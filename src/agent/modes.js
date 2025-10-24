@@ -35,10 +35,14 @@ const modes_list = [
             let blockAbove = bot.blockAt(bot.entity.position.offset(0, 1, 0));
             if (!block) block = {name: 'air'}; // hacky fix when blocks are not loaded
             if (!blockAbove) blockAbove = {name: 'air'};
-            if (blockAbove.name === 'water') {
-                // does not call execute so does not interrupt other actions
-                if (!bot.pathfinder.goal) {
+            if (blockAbove.name === 'water' || blockAbove.name === 'flowing_water') {
+                // Only jump to surface if not actively pathfinding
+                // This prevents interference with water navigation
+                if (!bot.pathfinder.goal && !bot.pathfinder.isMoving()) {
                     bot.setControlState('jump', true);
+                } else {
+                    // Let pathfinder handle swimming
+                    bot.setControlState('jump', false);
                 }
             }
             else if (this.fall_blocks.some(name => blockAbove.name.includes(name))) {

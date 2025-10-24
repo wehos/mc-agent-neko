@@ -329,6 +329,11 @@ export function getPosition(bot) {
      * let position = world.getPosition(bot);
      * let x = position.x;
      **/
+    // Safety check: bot.entity is null when dead
+    if (!bot.entity || !bot.entity.position) {
+        // Return last known position or spawn point
+        return bot.spawnPoint || { x: 0, y: 64, z: 0 };
+    }
     return bot.entity.position;
 }
 

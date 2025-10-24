@@ -12,6 +12,9 @@ import convoManager from '../conversation.js';
 export function getFullState(agent) {
     const bot = agent.bot;
 
+    // Check if bot is in a valid state
+    const isDead = !bot.entity || bot.health === 0;
+    
     const pos = getPosition(bot);
     const position = {
         x: Number(pos.x.toFixed(2)),
@@ -24,14 +27,15 @@ export function getFullState(agent) {
     else if (bot.rainState > 0) weather = 'Rain';
 
     let timeLabel = 'Night';
-    if (bot.time.timeOfDay < 6000) timeLabel = 'Morning';
-    else if (bot.time.timeOfDay < 12000) timeLabel = 'Afternoon';
+    if (bot.time && bot.time.timeOfDay < 6000) timeLabel = 'Morning';
+    else if (bot.time && bot.time.timeOfDay < 12000) timeLabel = 'Afternoon';
 
-    const below = getBlockAtPosition(bot, 0, -1, 0).name;
-    const legs = getBlockAtPosition(bot, 0, 0, 0).name;
-    const head = getBlockAtPosition(bot, 0, 1, 0).name;
+    // Safe block queries - return 'unknown' if bot is dead
+    const below = isDead ? 'unknown' : getBlockAtPosition(bot, 0, -1, 0).name;
+    const legs = isDead ? 'unknown' : getBlockAtPosition(bot, 0, 0, 0).name;
+    const head = isDead ? 'unknown' : getBlockAtPosition(bot, 0, 1, 0).name;
 
-    let players = getNearbyPlayerNames(bot);
+    let players = isDead ? [] : getNearbyPlayerNames(bot);
     let bots = convoManager.getInGameAgents().filter(b => b !== agent.name);
     players = players.filter(p => !bots.includes(p));
 
@@ -42,26 +46,27 @@ export function getFullState(agent) {
 
     const state = {
         name: agent.name,
+        isDead,  // Add death status
         gameplay: {
             position,
-            dimension: bot.game.dimension,
-            gamemode: bot.game.gameMode,
-            health: Math.round(bot.health),
-            hunger: Math.round(bot.food),
-            biome: getBiomeName(bot),
+            dimension: bot.game?.dimension || 'unknown',
+            gamemode: bot.game?.gameMode || 'unknown',
+            health: Math.round(bot.health || 0),
+            hunger: Math.round(bot.food || 0),
+            biome: isDead ? 'unknown' : getBiomeName(bot),
             weather,
-            timeOfDay: bot.time.timeOfDay,
+            timeOfDay: bot.time?.timeOfDay || 0,
             timeLabel
         },
         action: {
-            current: agent.isIdle() ? 'Idle' : agent.actions.currentActionLabel,
+            current: isDead ? 'Dead' : (agent.isIdle() ? 'Idle' : agent.actions.currentActionLabel),
             isIdle: agent.isIdle()
         },
         surroundings: {
             below,
             legs,
             head,
-            firstBlockAboveHead: getFirstBlockAboveHead(bot, null, 32)
+            firstBlockAboveHead: isDead ? 'unknown' : getFirstBlockAboveHead(bot, null, 32)
         },
         inventory: {
             counts: getInventoryCounts(bot),
@@ -78,10 +83,10 @@ export function getFullState(agent) {
         nearby: {
             humanPlayers: players,
             botPlayers: bots,
-            entityTypes: getNearbyEntityTypes(bot).filter(t => t !== 'player' && t !== 'item'),
+            entityTypes: isDead ? [] : getNearbyEntityTypes(bot).filter(t => t !== 'player' && t !== 'item'),
         },
         modes: {
-            summary: bot.modes.getMiniDocs()
+            summary: bot.modes?.getMiniDocs() || []
         }
     };
 

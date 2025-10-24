@@ -6,7 +6,7 @@ const settings = {
 
     // the mindserver manages all agents and hosts the UI
     "mindserver_port": 8080,
-    "auto_open_ui": true, // opens UI in browser on startup
+    "auto_open_ui": false, // opens UI in browser on startup
     
     "base_profile": "assistant", // survival, assistant, creative, or god_mode
     "profiles": [
@@ -28,7 +28,7 @@ const settings = {
 
     "load_memory": false, // load memory from previous session
     "init_message": "Respond with hello world and your name", // sends to all on spawn
-    "only_chat_with": [], // users that the bots listen to and send general messages to. if empty it will chat publicly
+    "only_chat_with": ["admin"], // users that the bots listen to and send general messages to. if empty it will chat publicly
 
     "speak": false,
     // allows all bots to speak through text-to-speech. 
@@ -36,7 +36,7 @@ const settings = {
     // if set to "system" it will use basic system text-to-speech. 
     // Works on windows and mac, but linux requires you to install the espeak package through your package manager eg: `apt install espeak` `pacman -S espeak`.
 
-    "chat_ingame": true, // bot responses are shown in minecraft chat
+    "chat_ingame": false, // bot responses are shown in minecraft chat
     "language": "en", // translate to/from this language. Supports these language names: https://cloud.google.com/translate/docs/languages
     "render_bot_view": false, // show bot's view in browser at localhost:3000, 3001...
 
@@ -49,9 +49,9 @@ const settings = {
     "max_messages": 15, // max number of messages to keep in context
     "num_examples": 2, // number of examples to give to the model
     "max_commands": -1, // max number of commands that can be used in consecutive responses. -1 for no limit
-    "show_command_syntax": "full", // "full", "shortened", or "none"
+    "show_command_syntax": "none", // "full", "shortened", or "none"
     "narrate_behavior": true, // chat simple automatic actions ('Picking up item!')
-    "chat_bot_messages": true, // publicly chat messages to other bots
+    "chat_bot_messages": false, // publicly chat messages to other bots
 
     "spawn_timeout": 30, // num seconds allowed for the bot to spawn before throwing error. Increase when spawning takes a while.
     "block_place_delay": 0, // delay between placing blocks (ms) if using newAction. helps avoid bot being kicked by anti-cheat mechanisms on servers.

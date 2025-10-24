@@ -2,6 +2,52 @@ import { Agent } from '../agent/agent.js';
 import { serverProxy } from '../agent/mindserver_proxy.js';
 import yargs from 'yargs';
 
+// Global error handlers to prevent crashes
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+    console.error('Stack:', error.stack);
+    // Don't exit - let the agent try to recover
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Promise Rejection at:', promise);
+    console.error('Reason:', reason);
+    // Don't exit - let the agent try to recover
+});
+
+// Memory monitoring to detect leaks early
+let lastMemoryCheck = Date.now();
+setInterval(() => {
+    const memUsage = process.memoryUsage();
+    const heapUsedMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+    const heapTotalMB = Math.round(memUsage.heapTotal / 1024 / 1024);
+    const externalMB = Math.round(memUsage.external / 1024 / 1024);
+    
+    // Log memory every 5 minutes
+    const now = Date.now();
+    if (now - lastMemoryCheck > 300000) { // 5 minutes
+        console.log(`📊 Memory: ${heapUsedMB}/${heapTotalMB} MB (heap), ${externalMB} MB (external)`);
+        lastMemoryCheck = now;
+    }
+    
+    // Warning if heap usage is high
+    if (heapUsedMB > 3000) {
+        console.warn(`⚠️ High memory usage: ${heapUsedMB} MB`);
+    }
+    
+    // Critical warning if approaching limit
+    if (heapUsedMB > 3500) {
+        console.error(`🚨 CRITICAL: Memory usage ${heapUsedMB} MB - approaching heap limit!`);
+        console.error('   Consider restarting the agent if memory continues to grow.');
+        
+        // Force garbage collection if available
+        if (global.gc) {
+            console.log('   Forcing garbage collection...');
+            global.gc();
+        }
+    }
+}, 60000); // Check every 60 seconds
+
 const args = process.argv.slice(2);
 if (args.length < 1) {
     console.log('Usage: node init_agent.js -n <agent_name> -p <port> -l <load_memory> -m <init_message> -c <count_id>');

@@ -1,3 +1,13 @@
+# How to use?
+
+localhost port `55916`
+
+`node main.js`
+
+lanlan_frd - `npm start`
+
+
+
 # Mindcraft 🧠⛏️
 
 Crafting minds for Minecraft with LLMs and [Mineflayer!](https://prismarinejs.github.io/mineflayer/#/)

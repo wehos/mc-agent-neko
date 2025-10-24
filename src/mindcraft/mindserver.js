@@ -48,7 +48,18 @@ export function logoutAgent(agentName) {
 export function createMindServer(host_public = false, port = 8080) {
     const app = express();
     server = http.createServer(app);
-    io = new Server(server);
+    
+    // Configure Socket.IO with appropriate timeouts and settings
+    io = new Server(server, {
+        pingTimeout: 60000,      // 60 seconds - increased from default 5s
+        pingInterval: 25000,     // 25 seconds - keep default
+        connectTimeout: 45000,   // 45 seconds for initial connection
+        maxHttpBufferSize: 1e8,  // 100MB buffer for large state transfers
+        cors: {
+            origin: '*',         // Allow all origins for local development
+            methods: ['GET', 'POST']
+        }
+    });
 
     // Serve static files
     const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -131,6 +142,8 @@ export function createMindServer(host_public = false, port = 8080) {
                 console.log(`Agent ${curAgentName} disconnected`);
                 agent_connections[curAgentName].in_game = false;
                 agent_connections[curAgentName].socket = null;
+                // Clear cached state for disconnected agent
+                delete latestAgentStates[curAgentName];
                 agentsStatusUpdate();
             }
             if (agent_listeners.includes(socket)) {
@@ -215,6 +228,18 @@ export function createMindServer(host_public = false, port = 8080) {
         socket.on('listen-to-agents', () => {
             addListener(socket);
         });
+
+        // Receive pushed state updates from agents (async push pattern)
+        socket.on('agent-state-push', (agentName, state) => {
+            // Add timestamp for freshness checking
+            state._timestamp = Date.now();
+            latestAgentStates[agentName] = state;
+            
+            // Immediately broadcast to listeners for real-time updates
+            for (let listener of agent_listeners) {
+                listener.emit('state-update', { [agentName]: state });
+            }
+        });
     });
 
     let host = host_public ? '0.0.0.0' : 'localhost';
@@ -243,29 +268,78 @@ function agentsStatusUpdate(socket) {
 }
 
 
+// Store latest states pushed from agents
+const latestAgentStates = {};
+
+// Cleanup old cached states periodically to prevent memory leak
+setInterval(() => {
+    const now = Date.now();
+    const maxAge = 60000; // 60 seconds
+    
+    for (const agentName in latestAgentStates) {
+        const state = latestAgentStates[agentName];
+        if (state._timestamp && (now - state._timestamp > maxAge)) {
+            // Remove stale state
+            delete latestAgentStates[agentName];
+            console.log(`🧹 Cleaned up stale state for agent: ${agentName}`);
+        }
+    }
+}, 30000); // Clean every 30 seconds
+
 let listenerInterval = null;
 function addListener(listener_socket) {
     agent_listeners.push(listener_socket);
     if (agent_listeners.length === 1) {
+        // Use event-driven push pattern with parallel fallback
         listenerInterval = setInterval(async () => {
+            const agentNames = Object.keys(agent_connections).filter(
+                name => agent_connections[name].in_game && agent_connections[name].socket
+            );
+            
+            // Check if we have fresh cached states (< 1 second old)
+            const now = Date.now();
             const states = {};
-            for (let agentName in agent_connections) {
-                let agent = agent_connections[agentName];
-                if (agent.in_game) {
-                    try {
-                        const state = await new Promise((resolve) => {
-                            agent.socket.emit('get-full-state', (s) => resolve(s));
-                        });
-                        states[agentName] = state;
-                    } catch (e) {
-                        states[agentName] = { error: String(e) };
-                    }
+            const needFetch = [];
+            
+            for (let agentName of agentNames) {
+                const cachedState = latestAgentStates[agentName];
+                if (cachedState && cachedState._timestamp && (now - cachedState._timestamp < 1000)) {
+                    // Use fresh cached state
+                    states[agentName] = cachedState;
+                } else {
+                    // Need to fetch
+                    needFetch.push(agentName);
                 }
             }
+            
+            // Parallel fetch for agents without fresh cache
+            if (needFetch.length > 0) {
+                const fetchPromises = needFetch.map(agentName => {
+                    return new Promise((resolve) => {
+                        const agent = agent_connections[agentName];
+                        
+                        const timeout = setTimeout(() => {
+                            resolve({ name: agentName, state: { error: 'Timeout' } });
+                        }, 2000); // Reduced timeout since we expect cached responses
+                        
+                        agent.socket.emit('get-full-state', (state) => {
+                            clearTimeout(timeout);
+                            resolve({ name: agentName, state });
+                        });
+                    });
+                });
+                
+                const results = await Promise.all(fetchPromises);
+                results.forEach(({ name, state }) => {
+                    states[name] = state;
+                });
+            }
+            
+            // Broadcast to all listeners
             for (let listener of agent_listeners) {
                 listener.emit('state-update', states);
             }
-        }, 1000);
+        }, 100); // Reduced to 100ms for real-time feel
     }
 }
 

@@ -29,7 +29,24 @@ export class Camera extends EventEmitter {
     }
   
     async _init () {
+        // Wait for bot to be properly spawned before initializing camera
+        if (!this.bot.entity || !this.bot.entity.position) {
+            console.warn('Bot not properly spawned, delaying camera initialization...');
+            // Retry after 2 seconds
+            setTimeout(() => this._init(), 2000);
+            return;
+        }
+        
         const botPos = this.bot.entity.position;
+        
+        // Validate bot position data
+        if (!this.isValidNumber(botPos.x) || !this.isValidNumber(botPos.y) || !this.isValidNumber(botPos.z)) {
+            console.warn('Bot position data invalid, delaying camera initialization...');
+            // Retry after 2 seconds
+            setTimeout(() => this._init(), 2000);
+            return;
+        }
+        
         const center = new Vec3(botPos.x, botPos.y+this.bot.entity.height, botPos.z);
         this.viewer.setVersion(this.bot.version);
         // Load world
@@ -41,10 +58,32 @@ export class Camera extends EventEmitter {
     }
   
     async capture() {
-        const center = new Vec3(this.bot.entity.position.x, this.bot.entity.position.y+this.bot.entity.height, this.bot.entity.position.z);
+        // Safety check: bot.entity is null when dead
+        if (!this.bot.entity || !this.bot.entity.position) {
+            console.warn('🚨 Cannot capture: bot.entity is null (bot may be dead or not spawned)');
+            return null;
+        }
+        
+        const pos = this.bot.entity.position;
+        const height = this.bot.entity.height || 1.62;
+        const yaw = this.bot.entity.yaw || 0;
+        const pitch = this.bot.entity.pitch || 0;
+        
+        const center = new Vec3(pos.x, pos.y + height, pos.z);
+        
+        // Validate position data to prevent NaN errors
+        if (!this.isValidNumber(center.x) || !this.isValidNumber(center.y) || !this.isValidNumber(center.z) ||
+            !this.isValidNumber(yaw) || !this.isValidNumber(pitch)) {
+            console.error('❌ Invalid bot position data in camera capture:');
+            console.error('   Position:', { x: center.x, y: center.y, z: center.z });
+            console.error('   Orientation:', { yaw, pitch });
+            console.error('   Height:', height);
+            return null;
+        }
+        
         this.viewer.camera.position.set(center.x, center.y, center.z);
         await this.worldView.updatePosition(center);
-        this.viewer.setFirstPersonCamera(this.bot.entity.position, this.bot.entity.yaw, this.bot.entity.pitch);
+        this.viewer.setFirstPersonCamera(pos, yaw, pitch);
         this.viewer.update();
         this.renderer.render(this.viewer.scene, this.viewer.camera);
 
@@ -62,6 +101,11 @@ export class Camera extends EventEmitter {
         await fs.writeFile(`${this.fp}/${filename}.jpg`, buf);
         console.log('saved', filename);
         return filename;
+    }
+
+    // Helper method to validate numeric values and prevent NaN
+    isValidNumber(value) {
+        return typeof value === 'number' && !isNaN(value) && isFinite(value);
     }
 
     async _ensureScreenshotDirectory() {

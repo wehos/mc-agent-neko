@@ -445,6 +445,10 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
     const movements = new pf.Movements(bot);
     movements.dontMineUnderFallingBlock = false;
     movements.dontCreateFlow = true;
+    
+    // Enable water movement for collectBlock
+    movements.liquids.add(mc.getBlockId('water'));
+    movements.liquids.add(mc.getBlockId('flowing_water'));
 
     // Blocks to ignore safety for, usually next to lava/water
     const unsafeBlocks = ['obsidian'];
@@ -498,9 +502,26 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             }
             else if (mc.mustCollectManually(blockType)) {
                 await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
-                await bot.dig(block);
-                await pickupNearbyItems(bot);
-                success = true;
+                
+                // Add timeout for manual digging
+                const digTimeout = 60000;
+                try {
+                    await Promise.race([
+                        bot.dig(block),
+                        new Promise((_, reject) => 
+                            setTimeout(() => reject(new Error('Dig timeout')), digTimeout)
+                        )
+                    ]);
+                    await pickupNearbyItems(bot);
+                    success = true;
+                } catch (error) {
+                    if (error.message === 'Dig timeout') {
+                        log(bot, `⚠️ Digging ${blockType} timed out, skipping.`);
+                        bot.stopDigging();
+                        continue;
+                    }
+                    throw error;
+                }
             }
             else {
                 await bot.collectBlock.collect(block);
@@ -537,22 +558,58 @@ export async function pickupNearbyItems(bot) {
      * await skills.pickupNearbyItems(bot);
      **/
     const distance = 8;
+    const maxAttempts = 10; // Prevent infinite loops
     const getNearestItem = bot => bot.nearestEntity(entity => entity.name === 'item' && bot.entity.position.distanceTo(entity.position) < distance);
     let nearestItem = getNearestItem(bot);
     let pickedUp = 0;
-    while (nearestItem) {
+    let attempts = 0;
+    let consecutiveFailures = 0;
+    
+    while (nearestItem && attempts < maxAttempts) {
+        attempts++;
         let movements = new pf.Movements(bot);
         movements.canDig = false;
         bot.pathfinder.setMovements(movements);
-        await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, 1));
+        
+        try {
+            // Add timeout for pathfinding
+            const pathTimeout = 5000; // 5 seconds
+            await Promise.race([
+                goToGoal(bot, new pf.goals.GoalFollow(nearestItem, 1)),
+                new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('Pathfind timeout')), pathTimeout)
+                )
+            ]);
+        } catch (error) {
+            if (error.message === 'Pathfind timeout') {
+                log(bot, `⚠️ Failed to reach item (timeout), skipping.`);
+                consecutiveFailures++;
+                if (consecutiveFailures >= 3) {
+                    log(bot, `Too many consecutive failures, stopping item pickup.`);
+                    break;
+                }
+            }
+        }
+        
         await new Promise(resolve => setTimeout(resolve, 200));
         let prev = nearestItem;
         nearestItem = getNearestItem(bot);
         if (prev === nearestItem) {
-            break;
+            consecutiveFailures++;
+            if (consecutiveFailures >= 2) {
+                log(bot, `Unable to reach item at ${prev.position}, giving up.`);
+                break;
+            }
+        } else {
+            consecutiveFailures = 0; // Reset on success
+            pickedUp++;
         }
-        pickedUp++;
     }
+    
+    if (attempts >= maxAttempts) {
+        log(bot, `⚠️ Stopped picking up items after ${maxAttempts} attempts.`);
+    }
+    
     log(bot, `Picked up ${pickedUp} items.`);
     return true;
 }
@@ -597,8 +654,25 @@ export async function breakBlockAt(bot, x, y, z) {
                 return false;
             }
         }
-        await bot.dig(block, true);
-        log(bot, `Broke ${block.name} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
+        
+        // Add timeout to prevent infinite hanging
+        const digTimeout = 60000; // 60 seconds max
+        const digPromise = bot.dig(block, true);
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Dig timeout')), digTimeout)
+        );
+        
+        try {
+            await Promise.race([digPromise, timeoutPromise]);
+            log(bot, `Broke ${block.name} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
+        } catch (error) {
+            if (error.message === 'Dig timeout') {
+                log(bot, `⚠️ Digging ${block.name} timed out after ${digTimeout/1000}s, stopping dig.`);
+                bot.stopDigging();
+                return false;
+            }
+            throw error;  // Re-throw other errors
+        }
     }
     else {
         log(bot, `Skipping block at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)} because it is ${block.name}.`);
@@ -1081,8 +1155,37 @@ export async function goToGoal(bot, goal) {
     }
     nonDestructiveMovements.placeCost = 2;
     nonDestructiveMovements.digCost = 10;
+    
+    // CRITICAL FIX: Enable water movement
+    // Add water and lava as liquid blocks for pathfinding
+    nonDestructiveMovements.liquids.add(mc.getBlockId('water'));
+    nonDestructiveMovements.liquids.add(mc.getBlockId('flowing_water'));
+    nonDestructiveMovements.liquids.add(mc.getBlockId('lava'));
+    nonDestructiveMovements.liquids.add(mc.getBlockId('flowing_lava'));
+    
+    // Allow scaffolding with common blocks in water
+    const scaffoldBlocks = ['dirt', 'cobblestone', 'stone', 'netherrack'];
+    scaffoldBlocks.forEach(blockName => {
+        const blockId = mc.getBlockId(blockName);
+        if (blockId) {
+            nonDestructiveMovements.scaffoldingBlocks.push(blockId);
+        }
+    });
 
     const destructiveMovements = new pf.Movements(bot);
+    
+    // Apply same water movement settings to destructive movements
+    destructiveMovements.liquids.add(mc.getBlockId('water'));
+    destructiveMovements.liquids.add(mc.getBlockId('flowing_water'));
+    destructiveMovements.liquids.add(mc.getBlockId('lava'));
+    destructiveMovements.liquids.add(mc.getBlockId('flowing_lava'));
+    
+    scaffoldBlocks.forEach(blockName => {
+        const blockId = mc.getBlockId(blockName);
+        if (blockId) {
+            destructiveMovements.scaffoldingBlocks.push(blockId);
+        }
+    });
 
     let final_movements = destructiveMovements;
 

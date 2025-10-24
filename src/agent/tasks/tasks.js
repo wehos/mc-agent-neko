@@ -364,9 +364,21 @@ export class Task {
 
     isDone() {
         let res = null;
-        if (this.validator)
+        if (this.validator) {
             res = this.validator.validate();
+            // Debug: Log validation result every 30 seconds
+            if (!this.lastValidationLogTime || Date.now() - this.lastValidationLogTime > 30000) {
+                console.log(`🔍 Task validation for ${this.agent.name}: valid=${res?.valid}, score=${res?.score}`);
+                this.lastValidationLogTime = Date.now();
+            }
+        }
         if (res && res.valid) {
+            console.log('\n🎯 ===== TASK VALIDATION SUCCESS =====');
+            console.log('📊 Score:', res.score);
+            console.log('⏰ Timestamp:', new Date().toISOString());
+            console.log('🤖 Agent:', this.agent.name);
+            console.log('=====================================\n');
+            
             // Find all the agents and clear their inventories
             for (let agent of this.available_agents) {
                 this.agent.bot.chat(`/clear ${agent}`);

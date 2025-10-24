@@ -16,11 +16,17 @@ import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 import settings from './settings.js';
 import { Task } from './tasks/tasks.js';
 import { speak } from './speak.js';
+import { wsServer } from '../websocket/ws_server.js';
 
 export class Agent {
     async start(load_mem=false, init_message=null, count_id=0) {
         this.last_sender = null;
         this.count_id = count_id;
+        this.taskCompleted = false; // Initialize task completion flag
+        this.reconnectAttempts = 0; // Initialize reconnect attempts counter
+        this.maxReconnectAttempts = 10; // Maximum reconnect attempts (increased from 5 to 10)
+        this.reconnectBaseDelay = 3000; // Base delay for reconnection (3 seconds)
+        this.load_mem = load_mem; // Save load_mem parameter for reconnection
         
         // Initialize components with more detailed error handling
         this.actions = new ActionManager(this);
@@ -51,61 +57,9 @@ export class Agent {
         blacklistCommands(this.blocked_actions);
 
         console.log(this.name, 'logging into minecraft...');
-        this.bot = initBot(this.name);
+        await this.initBot();
 
         initModes(this);
-
-        this.bot.on('login', () => {
-            console.log(this.name, 'logged in!');
-            serverProxy.login();
-            
-            // Set skin for profile, requires Fabric Tailor. (https://modrinth.com/mod/fabrictailor)
-            if (this.prompter.profile.skin)
-                this.bot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
-            else
-                this.bot.chat(`/skin clear`);
-        });
-		const spawnTimeoutDuration = settings.spawn_timeout;
-        const spawnTimeout = setTimeout(() => {
-            console.error(`Bot has not spawned after ${spawnTimeoutDuration} seconds. Exiting.`);
-            process.exit(0);
-        }, spawnTimeoutDuration * 1000);
-        this.bot.once('spawn', async () => {
-            try {
-                clearTimeout(spawnTimeout);
-                addBrowserViewer(this.bot, count_id);
-                console.log('Initializing vision intepreter...');
-                this.vision_interpreter = new VisionInterpreter(this, settings.allow_vision);
-
-                // wait for a bit so stats are not undefined
-                await new Promise((resolve) => setTimeout(resolve, 1000));
-                
-                console.log(`${this.name} spawned.`);
-                this.clearBotLogs();
-              
-                this._setupEventHandlers(save_data, init_message);
-                this.startEvents();
-              
-                if (!load_mem) {
-                    if (settings.task) {
-                        this.task.initBotTask();
-                        this.task.setAgentGoal();
-                    }
-                } else {
-                    // set the goal without initializing the rest of the task
-                    if (settings.task) {
-                        this.task.setAgentGoal();
-                    }
-                }
-
-                await new Promise((resolve) => setTimeout(resolve, 10000));
-                this.checkAllPlayersPresent();
-
-            } catch (error) {
-                console.error('Error in spawn event:', error);
-                process.exit(0);
-            }
-        });
     }
 
     async _setupEventHandlers(save_data, init_message) {
@@ -213,6 +167,163 @@ export class Agent {
             this.self_prompter.stop(false);
         }
         convoManager.endAllConversations();
+    }
+
+    async initBot() {
+        this.bot = initBot(this.name);
+        this.setupBotEventHandlers();
+    }
+
+    setupBotEventHandlers() {
+        this.bot.on('login', () => {
+            console.log(this.name, 'logged in!');
+            serverProxy.login();
+            
+            // Set skin for profile, requires Fabric Tailor. (https://modrinth.com/mod/fabrictailor)
+            if (this.prompter.profile.skin)
+                this.bot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
+            else
+                this.bot.chat(`/skin clear`);
+        });
+
+        const spawnTimeout = setTimeout(() => {
+            console.error('Bot has not spawned after 30 seconds. Exiting.');
+            process.exit(0);
+        }, 30000);
+        
+        this.bot.once('spawn', async () => {
+            try {
+                clearTimeout(spawnTimeout);
+                addBrowserViewer(this.bot, this.count_id);
+                console.log('Initializing vision intepreter...');
+                this.vision_interpreter = new VisionInterpreter(this, settings.allow_vision);
+
+                // wait for a bit so stats are not undefined
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+                
+                console.log(`${this.name} spawned.`);
+                this.clearBotLogs();
+                
+                // Start WebSocket server and connect this agent
+                if (this.count_id === 0) { // Only start server for the first agent
+                    wsServer.start();
+                }
+                wsServer.setAgent(this);
+              
+                this._setupEventHandlers(this.load_mem ? this.history.load() : null, null);
+                this.startEvents();
+              
+                if (!this.load_mem) {
+                    if (settings.task) {
+                        this.task.initBotTask();
+                        this.task.setAgentGoal();
+                    }
+                } else {
+                    // set the goal without initializing the rest of the task
+                    if (settings.task) {
+                        this.task.setAgentGoal();
+                    }
+                }
+
+                await new Promise((resolve) => setTimeout(resolve, 10000));
+                this.checkAllPlayersPresent();
+
+            } catch (error) {
+                console.error('Error in spawn event:', error);
+                process.exit(0);
+            }
+        });
+
+        // Bot event handlers
+        this.bot.on('error', (err) => {
+            console.error('Bot error event!', err);
+        });
+
+        this.bot.on('end', async (reason) => {
+            console.warn(`Bot disconnected! Reason: ${reason}`);
+            await this.handleBotDisconnection(reason);
+        });
+
+        this.bot.on('death', () => {
+            console.log(`${this.name} died, stopping current actions...`);
+            this.actions.cancelResume();
+            this.actions.stop();
+            
+            // Monitor respawn to ensure bot position is valid after death
+            this.monitorRespawn();
+        });
+
+        this.bot.on('kicked', async (reason) => {
+            console.warn('Bot kicked!', reason);
+            await this.handleBotDisconnection(`Kicked: ${reason}`);
+        });
+
+        this.bot.on('messagestr', async (message, _, jsonMsg) => {
+            if (jsonMsg.translate && jsonMsg.translate.startsWith('death') && message.startsWith(this.name)) {
+                console.log('Agent died: ', message);
+                let death_pos = this.bot.entity.position;
+                this.memory_bank.rememberPlace('last_death_position', death_pos.x, death_pos.y, death_pos.z);
+            }
+        });
+    }
+
+    async handleBotDisconnection(reason) {
+        // Debug output for bot disconnection
+        console.log('\n🚨 ===== BOT DISCONNECTION DETECTED =====');
+        console.log('🔗 Reason:', reason);
+        console.log('⏰ Timestamp:', new Date().toISOString());
+        console.log('🤖 Agent:', this.name);
+        console.log('🔄 Reconnect attempts:', this.reconnectAttempts, '/', this.maxReconnectAttempts);
+        console.log('========================================\n');
+        
+        // Always send task_finished message when bot disconnects
+        try {
+            wsServer.onTaskCompleted({
+                message: '任务中断',
+                score: 0,
+                reason: reason
+            });
+            console.log('Task interrupted due to bot disconnection, task_finished message sent');
+        } catch (error) {
+            console.error('Failed to send task interruption message:', error);
+        }
+
+    // Try to reconnect if we haven't exceeded max attempts
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+        this.reconnectAttempts++;
+        console.log(`Attempting to reconnect bot (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+        
+        // Use exponential backoff with jitter for reconnection delay
+        const baseDelay = this.reconnectBaseDelay || 3000;
+        const exponentialDelay = baseDelay * Math.pow(1.5, this.reconnectAttempts - 1);
+        const maxDelay = 30000; // Maximum 30 seconds
+        const jitter = Math.random() * 1000; // Add up to 1 second random jitter
+        const delay = Math.min(exponentialDelay, maxDelay) + jitter;
+        
+        console.log(`Waiting ${Math.round(delay / 1000)} seconds before reconnection...`);
+        
+        setTimeout(async () => {
+            try {
+                // Create new bot instance
+                this.bot = initBot(this.name);
+                
+                // Re-initialize modes for the new bot instance
+                initModes(this);
+                
+                this.setupBotEventHandlers();
+                console.log(`✅ Bot reconnected successfully (attempt ${this.reconnectAttempts})`);
+            } catch (error) {
+                console.error(`❌ Reconnection attempt ${this.reconnectAttempts} failed:`, error);
+                if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+                    console.error('Max reconnection attempts reached. Killing agent process.');
+                    this.cleanKill('Max reconnection attempts reached. Killing agent process.');
+                }
+            }
+        }, delay);
+    } else {
+        console.error('Max reconnection attempts reached. Killing agent process.');
+        this.cleanKill('Max reconnection attempts reached. Killing agent process.');
+    }
     }
 
     async handleMessage(source, message, max_responses=null) {
@@ -390,9 +501,18 @@ export class Agent {
             if (settings.chat_ingame) {this.bot.chat(message);}
             sendOutputToServer(this.name, message);
         }
+        
+        // Broadcast agent response to WebSocket clients
+        wsServer.broadcastAgentResponse(message);
     }
 
     startEvents() {
+        // Only initialize events once, not on every reconnection
+        if (this.eventsInitialized) {
+            return;
+        }
+        this.eventsInitialized = true;
+
         // Custom events
         this.bot.on('time', () => {
             if (this.bot.time.timeOfDay == 0)
@@ -415,22 +535,7 @@ export class Agent {
             }
             prev_health = this.bot.health;
         });
-        // Logging callbacks
-        this.bot.on('error' , (err) => {
-            console.error('Error event!', err);
-        });
-        this.bot.on('end', (reason) => {
-            console.warn('Bot disconnected! Killing agent process.', reason)
-            this.cleanKill('Bot disconnected! Killing agent process.');
-        });
-        this.bot.on('death', () => {
-            this.actions.cancelResume();
-            this.actions.stop();
-        });
-        this.bot.on('kicked', (reason) => {
-            console.warn('Bot kicked!', reason);
-            this.cleanKill('Bot kicked! Killing agent process.');
-        });
+        // Bot event handlers are now in setupBotEventHandlers()
         this.bot.on('messagestr', async (message, _, jsonMsg) => {
             if (jsonMsg.translate && jsonMsg.translate.startsWith('death') && message.startsWith(this.name)) {
                 console.log('Agent died: ', message);
@@ -486,24 +591,110 @@ export class Agent {
         return !this.actions.executing;
     }
     
+    monitorRespawn() {
+        // Wait for bot to respawn and validate position
+        const checkInterval = 500; // Check every 500ms
+        const maxWaitTime = 10000; // Wait maximum 10 seconds
+        let elapsed = 0;
+        
+        const respawnCheck = setInterval(() => {
+            elapsed += checkInterval;
+            
+            if (!this.bot || !this.bot.entity) {
+                // Bot not yet available
+                if (elapsed >= maxWaitTime) {
+                    clearInterval(respawnCheck);
+                    console.warn('⚠️ Bot did not respawn within 10 seconds');
+                }
+                return;
+            }
+            
+            const pos = this.bot.entity.position;
+            if (this.isValidPosition(pos)) {
+                clearInterval(respawnCheck);
+                console.log(`✅ Bot respawned successfully at (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})`);
+                // Reset reconnect attempts on successful respawn
+                this.reconnectAttempts = 0;
+            } else if (elapsed >= maxWaitTime) {
+                clearInterval(respawnCheck);
+                console.warn('⚠️ Bot position invalid after respawn, may need reconnection');
+            }
+        }, checkInterval);
+    }
+    
+    isValidPosition(pos) {
+        if (!pos) return false;
+        return typeof pos.x === 'number' && !isNaN(pos.x) && isFinite(pos.x) &&
+               typeof pos.y === 'number' && !isNaN(pos.y) && isFinite(pos.y) &&
+               typeof pos.z === 'number' && !isNaN(pos.z) && isFinite(pos.z);
+    }
 
     cleanKill(msg='Killing agent process...', code=1) {
+        // Send task_finished message before killing the process
+        if (!this.taskCompleted) {
+            try {
+                wsServer.onTaskCompleted({
+                    message: '任务中断',
+                    score: 0,
+                    reason: msg
+                });
+                console.log('Task interrupted due to agent restart, task_finished message sent');
+            } catch (error) {
+                console.error('Failed to send task interruption message:', error);
+            }
+        }
+        
         this.history.add('system', msg);
         this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.');
         this.history.save();
         process.exit(code);
     }
     async checkTaskDone() {
-        if (this.task.data) {
+        if (this.task && this.task.data) {
+            // Debug: Log task checking frequency (but limit to avoid spam)
+            if (!this.lastTaskCheckTime || Date.now() - this.lastTaskCheckTime > 10000) {
+                console.log(`🔍 Checking task completion for ${this.name}...`);
+                this.lastTaskCheckTime = Date.now();
+            }
+            
             let res = this.task.isDone();
             if (res) {
+                // Prevent duplicate task completion broadcasts
+                if (this.taskCompleted) {
+                    console.log('⚠️ Task completion already detected, skipping duplicate broadcast');
+                    return true;
+                }
+                
+                this.taskCompleted = true;
+                
                 await this.history.add('system', `Task ended with score : ${res.score}`);
                 await this.history.save();
                 // await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 second for save to complete
                 console.log('Task finished:', res.message);
+                
+                // Debug output for task completion
+                console.log('\n🎯 ===== AGENT TASK COMPLETION DETECTED =====');
+                console.log('📋 Message:', res.message);
+                console.log('📊 Score:', res.score);
+                console.log('⏰ Timestamp:', new Date().toISOString());
+                console.log('🤖 Agent:', this.name);
+                console.log('==========================================\n');
+                
+                // Broadcast task completion to WebSocket clients
+                try {
+                    wsServer.onTaskCompleted({
+                        message: res.message,
+                        score: res.score
+                    });
+                } catch (error) {
+                    console.error('Failed to broadcast task completion:', error);
+                }
+                
                 this.killAll();
+                return true;
             }
         }
+        return false;
     }
 
     killAll() {
