@@ -1,13 +1,314 @@
+diff --git a/node_modules/prismarine-viewer/public/textures/1.21.4/entity/glow_squid.png b/node_modules/prismarine-viewer/public/textures/1.21.4/entity/glow_squid.png
+new file mode 100644
+index 0000000..0a1805c
+Binary files /dev/null and b/node_modules/prismarine-viewer/public/textures/1.21.4/entity/glow_squid.png differ
+diff --git a/node_modules/prismarine-viewer/public/textures/1.21.4/entity/squid.png b/node_modules/prismarine-viewer/public/textures/1.21.4/entity/squid.png
+new file mode 100644
+index 0000000..fc31809
+Binary files /dev/null and b/node_modules/prismarine-viewer/public/textures/1.21.4/entity/squid.png differ
+diff --git a/node_modules/prismarine-viewer/viewer/lib/entities.js b/node_modules/prismarine-viewer/viewer/lib/entities.js
+index 459e3f3..5b105d5 100644
+--- a/node_modules/prismarine-viewer/viewer/lib/entities.js
++++ b/node_modules/prismarine-viewer/viewer/lib/entities.js
+@@ -6,10 +6,10 @@ const { dispose3 } = require('./dispose')
+ 
+ const { createCanvas } = require('canvas')
+ 
+-function getEntityMesh (entity, scene) {
++function getEntityMesh (entity, scene, version) {
+   if (entity.name) {
+     try {
+-      const e = new Entity('1.16.4', entity.name, scene)
++      const e = new Entity(version || '1.16.4', entity.name, scene)
+ 
+       if (entity.username !== undefined) {
+         const canvas = createCanvas(500, 100)
+@@ -25,6 +25,9 @@ function getEntityMesh (entity, scene) {
+ 
+         const tex = new THREE.Texture(canvas)
+         tex.needsUpdate = true
++        // Set filters to prevent non-power-of-two warnings
++        tex.minFilter = THREE.LinearFilter
++        tex.magFilter = THREE.LinearFilter
+         const spriteMat = new THREE.SpriteMaterial({ map: tex })
+         const sprite = new THREE.Sprite(spriteMat)
+         sprite.position.y += entity.height + 0.6
+@@ -37,19 +40,32 @@ function getEntityMesh (entity, scene) {
+     }
+   }
+ 
+-  const geometry = new THREE.BoxGeometry(entity.width, entity.height, entity.width)
+-  geometry.translate(0, entity.height / 2, 0)
++  // Validate entity dimensions to prevent NaN errors in BoxGeometry
++  const width = (typeof entity.width === 'number' && !isNaN(entity.width) && isFinite(entity.width)) 
++    ? entity.width : 0.6
++  const height = (typeof entity.height === 'number' && !isNaN(entity.height) && isFinite(entity.height))
++    ? entity.height : 1.8
++  
++  if (width <= 0 || height <= 0) return null
++
++  const geometry = new THREE.BoxGeometry(width, height, width)
++  geometry.translate(0, height / 2, 0)
+   const material = new THREE.MeshBasicMaterial({ color: 0xff00ff })
+   const cube = new THREE.Mesh(geometry, material)
+   return cube
+ }
+ 
+ class Entities {
+-  constructor (scene) {
++  constructor (scene, version) {
+     this.scene = scene
++    this.version = version || '1.16.4'
+     this.entities = {}
+   }
+   
++  setVersion (version) {
++    this.version = version
++  }
++
+   clear () {
+     for (const mesh of Object.values(this.entities)) {
+       this.scene.remove(mesh)
+@@ -60,7 +76,7 @@ class Entities {
+ 
+   update (entity) {
+     if (!this.entities[entity.id]) {
+-      const mesh = getEntityMesh(entity, this.scene)
++      const mesh = getEntityMesh(entity, this.scene, this.version)
+       if (!mesh) return
+       this.entities[entity.id] = mesh
+       this.scene.add(mesh)
 diff --git a/node_modules/prismarine-viewer/viewer/lib/entity/Entity.js b/node_modules/prismarine-viewer/viewer/lib/entity/Entity.js
-index 8945452..dab25be 100644
+index 8945452..e86f701 100644
 --- a/node_modules/prismarine-viewer/viewer/lib/entity/Entity.js
 +++ b/node_modules/prismarine-viewer/viewer/lib/entity/Entity.js
-@@ -203,7 +203,7 @@ function getMesh (texture, jsonModel) {
+@@ -168,8 +168,19 @@ function getMesh (texture, jsonModel) {
+ 
+   const rootBones = []
+   for (const jsonBone of jsonModel.bones) {
+-    if (jsonBone.parent) bones[jsonBone.parent].add(bones[jsonBone.name])
+-    else rootBones.push(bones[jsonBone.name])
++    if (jsonBone.parent) {
++      const parentBone = bones[jsonBone.parent]
++      const childBone = bones[jsonBone.name]
++      if (parentBone && childBone) {
++        parentBone.add(childBone)
++      } else {
++        // Silently handle missing bone references - this is common in entity models
++        if (childBone) rootBones.push(childBone)
++      }
++    } else {
++      const bone = bones[jsonBone.name]
++      if (bone) rootBones.push(bone)
++    }
+   }
+ 
+   const skeleton = new THREE.Skeleton(Object.values(bones))
+@@ -202,19 +213,33 @@ function getMesh (texture, jsonModel) {
+ 
  class Entity {
    constructor (version, type, scene) {
++    this.mesh = new THREE.Object3D()
++    
      const e = entities[type]
 -    if (!e) throw new Error(`Unknown entity ${type}`)
-+    if (!e) return; //throw new Error(`Unknown entity ${type}`)
++    if (!e) {
++      // Unknown entity type - create empty mesh instead of throwing error
++      // Silently handle common non-renderable entities
++      const silentTypes = ['item', 'falling_block', 'arrow', 'experience_orb']
++      if (!silentTypes.includes(type)) {
++        // Only log for entities that might have models
++        console.debug(`Unknown entity type: ${type}`)
++      }
++      return
++    }
  
-     this.mesh = new THREE.Object3D()
+-    this.mesh = new THREE.Object3D()
      for (const [name, jsonModel] of Object.entries(e.geometry)) {
+       const texture = e.textures[name]
+       if (!texture) continue
+       // console.log(JSON.stringify(jsonModel, null, 2))
+-      const mesh = getMesh(texture.replace('textures', 'textures/' + version) + '.png', jsonModel)
+-      /* const skeletonHelper = new THREE.SkeletonHelper( mesh )
+-      skeletonHelper.material.linewidth = 2
+-      scene.add( skeletonHelper ) */
+-      this.mesh.add(mesh)
++      try {
++        const mesh = getMesh(texture.replace('textures', 'textures/' + version) + '.png', jsonModel)
++        if (mesh) {
++          this.mesh.add(mesh)
++        }
++      } catch (err) {
++        // Silently skip failed meshes - likely due to missing textures or model issues
++        console.debug(`Failed to create mesh for entity ${type}, model ${name}:`, err.message)
++      }
+     }
+   }
+ }
+diff --git a/node_modules/prismarine-viewer/viewer/lib/utils.electron.js b/node_modules/prismarine-viewer/viewer/lib/utils.electron.js
+index e3066cd..be8963b 100644
+--- a/node_modules/prismarine-viewer/viewer/lib/utils.electron.js
++++ b/node_modules/prismarine-viewer/viewer/lib/utils.electron.js
+@@ -5,7 +5,46 @@ const textureCache = {}
+ function loadTexture (texture, cb) {
+   if (!textureCache[texture]) {
+     const url = path.resolve(__dirname, '../../public/' + texture)
+-    textureCache[texture] = new THREE.TextureLoader().load(url)
++    const loader = new THREE.TextureLoader()
++    
++    loader.load(
++      url,
++      // Success callback
++      (tex) => {
++        // Set filters to prevent non-power-of-two warnings
++        tex.minFilter = THREE.LinearFilter
++        tex.magFilter = THREE.LinearFilter
++        textureCache[texture] = tex
++        cb(tex)
++      },
++      // Progress callback (optional)
++      undefined,
++      // Error callback
++      (err) => {
++        // Fallback: try loading from subdirectory with same name
++        const parts = texture.split('/')
++        const filename = parts[parts.length - 1]
++        const filenameNoExt = filename.replace(/\.png$/, '')
++        const fallbackTexture = parts.slice(0, -1).join('/') + '/' + filenameNoExt + '/' + filename
++        const fallbackUrl = path.resolve(__dirname, '../../public/' + fallbackTexture)
++        
++        loader.load(
++          fallbackUrl,
++          (tex) => {
++            tex.minFilter = THREE.LinearFilter
++            tex.magFilter = THREE.LinearFilter
++            textureCache[texture] = tex
++            cb(tex)
++          },
++          undefined,
++          (fallbackErr) => {
++            console.warn(`Failed to load texture: ${texture}`)
++            cb(null)
++          }
++        )
++      }
++    )
++    return
+   }
+   cb(textureCache[texture])
+ }
+diff --git a/node_modules/prismarine-viewer/viewer/lib/utils.js b/node_modules/prismarine-viewer/viewer/lib/utils.js
+index 382c057..6427ba4 100644
+--- a/node_modules/prismarine-viewer/viewer/lib/utils.js
++++ b/node_modules/prismarine-viewer/viewer/lib/utils.js
+@@ -19,9 +19,37 @@ function loadTexture (texture, cb) {
+   if (textureCache[texture]) {
+     cb(textureCache[texture])
+   } else {
+-    loadImage(path.resolve(__dirname, '../../public/' + texture)).then(image => {
+-      textureCache[texture] = new THREE.CanvasTexture(image)
++    const mainPath = path.resolve(__dirname, '../../public/' + texture)
++    
++    loadImage(mainPath).then(image => {
++      const tex = new THREE.CanvasTexture(image)
++      // Set filters to prevent non-power-of-two warnings
++      tex.minFilter = THREE.LinearFilter
++      tex.magFilter = THREE.LinearFilter
++      textureCache[texture] = tex
+       cb(textureCache[texture])
++    }).catch(err => {
++      // Fallback: try loading from subdirectory with same name
++      // e.g., textures/1.21.4/entity/squid.png -> textures/1.21.4/entity/squid/squid.png
++      const parts = texture.split('/')
++      const filename = parts[parts.length - 1] // e.g., squid.png
++      const filenameNoExt = filename.replace(/\.png$/, '') // e.g., squid
++      const fallbackTexture = parts.slice(0, -1).join('/') + '/' + filenameNoExt + '/' + filename
++      const fallbackPath = path.resolve(__dirname, '../../public/' + fallbackTexture)
++      
++      loadImage(fallbackPath).then(image => {
++        const tex = new THREE.CanvasTexture(image)
++        tex.minFilter = THREE.LinearFilter
++        tex.magFilter = THREE.LinearFilter
++        textureCache[texture] = tex // Cache with original key
++        cb(textureCache[texture])
++      }).catch(fallbackErr => {
++        console.warn(`Failed to load texture: ${texture}`)
++        console.warn(`  Main path: ${mainPath}`)
++        console.warn(`  Fallback path: ${fallbackPath}`)
++        // Return a placeholder or null
++        cb(null)
++      })
+     })
+   }
+ }
+diff --git a/node_modules/prismarine-viewer/viewer/lib/utils.web.js b/node_modules/prismarine-viewer/viewer/lib/utils.web.js
+index 72d715b..d64bc14 100644
+--- a/node_modules/prismarine-viewer/viewer/lib/utils.web.js
++++ b/node_modules/prismarine-viewer/viewer/lib/utils.web.js
+@@ -4,7 +4,44 @@ const THREE = require('three')
+ const textureCache = {}
+ function loadTexture (texture, cb) {
+   if (!textureCache[texture]) {
+-    textureCache[texture] = new THREE.TextureLoader().load(texture)
++    const loader = new THREE.TextureLoader()
++    loader.load(
++      texture,
++      // Success callback
++      (tex) => {
++        // Set filters to prevent non-power-of-two warnings
++        tex.minFilter = THREE.LinearFilter
++        tex.magFilter = THREE.LinearFilter
++        textureCache[texture] = tex
++        cb(tex)
++      },
++      // Progress callback (optional)
++      undefined,
++      // Error callback
++      (err) => {
++        // Fallback: try loading from subdirectory with same name
++        const parts = texture.split('/')
++        const filename = parts[parts.length - 1]
++        const filenameNoExt = filename.replace(/\.png$/, '')
++        const fallbackTexture = parts.slice(0, -1).join('/') + '/' + filenameNoExt + '/' + filename
++        
++        loader.load(
++          fallbackTexture,
++          (tex) => {
++            tex.minFilter = THREE.LinearFilter
++            tex.magFilter = THREE.LinearFilter
++            textureCache[texture] = tex
++            cb(tex)
++          },
++          undefined,
++          (fallbackErr) => {
++            console.warn(`Failed to load texture: ${texture}`)
++            cb(null)
++          }
++        )
++      }
++    )
++    return
+   }
+   cb(textureCache[texture])
+ }
+diff --git a/node_modules/prismarine-viewer/viewer/lib/viewer.js b/node_modules/prismarine-viewer/viewer/lib/viewer.js
+index db02d90..9def053 100644
+--- a/node_modules/prismarine-viewer/viewer/lib/viewer.js
++++ b/node_modules/prismarine-viewer/viewer/lib/viewer.js
+@@ -23,7 +23,7 @@ class Viewer {
+     this.camera = new THREE.PerspectiveCamera(75, size.x / size.y, 0.1, 1000)
+ 
+     this.world = new WorldRenderer(this.scene)
+-    this.entities = new Entities(this.scene)
++    this.entities = new Entities(this.scene, this.version)
+     this.primitives = new Primitives(this.scene, this.camera)
+ 
+     this.domElement = renderer.domElement
+@@ -48,6 +48,7 @@ class Viewer {
+     console.log('Using version: ' + version)
+     this.version = version
+     this.world.setVersion(version)
++    this.entities.setVersion(version)
+     this.entities.clear()
+     this.primitives.clear()
+     return true

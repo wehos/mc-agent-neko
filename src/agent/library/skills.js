@@ -1168,7 +1168,8 @@ export async function goToGoal(bot, goal) {
     scaffoldBlocks.forEach(blockName => {
         const blockId = mc.getBlockId(blockName);
         if (blockId) {
-            nonDestructiveMovements.scaffoldingBlocks.push(blockId);
+            // Note: mineflayer-pathfinder has a typo - it's 'scafoldingBlocks' not 'scaffoldingBlocks'
+            nonDestructiveMovements.scafoldingBlocks.push(blockId);
         }
     });
 
@@ -1183,7 +1184,8 @@ export async function goToGoal(bot, goal) {
     scaffoldBlocks.forEach(blockName => {
         const blockId = mc.getBlockId(blockName);
         if (blockId) {
-            destructiveMovements.scaffoldingBlocks.push(blockId);
+            // Note: mineflayer-pathfinder has a typo - it's 'scafoldingBlocks' not 'scaffoldingBlocks'
+            destructiveMovements.scafoldingBlocks.push(blockId);
         }
     });
 

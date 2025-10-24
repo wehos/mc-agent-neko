@@ -171,6 +171,12 @@ export class Agent {
 
     async initBot() {
         this.bot = initBot(this.name);
+        
+        // Increase max listeners to prevent warnings when multiple systems listen to events
+        // This is necessary because bot events are listened to by: agent, mindserver_proxy, 
+        // action_manager, vision, websocket server, prismarine-viewer, and various plugins
+        this.bot.setMaxListeners(50);
+        
         this.setupBotEventHandlers();
     }
 
@@ -248,6 +254,13 @@ export class Agent {
             console.log(`${this.name} died, stopping current actions...`);
             this.actions.cancelResume();
             this.actions.stop();
+            
+            // Report task interruption due to death
+            wsServer.onTaskCompleted({
+                message: '任务因死亡而中断',
+                score: 0,
+                reason: 'death'
+            });
             
             // Monitor respawn to ensure bot position is valid after death
             this.monitorRespawn();

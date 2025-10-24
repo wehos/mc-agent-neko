@@ -65,6 +65,11 @@ export function initBot(username) {
     }
 
     const bot = createBot(options);
+    
+    // Increase max listeners to prevent EventEmitter warnings
+    // Multiple systems listen to bot events: plugins, agent, proxy, viewer, etc.
+    bot.setMaxListeners(50);
+    
     bot.loadPlugin(pathfinder);
     bot.loadPlugin(pvp);
     bot.loadPlugin(collectblock);

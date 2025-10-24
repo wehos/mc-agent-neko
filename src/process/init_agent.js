@@ -1,6 +1,11 @@
 import { Agent } from '../agent/agent.js';
 import { serverProxy } from '../agent/mindserver_proxy.js';
 import yargs from 'yargs';
+import { EventEmitter } from 'events';
+
+// Increase the default max listeners globally to prevent memory leak warnings
+// This is needed because bot events are listened to by many systems simultaneously
+EventEmitter.defaultMaxListeners = 50;
 
 // Global error handlers to prevent crashes
 process.on('uncaughtException', (error) => {
