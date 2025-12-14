@@ -7,7 +7,7 @@ let mindserver;
 let connected = false;
 let agent_processes = {};
 let agent_count = 0;
-let port = 8080;
+let mindserver_port = 8080;
 
 export async function init(host_public=false, port=8080, auto_open_ui=true) {
     if (connected) {
@@ -15,7 +15,7 @@ export async function init(host_public=false, port=8080, auto_open_ui=true) {
         return;
     }
     mindserver = createMindServer(host_public, port);
-    port = port;
+    mindserver_port = port;
     connected = true;
     if (auto_open_ui) {
         setTimeout(() => {
@@ -57,7 +57,7 @@ export async function createAgent(settings) {
             console.warn(`Attempting to connect anyway...`);
         }
 
-        const agentProcess = new AgentProcess(agent_name, port);
+        const agentProcess = new AgentProcess(agent_name, mindserver_port);
         agentProcess.start(load_memory, init_message, agentIndex);
         agent_processes[settings.profile.name] = agentProcess;
     } catch (error) {

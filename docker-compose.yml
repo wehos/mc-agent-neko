@@ -1,14 +1,19 @@
-version: '3.8'
-
 services:
-  app:
-    image: node:18
-    working_dir: /app
+  mindcraft:
+    build: .
+    environment:
+      SETTINGS_JSON: |
+        {"auto_open_ui": false}
     volumes:
-      - .:/app
-    command: node main.js
+      - ./settings.js:/app/settings.js
+      - ./keys.json:/app/keys.json
+      - ./profiles:/app/profiles
+      - ./bots:/app/bots
     ports:
       - "3000-3003:3000-3003" # see the view from the camera mounted on your bot head: http://localhost:3000/
+      - 8080 # Mindserver port
+    extra_hosts:
+    - "host.docker.internal:host-gateway"
 
   viaproxy: #use this service to connect to an unsupported minecraft server versions. more info: ./services/viaproxy/README.md
     image: ghcr.io/viaversion/viaproxy:latest
@@ -18,3 +23,5 @@ services:
       - "25568:25568"
     profiles:
       - viaproxy
+    stdin_open: true
+    tty: true

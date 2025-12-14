@@ -377,7 +377,7 @@
     </div>
 
     <script>
-        const socket = io();
+        const socket = io({ path: window.location.pathname + 'socket.io' })
         const agentsDiv = document.getElementById('agents');
         let settingsSpec = {};
         let profileData = null;

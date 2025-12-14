@@ -28,7 +28,6 @@ The generation code is documented to help with customization.
 
 ## Important File Locations
 - `tasks/construction_tasks/generate_multiagent_construction_tasks.js` - Main task generation script
-- `profiles/task_construct.json` - Default configuration profile
-- `tasks/construction_tasks/test_multiagent_construction_tasks.json` - Training task definitions (initalized with 5 variants)
-- `tasks/construction_tasks/test_multiagent_construction_tasks.json` - Test task definitions (initalized with 1 variant)
+- `profiles/tasks/construction_profile.json` - Default configuration profile
+- `tasks/construction_tasks/custom/` - Directory containing various task definitions (e.g., church_one_agent.json, pyramid.json)
 - `src/agent/tasks/construction_tasks.js` - Blueprint Class, Construction Validation Class, and Procedural Generation Function
