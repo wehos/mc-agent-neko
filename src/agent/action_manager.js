@@ -25,15 +25,35 @@ export class ActionManager {
 
     async stop() {
         if (!this.executing) return;
+        
+        let waitTime = 0;
+        const checkInterval = 300; // Check every 300ms
+        const logInterval = 2000; // Only log every 2 seconds to reduce spam
+        const maxWaitTime = 10000; // 10 seconds max
+        let lastLogTime = 0;
+        
         const timeout = setTimeout(() => {
             this.agent.cleanKill('Code execution refused stop after 10 seconds. Killing process.');
-        }, 10000);
-        while (this.executing) {
+        }, maxWaitTime);
+        
+        while (this.executing && waitTime < maxWaitTime) {
             this.agent.requestInterrupt();
-            console.log('waiting for code to finish executing...');
-            await new Promise(resolve => setTimeout(resolve, 300));
+            
+            // Only log occasionally to avoid spam
+            if (waitTime - lastLogTime >= logInterval) {
+                console.log(`Waiting for code to finish executing... (${(waitTime / 1000).toFixed(1)}s)`);
+                lastLogTime = waitTime;
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, checkInterval));
+            waitTime += checkInterval;
         }
+        
         clearTimeout(timeout);
+        
+        if (this.executing) {
+            console.warn('Code did not stop after 10 seconds, force killing...');
+        }
     } 
 
     cancelResume() {
@@ -129,23 +149,39 @@ export class ActionManager {
             this.currentActionFn = null;
             clearTimeout(TIMEOUT);
             this.cancelResume();
-            console.error("Code execution triggered catch:", err);
-            // Log the full stack trace
-            console.error(err.stack);
+            
+            const errMsg = err.message || err.toString();
+            const isInterrupt = errMsg.includes('interrupted') || errMsg.includes('Interrupted') || this.agent.bot.interrupt_code;
+            
+            // Only log full stack for real errors, not normal interrupts
+            if (isInterrupt) {
+                // Interrupts are expected behavior, minimal logging
+                console.log(`Action interrupted: ${actionLabel}`);
+            } else {
+                console.error("Code execution triggered catch:", err);
+                console.error(err.stack);
+            }
+            
             await this.stop();
-            err = err.toString();
+            const errStr = err.toString();
 
-            let message = this.getBotOutputSummary() +
-                '!!Code threw exception!!\n' +
-                'Error: ' + err + '\n' +
-                'Stack trace:\n' + err.stack+'\n';
+            let message;
+            if (isInterrupt) {
+                // Clean message for interrupts
+                message = this.getBotOutputSummary() + '(action interrupted)\n';
+            } else {
+                message = this.getBotOutputSummary() +
+                    '!!Code threw exception!!\n' +
+                    'Error: ' + errStr + '\n' +
+                    'Stack trace:\n' + err.stack + '\n';
+            }
 
             let interrupted = this.agent.bot.interrupt_code;
             this.agent.clearBotLogs();
             if (!interrupted) {
                 this.agent.bot.emit('idle');
             }
-            return { success: false, message, interrupted, timedout: false };
+            return { success: false, message, interrupted: isInterrupt || interrupted, timedout: false };
         }
     }
 

@@ -1,7 +1,8 @@
 import { io } from 'socket.io-client';
 import convoManager from './conversation.js';
 import { setSettings } from './settings.js';
-import { getFullState } from './library/full_state.js';
+import { getFullState, getFullStateAsync } from './library/full_state.js';
+import PerformanceMonitor from './library/performance_monitor.js';
 
 // agent's individual connection to the mindserver
 // always connect to localhost
@@ -27,14 +28,17 @@ class MindServerProxy {
         this.name = name;
         this.port = port;
         
-        // Configure Socket.IO client with appropriate timeouts
+        // Configure Socket.IO client - optimized for fast async operations
         this.socket = io(`http://localhost:${port}`, {
             reconnection: true,          // Enable auto-reconnection
-            reconnectionAttempts: 5,     // Try 5 times before giving up
-            reconnectionDelay: 1000,     // Start with 1 second delay
-            reconnectionDelayMax: 5000,  // Max 5 seconds between attempts
+            reconnectionAttempts: Infinity, // Keep trying to reconnect
+            reconnectionDelay: 500,      // Start with 500ms delay (faster)
+            reconnectionDelayMax: 3000,  // Max 3 seconds between attempts (faster recovery)
             timeout: 20000,              // Connection timeout: 20 seconds
             transports: ['websocket', 'polling'], // Try websocket first, fallback to polling
+            upgrade: true,               // Allow transport upgrade
+            rememberUpgrade: true,       // Remember successful upgrade
+            forceNew: false,             // Reuse existing connection if possible
         });
 
         await new Promise((resolve, reject) => {
@@ -51,17 +55,26 @@ class MindServerProxy {
 
         // Enhanced connection event handlers
         this.socket.on('disconnect', (reason) => {
-            console.log(`Disconnected from MindServer. Reason: ${reason}`);
+            console.log(`⚠️ Disconnected from MindServer. Reason: ${reason}`);
             this.connected = false;
             
-            // Stop state pushing when disconnected
-            this.stopStatePushing();
+            // Don't stop state pushing completely - just mark as disconnected
+            // This allows pushing to resume immediately after reconnection
+            this.pushInProgress = false;
             
-            // Socket.IO has built-in auto-reconnection, but we also have our manual reconnection
-            // Only trigger manual reconnection if it's not a clean disconnect
-            if (reason !== 'io client disconnect' && this.agent && !this.reconnecting) {
-                this.attemptReconnect();
+            // Log disconnect reason for debugging
+            const criticalDisconnects = ['ping timeout', 'transport error', 'transport close'];
+            if (criticalDisconnects.some(r => reason.includes(r))) {
+                console.warn(`🚨 Critical disconnect detected: ${reason}`);
+                // Print performance metrics if available
+                if (this.perfMonitor && process.env.MONITOR_PERFORMANCE === 'true') {
+                    console.log('📊 Performance at disconnect:');
+                    this.perfMonitor.printReport();
+                }
             }
+            
+            // Socket.IO handles reconnection automatically with our config
+            // No need for manual reconnection - rely on built-in mechanism
         });
 
         this.socket.on('reconnect', (attemptNumber) => {
@@ -71,9 +84,17 @@ class MindServerProxy {
             
             // Re-login agent after reconnection
             if (this.agent) {
+                // Login immediately
                 this.login();
-                // Restart state pushing after reconnection
-                this.startStatePushing();
+                
+                // Don't restart state pushing - it's already running
+                // Just clear the in-progress flag to allow new pushes
+                this.pushInProgress = false;
+                
+                // Trigger immediate state push to sync state after reconnection
+                setImmediate(() => {
+                    this.pushStateIfChangedAsync(true, 'reconnect');
+                });
             }
         });
 
@@ -86,11 +107,8 @@ class MindServerProxy {
         });
 
         this.socket.on('reconnect_failed', () => {
-            console.error('❌ Socket.IO reconnection failed after all attempts');
-            // Our manual reconnection will take over
-            if (this.agent && !this.reconnecting) {
-                this.attemptReconnect();
-            }
+            console.error('❌ Socket.IO reconnection failed (will keep retrying with infinite attempts)');
+            // With reconnectionAttempts: Infinity, this should rarely happen
         });
 
         this.socket.on('connect_error', (error) => {
@@ -174,8 +192,17 @@ class MindServerProxy {
 
     setAgent(agent) {
         this.agent = agent;
+        // Initialize performance monitor
+        this.perfMonitor = new PerformanceMonitor(agent.name);
         // Start pushing state updates proactively
         this.startStatePushing();
+        
+        // Print performance report every 5 minutes if monitoring enabled
+        if (process.env.MONITOR_PERFORMANCE === 'true') {
+            this.perfReportInterval = setInterval(() => {
+                this.perfMonitor.printReport();
+            }, 5 * 60 * 1000);
+        }
     }
 
     startStatePushing() {
@@ -187,19 +214,23 @@ class MindServerProxy {
         // Initialize state cache
         this.cachedState = null;
         this.lastStateHash = null;
+        this.lastPushTime = 0;
+        this.pushThrottleMs = 300; // Minimum 300ms between pushes (aggressive)
+        this.pushInProgress = false; // Track if push is in progress
         
         // Event-driven: Push state when critical events occur
         this.setupEventDrivenPush();
         
-        // Fallback: Check for changes at moderate frequency (every 1s)
-        // Reduced from 500ms to 1000ms to lower CPU/memory pressure
+        // Regular polling: Check for changes at 1 second intervals (restored)
+        // Use fully async pattern to never block event loop
         this.statePushInterval = setInterval(() => {
-            if (!this.agent || !this.agent.bot || !this.connected) return;
+            if (!this.agent || !this.agent.bot || !this.connected || this.pushInProgress) return;
             
+            // Schedule async push in next tick - never blocks current tick
             setImmediate(() => {
-                this.pushStateIfChanged();
+                this.pushStateIfChangedAsync();
             });
-        }, 1000); // Reduced to 1 second to save memory
+        }, 1000); // 1 second - restored original frequency
     }
 
     setupEventDrivenPush() {
@@ -207,11 +238,10 @@ class MindServerProxy {
         
         const bot = this.agent.bot;
         
-        // CRITICAL FIX: Store handler references for proper cleanup
+        // Store handler references for proper cleanup
         this.eventHandlers = new Map();
         
-        // Reduced critical events to avoid memory leaks
-        // Removed physicsTick - too high frequency causes memory issues
+        // Critical events that warrant immediate state push (restored full set)
         const criticalEvents = [
             'health',           // Health changed (combat, fall damage)
             'death',            // Agent died
@@ -223,9 +253,9 @@ class MindServerProxy {
         const createHandler = (eventName) => {
             return () => {
                 try {
-                    // Non-blocking push
+                    // Fully async push - never blocks event handler
                     setImmediate(() => {
-                        this.pushStateIfChanged(true);
+                        this.pushStateIfChangedAsync(true, eventName);
                     });
                 } catch (error) {
                     console.error(`[${this.agent?.name}] ❌ Error in event handler (${eventName}):`, error.message);
@@ -245,34 +275,87 @@ class MindServerProxy {
         });
     }
 
-    pushStateIfChanged(forcePush = false) {
+    // New async push method - fully non-blocking
+    async pushStateIfChangedAsync(forcePush = false, eventName = null) {
+        // Prevent concurrent pushes
+        if (this.pushInProgress && !forcePush) {
+            return;
+        }
+        
+        const startTime = this.perfMonitor ? this.perfMonitor.startTiming() : Date.now();
+        
         try {
+            this.pushInProgress = true;
+            
             // Safety check before getting state
             if (!this.agent || !this.agent.bot) {
                 return;
             }
             
-            const state = getFullState(this.agent);
+            // Throttling: prevent pushes more frequent than pushThrottleMs
+            const now = Date.now();
+            const timeSinceLastPush = now - this.lastPushTime;
+            
+            // Skip push if too soon (unless it's a critical event)
+            if (timeSinceLastPush < this.pushThrottleMs && !forcePush) {
+                return;
+            }
+            
+            // Async state fetching - split into microtasks to avoid blocking
+            let state;
+            try {
+                // Yield to event loop before expensive operation
+                await Promise.resolve();
+                state = await getFullStateAsync(this.agent);
+            } catch (stateError) {
+                console.error(`[${this.agent?.name}] ❌ Error in getFullState:`, stateError.message);
+                if (this.perfMonitor) this.perfMonitor.recordError();
+                // Use cached state if available, otherwise skip this push
+                if (this.cachedState) {
+                    state = this.cachedState;
+                } else {
+                    return;
+                }
+            }
             
             // Create a compact hash of critical fields for change detection
-            // Use smaller representation to reduce memory
             const stateHash = `${state.isDead}|${state.gameplay?.health}|${state.gameplay?.hunger}|${Math.floor(state.gameplay?.position?.x)}|${Math.floor(state.gameplay?.position?.y)}|${Math.floor(state.gameplay?.position?.z)}|${state.action?.current}|${state.inventory?.stacksUsed}`;
             
             // Only push if changed or forced
             if (forcePush || stateHash !== this.lastStateHash) {
                 this.cachedState = state;
                 this.lastStateHash = stateHash;
+                this.lastPushTime = now;
                 
                 if (this.socket && this.connected) {
-                    this.socket.emit('agent-state-push', this.agent.name, state);
+                    // Emit with error boundary - yield before emit
+                    try {
+                        await Promise.resolve();
+                        this.socket.emit('agent-state-push', this.agent.name, state);
+                        // Record successful push timing
+                        if (this.perfMonitor) {
+                            this.perfMonitor.endTiming(startTime, 'state-push');
+                        }
+                    } catch (emitError) {
+                        console.error(`[${this.agent?.name}] ❌ Error emitting state:`, emitError.message);
+                        if (this.perfMonitor) this.perfMonitor.recordError();
+                    }
                 }
             }
         } catch (error) {
-            console.error(`[${this.agent?.name || 'Unknown'}] ❌ Error pushing state:`);
-            console.error('Message:', error.message);
-            console.error('Stack:', error.stack);
-            // Don't crash, just skip this push
+            console.error(`[${this.agent?.name || 'Unknown'}] ❌ Error pushing state:`, error.message);
+            if (this.perfMonitor) this.perfMonitor.recordError();
+        } finally {
+            this.pushInProgress = false;
         }
+    }
+
+    // Legacy sync method - kept for backward compatibility but delegates to async
+    pushStateIfChanged(forcePush = false, eventName = null) {
+        // Just schedule async version without waiting
+        setImmediate(() => {
+            this.pushStateIfChangedAsync(forcePush, eventName);
+        });
     }
 
     stopStatePushing() {
@@ -280,6 +363,18 @@ class MindServerProxy {
         if (this.statePushInterval) {
             clearInterval(this.statePushInterval);
             this.statePushInterval = null;
+        }
+        
+        // Clear performance report interval
+        if (this.perfReportInterval) {
+            clearInterval(this.perfReportInterval);
+            this.perfReportInterval = null;
+        }
+        
+        // Print final report before stopping
+        if (this.perfMonitor && process.env.MONITOR_PERFORMANCE === 'true') {
+            console.log('\n📊 Final Performance Report:');
+            this.perfMonitor.printReport();
         }
         
         // CRITICAL FIX: Properly remove event listeners by reference
@@ -298,6 +393,7 @@ class MindServerProxy {
         // Clear cached data to free memory
         this.cachedState = null;
         this.lastStateHash = null;
+        this.perfMonitor = null;
     }
 
     getCachedState() {
@@ -325,59 +421,8 @@ class MindServerProxy {
         return this.socket;
     }
 
-    async attemptReconnect() {
-        if (this.reconnecting) return;
-        
-        this.reconnecting = true;
-        this.reconnectAttempts++;
-        
-        console.log(`\n🔄 ===== MINDSERVER RECONNECTION ATTEMPT =====`);
-        console.log(`🔗 Attempt: ${this.reconnectAttempts}/${this.maxReconnectAttempts}`);
-        console.log(`🤖 Agent: ${this.name}`);
-        console.log(`⏰ Timestamp: ${new Date().toISOString()}`);
-        console.log(`=============================================\n`);
-        
-        if (this.reconnectAttempts > this.maxReconnectAttempts) {
-            console.error('Max MindServer reconnection attempts reached. Killing agent process.');
-            this.reconnecting = false;
-            if (this.agent) {
-                this.agent.cleanKill('Disconnected from MindServer. Max reconnection attempts reached.');
-            }
-            return;
-        }
-        
-        // Wait before attempting reconnection
-        const delay = Math.min(2000 * this.reconnectAttempts, 10000); // 2s, 4s, 6s... max 10s
-        await new Promise(resolve => setTimeout(resolve, delay));
-        
-        try {
-            // Clean up old socket
-            if (this.socket) {
-                this.socket.removeAllListeners();
-                this.socket.close();
-            }
-            
-            // Reset connection state
-            this.connected = false;
-            this.reconnecting = false;
-            
-            // Attempt new connection
-            await this.connect(this.name, this.port);
-            
-            console.log(`✅ Successfully reconnected to MindServer (attempt ${this.reconnectAttempts})`);
-            
-            // Re-login the agent
-            if (this.agent) {
-                this.login();
-            }
-        } catch (error) {
-            console.error(`❌ MindServer reconnection attempt ${this.reconnectAttempts} failed:`, error);
-            this.reconnecting = false;
-            
-            // Try again
-            this.attemptReconnect();
-        }
-    }
+    // Removed manual reconnection - Socket.IO handles this automatically
+    // with connectionStateRecovery and infinite reconnectionAttempts
 }
 
 // Create and export a singleton instance

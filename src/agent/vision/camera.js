@@ -17,12 +17,13 @@ export class Camera extends EventEmitter {
         super();
         this.bot = bot;
         this.fp = fp;
-        this.viewDistance = 12;
+        this.viewDistance = 6; // Reduced from 12 to save memory
         this.width = 800;
         this.height = 512;
         this.canvas = createCanvas(this.width, this.height);
         this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas });
         this.viewer = new Viewer(this.renderer);
+        this.captureCount = 0;
         this._init().then(() => {
             this.emit('ready');
         })
@@ -116,6 +117,55 @@ export class Camera extends EventEmitter {
             if (!stats?.isDirectory()) {
                 await fs.mkdir(this.fp);
             }
+        }
+    }
+
+    /**
+     * Clean up resources to prevent memory leaks.
+     * Call this periodically or when the camera is no longer needed.
+     */
+    cleanup() {
+        try {
+            // Dispose of WorldView listeners
+            if (this.worldView) {
+                this.worldView.removeListenersFromBot(this.bot);
+                this.worldView = null;
+            }
+            
+            // Dispose of THREE.js resources
+            if (this.viewer && this.viewer.scene) {
+                this.viewer.scene.traverse((object) => {
+                    if (object.geometry) {
+                        object.geometry.dispose();
+                    }
+                    if (object.material) {
+                        if (Array.isArray(object.material)) {
+                            object.material.forEach(m => m.dispose());
+                        } else {
+                            object.material.dispose();
+                        }
+                    }
+                });
+            }
+            
+            // Dispose of renderer
+            if (this.renderer) {
+                this.renderer.dispose();
+            }
+            
+            console.log('Camera resources cleaned up');
+        } catch (err) {
+            console.warn('Error cleaning up camera:', err.message);
+        }
+    }
+
+    /**
+     * Trigger garbage collection if available (requires --expose-gc flag)
+     */
+    static triggerGC() {
+        if (global.gc) {
+            global.gc();
+            console.log('Manual GC triggered');
         }
     }
 }

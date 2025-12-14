@@ -384,16 +384,14 @@ export async function defendSelf(bot, range=9) {
         await equipHighestAttack(bot);
         if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
             try {
-                bot.pathfinder.setMovements(new pf.Movements(bot));
-                await bot.pathfinder.goto(new pf.goals.GoalFollow(enemy, 3.5), true);
-            } catch (err) {/* might error if entity dies, ignore */}
+                await goToGoal(bot, new pf.goals.GoalFollow(enemy, 3.5));
+            } catch (err) {/* might error if entity dies or path blocked, ignore */}
         }
         if (bot.entity.position.distanceTo(enemy.position) <= 2) {
             try {
-                bot.pathfinder.setMovements(new pf.Movements(bot));
                 let inverted_goal = new pf.goals.GoalInvert(new pf.goals.GoalFollow(enemy, 2));
-                await bot.pathfinder.goto(inverted_goal, true);
-            } catch (err) {/* might error if entity dies, ignore */}
+                await goToGoal(bot, inverted_goal);
+            } catch (err) {/* might error if entity dies or path blocked, ignore */}
         }
         bot.pvp.attack(enemy);
         attacked = true;
@@ -535,6 +533,10 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             if (err.name === 'NoChests') {
                 log(bot, `Failed to collect ${blockType}: Inventory full, no place to deposit.`);
                 break;
+            }
+            else if (err.name === 'PathfindingFailed' || (err.message && err.message.includes('path'))) {
+                log(bot, `⚠️ Cannot reach ${blockType} - pathfinding failed. Trying next block or consider changing target.`);
+                continue;
             }
             else {
                 log(bot, `Failed to collect ${blockType}: ${err}.`);
@@ -824,6 +826,12 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         return false;
     }
 
+    // Check for interrupt before potentially long operations
+    if (bot.interrupt_code) {
+        log(bot, `Interrupted before placing ${blockType}.`);
+        return false;
+    }
+
     const pos = bot.entity.position;
     const pos_above = pos.plus(Vec3(0,1,0));
     const dont_move_for = ['torch', 'redstone_torch', 'redstone', 'lever', 'button', 'rail', 'detector_rail', 
@@ -832,9 +840,14 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         // too close
         let goal = new pf.goals.GoalNear(targetBlock.position.x, targetBlock.position.y, targetBlock.position.z, 2);
         let inverted_goal = new pf.goals.GoalInvert(goal);
-        bot.pathfinder.setMovements(new pf.Movements(bot));
-        await bot.pathfinder.goto(inverted_goal);
+        await goToGoal(bot, inverted_goal);
     }
+    
+    if (bot.interrupt_code) {
+        log(bot, `Interrupted while positioning for ${blockType}.`);
+        return false;
+    }
+    
     if (bot.entity.position.distanceTo(targetBlock.position) > 4.5) {
         // too far
         let pos = targetBlock.position;
@@ -1141,13 +1154,132 @@ export async function giveToPlayer(bot, itemType, username, num=1) {
     return false;
 }
 
+/**
+ * Attempt to unstick the bot by jumping and moving in a random direction.
+ * @param {MinecraftBot} bot - reference to the minecraft bot.
+ * @returns {Promise<boolean>} true if movement was attempted.
+ */
+async function attemptUnstick(bot) {
+    const pos = bot.entity.position;
+    
+    // Check if standing on dangerous block
+    const blockBelow = bot.blockAt(pos.offset(0, -1, 0));
+    const isOnLava = blockBelow && (blockBelow.name.includes('lava'));
+    
+    // Random direction
+    const angle = Math.random() * Math.PI * 2;
+    const dx = Math.cos(angle);
+    const dz = Math.sin(angle);
+    
+    // Look in the direction we want to move
+    await bot.look(Math.atan2(-dx, -dz), 0);
+    
+    // Jump first
+    bot.setControlState('jump', true);
+    await new Promise(r => setTimeout(r, 150));
+    bot.setControlState('jump', false);
+    
+    // Move forward briefly
+    bot.setControlState('forward', true);
+    bot.setControlState('sprint', true);
+    await new Promise(r => setTimeout(r, 400));
+    bot.setControlState('forward', false);
+    bot.setControlState('sprint', false);
+    
+    // If on lava, keep jumping
+    if (isOnLava) {
+        for (let i = 0; i < 3; i++) {
+            bot.setControlState('jump', true);
+            bot.setControlState('forward', true);
+            await new Promise(r => setTimeout(r, 200));
+            bot.setControlState('jump', false);
+            bot.setControlState('forward', false);
+            await new Promise(r => setTimeout(r, 100));
+        }
+    }
+    
+    await new Promise(r => setTimeout(r, 300));
+    return true;
+}
+
+/**
+ * Execute pathfinding with a specific movement set and stuck timeout.
+ * @returns {Promise<{success: boolean, stuckDetected: boolean}>}
+ */
+async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doorCheckInterval) {
+    let stuckCheckInterval;
+    let lastPosition = bot.entity.position.clone();
+    let stuckTime = 0;
+    let lastCheckTime = Date.now();
+    const stuckRadius = 1.5; // Tighter radius for faster stuck detection
+    
+    bot.pathfinder.setMovements(movements);
+    
+    const stuckCheckPromise = new Promise((_, reject) => {
+        stuckCheckInterval = setInterval(() => {
+            if (bot.interrupt_code) {
+                clearInterval(stuckCheckInterval);
+                reject(new Error('Interrupted'));
+                return;
+            }
+            
+            const currentPos = bot.entity.position;
+            const distance = currentPos.distanceTo(lastPosition);
+            const now = Date.now();
+            const elapsed = now - lastCheckTime;
+            
+            if (distance < stuckRadius) {
+                stuckTime += elapsed;
+                if (stuckTime >= stuckTimeoutMs) {
+                    clearInterval(stuckCheckInterval);
+                    reject(new Error('PhaseStuck'));
+                }
+            } else {
+                stuckTime = 0;
+                lastPosition = currentPos.clone();
+            }
+            lastCheckTime = now;
+        }, 500); // Check every 500ms for faster response
+    });
+    
+    try {
+        await Promise.race([
+            bot.pathfinder.goto(goal),
+            stuckCheckPromise
+        ]);
+        clearInterval(stuckCheckInterval);
+        return { success: true, stuckDetected: false };
+    } catch (err) {
+        clearInterval(stuckCheckInterval);
+        bot.pathfinder.setGoal(null);
+        
+        const errorMsg = err.message || err.toString();
+        if (errorMsg.includes('Interrupted') || bot.interrupt_code) {
+            throw new Error('Navigation interrupted');
+        }
+        if (errorMsg.includes('PhaseStuck')) {
+            return { success: false, stuckDetected: true };
+        }
+        // Goal reached or path completed normally despite "error"
+        if (errorMsg.includes('Goal') || errorMsg.includes('arrived')) {
+            return { success: true, stuckDetected: false };
+        }
+        return { success: false, stuckDetected: false };
+    }
+}
+
 export async function goToGoal(bot, goal) {
     /**
-     * Navigate to the given goal. Use doors and attempt minimally destructive movements.
+     * Navigate to the given goal with adaptive stuck recovery.
+     * Strategy:
+     *   1. Try non-destructive path, 3s stuck → switch to destructive
+     *   2. Try destructive path, 3s stuck → manual jump unstick
+     *   3. After unstick, retry up to 3 times
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {pf.goals.Goal} goal, the goal to navigate to.
      **/
 
+    // Setup movements
     const nonDestructiveMovements = new pf.Movements(bot);
     const dontBreakBlocks = ['glass', 'glass_pane'];
     for (let block of dontBreakBlocks) {
@@ -1156,26 +1288,20 @@ export async function goToGoal(bot, goal) {
     nonDestructiveMovements.placeCost = 2;
     nonDestructiveMovements.digCost = 10;
     
-    // CRITICAL FIX: Enable water movement
-    // Add water and lava as liquid blocks for pathfinding
     nonDestructiveMovements.liquids.add(mc.getBlockId('water'));
     nonDestructiveMovements.liquids.add(mc.getBlockId('flowing_water'));
     nonDestructiveMovements.liquids.add(mc.getBlockId('lava'));
     nonDestructiveMovements.liquids.add(mc.getBlockId('flowing_lava'));
     
-    // Allow scaffolding with common blocks in water
     const scaffoldBlocks = ['dirt', 'cobblestone', 'stone', 'netherrack'];
     scaffoldBlocks.forEach(blockName => {
         const blockId = mc.getBlockId(blockName);
         if (blockId) {
-            // Note: mineflayer-pathfinder has a typo - it's 'scafoldingBlocks' not 'scaffoldingBlocks'
             nonDestructiveMovements.scafoldingBlocks.push(blockId);
         }
     });
 
     const destructiveMovements = new pf.Movements(bot);
-    
-    // Apply same water movement settings to destructive movements
     destructiveMovements.liquids.add(mc.getBlockId('water'));
     destructiveMovements.liquids.add(mc.getBlockId('flowing_water'));
     destructiveMovements.liquids.add(mc.getBlockId('lava'));
@@ -1184,35 +1310,109 @@ export async function goToGoal(bot, goal) {
     scaffoldBlocks.forEach(blockName => {
         const blockId = mc.getBlockId(blockName);
         if (blockId) {
-            // Note: mineflayer-pathfinder has a typo - it's 'scafoldingBlocks' not 'scaffoldingBlocks'
             destructiveMovements.scafoldingBlocks.push(blockId);
         }
     });
 
-    let final_movements = destructiveMovements;
-
-    const pathfind_timeout = 1000;
-    if (await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout).status === 'success') {
-        final_movements = nonDestructiveMovements;
-        log(bot, `Found non-destructive path.`);
-    }
-    else if (await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout).status === 'success') {
-        log(bot, `Found destructive path.`);
-    }
-    else {
-        log(bot, `Path not found, but attempting to navigate anyway using destructive movements.`);
-    }
-
     const doorCheckInterval = startDoorInterval(bot);
+    const totalStartTime = Date.now();
+    const totalTimeout = 60000; // 60s total timeout
+    const phaseStuckTimeout = 3000; // 3s stuck detection per phase
+    const maxUnstickAttempts = 3;
+    
+    let currentMovements = nonDestructiveMovements;
+    let isDestructive = false;
+    let unstickAttempts = 0;
 
-    bot.pathfinder.setMovements(final_movements);
+    // Determine initial path type
+    const pathfind_timeout = 1000;
+    const nonDestructivePath = await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout);
+    if (nonDestructivePath.status === 'success') {
+        currentMovements = nonDestructiveMovements;
+        isDestructive = false;
+        log(bot, `Found non-destructive path.`);
+    } else {
+        const destructivePath = await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout);
+        if (destructivePath.status === 'success') {
+            currentMovements = destructiveMovements;
+            isDestructive = true;
+            log(bot, `Found destructive path.`);
+        } else {
+            currentMovements = destructiveMovements;
+            isDestructive = true;
+            log(bot, `Path not found, attempting navigation with destructive movements.`);
+        }
+    }
+
     try {
-        await bot.pathfinder.goto(goal);
+        while (Date.now() - totalStartTime < totalTimeout) {
+            if (bot.interrupt_code) {
+                throw new Error('Navigation interrupted');
+            }
+
+            const result = await executePathfindingPhase(
+                bot, goal, currentMovements, phaseStuckTimeout, doorCheckInterval
+            );
+
+            if (result.success) {
+                clearInterval(doorCheckInterval);
+                return true;
+            }
+
+            if (result.stuckDetected) {
+                // Phase 1: Non-destructive stuck → switch to destructive
+                if (!isDestructive) {
+                    log(bot, `⚠️ Stuck with non-destructive path, switching to destructive...`);
+                    currentMovements = destructiveMovements;
+                    isDestructive = true;
+                    continue;
+                }
+
+                // Phase 2: Destructive also stuck → manual unstick
+                if (unstickAttempts < maxUnstickAttempts) {
+                    unstickAttempts++;
+                    log(bot, `⚠️ Stuck! Attempting manual unstick (${unstickAttempts}/${maxUnstickAttempts})...`);
+                    await attemptUnstick(bot);
+                    
+                    // Brief pause then retry
+                    await new Promise(r => setTimeout(r, 500));
+                    continue;
+                }
+
+                // All attempts exhausted
+                break;
+            }
+
+            // Non-stuck failure (path blocked, etc.) - try unstick anyway
+            if (unstickAttempts < maxUnstickAttempts) {
+                unstickAttempts++;
+                log(bot, `Path failed, attempting unstick (${unstickAttempts}/${maxUnstickAttempts})...`);
+                await attemptUnstick(bot);
+                await new Promise(r => setTimeout(r, 500));
+                continue;
+            }
+            break;
+        }
+
         clearInterval(doorCheckInterval);
-        return true;
+        bot.pathfinder.setGoal(null);
+        
+        const betterError = new Error(
+            `Cannot reach destination after ${unstickAttempts} unstick attempts. ` +
+            `You may be trapped or the path is blocked. Try a different target.`
+        );
+        betterError.name = 'PathfindingFailed';
+        log(bot, `⚠️ Pathfinding failed: ${betterError.message}`);
+        throw betterError;
+        
     } catch (err) {
         clearInterval(doorCheckInterval);
-        // we need to catch so we can clean up the door check interval, then rethrow the error
+        bot.pathfinder.setGoal(null);
+        
+        const errorMsg = err.message || err.toString();
+        if (errorMsg.includes('Interrupted') || bot.interrupt_code) {
+            throw new Error('Navigation interrupted');
+        }
         throw err;
     }
 }
@@ -1350,22 +1550,39 @@ export async function goToNearestBlock(bot, blockType,  min_distance=2, range=64
      * @example
      * await skills.goToNearestBlock(bot, "oak_log", 64, 2);
      * **/
-    const MAX_RANGE = 512;
+    const MAX_RANGE = 256;
     if (range > MAX_RANGE) {
         log(bot, `Maximum search range capped at ${MAX_RANGE}. `);
         range = MAX_RANGE;
     }
     let block = null;
+    
+    // Use async search for large ranges to avoid blocking the event loop
+    const useAsync = range > 64;
+    
     if (blockType === 'water' || blockType === 'lava') {
-        let blocks = world.getNearestBlocksWhere(bot, block => block.name === blockType && block.metadata === 0, range, 1);
-        if (blocks.length === 0) {
-            log(bot, `Could not find any source ${blockType} in ${range} blocks, looking for uncollectable flowing instead...`);
-            blocks = world.getNearestBlocksWhere(bot, block => block.name === blockType, range, 1);
+        if (useAsync) {
+            let blocks = await world.getNearestBlocksWhereAsync(bot, block => block.name === blockType && block.metadata === 0, range, 1);
+            if (blocks.length === 0) {
+                log(bot, `Could not find any source ${blockType} in ${range} blocks, looking for uncollectable flowing instead...`);
+                blocks = await world.getNearestBlocksWhereAsync(bot, block => block.name === blockType, range, 1);
+            }
+            block = blocks[0];
+        } else {
+            let blocks = world.getNearestBlocksWhere(bot, block => block.name === blockType && block.metadata === 0, range, 1);
+            if (blocks.length === 0) {
+                log(bot, `Could not find any source ${blockType} in ${range} blocks, looking for uncollectable flowing instead...`);
+                blocks = world.getNearestBlocksWhere(bot, block => block.name === blockType, range, 1);
+            }
+            block = blocks[0];
         }
-        block = blocks[0];
     }
     else {
-        block = world.getNearestBlock(bot, blockType, range);
+        if (useAsync) {
+            block = await world.getNearestBlockAsync(bot, blockType, range);
+        } else {
+            block = world.getNearestBlock(bot, blockType, range);
+        }
     }
     if (!block) {
         log(bot, `Could not find any ${blockType} in ${range} blocks.`);
@@ -1542,8 +1759,7 @@ export async function moveAwayFromEntity(bot, entity, distance=16) {
      **/
     let goal = new pf.goals.GoalFollow(entity, distance);
     let inverted_goal = new pf.goals.GoalInvert(goal);
-    bot.pathfinder.setMovements(new pf.Movements(bot));
-    await bot.pathfinder.goto(inverted_goal);
+    await goToGoal(bot, inverted_goal);
     return true;
 }
 

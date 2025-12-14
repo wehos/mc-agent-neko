@@ -39,7 +39,7 @@
     },
     "scripts": {
         "postinstall": "patch-package",
-        "start": "node main.js"
+        "start": "node --max-old-space-size=8192 --expose-gc main.js"
     },
     "devDependencies": {
         "@eslint/js": "^9.13.0",

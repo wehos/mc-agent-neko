@@ -49,15 +49,27 @@ export function createMindServer(host_public = false, port = 8080) {
     const app = express();
     server = http.createServer(app);
     
-    // Configure Socket.IO with appropriate timeouts and settings
+    // Configure Socket.IO with optimized settings for async operations
     io = new Server(server, {
-        pingTimeout: 60000,      // 60 seconds - increased from default 5s
+        pingTimeout: 60000,      // 60 seconds - standard timeout (operations should not block)
         pingInterval: 25000,     // 25 seconds - keep default
         connectTimeout: 45000,   // 45 seconds for initial connection
         maxHttpBufferSize: 1e8,  // 100MB buffer for large state transfers
+        upgradeTimeout: 30000,   // 30 seconds for transport upgrade
         cors: {
             origin: '*',         // Allow all origins for local development
             methods: ['GET', 'POST']
+        },
+        // Connection state recovery for quick reconnection
+        connectionStateRecovery: {
+            maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+            skipMiddlewares: true,
+        },
+        // Disable compression to reduce CPU load (faster but more bandwidth)
+        perMessageDeflate: false,
+        // Allow more concurrent requests
+        allowRequest: (req, callback) => {
+            callback(null, true);
         }
     });
 
@@ -68,7 +80,31 @@ export function createMindServer(host_public = false, port = 8080) {
     // Socket.io connection handling
     io.on('connection', (socket) => {
         let curAgentName = null;
-        console.log('Client connected');
+        console.log(`✅ Client connected [${socket.id}]`);
+        
+        // Add connection diagnostics and cleanup
+        socket.on('disconnect', (reason) => {
+            console.log(`⚠️ Client disconnected [${socket.id}] - Agent: ${curAgentName || 'unknown'} - Reason: ${reason}`);
+            
+            // Cleanup agent connection state
+            if (agent_connections[curAgentName]) {
+                console.log(`Agent ${curAgentName} disconnected`);
+                agent_connections[curAgentName].in_game = false;
+                agent_connections[curAgentName].socket = null;
+                // Clear cached state for disconnected agent
+                delete latestAgentStates[curAgentName];
+                agentsStatusUpdate();
+            }
+            
+            // Remove from listeners if applicable
+            if (agent_listeners.includes(socket)) {
+                removeListener(socket);
+            }
+        });
+        
+        socket.on('error', (error) => {
+            console.error(`❌ Socket error [${socket.id}] - Agent: ${curAgentName || 'unknown'}:`, error.message);
+        });
 
         agentsStatusUpdate(socket);
 
@@ -137,19 +173,6 @@ export function createMindServer(host_public = false, port = 8080) {
             }
         });
 
-        socket.on('disconnect', () => {
-            if (agent_connections[curAgentName]) {
-                console.log(`Agent ${curAgentName} disconnected`);
-                agent_connections[curAgentName].in_game = false;
-                agent_connections[curAgentName].socket = null;
-                // Clear cached state for disconnected agent
-                delete latestAgentStates[curAgentName];
-                agentsStatusUpdate();
-            }
-            if (agent_listeners.includes(socket)) {
-                removeListener(socket);
-            }
-        });
 
         socket.on('chat-message', (agentName, json) => {
             if (!agent_connections[agentName]) {

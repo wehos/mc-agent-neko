@@ -7,7 +7,7 @@ new file mode 100644
 index 0000000..fc31809
 Binary files /dev/null and b/node_modules/prismarine-viewer/public/textures/1.21.4/entity/squid.png differ
 diff --git a/node_modules/prismarine-viewer/viewer/lib/entities.js b/node_modules/prismarine-viewer/viewer/lib/entities.js
-index 459e3f3..5b105d5 100644
+index 459e3f3..f09b91f 100644
 --- a/node_modules/prismarine-viewer/viewer/lib/entities.js
 +++ b/node_modules/prismarine-viewer/viewer/lib/entities.js
 @@ -6,10 +6,10 @@ const { dispose3 } = require('./dispose')
@@ -33,7 +33,14 @@ index 459e3f3..5b105d5 100644
          const spriteMat = new THREE.SpriteMaterial({ map: tex })
          const sprite = new THREE.Sprite(spriteMat)
          sprite.position.y += entity.height + 0.6
-@@ -37,19 +40,32 @@ function getEntityMesh (entity, scene) {
+@@ -33,23 +36,38 @@ function getEntityMesh (entity, scene) {
+       }
+       return e.mesh
+     } catch (err) {
+-      console.log(err)
++      console.error(`❌ Failed to create entity mesh for ${entity.name} (version: ${version || '1.16.4'}):`)
++      console.error(`   Error: ${err.message}`)
++      console.error(`   Stack:`, err.stack)
      }
    }
  
@@ -69,7 +76,7 @@ index 459e3f3..5b105d5 100644
    clear () {
      for (const mesh of Object.values(this.entities)) {
        this.scene.remove(mesh)
-@@ -60,7 +76,7 @@ class Entities {
+@@ -60,7 +78,7 @@ class Entities {
  
    update (entity) {
      if (!this.entities[entity.id]) {
@@ -79,7 +86,7 @@ index 459e3f3..5b105d5 100644
        this.entities[entity.id] = mesh
        this.scene.add(mesh)
 diff --git a/node_modules/prismarine-viewer/viewer/lib/entity/Entity.js b/node_modules/prismarine-viewer/viewer/lib/entity/Entity.js
-index 8945452..e86f701 100644
+index 8945452..6d4fdf5 100644
 --- a/node_modules/prismarine-viewer/viewer/lib/entity/Entity.js
 +++ b/node_modules/prismarine-viewer/viewer/lib/entity/Entity.js
 @@ -168,8 +168,19 @@ function getMesh (texture, jsonModel) {
@@ -104,7 +111,34 @@ index 8945452..e86f701 100644
    }
  
    const skeleton = new THREE.Skeleton(Object.values(bones))
-@@ -202,19 +213,33 @@ function getMesh (texture, jsonModel) {
+@@ -188,13 +199,19 @@ function getMesh (texture, jsonModel) {
+   mesh.bind(skeleton)
+   mesh.scale.set(1 / 16, 1 / 16, 1 / 16)
+ 
+-  loadTexture(texture, texture => {
+-    texture.magFilter = THREE.NearestFilter
+-    texture.minFilter = THREE.NearestFilter
+-    texture.flipY = false
+-    texture.wrapS = THREE.RepeatWrapping
+-    texture.wrapT = THREE.RepeatWrapping
+-    material.map = texture
++  const texturePath = texture // Save the path for error logging
++  loadTexture(texture, loadedTexture => {
++    if (!loadedTexture) {
++      console.error(`❌ Entity texture failed to load: ${texturePath}`)
++      console.error('   Entity will render without texture (magenta cube)')
++      return
++    }
++    loadedTexture.magFilter = THREE.NearestFilter
++    loadedTexture.minFilter = THREE.NearestFilter
++    loadedTexture.flipY = false
++    loadedTexture.wrapS = THREE.RepeatWrapping
++    loadedTexture.wrapT = THREE.RepeatWrapping
++    material.map = loadedTexture
+   })
+ 
+   return mesh
+@@ -202,19 +219,36 @@ function getMesh (texture, jsonModel) {
  
  class Entity {
    constructor (version, type, scene) {
@@ -118,7 +152,8 @@ index 8945452..e86f701 100644
 +      const silentTypes = ['item', 'falling_block', 'arrow', 'experience_orb']
 +      if (!silentTypes.includes(type)) {
 +        // Only log for entities that might have models
-+        console.debug(`Unknown entity type: ${type}`)
++        console.warn(`⚠️  Unknown entity type: ${type} (version: ${version})`)
++        console.warn('    Entity will not be rendered - no model definition found')
 +      }
 +      return
 +    }
@@ -139,17 +174,32 @@ index 8945452..e86f701 100644
 +          this.mesh.add(mesh)
 +        }
 +      } catch (err) {
-+        // Silently skip failed meshes - likely due to missing textures or model issues
-+        console.debug(`Failed to create mesh for entity ${type}, model ${name}:`, err.message)
++        // Log mesh creation failures - likely due to missing textures or model issues
++        console.error(`❌ Failed to create mesh for entity ${type}, model ${name}:`)
++        console.error(`   Error: ${err.message}`)
++        console.error(`   Texture path: ${texture.replace('textures', 'textures/' + version) + '.png'}`)
 +      }
      }
    }
  }
+diff --git a/node_modules/prismarine-viewer/viewer/lib/entity/entities.json b/node_modules/prismarine-viewer/viewer/lib/entity/entities.json
+index 7ab91d5..165d51c 100644
+--- a/node_modules/prismarine-viewer/viewer/lib/entity/entities.json
++++ b/node_modules/prismarine-viewer/viewer/lib/entity/entities.json
+@@ -11192,7 +11192,7 @@
+       "animated": "player_animated"
+     },
+     "textures": {
+-      "default": "textures/entity/steve"
++      "default": "textures/entity/player/wide/steve"
+     },
+     "geometry": {
+       "default": {
 diff --git a/node_modules/prismarine-viewer/viewer/lib/utils.electron.js b/node_modules/prismarine-viewer/viewer/lib/utils.electron.js
-index e3066cd..be8963b 100644
+index e3066cd..dbeee3a 100644
 --- a/node_modules/prismarine-viewer/viewer/lib/utils.electron.js
 +++ b/node_modules/prismarine-viewer/viewer/lib/utils.electron.js
-@@ -5,7 +5,46 @@ const textureCache = {}
+@@ -5,7 +5,49 @@ const textureCache = {}
  function loadTexture (texture, cb) {
    if (!textureCache[texture]) {
      const url = path.resolve(__dirname, '../../public/' + texture)
@@ -187,7 +237,10 @@ index e3066cd..be8963b 100644
 +          },
 +          undefined,
 +          (fallbackErr) => {
-+            console.warn(`Failed to load texture: ${texture}`)
++            console.error(`❌ Failed to load texture: ${texture}`)
++            console.error(`   Main path: ${url}`)
++            console.error(`   Fallback path: ${fallbackUrl}`)
++            console.error('   Both paths failed - texture will not be rendered')
 +            cb(null)
 +          }
 +        )
@@ -198,10 +251,10 @@ index e3066cd..be8963b 100644
    cb(textureCache[texture])
  }
 diff --git a/node_modules/prismarine-viewer/viewer/lib/utils.js b/node_modules/prismarine-viewer/viewer/lib/utils.js
-index 382c057..6427ba4 100644
+index 382c057..153d006 100644
 --- a/node_modules/prismarine-viewer/viewer/lib/utils.js
 +++ b/node_modules/prismarine-viewer/viewer/lib/utils.js
-@@ -19,9 +19,37 @@ function loadTexture (texture, cb) {
+@@ -19,9 +19,38 @@ function loadTexture (texture, cb) {
    if (textureCache[texture]) {
      cb(textureCache[texture])
    } else {
@@ -232,9 +285,10 @@ index 382c057..6427ba4 100644
 +        textureCache[texture] = tex // Cache with original key
 +        cb(textureCache[texture])
 +      }).catch(fallbackErr => {
-+        console.warn(`Failed to load texture: ${texture}`)
-+        console.warn(`  Main path: ${mainPath}`)
-+        console.warn(`  Fallback path: ${fallbackPath}`)
++        console.error(`❌ Failed to load texture: ${texture}`)
++        console.error(`   Main path: ${mainPath}`)
++        console.error(`   Fallback path: ${fallbackPath}`)
++        console.error('   Both paths failed - texture will not be rendered')
 +        // Return a placeholder or null
 +        cb(null)
 +      })
@@ -242,10 +296,10 @@ index 382c057..6427ba4 100644
    }
  }
 diff --git a/node_modules/prismarine-viewer/viewer/lib/utils.web.js b/node_modules/prismarine-viewer/viewer/lib/utils.web.js
-index 72d715b..d64bc14 100644
+index 72d715b..14404fb 100644
 --- a/node_modules/prismarine-viewer/viewer/lib/utils.web.js
 +++ b/node_modules/prismarine-viewer/viewer/lib/utils.web.js
-@@ -4,7 +4,44 @@ const THREE = require('three')
+@@ -4,7 +4,47 @@ const THREE = require('three')
  const textureCache = {}
  function loadTexture (texture, cb) {
    if (!textureCache[texture]) {
@@ -281,7 +335,10 @@ index 72d715b..d64bc14 100644
 +          },
 +          undefined,
 +          (fallbackErr) => {
-+            console.warn(`Failed to load texture: ${texture}`)
++            console.error(`❌ Failed to load texture: ${texture}`)
++            console.error(`   Main URL: ${texture}`)
++            console.error(`   Fallback URL: ${fallbackTexture}`)
++            console.error('   Both paths failed - texture will not be rendered')
 +            cb(null)
 +          }
 +        )
@@ -292,11 +349,15 @@ index 72d715b..d64bc14 100644
    cb(textureCache[texture])
  }
 diff --git a/node_modules/prismarine-viewer/viewer/lib/viewer.js b/node_modules/prismarine-viewer/viewer/lib/viewer.js
-index db02d90..9def053 100644
+index db02d90..2a1053e 100644
 --- a/node_modules/prismarine-viewer/viewer/lib/viewer.js
 +++ b/node_modules/prismarine-viewer/viewer/lib/viewer.js
-@@ -23,7 +23,7 @@ class Viewer {
-     this.camera = new THREE.PerspectiveCamera(75, size.x / size.y, 0.1, 1000)
+@@ -20,10 +20,10 @@ class Viewer {
+     this.scene.add(this.directionalLight)
+ 
+     const size = renderer.getSize(new THREE.Vector2())
+-    this.camera = new THREE.PerspectiveCamera(75, size.x / size.y, 0.1, 1000)
++    this.camera = new THREE.PerspectiveCamera(75, size.x / size.y, 0.01, 1000)
  
      this.world = new WorldRenderer(this.scene)
 -    this.entities = new Entities(this.scene)
@@ -312,3 +373,23 @@ index db02d90..9def053 100644
      this.entities.clear()
      this.primitives.clear()
      return true
+diff --git a/node_modules/prismarine-viewer/viewer/lib/worldrenderer.js b/node_modules/prismarine-viewer/viewer/lib/worldrenderer.js
+index 744224a..4f5ec9a 100644
+--- a/node_modules/prismarine-viewer/viewer/lib/worldrenderer.js
++++ b/node_modules/prismarine-viewer/viewer/lib/worldrenderer.js
+@@ -87,7 +87,14 @@ class WorldRenderer {
+   }
+ 
+   updateTexturesData () {
+-    loadTexture(this.texturesDataUrl || `textures/${this.version}.png`, texture => {
++    const textureUrl = this.texturesDataUrl || `textures/${this.version}.png`
++    loadTexture(textureUrl, texture => {
++      if (!texture) {
++        console.error(`❌ CRITICAL: Block texture atlas failed to load: ${textureUrl}`)
++        console.error('   World blocks will not render correctly!')
++        console.error('   This is a critical error - blocks will be invisible or incorrect')
++        return
++      }
+       texture.magFilter = THREE.NearestFilter
+       texture.minFilter = THREE.NearestFilter
+       texture.flipY = false

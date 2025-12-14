@@ -526,6 +526,11 @@ export class Agent {
         }
         this.eventsInitialized = true;
 
+        // Periodic memory cleanup every 5 minutes
+        this._memoryCleanupInterval = setInterval(() => {
+            this._performMemoryCleanup();
+        }, 5 * 60 * 1000);
+
         // Custom events
         this.bot.on('time', () => {
             if (this.bot.time.timeOfDay == 0)
@@ -640,6 +645,29 @@ export class Agent {
         return typeof pos.x === 'number' && !isNaN(pos.x) && isFinite(pos.x) &&
                typeof pos.y === 'number' && !isNaN(pos.y) && isFinite(pos.y) &&
                typeof pos.z === 'number' && !isNaN(pos.z) && isFinite(pos.z);
+    }
+
+    _performMemoryCleanup() {
+        const memUsage = process.memoryUsage();
+        const heapUsedMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+        const heapTotalMB = Math.round(memUsage.heapTotal / 1024 / 1024);
+        
+        console.log(`📊 Memory: ${heapUsedMB}MB / ${heapTotalMB}MB heap`);
+        
+        // Trigger GC if available and memory is high (> 2GB)
+        if (heapUsedMB > 2048 && global.gc) {
+            console.log('🧹 High memory usage detected, triggering GC...');
+            global.gc();
+            
+            const afterGC = process.memoryUsage();
+            const afterHeapMB = Math.round(afterGC.heapUsed / 1024 / 1024);
+            console.log(`📊 After GC: ${afterHeapMB}MB heap (freed ${heapUsedMB - afterHeapMB}MB)`);
+        }
+        
+        // Clean up vision interpreter if available
+        if (this.vision_interpreter && this.vision_interpreter.camera) {
+            // Don't fully cleanup, just trigger GC if available
+        }
     }
 
     cleanKill(msg='Killing agent process...', code=1) {

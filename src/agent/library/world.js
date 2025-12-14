@@ -157,6 +157,54 @@ export function getNearestBlocksWhere(bot, predicate, distance=8, count=10000) {
     return blocks;
 }
 
+// Helper function to create a promise that yields to event loop
+function yieldToEventLoop() {
+    return new Promise(resolve => setImmediate(resolve));
+}
+
+export async function getNearestBlocksWhereAsync(bot, predicate, distance=8, count=10000) {
+    /**
+     * Asynchronously get a list of the nearest blocks that satisfy the given predicate.
+     * This function searches in chunks to avoid blocking the event loop and causing keepalive timeouts.
+     * @param {Bot} bot - The bot to get the nearest blocks for.
+     * @param {function} predicate - The predicate to filter the blocks.
+     * @param {number} distance - The maximum distance to search, default 16.
+     * @param {number} count - The maximum number of blocks to find, default 10000.
+     * @returns {Promise<Block[]>} - The nearest blocks that satisfy the given predicate.
+     * @example
+     * let waterBlocks = await world.getNearestBlocksWhereAsync(bot, block => block.name === 'water', 16, 10);
+     **/
+    const CHUNK_SIZE = 64; // Search in 64-block radius chunks
+    const results = [];
+    
+    // For small distances, use the synchronous version
+    if (distance <= 64) {
+        let positions = bot.findBlocks({matching: predicate, maxDistance: distance, count: count});
+        return positions.map(position => bot.blockAt(position));
+    }
+    
+    // For large distances, search in expanding spheres
+    for (let currentRadius = CHUNK_SIZE; currentRadius <= distance; currentRadius += CHUNK_SIZE) {
+        // Yield to event loop every chunk to prevent blocking
+        await yieldToEventLoop();
+        
+        const searchRadius = Math.min(currentRadius, distance);
+        let positions = bot.findBlocks({
+            matching: predicate, 
+            maxDistance: searchRadius, 
+            count: count
+        });
+        
+        if (positions.length > 0) {
+            // Convert positions to blocks
+            let blocks = positions.map(position => bot.blockAt(position));
+            return blocks; // Return as soon as we find something
+        }
+    }
+    
+    return results;
+}
+
 
 export function getNearestBlock(bot, block_type, distance=16) {
      /**
@@ -169,6 +217,51 @@ export function getNearestBlock(bot, block_type, distance=16) {
      * let coalBlock = world.getNearestBlock(bot, 'coal_ore', 16);
      **/
     let blocks = getNearestBlocks(bot, block_type, distance, 1);
+    if (blocks.length > 0) {
+        return blocks[0];
+    }
+    return null;
+}
+
+export async function getNearestBlocksAsync(bot, block_types=null, distance=8, count=10000) {
+    /**
+     * Asynchronously get a list of the nearest blocks of the given types.
+     * This function is safe to use with large distances as it yields to the event loop.
+     * @param {Bot} bot - The bot to get the nearest block for.
+     * @param {string[]} block_types - The names of the blocks to search for.
+     * @param {number} distance - The maximum distance to search, default 16.
+     * @param {number} count - The maximum number of blocks to find, default 10000.
+     * @returns {Promise<Block[]>} - The nearest blocks of the given type.
+     * @example
+     * let woodBlocks = await world.getNearestBlocksAsync(bot, ['oak_log', 'birch_log'], 16, 1);
+     **/
+    // if blocktypes is not a list, make it a list
+    let block_ids = [];
+    if (block_types === null) {
+        block_ids = mc.getAllBlockIds(['air']);
+    }
+    else {
+        if (!Array.isArray(block_types))
+            block_types = [block_types];
+        for(let block_type of block_types) {
+            block_ids.push(mc.getBlockId(block_type));
+        }
+    }
+    return await getNearestBlocksWhereAsync(bot, block_ids, distance, count);  
+}
+
+export async function getNearestBlockAsync(bot, block_type, distance=16) {
+     /**
+     * Asynchronously get the nearest block of the given type.
+     * This function is safe to use with large distances as it yields to the event loop.
+     * @param {Bot} bot - The bot to get the nearest block for.
+     * @param {string} block_type - The name of the block to search for.
+     * @param {number} distance - The maximum distance to search, default 16.
+     * @returns {Promise<Block>} - The nearest block of the given type.
+     * @example
+     * let coalBlock = await world.getNearestBlockAsync(bot, 'coal_ore', 256);
+     **/
+    let blocks = await getNearestBlocksAsync(bot, block_type, distance, 1);
     if (blocks.length > 0) {
         return blocks[0];
     }

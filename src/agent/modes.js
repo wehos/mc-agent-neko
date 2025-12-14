@@ -127,10 +127,19 @@ const modes_list = [
                 say(agent, 'I\'m stuck!');
                 this.stuck_time = 0;
                 execute(this, agent, async () => {
-                    const crashTimeout = setTimeout(() => { agent.cleanKill("Got stuck and couldn't get unstuck") }, 10000);
-                    await skills.moveAway(bot, 5);
-                    clearTimeout(crashTimeout);
-                    say(agent, 'I\'m free.');
+                    // With smart timeout (10s if stuck, 60s if moving), give it 65s total
+                    const crashTimeout = setTimeout(() => { 
+                        agent.cleanKill("Got stuck and couldn't get unstuck") 
+                    }, 65000); // 65 seconds to allow pathfinding timeout to work
+                    try {
+                        await skills.moveAway(bot, 5);
+                        clearTimeout(crashTimeout);
+                        say(agent, 'I\'m free.');
+                    } catch (err) {
+                        clearTimeout(crashTimeout);
+                        say(agent, `Failed to get unstuck: ${err.message}. May be trapped in water or impassable terrain.`);
+                        // Don't crash immediately, let agent try to handle the situation
+                    }
                 });
             }
             this.last_time = Date.now();
@@ -316,7 +325,12 @@ async function execute(mode, agent, func, timeout=-1) {
         await func();
     }, { timeout });
     mode.active = false;
-    console.log(`Mode ${mode.name} finished executing, code_return: ${code_return.message}`);
+    
+    // Only log mode completion for non-interrupted actions or when there's meaningful output
+    if (!code_return.interrupted) {
+        const outputPreview = code_return.message ? code_return.message.substring(0, 100) : '';
+        console.log(`Mode ${mode.name} finished: ${outputPreview}`);
+    }
 
     let should_reprompt = 
         interrupted_action && // it interrupted a previous action

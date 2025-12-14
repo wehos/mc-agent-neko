@@ -128,7 +128,7 @@ export const actionsList = [
         description: 'Find and go to the nearest block of a given type in a given range.',
         params: {
             'type': { type: 'BlockName', description: 'The block type to go to.' },
-            'search_range': { type: 'float', description: 'The range to search for the block. Minimum 32.', domain: [10, 512] }
+            'search_range': { type: 'float', description: 'The range to search for the block. Minimum 32, maximum 256.', domain: [10, 256] }
         },
         perform: runAsAction(async (agent, block_type, range) => {
             if (range < 32) {
@@ -143,7 +143,7 @@ export const actionsList = [
         description: 'Find and go to the nearest entity of a given type in a given range.',
         params: {
             'type': { type: 'string', description: 'The type of entity to go to.' },
-            'search_range': { type: 'float', description: 'The range to search for the entity.', domain: [32, 512] }
+            'search_range': { type: 'float', description: 'The range to search for the entity. Maximum 256.', domain: [32, 256] }
         },
         perform: runAsAction(async (agent, entity_type, range) => {
             await skills.goToNearestEntity(agent.bot, entity_type, 4, range);
