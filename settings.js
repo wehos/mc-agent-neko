@@ -1,13 +1,13 @@
 const settings = {
     "minecraft_version": "auto", // or specific version like "1.21.6"
-    "host": "127.0.0.1", // or "localhost", "your.ip.address.here"
+    "host": "localhost", // or "localhost", "your.ip.address.here"
     "port": 55916, // set to -1 to automatically scan for open ports
     "auth": "offline", // or "microsoft"
 
     // the mindserver manages all agents and hosts the UI
     "mindserver_port": 8080,
     "auto_open_ui": false, // opens UI in browser on startup
-    
+
     "base_profile": "assistant", // survival, assistant, creative, or god_mode
     "profiles": [
         "./andy.json",
@@ -27,7 +27,7 @@ const settings = {
     ],
 
     "load_memory": false, // load memory from previous session
-    "init_message": "Respond with hello world and your name", // sends to all on spawn
+    "init_message": "", // sends to all on spawn
     "only_chat_with": ["admin"], // users that the bots listen to and send general messages to. if empty it will chat publicly
 
     "speak": false,
@@ -42,7 +42,7 @@ const settings = {
 
     "allow_insecure_coding": true, // allows newAction command and model can write/run code on your computer. enable at own risk
     "allow_vision": false, // allows vision model to interpret screenshots as inputs
-    "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"] , // commands to disable and remove from docs. Ex: ["!setMode"]
+    "blocked_actions": ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"], // commands to disable and remove from docs. Ex: ["!setMode"]
     "code_timeout_mins": -1, // minutes code is allowed to run. -1 for no timeout
     "relevant_docs_count": 5, // number of relevant code function docs to select for prompting. -1 for all
 
@@ -55,7 +55,7 @@ const settings = {
 
     "spawn_timeout": 30, // num seconds allowed for the bot to spawn before throwing error. Increase when spawning takes a while.
     "block_place_delay": 50, // delay between placing blocks (ms) if using newAction. helps avoid bot being kicked by anti-cheat mechanisms on servers.
-  
+
     "log_all_prompts": false, // log ALL prompts to file
 
 }

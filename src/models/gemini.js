@@ -31,7 +31,7 @@ export class Gemini {
             },
         ];
 
-        this.genAI = new GoogleGenAI({apiKey: getKey('GEMINI_API_KEY')});
+        this.genAI = new GoogleGenAI({ apiKey: getKey('GEMINI_API_KEY') });
     }
 
     async sendRequest(turns, systemMessage) {
@@ -47,9 +47,9 @@ export class Gemini {
         }
 
         const result = await this.genAI.models.generateContent({
-            model: this.model_name || "gemini-2.5-flash",
+            model: this.model_name || "gemini-3-flash-preview",
             contents: contents,
-            safetySettings: this.safetySettings,
+
             config: {
                 systemInstruction: systemMessage,
                 ...(this.params || {})
@@ -69,7 +69,7 @@ export class Gemini {
                 mimeType: 'image/jpeg'
             }
         };
-       
+
         turns = strictFormat(turns);
         let contents = [];
         for (let turn of turns) {
@@ -87,12 +87,9 @@ export class Gemini {
         try {
             console.log('Awaiting Google API vision response...');
             const result = await this.genAI.models.generateContent({
-                model: this.model_name,
+                model: this.model_name || "gemini-3-flash-preview",
+                config,
                 contents: contents,
-                safetySettings: this.safetySettings,
-                generationConfig: {
-                    ...(this.params || {})
-                },
                 systemInstruction: systemMessage
             });
             res = await result.text;
@@ -119,11 +116,11 @@ export class Gemini {
 }
 
 const sendAudioRequest = async (text, model, voice, url) => {
-    const ai = new GoogleGenAI({apiKey: getKey('GEMINI_API_KEY')});
+    const ai = new GoogleGenAI({ apiKey: getKey('GEMINI_API_KEY') });
 
     const response = await ai.models.generateContent({
         model: model,
-        contents: [{ parts: [{text: text}] }],
+        contents: [{ parts: [{ text: text }] }],
         config: {
             responseModalities: ['AUDIO'],
             speechConfig: {
