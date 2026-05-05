@@ -89,19 +89,7 @@ You can view the crafting task in action [here](https://www.youtube.com/shorts/V
 
 You **DO NOT** need Linux to run this, you can run on Windows with the --no-launch-world flag and by installing git bash. 
 
-Please follow the installation docs in the README to install mindcraft. You can create a docker image using the Tasks.Dockerfile. 
-
-If you don't own Minecraft, you can run a limited version solely for offline games using these instructions:
-
-> [!Warning]
-Unofficial offline launchers (e.g., TLauncher, Prism Launcher or forks of community launchers) are not endorsed by this project and may be unsafe or contain malware. Use them at your own risk.  
-For guaranteed safety, please [purchase the game](https://www.minecraft.net/) and use the official launcher.
-
-1. Download the [Prism Launcher](https://github.com/Diegiwg/PrismLauncher-Cracked).
-2. Add an offline account with your username and create a [Minecraft 1.21.1 instance](https://prismlauncher.org/wiki/help-pages/vanilla-platform/).
-3. Launch the created instance.
-4. Click **Multiplayer** and then **Direct Connection**.
-5. Enter `localhost:55916` and hit **Join Server**.
+Please follow the installation docs in the README to install mindcraft. You can create a docker image using the Tasks.Dockerfile.
 
 Download the relevant task files and server data files, you can find the link [here](https://drive.google.com/drive/folders/1XygbitBBTsNO6q_doEiZHmdETpnyRmCS). The tasks files are for specifying the tasks to run and the server data is for allowing the models to launch the task in the correct world automatically. **Unzip the server_data.zip in the base `tasks/` folder**.
 

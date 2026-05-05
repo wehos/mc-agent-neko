@@ -59,6 +59,7 @@ export function initBot(username) {
         port: settings.port,
         auth: settings.auth,
         version: mc_version,
+        checkTimeoutInterval: 60000,
     }
     if (!mc_version || mc_version === "auto") {
         delete options.version;
@@ -69,6 +70,45 @@ export function initBot(username) {
     // Increase max listeners to prevent EventEmitter warnings
     // Multiple systems listen to bot events: plugins, agent, proxy, viewer, etc.
     bot.setMaxListeners(50);
+
+    let lastPositionUpdate = 0;
+    let pendingPositionPacket = null;
+    const POSITION_THROTTLE_MS = 50;
+    const originalWrite = bot._client.write.bind(bot._client);
+    bot._client.write = function(name, data) {
+        if (name === 'position' || name === 'position_look' || name === 'look') {
+            const now = Date.now();
+            if (now - lastPositionUpdate < POSITION_THROTTLE_MS) {
+                if (!pendingPositionPacket) {
+                    pendingPositionPacket = setTimeout(() => {
+                        pendingPositionPacket = null;
+                        lastPositionUpdate = Date.now();
+                        originalWrite(name, data);
+                    }, POSITION_THROTTLE_MS - (now - lastPositionUpdate));
+                }
+                return;
+            }
+            lastPositionUpdate = now;
+            if (pendingPositionPacket) {
+                clearTimeout(pendingPositionPacket);
+                pendingPositionPacket = null;
+            }
+        }
+        return originalWrite(name, data);
+    };
+
+    const originalEmit = bot._client.emit.bind(bot._client);
+    bot._client.emit = function(event, ...args) {
+        if (event === 'error' && args[0]) {
+            const err = args[0];
+            const errStr = err instanceof Error ? err.message : String(err);
+            if (errStr.includes('PartialReadError')) {
+                console.warn('[mcdata] Suppressed PartialReadError:', errStr.substring(0, 120));
+                return true;
+            }
+        }
+        return originalEmit(event, ...args);
+    };
     
     bot.loadPlugin(pathfinder);
     bot.loadPlugin(pvp);

@@ -17,6 +17,7 @@ import settings from './settings.js';
 import { Task } from './tasks/tasks.js';
 import { speak } from './speak.js';
 import { wsServer } from '../websocket/ws_server.js';
+import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
 
 export class Agent {
     async start(load_mem=false, init_message=null, count_id=0) {
@@ -27,12 +28,21 @@ export class Agent {
         this.maxReconnectAttempts = 10; // Maximum reconnect attempts (increased from 5 to 10)
         this.reconnectBaseDelay = 3000; // Base delay for reconnection (3 seconds)
         this.load_mem = load_mem; // Save load_mem parameter for reconnection
+        this._disconnectHandled = false;
         
         // Initialize components with more detailed error handling
         this.actions = new ActionManager(this);
         this.prompter = new Prompter(this, settings.profile);
-        this.name = this.prompter.getName();
+        this.name = (this.prompter.getName() || '').trim();
         console.log(`Initializing agent ${this.name}...`);
+
+        const nameCheck = validateNameFormat(this.name);
+        if (!nameCheck.success) {
+            log(this.name, nameCheck.msg);
+            process.exit(1);
+            return;
+        }
+
         this.history = new History(this);
         this.coder = new Coder(this);
         this.npc = new NPCContoller(this);
@@ -171,6 +181,7 @@ export class Agent {
 
     async initBot() {
         this.bot = initBot(this.name);
+        this._disconnectHandled = false;
         
         // Increase max listeners to prevent warnings when multiple systems listen to events
         // This is necessary because bot events are listened to by: agent, mindserver_proxy, 
@@ -192,10 +203,12 @@ export class Agent {
                 this.bot.chat(`/skin clear`);
         });
 
+        const spawnTimeoutDuration = settings.spawn_timeout || 30;
         const spawnTimeout = setTimeout(() => {
-            console.error('Bot has not spawned after 30 seconds. Exiting.');
-            process.exit(0);
-        }, 30000);
+            const msg = `Bot has not spawned after ${spawnTimeoutDuration} seconds. Exiting.`;
+            log(this.name, msg);
+            process.exit(1);
+        }, spawnTimeoutDuration * 1000);
         
         this.bot.once('spawn', async () => {
             try {
@@ -242,11 +255,14 @@ export class Agent {
 
         // Bot event handlers
         this.bot.on('error', (err) => {
-            console.error('Bot error event!', err);
+            if (String(err).includes('Duplicate') || String(err).includes('ECONNREFUSED')) {
+                void this.handleBotDisconnection(err);
+            } else {
+                log(this.name, `[LoginGuard] Connection Error: ${String(err)}`);
+            }
         });
 
         this.bot.on('end', async (reason) => {
-            console.warn(`Bot disconnected! Reason: ${reason}`);
             await this.handleBotDisconnection(reason);
         });
 
@@ -267,8 +283,7 @@ export class Agent {
         });
 
         this.bot.on('kicked', async (reason) => {
-            console.warn('Bot kicked!', reason);
-            await this.handleBotDisconnection(`Kicked: ${reason}`);
+            await this.handleBotDisconnection(reason);
         });
 
         this.bot.on('messagestr', async (message, _, jsonMsg) => {
@@ -281,9 +296,14 @@ export class Agent {
     }
 
     async handleBotDisconnection(reason) {
+        if (this._disconnectHandled) return;
+        this._disconnectHandled = true;
+
+        const { msg } = handleDisconnection(this.name, reason);
+
         // Debug output for bot disconnection
         console.log('\n🚨 ===== BOT DISCONNECTION DETECTED =====');
-        console.log('🔗 Reason:', reason);
+        console.log('🔗 Reason:', msg);
         console.log('⏰ Timestamp:', new Date().toISOString());
         console.log('🤖 Agent:', this.name);
         console.log('🔄 Reconnect attempts:', this.reconnectAttempts, '/', this.maxReconnectAttempts);
@@ -319,6 +339,7 @@ export class Agent {
             try {
                 // Create new bot instance
                 this.bot = initBot(this.name);
+                this._disconnectHandled = false;
                 
                 // Re-initialize modes for the new bot instance
                 initModes(this);
@@ -520,16 +541,15 @@ export class Agent {
     }
 
     startEvents() {
-        // Only initialize events once, not on every reconnection
-        if (this.eventsInitialized) {
-            return;
-        }
+        const firstStart = !this.eventsInitialized;
         this.eventsInitialized = true;
 
         // Periodic memory cleanup every 5 minutes
-        this._memoryCleanupInterval = setInterval(() => {
-            this._performMemoryCleanup();
-        }, 5 * 60 * 1000);
+        if (firstStart) {
+            this._memoryCleanupInterval = setInterval(() => {
+                this._performMemoryCleanup();
+            }, 5 * 60 * 1000);
+        }
 
         // Custom events
         this.bot.on('time', () => {
@@ -561,7 +581,7 @@ export class Agent {
                 this.memory_bank.rememberPlace('last_death_position', death_pos.x, death_pos.y, death_pos.z);
                 let death_pos_text = null;
                 if (death_pos) {
-                    death_pos_text = `x: ${death_pos.x.toFixed(2)}, y: ${death_pos.y.toFixed(2)}, z: ${death_pos.x.toFixed(2)}`;
+                    death_pos_text = `x: ${death_pos.x.toFixed(2)}, y: ${death_pos.y.toFixed(2)}, z: ${death_pos.z.toFixed(2)}`;
                 }
                 let dimention = this.bot.game.dimension;
                 this.handleMessage('system', `You died at position ${death_pos_text || "unknown"} in the ${dimention} dimension with the final message: '${message}'. Your place of death is saved as 'last_death_position' if you want to return. Previous actions were stopped and you have respawned.`);
@@ -581,20 +601,22 @@ export class Agent {
         // Init NPC controller
         this.npc.init();
 
-        // This update loop ensures that each update() is called one at a time, even if it takes longer than the interval
-        const INTERVAL = 300;
-        let last = Date.now();
-        setTimeout(async () => {
-            while (true) {
-                let start = Date.now();
-                await this.update(start - last);
-                let remaining = INTERVAL - (Date.now() - start);
-                if (remaining > 0) {
-                    await new Promise((resolve) => setTimeout(resolve, remaining));
+        if (firstStart) {
+            // This update loop ensures that each update() is called one at a time, even if it takes longer than the interval
+            const INTERVAL = 300;
+            let last = Date.now();
+            setTimeout(async () => {
+                while (true) {
+                    let start = Date.now();
+                    await this.update(start - last);
+                    let remaining = INTERVAL - (Date.now() - start);
+                    if (remaining > 0) {
+                        await new Promise((resolve) => setTimeout(resolve, remaining));
+                    }
+                    last = start;
                 }
-                last = start;
-            }
-        }, INTERVAL);
+            }, INTERVAL);
+        }
 
         this.bot.emit('idle');
     }

@@ -7,6 +7,7 @@ export class GPT {
     constructor(model_name, url, params) {
         this.model_name = model_name;
         this.params = params;
+        this.url = url; // store so that we know whether a custom URL has been set
 
         let config = {};
         if (url)
@@ -26,22 +27,50 @@ export class GPT {
             message.content += stop_seq;
             return message;
         });
-        let model = this.model_name || "gpt-4o-mini";
+        let model = this.model_name || "gpt-5.4-mini";
 
         let res = null;
 
         try {
-            console.log('Awaiting openai api response from model', model)
-            const response = await this.openai.responses.create({
-                model: model,
-                instructions: systemMessage,
-                input: messages,
-                ...(this.params || {})
-            });
-            console.log('Received.')
-            res = response.output_text;
-            let stop_seq_index = res.indexOf(stop_seq);
-            res = stop_seq_index !== -1 ? res.slice(0, stop_seq_index) : res;
+            console.log('Awaiting openai api response from model', model);
+            // if a custom URL is set, use chat.completions
+            // because custom "OpenAI-compatible" endpoints likely do not have responses endpoint
+            if (this.url) {
+                let messages = [{'role': 'system', 'content': systemMessage}].concat(turns);
+                messages = strictFormat(messages);
+                const pack = {
+                    model: model,
+                    messages,
+                    stop: stop_seq,
+                    ...(this.params || {})
+                };
+                if (model.includes('o1') || model.includes('o3') || model.includes('5')) {
+                    delete pack.stop;
+                }
+                let completion = await this.openai.chat.completions.create(pack);
+                if (completion.choices[0].finish_reason == 'length')
+                    throw new Error('Context length exceeded'); 
+                console.log('Received.');
+                res = completion.choices[0].message.content;
+            } 
+            // otherwise, use responses
+            else {
+                let messages = strictFormat(turns);
+                messages = messages.map(message => {
+                    message.content += stop_seq;
+                    return message;
+                });
+                const response = await this.openai.responses.create({
+                    model: model,
+                    instructions: systemMessage,
+                    input: messages,
+                    ...(this.params || {})
+                });
+                console.log('Received.');
+                res = response.output_text;
+                let stop_seq_index = res.indexOf(stop_seq);
+                res = stop_seq_index !== -1 ? res.slice(0, stop_seq_index) : res;
+            }
         }
         catch (err) {
             if ((err.message == 'Context length exceeded' || err.code == 'context_length_exceeded') && turns.length > 1) {

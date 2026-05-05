@@ -54,7 +54,7 @@ const modes_list = [
                 blockAbove.name === 'lava' || blockAbove.name === 'fire') {
                 say(agent, 'I\'m on fire!');
                 // if you have a water bucket, use it
-                let waterBucket = bot.inventory.items().find(item => item.name === 'water_bucket');
+                let waterBucket = bot.inventory.findInventoryItem('water_bucket');
                 if (waterBucket) {
                     execute(this, agent, async () => {
                         let success = await skills.placeBlock(bot, 'water_bucket', block.position.x, block.position.y, block.position.z);
@@ -63,7 +63,7 @@ const modes_list = [
                 }
                 else {
                     execute(this, agent, async () => {
-                        let waterBucket = bot.inventory.items().find(item => item.name === 'water_bucket');
+                        let waterBucket = bot.inventory.findInventoryItem('water_bucket');
                         if (waterBucket) {
                             let success = await skills.placeBlock(bot, 'water_bucket', block.position.x, block.position.y, block.position.z);
                             if (success) say(agent, 'Placed some water, ahhhh that\'s better!');
