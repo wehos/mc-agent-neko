@@ -1,5 +1,6 @@
 import * as mc from "../../utils/mcdata.js";
 import * as world from "./world.js";
+import * as tickConfirm from "./tick_confirm.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import settings from "../../../settings.js";
@@ -351,6 +352,9 @@ export async function attackEntity(bot, entity, kill=true) {
         }
         console.log('attacking mob...')
         await bot.attack(entity);
+        // bot.attack sends use_entity fire-and-forget; settle one tick so the
+        // damage tick lands before caller queries entity state.
+        await tickConfirm.sleepMs(100);
     }
     else {
         bot.pvp.attack(entity);
@@ -862,11 +866,24 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
             await useToolOnBlock(bot, item_name, buildOffBlock);
         }
         else {
-            await bot.equip(block_item, 'hand');
+            // Confirm the held slot lands on the server before we send block_place,
+            // otherwise the server resolves the place packet against the previous
+            // held item (typically 'air') and silently rejects it.
+            const equipRes = await tickConfirm.equipConfirmed(bot, block_item.name, 'hand');
+            if (!equipRes.ok) {
+                log(bot, `Failed to equip ${block_item.name} to place: ${equipRes.reason}.`);
+                return false;
+            }
             await bot.lookAt(buildOffBlock.position.offset(0.5, 0.5, 0.5));
-            await bot.placeBlock(buildOffBlock, faceVec);
+            const res = await tickConfirm.placeBlockConfirmed(
+                bot, buildOffBlock, faceVec, target_dest, blockType,
+                { retries: 2, confirmTimeoutMs: 600, backoffMs: 200 }
+            );
+            if (!res.ok) {
+                log(bot, `Failed to place ${blockType} at ${target_dest}: ${res.error_class} (${res.reason}).`);
+                return false;
+            }
             log(bot, `Placed ${blockType} at ${target_dest}.`);
-            await new Promise(resolve => setTimeout(resolve, 200));
             return true;
         }
     } catch (err) {
@@ -886,6 +903,8 @@ export async function equip(bot, itemName) {
      **/
     if (itemName === 'hand') {
         await bot.unequip('hand');
+        // give the server a couple ticks to register the unequip before any follow-up packet
+        await tickConfirm.sleepMs(100);
         log(bot, `Unequipped hand.`);
         return true;
     }
@@ -900,23 +919,21 @@ export async function equip(bot, itemName) {
             return false;
         }
     }
-    if (itemName.includes('leggings')) {
-        await bot.equip(item, 'legs');
-    }
-    else if (itemName.includes('boots')) {
-        await bot.equip(item, 'feet');
-    }
-    else if (itemName.includes('helmet')) {
-        await bot.equip(item, 'head');
-    }
-    else if (itemName.includes('chestplate') || itemName.includes('elytra')) {
-        await bot.equip(item, 'torso');
-    }
-    else if (itemName.includes('shield')) {
-        await bot.equip(item, 'off-hand');
-    }
-    else {
-        await bot.equip(item, 'hand');
+    let destination = 'hand';
+    if (itemName.includes('leggings')) destination = 'legs';
+    else if (itemName.includes('boots')) destination = 'feet';
+    else if (itemName.includes('helmet')) destination = 'head';
+    else if (itemName.includes('chestplate') || itemName.includes('elytra')) destination = 'torso';
+    else if (itemName.includes('shield')) destination = 'off-hand';
+
+    const res = await tickConfirm.equipConfirmed(bot, itemName, destination);
+    if (!res.ok) {
+        if (res.error_class === 'prerequisite') {
+            log(bot, `You do not have any ${itemName} to equip.`);
+        } else {
+            log(bot, `Failed to equip ${itemName} (${res.error_class}): ${res.reason}.`);
+        }
+        return false;
     }
     log(bot, `Equipped ${itemName}.`);
     return true;
@@ -1075,7 +1092,11 @@ export async function consume(bot, itemName="") {
         log(bot, `You do not have any ${name} to eat.`);
         return false;
     }
-    await bot.equip(item, 'hand');
+    const equipRes = await tickConfirm.equipConfirmed(bot, item.name, 'hand');
+    if (!equipRes.ok) {
+        log(bot, `Failed to equip ${item.name} to consume: ${equipRes.reason}.`);
+        return false;
+    }
     await bot.consume();
     log(bot, `Consumed ${item.name}.`);
     return true;
@@ -1849,13 +1870,20 @@ export async function useDoor(bot, door_pos=null) {
     
     let door_block = bot.blockAt(door_pos);
     await bot.lookAt(door_pos);
-    if (!door_block._properties.open)
-        await bot.activateBlock(door_block);
-    
+    if (!door_block._properties.open) {
+        await tickConfirm.activateBlockConfirmed(bot, door_block, {
+            confirm: async () => bot.blockAt(door_pos)?._properties?.open === true,
+            retries: 3,
+            confirmTimeoutMs: 500,
+        });
+    }
+
     bot.setControlState("forward", true);
     await new Promise((resolve) => setTimeout(resolve, 600));
     bot.setControlState("forward", false);
+    // close on the way out — no critical confirm here, just settle a tick
     await bot.activateBlock(door_block);
+    await tickConfirm.sleepMs(100);
 
     log(bot, `Used door at ${door_pos}.`);
     return true;
@@ -1951,10 +1979,14 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
             log(bot, `Cannot till, no hoes.`);
             return false;
         }
-        await bot.activateBlock(block);
+        await tickConfirm.activateBlockConfirmed(bot, block, {
+            confirm: async () => bot.blockAt(pos)?.name === 'farmland',
+            retries: 3,
+            confirmTimeoutMs: 600,
+        });
         log(bot, `Tilled block x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
     }
-    
+
     if (seedType) {
         if (seedType.endsWith('seed') && !seedType.endsWith('seeds'))
             seedType += 's'; // fixes common mistake
@@ -1965,6 +1997,7 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
         }
 
         await bot.activateBlock(block);
+        await tickConfirm.sleepMs(100);
         log(bot, `Planted ${seedType} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
     }
     return true;
@@ -1990,6 +2023,10 @@ export async function activateNearestBlock(bot, type) {
         await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
     }
     await bot.activateBlock(block);
+    // No generic observable for activateBlock — settle one tick so a subsequent
+    // command that depends on the resulting block state (e.g. lever flip, chest
+    // open) sees the new state.
+    await tickConfirm.sleepMs(100);
     log(bot, `Activated ${type} at x:${block.position.x.toFixed(1)}, y:${block.position.y.toFixed(1)}, z:${block.position.z.toFixed(1)}.`);
     return true;
 }
@@ -2320,6 +2357,7 @@ export async function useToolOn(bot, toolName, targetName) {
             return false;
         }
         await bot.activateItem();
+        await tickConfirm.sleepMs(100);
         log(bot, `Used ${toolName}.`);
     } else if (world.isEntityType(targetName)) {
         const entity = world.getNearestEntityWhere(bot, e => e.name === targetName, 64);
@@ -2330,13 +2368,44 @@ export async function useToolOn(bot, toolName, targetName) {
         await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z);
         if (toolName === 'hand') {
             await bot.unequip('hand');
+            await tickConfirm.sleepMs(100);
         }
         else {
             const equipped = await equip(bot, toolName);
             if (!equipped) return false;
         }
-        await bot.useOn(entity);
-        log(bot, `Used ${toolName} on ${targetName}.`);
+
+        // For lead specifically: confirm by inventory delta (one lead leaves the bot
+        // on a successful leash). Without this we cannot tell a successful leash
+        // from a fire-and-forget packet that the server dropped.
+        if (toolName === 'lead') {
+            const before = tickConfirm.snapshotItemCount(bot, 'lead');
+            if (before <= 0) {
+                log(bot, `No lead in inventory to use on ${targetName}.`);
+                return false;
+            }
+            const res = await tickConfirm.useOnEntityConfirmed(bot, entity, {
+                confirm: async () => tickConfirm.snapshotItemCount(bot, 'lead') < before,
+                retries: 3,
+                backoffMs: 200,
+                confirmTimeoutMs: 600,
+            });
+            if (!res.ok) {
+                log(bot, `Failed to leash ${targetName} after ${res.attempts} attempt(s) (${res.error_class}). The ${targetName} may be out of range, already leashed, or unleashable.`);
+                return false;
+            }
+            log(bot, `Leashed ${targetName} with ${toolName}.`);
+        } else {
+            // Generic use_entity: caller has no observable side-effect, just settle one tick.
+            const res = await tickConfirm.useOnEntityConfirmed(bot, entity, {
+                retries: 1,
+                confirmTimeoutMs: 50,
+            });
+            // res is always ok here (no confirm fn)
+            void res;
+            await tickConfirm.sleepMs(100);
+            log(bot, `Used ${toolName} on ${targetName}.`);
+        }
     } else {
         let block = null;
         if (targetName === 'water' || targetName === 'lava') {
@@ -2409,6 +2478,10 @@ export async function useToolOn(bot, toolName, targetName) {
     else {
         await bot.activateBlock(block);
     }
+    // Both activateItem and activateBlock are fire-and-forget; wait one tick
+    // so observable effects (bucket fill, block state change) settle before
+    // the caller proceeds.
+    await tickConfirm.sleepMs(100);
     log(bot, `Used ${toolName} on ${block.name}.`);
     return true;
  }

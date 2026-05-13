@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { makeCompartment, lockdown } from './library/lockdown.js';
 import * as skills from './library/skills.js';
 import * as world from './library/world.js';
+import * as tick_confirm from './library/tick_confirm.js';
 import { Vec3 } from 'vec3';
 import {ESLint} from "eslint";
 
@@ -190,6 +191,7 @@ export class Coder {
             skills,
             log: skills.log,
             world,
+            tick_confirm,
             Vec3,
         });
         const mainFn = compartment.evaluate(src);
