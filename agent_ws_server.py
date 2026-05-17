@@ -1,5 +1,29 @@
 import os
-os.environ["OPENAI_API_KEY"] = "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"
+import json as _json
+import sys as _sys
+from pathlib import Path as _Path
+
+# Load API keys from gitignored keys.json (sibling to this file). Same
+# secrets store the Node.js side reads — see keys.example.json for the
+# expected shape. Existing env vars win, so containerized / CI flows
+# that inject via env still work.
+#
+# History note: this line used to hard-code OPENAI_API_KEY as a literal,
+# which got committed to b97f3bb and lived in tracked history. Don't
+# put literal secrets back here — drop them into keys.json instead
+# (which is .gitignore'd at the repo root).
+_KEYS_FILE = _Path(__file__).resolve().parent / "keys.json"
+if _KEYS_FILE.is_file():
+    try:
+        _local_keys = _json.loads(_KEYS_FILE.read_text(encoding="utf-8"))
+        for _k, _v in _local_keys.items():
+            if _v and _k not in os.environ:
+                os.environ[_k] = str(_v)
+    except Exception as _err:
+        print(
+            f"[agent_ws_server] keys.json present but unreadable: {_err}",
+            file=_sys.stderr,
+        )
 
 import argparse
 import asyncio
