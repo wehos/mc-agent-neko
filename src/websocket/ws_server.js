@@ -709,7 +709,10 @@ class WSMessageServer {
     }
 }
 
-// Create singleton instance
-const wsServer = new WSMessageServer();
+// Create singleton instance. NEKO_PLUGIN_WS_PORT lets a host launcher
+// pick a non-default port when 48909 is taken; the N.E.K.O. plugin reads
+// the same env to know where to connect.
+const pluginWsPort = parseInt(process.env.NEKO_PLUGIN_WS_PORT, 10) || 48909;
+const wsServer = new WSMessageServer(pluginWsPort);
 
 export { wsServer };

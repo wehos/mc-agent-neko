@@ -25,7 +25,13 @@ export class Agent {
         this.count_id = count_id;
         this.taskCompleted = false; // Initialize task completion flag
         this.reconnectAttempts = 0; // Initialize reconnect attempts counter
-        this.maxReconnectAttempts = 10; // Maximum reconnect attempts (increased from 5 to 10)
+        // Retry forever. End users' standard flow is "start N.E.K.O. first,
+        // then open Minecraft and Open-to-LAN" — capping at N attempts
+        // (formerly 10, ~3 minutes wall clock) would self-kill the agent
+        // before they finish picking a world. The mindserver UI / launcher
+        // still provides an explicit stop path, so an infinite retry loop
+        // isn't unkillable.
+        this.maxReconnectAttempts = Infinity;
         this.reconnectBaseDelay = 3000; // Base delay for reconnection (3 seconds)
         this.load_mem = load_mem; // Save load_mem parameter for reconnection
         this._disconnectHandled = false;
@@ -327,7 +333,8 @@ export class Agent {
         console.log('🔗 Reason:', msg);
         console.log('⏰ Timestamp:', new Date().toISOString());
         console.log('🤖 Agent:', this.name);
-        console.log('🔄 Reconnect attempts:', this.reconnectAttempts, '/', this.maxReconnectAttempts);
+        const attemptCapStr = Number.isFinite(this.maxReconnectAttempts) ? String(this.maxReconnectAttempts) : '∞';
+        console.log('🔄 Reconnect attempts:', this.reconnectAttempts, '/', attemptCapStr);
         console.log('========================================\n');
         
         // Always send task_finished message when bot disconnects
@@ -346,12 +353,15 @@ export class Agent {
     // Try to reconnect if we haven't exceeded max attempts
     if (this.reconnectAttempts < this.maxReconnectAttempts) {
         this.reconnectAttempts++;
-        console.log(`Attempting to reconnect bot (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+        const capStr = Number.isFinite(this.maxReconnectAttempts) ? `/${this.maxReconnectAttempts}` : '';
+        console.log(`Attempting to reconnect bot (attempt ${this.reconnectAttempts}${capStr})...`);
         
-        // Use exponential backoff with jitter for reconnection delay
+        // Use exponential backoff with jitter for reconnection delay.
+        // Cap at 10s (was 30s) so the "open Minecraft after agent started"
+        // flow doesn't make the user wait half a minute between retries.
         const baseDelay = this.reconnectBaseDelay || 3000;
         const exponentialDelay = baseDelay * Math.pow(1.5, this.reconnectAttempts - 1);
-        const maxDelay = 30000; // Maximum 30 seconds
+        const maxDelay = 10000; // Maximum 10 seconds between retries
         const jitter = Math.random() * 1000; // Add up to 1 second random jitter
         const delay = Math.min(exponentialDelay, maxDelay) + jitter;
         
