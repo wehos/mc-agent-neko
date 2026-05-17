@@ -117,12 +117,29 @@ class WSMessageServer {
 
         switch (data.type) {
             case 'task':
-                this.injectMessage(data.task);
+                // Forward optional task_id so we can echo it back on the
+                // matching task_finished frame. The plugin uses that echo
+                // to do explicit ID-based correlation (see plugin
+                // game_agent_minecraft service.py _on_task_finished's
+                // ``echoed_task_id`` branch); without it the plugin falls
+                // back to a fragile FIFO drop counter that mis-attributes
+                // completions whenever a task takes longer than the
+                // plugin-side ``task_timeout_seconds``.
+                this.injectMessage(data.task, data.task_id);
                 break;
             case 'ping':
                 this.broadcast({
                     type: 'pong'
                 });
+                break;
+            case 'query_inventory':
+                // On-demand snapshot. Plugin uses this to back its
+                // ``query_inventory`` plugin entry — without a live
+                // request path, the entry could only return what was
+                // cached on the last ``task_finished`` (minutes stale
+                // between actions, which made the dialog LLM narrate
+                // outdated 持有物 lists like a robot).
+                this.broadcastCurrentInventory();
                 break;
             default:
                 this.broadcast({
@@ -132,7 +149,35 @@ class WSMessageServer {
         }
     }
 
-    injectMessage(message) {
+    // Build + broadcast an ``inventory`` frame from the live bot. Called
+    // from the ``query_inventory`` request path; safe to call any time
+    // (no-op when bot is offline). The plugin matches this frame to a
+    // pending ``request_fresh_inventory`` future to wake the awaiting
+    // ``query_inventory`` entry.
+    broadcastCurrentInventory() {
+        const inventory = {};
+        if (this.agent && this.agent.bot) {
+            try {
+                for (const item of this.agent.bot.inventory.items()) {
+                    if (item != null) {
+                        if (!inventory[item.name]) {
+                            inventory[item.name] = 0;
+                        }
+                        inventory[item.name] += item.count;
+                    }
+                }
+            } catch (err) {
+                console.warn('Failed to read inventory for query response:', err);
+            }
+        }
+        this.broadcast({
+            type: 'inventory',
+            inventory: inventory,
+            ts: Date.now(),
+        });
+    }
+
+    injectMessage(message, taskId) {
         if (!message || typeof message !== 'string') {
             this.broadcast({
                 type: 'error',
@@ -144,13 +189,36 @@ class WSMessageServer {
         try {
             // Inject message as if it came from "admin" user
             // This leverages the existing respondFunc mechanism
-            console.log(`😊WebSocket injecting task from admin: "${message}"`);
+            console.log(`😊WebSocket injecting task from admin: "${message}"` + (taskId ? ` (task_id=${taskId})` : ''));
 
             // Call the agent's respondFunc directly with "admin" as sender
             this.agent.respondFunc('admin', message);
 
-            // Track current task for completion detection
+            // Track current task for completion detection.
+            //
+            // ``injectedTaskIdQueue`` is a FIFO of plugin-supplied UUIDs
+            // pending chat-loop completion; ``markChatTaskComplete``
+            // shifts the head when a chat-loop ends. Why a queue rather
+            // than a single ``currentTaskId``: agent.handleMessage runs
+            // SYNCHRONOUSLY one user-turn at a time. If the plugin
+            // dispatches task #2 while the chat-loop for task #1 is
+            // still running (e.g. plugin's task_timeout_seconds fired
+            // and plugin moved on), task #2 would otherwise overwrite
+            // currentTaskId. When task #1's chat-loop finally finishes,
+            // markChatTaskComplete would echo task #2's id along with
+            // task #1's reply — plugin then attributes the wrong
+            // completion to the wrong slot, causing the dialog LLM to
+            // see "task succeeded" cues that don't match what actually
+            // happened. Queue + FIFO shift keeps id↔reply alignment.
+            //
+            // ``currentTaskId`` is the most-recent id, kept around as a
+            // fallback for death/disconnect/cleanKill paths that don't
+            // tie to a specific chat-loop.
+            this.injectedTaskIdQueue = this.injectedTaskIdQueue || [];
+            const safeTaskId = (typeof taskId === 'string' && taskId) ? taskId : null;
+            this.injectedTaskIdQueue.push(safeTaskId);
             this.currentTask = message;
+            this.currentTaskId = safeTaskId;
             this.taskStartTime = Date.now();
             this.taskCompleted = false; // Reset completion status for new task
             this.lastTaskCompletionTime = null;
@@ -164,6 +232,52 @@ class WSMessageServer {
         }
     }
 
+    // Called by agent.handleMessage when its response loop exits naturally
+    // (no in-flight commands, agent emitted a conversation reply). In
+    // free-play mode (no this.task.data) checkTaskDone() never fires, so
+    // without this hook the plugin's awaiting minecraft_task tool call
+    // would never wake up and would always time out — see plugin
+    // game_agent_minecraft README's "free-play 完成识别" note.
+    //
+    // We gate on `this.currentTask` so:
+    //   - chat from a non-WS source (real admin player) doesn't spuriously
+    //     fire task_finished frames (currentTask is null → no-op)
+    //   - death / disconnect / cleanKill paths that already fired an
+    //     'interrupted' completion are not double-fired here, because they
+    //     set taskCompleted within the last few seconds (see guard below)
+    markChatTaskComplete(lastReply) {
+        if (!this.currentTask) {
+            return; // nothing to complete (no WS task pending)
+        }
+        if (this.taskCompleted && this.lastTaskCompletionTime &&
+            (Date.now() - this.lastTaskCompletionTime) < 5000) {
+            // Another path (checkTaskDone / death / disconnect) just
+            // broadcast a completion for this task slot. Don't double-fire.
+            this.currentTask = null;
+            return;
+        }
+        const taskText = this.currentTask;
+        this.currentTask = null;
+        const replyText = (typeof lastReply === 'string' && lastReply.trim())
+            ? lastReply.trim()
+            : '(chat loop ended without a final reply)';
+        // Shift the FIFO of injected task ids — this chat-loop is the
+        // oldest still-pending one (mc-agent's chat-loop is sequential,
+        // so completion order matches inject order). Pass the shifted
+        // id explicitly to onTaskCompleted so it doesn't fall back to
+        // ``currentTaskId``, which has already been overwritten by any
+        // newer inject that occurred while this chat-loop was running.
+        this.injectedTaskIdQueue = this.injectedTaskIdQueue || [];
+        const taskId = this.injectedTaskIdQueue.shift() || null;
+        this.onTaskCompleted({
+            status: 'ok',
+            message: replyText,
+            score: null,
+            reason: `chat-loop completed: "${taskText.slice(0, 60)}"`,
+            task_id: taskId,
+        });
+    }
+
     // Handle reconnection by checking if there's a completed task to report
     handleReconnection(ws) {
         if (this.taskCompleted && this.lastTaskCompletionTime) {
@@ -171,10 +285,14 @@ class WSMessageServer {
             const timeSinceCompletion = Date.now() - this.lastTaskCompletionTime;
             if (timeSinceCompletion < 30000) {
                 console.log('Reporting previously completed task to reconnected client');
+                // Reconnected client missed the original task_finished.
+                // Replay it in Chinese first-person so the dialog LLM
+                // forwards it cleanly to猫娘 instead of leaking
+                // English transport vocabulary into her narration.
                 ws.send(JSON.stringify({
                     type: 'task_finished',
                     status: 'ok',
-                    message: 'Task was completed before reconnection',
+                    message: '上一段动作在你掉线那会儿就跑完了。',
                     timestamp: this.lastTaskCompletionTime,
                     reconnected: true
                 }));
@@ -276,8 +394,15 @@ class WSMessageServer {
             }
         }
 
+        // status defaults to 'ok' for normal completion. Death / disconnect /
+        // forced restart paths pass 'interrupted' so the downstream LLM doesn't
+        // mis-read a forced abort as a successful finish (the plugin transparently
+        // forwards this status into its tool result).
+        const status = completionData.status || 'ok';
+
         // Highligh debug output for task_finished
         console.log('\n🎯 ===== TASK FINISHED =====');
+        console.log('📋 Status:', status);
         console.log('📋 Message:', completionData.message || 'Task completed');
         console.log('📊 Score:', completionData.score);
         console.log('⏰ Timestamp:', new Date(this.lastTaskCompletionTime).toISOString());
@@ -288,15 +413,35 @@ class WSMessageServer {
         // Append inventory info to message
         const messageWithInventory = (completionData.message || 'Task completed') + inventoryInfo;
 
-        // Broadcast to all connected clients with retry mechanism
-        this.broadcastTaskCompletion({
+        // Echo back the plugin-supplied task_id so the plugin can use
+        // explicit ID-based correlation instead of FIFO drop counter.
+        // Two sources, by precedence:
+        //   1. completionData.task_id  — explicitly passed by the agent
+        //      callsite (e.g. checkTaskDone for eval-mode score reporting,
+        //      where completion isn't tied to the WS-injected currentTask)
+        //   2. this.currentTaskId      — the active WS task; chat-loop
+        //      completion / death / disconnect / cleanKill all relate to it
+        // Drop the field entirely (instead of sending null/empty) when
+        // neither is present, so the plugin's id-mismatch path treats
+        // the frame as legacy/un-correlated and falls back to FIFO.
+        const taskId = completionData.task_id || this.currentTaskId || null;
+        const payload = {
             type: 'task_finished',
-            status: 'ok',
+            status,
             message: messageWithInventory,
             score: completionData.score,
             timestamp: this.lastTaskCompletionTime,
-            inventory: inventoryData
-        });
+            inventory: inventoryData,
+        };
+        if (taskId) payload.task_id = taskId;
+
+        // Broadcast to all connected clients with retry mechanism
+        this.broadcastTaskCompletion(payload);
+
+        // Once the completion is on the wire, the in-flight WS task is
+        // resolved — clear currentTaskId so a stale/late frame doesn't
+        // re-use the same id and confuse the plugin.
+        this.currentTaskId = null;
 
         console.log('Task completion broadcasted to all WebSocket clients');
     }
@@ -349,8 +494,20 @@ class WSMessageServer {
     }
 
     startScreenshotTimer() {
-        // Take screenshot every 2 seconds
-        // But only if previous screenshot is complete
+        // Default 1s/frame — tightened from the original 2s to improve
+        // realtime sync with the upstream LLM (it sees the world half as
+        // stale). Override with env NEKO_AGENT_SCREENSHOT_INTERVAL_MS,
+        // clamped to [200, 10000] so a misconfig can't either DoS the
+        // socket (sub-200ms) or freeze the visual feed (>10s).
+        const envMs = parseInt(process.env.NEKO_AGENT_SCREENSHOT_INTERVAL_MS || '', 10);
+        const intervalMs = Number.isFinite(envMs)
+            ? Math.max(200, Math.min(10000, envMs))
+            : 1000;
+        console.log(`📷 Screenshot timer starting at ${intervalMs}ms interval`);
+        // Skip if previous screenshot is still in progress so we never
+        // queue captures faster than the camera can produce them; the
+        // 1s default plus this gate makes the effective rate
+        // self-throttling on slower machines.
         this.screenshotInterval = setInterval(async () => {
             // Skip if previous screenshot is still in progress
             if (this.screenshotInProgress) {
@@ -363,7 +520,7 @@ class WSMessageServer {
             } catch (error) {
                 console.warn('Screenshot capture failed:', error);
             }
-        }, 2000);
+        }, intervalMs);
     }
 
     async captureAndBroadcastScreenshot() {

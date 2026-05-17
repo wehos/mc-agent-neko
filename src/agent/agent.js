@@ -270,9 +270,30 @@ export class Agent {
             console.log(`${this.name} died, stopping current actions...`);
             this.actions.cancelResume();
             this.actions.stop();
-            
+
+            // Fire a critical-severity alert before the task_finished
+            // broadcast below. Rationale: task_finished is only meaningful
+            // to the plugin when a minecraft_task is pending; otherwise it
+            // gets consumed as a stale frame and the dialog LLM never
+            // hears about the death. The alert path is unconditional —
+            // dialog LLM is informed regardless of pending state.
+            try {
+                const deathCause = this._inferDamageCause();
+                wsServer.broadcast({
+                    type: 'alert',
+                    severity: 'critical',
+                    text: '角色阵亡。物品已掉落原地，即将重生。',
+                    hp: 0,
+                    cause: deathCause,
+                    timestamp: Date.now(),
+                });
+            } catch (e) {
+                console.warn('death alert broadcast failed:', e);
+            }
+
             // Report task interruption due to death
             wsServer.onTaskCompleted({
+                status: 'interrupted',
                 message: '任务因死亡而中断',
                 score: 0,
                 reason: 'death'
@@ -312,6 +333,7 @@ export class Agent {
         // Always send task_finished message when bot disconnects
         try {
             wsServer.onTaskCompleted({
+                status: 'interrupted',
                 message: '任务中断',
                 score: 0,
                 reason: reason
@@ -361,133 +383,201 @@ export class Agent {
     }
 
     async handleMessage(source, message, max_responses=null) {
-        await this.checkTaskDone();
-        if (!source || !message) {
-            console.warn('Received empty message from', source);
-            return false;
-        }
+        // ``lastConversationReply`` is the most recent free-text reply the
+        // agent emitted while servicing this message — used by the WS bridge
+        // to populate ``task_finished.message`` so the upstream plugin's
+        // minecraft_task LLM tool returns useful commentary instead of an
+        // empty string. Reset on every entry.
+        let lastConversationReply = '';
 
-        let used_command = false;
-        if (max_responses === null) {
-            max_responses = settings.max_commands === -1 ? Infinity : settings.max_commands;
-        }
-        if (max_responses === -1) {
-            max_responses = Infinity;
-        }
-
-        const self_prompt = source === 'system' || source === this.name;
-        const from_other_bot = convoManager.isOtherAgent(source);
-
-        if (!self_prompt && !from_other_bot) { // from user, check for forced commands
-            const user_command_name = containsCommand(message);
-            if (user_command_name) {
-                if (!commandExists(user_command_name)) {
-                    this.routeResponse(source, `Command '${user_command_name}' does not exist.`);
-                    return false;
-                }
-                this.routeResponse(source, `*${source} used ${user_command_name.substring(1)}*`);
-                if (user_command_name === '!newAction') {
-                    // all user-initiated commands are ignored by the bot except for this one
-                    // add the preceding message to the history to give context for newAction
-                    this.history.add(source, message);
-                }
-                let execute_res = await executeCommand(this, message);
-                if (execute_res) 
-                    this.routeResponse(source, execute_res);
-                return true;
-            }
-        }
-
-        if (from_other_bot)
-            this.last_sender = source;
-
-        // Now translate the message
-        message = await handleEnglishTranslation(message);
-        console.log('received message from', source, ':', message);
-
-        const checkInterrupt = () => this.self_prompter.shouldInterrupt(self_prompt) || this.shut_up || convoManager.responseScheduledFor(source);
-        
-        let behavior_log = this.bot.modes.flushBehaviorLog().trim();
-        if (behavior_log.length > 0) {
-            const MAX_LOG = 500;
-            if (behavior_log.length > MAX_LOG) {
-                behavior_log = '...' + behavior_log.substring(behavior_log.length - MAX_LOG);
-            }
-            behavior_log = 'Recent behaviors log: \n' + behavior_log;
-            await this.history.add('system', behavior_log);
-        }
-
-        // Handle other user messages
-        await this.history.add(source, message);
-        this.history.save();
-
-        if (!self_prompt && this.self_prompter.isActive()) // message is from user during self-prompting
-            max_responses = 1; // force only respond to this message, then let self-prompting take over
-        for (let i=0; i<max_responses; i++) {
-            if (checkInterrupt()) break;
-            let history = this.history.getHistory();
-            let res = await this.prompter.promptConvo(history);
-
-            console.log(`${this.name} full response to ${source}: ""${res}""`);
-
-            if (res.trim().length === 0) {
-                console.warn('no response')
-                break; // empty response ends loop
+        try {
+            await this.checkTaskDone();
+            if (!source || !message) {
+                console.warn('Received empty message from', source);
+                return false;
             }
 
-            let command_name = containsCommand(res);
-
-            if (command_name) { // contains query or command
-                res = truncCommandMessage(res); // everything after the command is ignored
-                this.history.add(this.name, res);
-                
-                if (!commandExists(command_name)) {
-                    this.history.add('system', `Command ${command_name} does not exist.`);
-                    console.warn('Agent hallucinated command:', command_name)
-                    continue;
-                }
-
-                if (checkInterrupt()) break;
-                this.self_prompter.handleUserPromptedCmd(self_prompt, isAction(command_name));
-
-                if (settings.show_command_syntax === "full") {
-                    this.routeResponse(source, res);
-                }
-                else if (settings.show_command_syntax === "shortened") {
-                    // show only "used !commandname"
-                    let pre_message = res.substring(0, res.indexOf(command_name)).trim();
-                    let chat_message = `*used ${command_name.substring(1)}*`;
-                    if (pre_message.length > 0)
-                        chat_message = `${pre_message}  ${chat_message}`;
-                    this.routeResponse(source, chat_message);
-                }
-                else {
-                    // no command at all
-                    let pre_message = res.substring(0, res.indexOf(command_name)).trim();
-                    if (pre_message.trim().length > 0)
-                        this.routeResponse(source, pre_message);
-                }
-
-                let execute_res = await executeCommand(this, res);
-
-                console.log('Agent executed:', command_name, 'and got:', execute_res);
-                used_command = true;
-
-                if (execute_res)
-                    this.history.add('system', execute_res);
-                else
-                    break;
+            let used_command = false;
+            if (max_responses === null) {
+                max_responses = settings.max_commands === -1 ? Infinity : settings.max_commands;
             }
-            else { // conversation response
-                this.history.add(this.name, res);
-                this.routeResponse(source, res);
-                break;
+            if (max_responses === -1) {
+                max_responses = Infinity;
             }
-            
+
+            const self_prompt = source === 'system' || source === this.name;
+            const from_other_bot = convoManager.isOtherAgent(source);
+
+            if (!self_prompt && !from_other_bot) { // from user, check for forced commands
+                const user_command_name = containsCommand(message);
+                if (user_command_name) {
+                    if (!commandExists(user_command_name)) {
+                        this.routeResponse(source, `Command '${user_command_name}' does not exist.`);
+                        return false;
+                    }
+                    this.routeResponse(source, `*${source} used ${user_command_name.substring(1)}*`);
+                    if (user_command_name === '!newAction') {
+                        // all user-initiated commands are ignored by the bot except for this one
+                        // add the preceding message to the history to give context for newAction
+                        this.history.add(source, message);
+                    }
+                    let execute_res = await executeCommand(this, message);
+                    if (execute_res) {
+                        this.routeResponse(source, execute_res);
+                        lastConversationReply = execute_res;
+                    }
+                    return true;
+                }
+            }
+
+            if (from_other_bot)
+                this.last_sender = source;
+
+            // Now translate the message
+            message = await handleEnglishTranslation(message);
+            console.log('received message from', source, ':', message);
+
+            const checkInterrupt = () => this.self_prompter.shouldInterrupt(self_prompt) || this.shut_up || convoManager.responseScheduledFor(source);
+
+            let behavior_log = this.bot.modes.flushBehaviorLog().trim();
+            if (behavior_log.length > 0) {
+                const MAX_LOG = 500;
+                if (behavior_log.length > MAX_LOG) {
+                    behavior_log = '...' + behavior_log.substring(behavior_log.length - MAX_LOG);
+                }
+                behavior_log = 'Recent behaviors log: \n' + behavior_log;
+                await this.history.add('system', behavior_log);
+            }
+
+            // Handle other user messages
+            await this.history.add(source, message);
             this.history.save();
-        }
 
-        return used_command;
+            if (!self_prompt && this.self_prompter.isActive()) // message is from user during self-prompting
+                max_responses = 1; // force only respond to this message, then let self-prompting take over
+            for (let i=0; i<max_responses; i++) {
+                if (checkInterrupt()) break;
+                let history = this.history.getHistory();
+                let res = await this.prompter.promptConvo(history);
+
+                console.log(`${this.name} full response to ${source}: ""${res}""`);
+
+                if (res.trim().length === 0) {
+                    console.warn('no response')
+                    break; // empty response ends loop
+                }
+
+                let command_name = containsCommand(res);
+
+                if (command_name) { // contains query or command
+                    res = truncCommandMessage(res); // everything after the command is ignored
+                    this.history.add(this.name, res);
+
+                    if (!commandExists(command_name)) {
+                        this.history.add('system', `Command ${command_name} does not exist.`);
+                        console.warn('Agent hallucinated command:', command_name)
+                        continue;
+                    }
+
+                    if (checkInterrupt()) break;
+                    this.self_prompter.handleUserPromptedCmd(self_prompt, isAction(command_name));
+
+                    let pre_message = res.substring(0, res.indexOf(command_name)).trim();
+
+                    if (settings.show_command_syntax === "full") {
+                        this.routeResponse(source, res);
+                    }
+                    else if (settings.show_command_syntax === "shortened") {
+                        // show only "used !commandname"
+                        let chat_message = `*used ${command_name.substring(1)}*`;
+                        if (pre_message.length > 0)
+                            chat_message = `${pre_message}  ${chat_message}`;
+                        this.routeResponse(source, chat_message);
+                    }
+                    else {
+                        // no command at all
+                        if (pre_message.trim().length > 0)
+                            this.routeResponse(source, pre_message);
+                    }
+
+                    // Track the natural-language portion the agent emitted
+                    // alongside its command so a "I'll grab some logs !collectBlocks(...)"
+                    // turn still yields useful text in the final task_finished
+                    // frame even though the loop continues after the command.
+                    if (pre_message.length > 0) {
+                        lastConversationReply = pre_message;
+                    }
+
+                    let execute_res = await executeCommand(this, res);
+
+                    console.log('Agent executed:', command_name, 'and got:', execute_res);
+                    used_command = true;
+
+                    if (execute_res)
+                        this.history.add('system', execute_res);
+                    else
+                        break;
+                }
+                else { // conversation response
+                    this.history.add(this.name, res);
+                    this.routeResponse(source, res);
+                    lastConversationReply = res;
+                    break;
+                }
+
+                this.history.save();
+            }
+
+            return used_command;
+        } finally {
+            // Wake the WS-injected task waiter (game_agent_minecraft plugin's
+            // minecraft_task tool) when the response loop exits naturally.
+            // Free-play mode (no settings.task) means checkTaskDone() at the
+            // top of this function never fires; without this hook the plugin
+            // would always hit its task_timeout_seconds and surface a
+            // {status: "timeout"} to the LLM even on perfectly successful
+            // tasks. The ``markChatTaskComplete`` call is a no-op when
+            // currentTask is null (covers regular in-game chat from real
+            // admin players, and the second invocation of nested handleMessage
+            // calls where the outer call already consumed the slot).
+            if (source === 'admin') {
+                try {
+                    // The mini LLM often emits just '\t' when it has no
+                    // narrative to add (see andy.json's "respond with just
+                    // a tab" prompt rule). That value is useless to the
+                    // upstream LLM, so fall back to the last meaningful
+                    // signal we have: the last command's action output,
+                    // or the last system-recorded line, before letting
+                    // markChatTaskComplete's '(no final reply)' kick in.
+                    let reply = lastConversationReply;
+                    const isUseful = (s) => typeof s === 'string'
+                        && s.trim().length > 0
+                        && s.trim() !== '\\t'
+                        && s.trim() !== '\t';
+                    if (!isUseful(reply)) {
+                        try {
+                            const hist = this.history.getHistory();
+                            for (let i = hist.length - 1; i >= 0; i--) {
+                                const entry = hist[i];
+                                const content = (entry && entry.content) || '';
+                                // Prefer system-injected action output (from
+                                // executeCommand) — that's typically the
+                                // most concrete description of what just
+                                // happened. Skip the user/admin's own task
+                                // text and the agent's hollow '\t' replies.
+                                if (entry && entry.role === 'system' && isUseful(content)) {
+                                    reply = content;
+                                    break;
+                                }
+                            }
+                        } catch (_) { /* history shape may vary; ignore */ }
+                    }
+                    wsServer.markChatTaskComplete(reply);
+                } catch (e) {
+                    console.error('markChatTaskComplete failed:', e);
+                }
+            }
+        }
     }
 
     async routeResponse(to_player, message) {
@@ -566,12 +656,55 @@ export class Agent {
         let prev_health = this.bot.health;
         this.bot.lastDamageTime = 0;
         this.bot.lastDamageTaken = 0;
+        // Per-severity cooldown so a continuous combat (zombie hitting bot
+        // every second) doesn't fire an alert each tick. The dialog LLM only
+        // needs to know "you're being hurt" once, not 12x. Critical alerts
+        // (HP at the edge of death) reset the cooldown so they can fire even
+        // if a warning-level alert just fired moments ago.
+        const ALERT_COOLDOWN_MS = 10000;
+        let lastAlertAt = { warn: 0, critical: 0 };
         this.bot.on('health', () => {
-            if (this.bot.health < prev_health) {
+            const newHp = this.bot.health;
+            if (newHp < prev_health) {
                 this.bot.lastDamageTime = Date.now();
-                this.bot.lastDamageTaken = prev_health - this.bot.health;
+                this.bot.lastDamageTaken = prev_health - newHp;
+
+                // Decide alert severity. Thresholds tuned for survival mode:
+                //  - HP ≤ 6 (3 hearts): critical, one more hit could be fatal
+                //  - HP < prev:        warn, took damage (but not in danger zone)
+                const now = Date.now();
+                let severity = null;
+                if (newHp <= 6) {
+                    severity = 'critical';
+                } else if (this.bot.lastDamageTaken >= 1) {
+                    severity = 'warn';
+                }
+                if (severity) {
+                    const last = lastAlertAt[severity] || 0;
+                    if (now - last >= ALERT_COOLDOWN_MS) {
+                        lastAlertAt[severity] = now;
+                        const hpInt = Math.max(0, Math.round(newHp));
+                        const text = severity === 'critical'
+                            ? `角色生命值告急：${hpInt}/20，再受一次伤可能致命。`
+                            : `角色受到伤害：失去 ${this.bot.lastDamageTaken.toFixed(0)} HP，当前 ${hpInt}/20。`;
+                        const cause = this._inferDamageCause();
+                        try {
+                            wsServer.broadcast({
+                                type: 'alert',
+                                severity,
+                                text,
+                                hp: newHp,
+                                food: this.bot.food,
+                                cause,
+                                timestamp: now,
+                            });
+                        } catch (e) {
+                            console.warn('alert broadcast failed:', e);
+                        }
+                    }
+                }
             }
-            prev_health = this.bot.health;
+            prev_health = newHp;
         });
         // Bot event handlers are now in setupBotEventHandlers()
         this.bot.on('messagestr', async (message, _, jsonMsg) => {
@@ -692,11 +825,127 @@ export class Agent {
         }
     }
 
+    // Best-effort scan of why the bot just lost HP. mineflayer doesn't
+    // expose attacker directly for damage taken by the local player, so we
+    // fall back to environment inspection + nearest-hostile heuristic. The
+    // plugin forwards the result to the dialog LLM so the character can
+    // narrate "a creeper got me" instead of inventing reasons.
+    //
+    // Returns ``null`` when nothing actionable found — caller still
+    // surfaces the alert, just without a cause hint.
+    _inferDamageCause() {
+        if (!this.bot || !this.bot.entity) return null;
+        const hints = {};
+
+        // Environmental: block at / over the bot's feet
+        try {
+            const pos = this.bot.entity.position;
+            const at = this.bot.blockAt(pos);
+            const below = this.bot.blockAt(pos.offset(0, -1, 0));
+            if (at && at.name) {
+                if (at.name === 'lava') hints.environment = 'lava';
+                else if (at.name === 'fire' || at.name === 'soul_fire') hints.environment = 'fire';
+                else if (at.name === 'water' && (this.bot.oxygenLevel ?? 20) < 18) hints.environment = 'drowning';
+                else if (at.name === 'sweet_berry_bush' || at.name === 'cactus') hints.environment = at.name;
+            }
+            if (!hints.environment && below && (below.name === 'magma_block')) {
+                hints.environment = 'magma_block';
+            }
+        } catch (_) { /* ignore */ }
+
+        // Fall damage — large downward velocity in the last tick is a
+        // strong signal even when the actual hit lands on landing.
+        try {
+            if (this.bot.entity.velocity && this.bot.entity.velocity.y < -0.6) {
+                hints.fall = true;
+            }
+        } catch (_) { /* ignore */ }
+
+        // Nearest hostile entity within reach. mineflayer tags mobs by
+        // ``kind === 'Hostile mobs'`` in older versions; in newer ones the
+        // safer check is the name list. Include both for robustness.
+        const HOSTILES = new Set([
+            'zombie', 'husk', 'drowned', 'zombie_villager', 'zombified_piglin',
+            'skeleton', 'stray', 'wither_skeleton', 'bogged',
+            'creeper', 'spider', 'cave_spider',
+            'witch', 'enderman', 'endermite', 'silverfish',
+            'pillager', 'vindicator', 'evoker', 'vex', 'ravager',
+            'piglin', 'piglin_brute', 'hoglin', 'zoglin',
+            'blaze', 'ghast', 'magma_cube', 'slime',
+            'phantom', 'guardian', 'elder_guardian', 'shulker', 'warden',
+            'breeze',
+        ]);
+        let closest = null;
+        let closestDist = Infinity;
+        try {
+            const myPos = this.bot.entity.position;
+            for (const id of Object.keys(this.bot.entities || {})) {
+                const e = this.bot.entities[id];
+                if (!e || !e.position || e === this.bot.entity) continue;
+                const name = (e.name || e.displayName || '').toLowerCase();
+                if (!name || !HOSTILES.has(name)) continue;
+                const d = myPos.distanceTo(e.position);
+                if (d < closestDist) {
+                    closestDist = d;
+                    closest = e;
+                }
+            }
+        } catch (_) { /* ignore */ }
+        if (closest && closestDist <= 6) {
+            hints.attacker = {
+                kind: (closest.name || closest.displayName || 'mob').toLowerCase(),
+                distance: Number(closestDist.toFixed(1)),
+            };
+        }
+
+        // Nearest other player. Without this, when the human user hits
+        // the bot the dialog LLM gets a cause-less alert and invents
+        // "被怪打了一下" (the historical UX bug). A close player who is
+        // not us is the most likely melee attacker; we don't try to
+        // confirm intent (no swing animation tracking), the dialog LLM
+        // can use the hint loosely as "X 可能打了我".
+        try {
+            const myPos = this.bot.entity.position;
+            const myName = this.bot.username || this.name;
+            let closestPlayer = null;
+            let closestPlayerDist = Infinity;
+            for (const pname of Object.keys(this.bot.players || {})) {
+                if (pname === myName) continue;
+                const p = this.bot.players[pname];
+                const ent = p && p.entity;
+                if (!ent || !ent.position) continue;
+                const d = myPos.distanceTo(ent.position);
+                if (d < closestPlayerDist) {
+                    closestPlayerDist = d;
+                    closestPlayer = pname;
+                }
+            }
+            // Players have longer reach than the 6-block mob window —
+            // include a slightly wider 5-block player melee range.
+            if (closestPlayer && closestPlayerDist <= 5) {
+                // Prefer player over hostile mob if both present and the
+                // player is closer: a human swinging at point-blank is a
+                // stronger signal than a distant zombie.
+                if (!hints.attacker || closestPlayerDist < (hints.attacker.distance ?? Infinity)) {
+                    hints.attacker = {
+                        kind: 'player',
+                        name: closestPlayer,
+                        distance: Number(closestPlayerDist.toFixed(1)),
+                    };
+                }
+            }
+        } catch (_) { /* ignore */ }
+
+        if (Object.keys(hints).length === 0) return null;
+        return hints;
+    }
+
     cleanKill(msg='Killing agent process...', code=1) {
         // Send task_finished message before killing the process
         if (!this.taskCompleted) {
             try {
                 wsServer.onTaskCompleted({
+                    status: 'interrupted',
                     message: '任务中断',
                     score: 0,
                     reason: msg

@@ -1,0 +1,13 @@
+diff --git a/node_modules/minecraft-data/minecraft-data/data/pc/1.21.6/protocol.json b/node_modules/minecraft-data/minecraft-data/data/pc/1.21.6/protocol.json
+index 907ee7d..55cc4c0 100644
+--- a/node_modules/minecraft-data/minecraft-data/data/pc/1.21.6/protocol.json
++++ b/node_modules/minecraft-data/minecraft-data/data/pc/1.21.6/protocol.json
+@@ -9045,7 +9045,7 @@
+             },
+             {
+               "name": "checksum",
+-              "type": "i8"
++              "type": "u8"
+             }
+           ]
+         ],

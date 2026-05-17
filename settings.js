@@ -5,7 +5,7 @@ const settings = {
     "auth": "offline", // or "microsoft"
 
     // the mindserver manages all agents and hosts the UI
-    "mindserver_port": 8080,
+    "mindserver_port": 8765,
     "auto_open_ui": false, // opens UI in browser on startup
 
     "base_profile": "assistant", // survival, assistant, creative, or god_mode
@@ -41,8 +41,14 @@ const settings = {
     "render_bot_view": false, // show bot's view in browser at localhost:3000, 3001...
 
     "allow_insecure_coding": true, // allows newAction command and model can write/run code on your computer. enable at own risk
-    "allow_vision": false, // allows vision model to interpret screenshots as inputs
-    "blocked_actions": ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"], // commands to disable and remove from docs. Ex: ["!setMode"]
+    "allow_vision": true, // allows vision model to interpret screenshots (enables !lookAtPlayer/!lookAtPosition's real vision path; vision_model falls back to chat_model when not explicitly set in profile)
+    // `!restart` and `!stfu` blocked: the mc LLM has been observed entering a
+    // self-restart loop where every incoming task is answered with `!restart`,
+    // which triggers cleanKill → process exit → parent spawns a fresh agent →
+    // it inherits the same history and emits `!restart` again. Blocking the
+    // command removes it from the doc set the LLM sees, so the loop can't be
+    // re-entered. `!stfu` blocked for the same shape (silences self).
+    "blocked_actions": ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel", "!restart", "!stfu"], // commands to disable and remove from docs. Ex: ["!setMode"]
     "code_timeout_mins": -1, // minutes code is allowed to run. -1 for no timeout
     "relevant_docs_count": 5, // number of relevant code function docs to select for prompting. -1 for all
 

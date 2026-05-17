@@ -1,0 +1,33 @@
+diff --git a/node_modules/mineflayer/lib/plugins/digging.js b/node_modules/mineflayer/lib/plugins/digging.js
+index 5ae5552..9a1852f 100644
+--- a/node_modules/mineflayer/lib/plugins/digging.js
++++ b/node_modules/mineflayer/lib/plugins/digging.js
+@@ -244,11 +244,14 @@ function inject (bot) {
+       enchantments = enchantments.concat(helmetEnchantments)
+     }
+ 
++    if (block.material === 'incorrect_for_wooden_tool')
++      block.material = 'mineable/pickaxe'
++
+     const creative = bot.game.gameMode === 'creative'
+     return block.digTime(
+       type,
+       creative,
+-      ['water', 'flowing_water'].includes(bot._getBlockAtEyeLevel()?.name),
++      false, // isInWater, water calc is bugged, so always false
+       !bot.entity.onGround,
+       enchantments,
+       bot.entity.effects
+diff --git a/node_modules/mineflayer/lib/plugins/place_block.js b/node_modules/mineflayer/lib/plugins/place_block.js
+index fdaec6b..08983b6 100644
+--- a/node_modules/mineflayer/lib/plugins/place_block.js
++++ b/node_modules/mineflayer/lib/plugins/place_block.js
+@@ -11,7 +11,7 @@ function inject (bot) {
+     let newBlock = bot.blockAt(dest)
+     if (oldBlock.type === newBlock.type) {
+       [oldBlock, newBlock] = await onceWithCleanup(bot, `blockUpdate:${dest}`, {
+-        timeout: 5000,
++        timeout: 500,
+         // Condition to wait to receive block update actually changing the block type, in case the bot receives block updates with no changes
+         // oldBlock and newBlock will both be null when the world unloads
+         checkCondition: (oldBlock, newBlock) => !oldBlock || !newBlock || oldBlock.type !== newBlock.type
