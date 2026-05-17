@@ -107,10 +107,26 @@ Write-Host "Size: $((Get-Item "$OUT_NAME.zip").Length / 1MB) MB"
 解压到一个干净目录，双击 `启动mc-agent.bat`：
 
 1. 应该开一个黑色 console 窗口
-2. 几秒内打出 `WebSocket server started on ws://0.0.0.0:48909`
-3. 如果同机已经跑了 N.E.K.O. 且启用了 game_agent_minecraft 插件，N.E.K.O. 那边会自动连上
+2. 打出 `MindServer running on port 8765 on host localhost`
+3. 打出 `MC server found. (Host: localhost, Port: 55916, Version: 1.21.x)`（前提你机器上 MC 在 55916 跑着；没跑也没关系，agent 进程仍会启动等待）
+4. **首次启动一定会**报 `API key "OPENAI_API_KEY" not found in keys.json or environment variables!` 然后 agent 进程退出 —— 这是预期：zip 里**故意没带 keys.json**（gitignored，避免打包者把自己的 key 泄露给最终用户）
 
-如果 bat 启动后窗口闪退，把 `node ... main.js` 那行末尾的 `pause` 临时改成 `cmd /k` 跑一次抓错。常见原因：node_modules 没装全（重新 `npm ci`）、Node 版本过老（v18 LTS 或 v20 LTS 才稳，v24+ 已知挂）。
+## 最终用户首次设置 LLM key
+
+打完包后告诉用户：解压后**先做这一步再点 bat**。
+
+1. 进入解压目录的 `src/` 子目录
+2. 把 `keys.example.json` 复制一份命名为 `keys.json`
+3. 用记事本打开 `keys.json`，把 `"OPENAI_API_KEY": ""` 填成 `"OPENAI_API_KEY": "sk-..."`（或他用的其他 LLM 提供商的 key，参考 mc-agent 主 README 的支持列表：openai / google / anthropic / deepseek / qwen / ollama 等）
+4. 回外层目录双击 `启动mc-agent.bat`，这次 agent 能正常起来连进 MC bot
+
+mindserver UI（启动后浏览器开 <http://localhost:8765>）也能编辑这些字段，但 mindserver UI 需要 agent 进程先起来，所以**首次填 key 只能改文件**。
+
+## 排错
+
+bat 启动后窗口闪退（不是 keys 报错那种"打完信息再退"）：
+- 把 `node ... main.js` 那行末尾的 `pause` 临时改成 `cmd /k` 跑一次抓错
+- 常见原因：node_modules 没装全（重新 `npm ci`）、Node 版本过老（v22+ 才稳，v20 会触发 mineflayer EBADENGINE）
 
 ## 上传
 
