@@ -39,7 +39,7 @@ $ErrorActionPreference = "Stop"
 $VERSION   = "0.1.0"                                          # ← 调
 $SRC_REPO  = "C:\Users\wehos\Project\mc-agent-upstream-sync"  # ← 调
 $OUT_NAME  = "mc-agent-win-v$VERSION"
-$NODE_VER  = "v20.11.1"
+$NODE_VER  = "v22.13.0"   # mineflayer 4.37 + minecraft-protocol 1.66 require Node >=22
 $NODE_DIST = "node-$NODE_VER-win-x64"
 
 # 1. 清空 + 建目录
@@ -67,10 +67,15 @@ robocopy $SRC_REPO $srcDest /E `
     /XF $EXCLUDE_FILES `
     /NFL /NDL /NJH /NJS | Out-Null
 
-# 4. npm ci --omit=dev（用刚下的 portable Node）
+# 4. npm ci（用刚下的 portable Node）。**不能加 --omit=dev**：mc-agent 的
+# postinstall 会跑 patch-package 把 patches/*.patch 打上去（修
+# mineflayer / minecraft-data 的已知 bug），而 patch-package 是 devDep；
+# --omit=dev 之后 patch-package 不在 node_modules 里，postinstall 仍然触发，
+# 报 "patch-package is not recognized" 然后 npm ci exit 1。代价：node_modules
+# 多 ~30-50 MB devDep，可接受。
 $env:PATH = "$PWD\$OUT_NAME\node\$NODE_DIST;" + $env:PATH
 Push-Location $srcDest
-& "$PWD\..\node\$NODE_DIST\npm.cmd" ci --omit=dev
+& "$PWD\..\node\$NODE_DIST\npm.cmd" ci
 Pop-Location
 
 # 5. 写启动 bat（UTF-8 with BOM 避免中文文件名乱码）
