@@ -52,12 +52,20 @@ curl.exe -L "https://nodejs.org/dist/$NODE_VER/$nodeZip" -o $nodeZip
 Expand-Archive $nodeZip -DestinationPath "$OUT_NAME/node" -Force
 Remove-Item $nodeZip
 
-# 3. 复制源码（去掉 .git / node_modules / tests / 评估 harness 等大件）
-$EXCLUDE = @('.git', '.github', 'node_modules', 'tests', 'tasks', 'experiments',
-             'wandb', 'code_records', 'logs', '.claude', '.codex', '__pycache__',
-             'BUILD-WIN-ZIP.md')
+# 3. 复制源码。
+# /XD 排除目录（.git / node_modules / 评估 harness 等大件）。
+# /XF 排除文件 —— **特别注意 keys.json**（gitignored 的本地密钥），还有
+# andy_*.json / jill_*.json（运行时生成的 profile 副本），漏一个就把
+# 你的 API key 一起打进 zip 分发出去。BUILD-WIN-ZIP.md 是本文档自身，
+# 给维护者看的，不需要进 zip。
+$EXCLUDE_DIRS = @('.git', '.github', 'node_modules', 'tests', 'tasks', 'experiments',
+                  'wandb', 'code_records', 'logs', '.claude', '.codex', '__pycache__')
+$EXCLUDE_FILES = @('keys.json', 'BUILD-WIN-ZIP.md', 'andy_*.json', 'jill_*.json', '*.pyc')
 $srcDest = "$OUT_NAME/src"
-robocopy $SRC_REPO $srcDest /E /XD ($EXCLUDE | %{ Join-Path $SRC_REPO $_ }) /XF *.pyc /NFL /NDL /NJH /NJS | Out-Null
+robocopy $SRC_REPO $srcDest /E `
+    /XD ($EXCLUDE_DIRS | %{ Join-Path $SRC_REPO $_ }) `
+    /XF $EXCLUDE_FILES `
+    /NFL /NDL /NJH /NJS | Out-Null
 
 # 4. npm ci --omit=dev（用刚下的 portable Node）
 $env:PATH = "$PWD\$OUT_NAME\node\$NODE_DIST;" + $env:PATH
