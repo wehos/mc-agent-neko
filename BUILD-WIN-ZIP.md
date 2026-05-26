@@ -20,12 +20,23 @@ mc-agent-win-vX.Y.Z/
 ├── src/
 │   ├── main.js
 │   ├── settings.js
-│   ├── andy.json
+│   ├── neko.json
 │   ├── package.json
 │   ├── node_modules/        ← 已预装，arch 对的上 win-x64
 │   └── ...
+├── keys.example.json        ← 外层副本，见下方"为什么放外层"
+├── neko.json                ← 外层副本，见下方"为什么放外层"
 └── 启动mc-agent.bat
 ```
+
+### 为什么 keys.json / 配置 profile 要放外层（与 src 同级）
+
+bat 用 `"%~dp0src\main.js"` 启动，但**双击 bat 时进程的工作目录是 bat 所在目录（zip 根，src 的上一层）**。而：
+
+- `src/utils/keys.js` 用 `readFileSync('./keys.json')`（CWD 相对）→ 读的是 **zip 根** 的 `keys.json`
+- `main.js` 用 `readFileSync(profile)`，profile 来自 `settings.js` 的 `"./neko.json"`（CWD 相对）→ 读的是 **zip 根** 的 `neko.json`
+
+所以这两个文件**必须放在 zip 根**，放进 src/ 里运行时根本读不到。下面构建步骤 5b 会把它们从 src/ 复制一份到外层。（src/ 里的副本留着无害，只是不被读取。）
 
 ## 构建步骤
 
@@ -36,7 +47,7 @@ mc-agent-win-vX.Y.Z/
 ```powershell
 $ErrorActionPreference = "Stop"
 
-$VERSION   = "0.1.0"                                          # ← 调
+$VERSION   = "0.1.1"                                          # ← 调
 $SRC_REPO  = "C:\Users\wehos\Project\mc-agent-upstream-sync"  # ← 调
 $OUT_NAME  = "mc-agent-win-v$VERSION"
 $NODE_VER  = "v22.13.0"   # mineflayer 4.37 + minecraft-protocol 1.66 require Node >=22
@@ -90,6 +101,12 @@ pause
 "@
 [System.IO.File]::WriteAllText("$PWD\$OUT_NAME\启动mc-agent.bat", $BAT_BODY, (New-Object System.Text.UTF8Encoding $true))
 
+# 5b. 把 keys 模板 + profile 复制一份到 zip 根（外层）。
+# 双击 bat 时 CWD = zip 根，而 keys.js / main.js 用 './keys.json' './neko.json'
+# 这种 CWD 相对路径读取，所以这俩文件必须在外层才会被读到（见上方"为什么放外层"）。
+Copy-Item "$srcDest\keys.example.json" "$OUT_NAME\keys.example.json" -Force
+Copy-Item "$srcDest\neko.json"         "$OUT_NAME\neko.json"         -Force
+
 # 6. 打包成 zip
 Compress-Archive -Path $OUT_NAME -DestinationPath "$OUT_NAME.zip" -CompressionLevel Optimal -Force
 
@@ -115,10 +132,12 @@ Write-Host "Size: $((Get-Item "$OUT_NAME.zip").Length / 1MB) MB"
 
 打完包后告诉用户：解压后**先做这一步再点 bat**。
 
-1. 进入解压目录的 `src/` 子目录
-2. 把 `keys.example.json` 复制一份命名为 `keys.json`
+1. 留在**解压后的最外层目录**（就是 `启动mc-agent.bat` 和 `keys.example.json` 所在的那一层，**不要进 src/**）
+2. 把这一层的 `keys.example.json` 复制一份命名为 `keys.json`
 3. 用记事本打开 `keys.json`，把 `"OPENAI_API_KEY": ""` 填成 `"OPENAI_API_KEY": "sk-..."`（或他用的其他 LLM 提供商的 key，参考 mc-agent 主 README 的支持列表：openai / google / anthropic / deepseek / qwen / ollama 等）
-4. 回外层目录双击 `启动mc-agent.bat`，这次 agent 能正常起来连进 MC bot
+4. 双击 `启动mc-agent.bat`，这次 agent 能正常起来连进 MC bot
+
+> ⚠️ 一定是放在**外层**（与 bat 同级）的 `keys.json`，不是 `src/keys.json`。双击 bat 时工作目录是外层，程序按 CWD 相对路径读 `./keys.json`，放进 src/ 里读不到。改 bot 名字 / 模型同理：编辑外层的 `neko.json`。
 
 mindserver UI（启动后浏览器开 <http://localhost:8765>）也能编辑这些字段，但 mindserver UI 需要 agent 进程先起来，所以**首次填 key 只能改文件**。
 

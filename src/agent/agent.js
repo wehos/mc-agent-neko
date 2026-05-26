@@ -553,7 +553,7 @@ export class Agent {
             if (source === 'admin') {
                 try {
                     // The mini LLM often emits just '\t' when it has no
-                    // narrative to add (see andy.json's "respond with just
+                    // narrative to add (see neko.json's "respond with just
                     // a tab" prompt rule). That value is useless to the
                     // upstream LLM, so fall back to the last meaningful
                     // signal we have: the last command's action output,
