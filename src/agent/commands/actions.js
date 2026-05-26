@@ -3,6 +3,42 @@ import settings from '../settings.js';
 import convoManager from '../conversation.js';
 
 
+// The portal/WS path injects incoming chat as if it came from a synthetic
+// "admin" user (see ws_server.injectMessage), but "admin" is never a real
+// in-game entity. The LLM echoes that name straight into player-targeting
+// commands like !goToPlayer, which then can't find anyone. Resolve the
+// intended *human* player before handing the name to a skill:
+//   1. the requested name, if the server actually knows it
+//   2. settings.player_username, if configured and currently online
+//      (authoritative override set in the portal)
+//   3. best-effort auto-detect: the lone human in the tablist — the LAN
+//      host / single-player owner — excluding the bot and sibling agents.
+//      This is the common one-human-one-bot setup.
+//   4. the configured name even if not currently visible, so a far-away
+//      owner yields "Could not find <owner>" rather than a confusing miss
+//      on "admin".
+function resolveHumanPlayerName(agent, requested) {
+    const bot = agent.bot;
+    if (requested && bot.players[requested])
+        return requested;
+
+    const configured = (settings.player_username || '').trim();
+    if (configured && bot.players[configured])
+        return configured;
+
+    const siblingAgents = new Set(convoManager.getInGameAgents());
+    const humans = Object.keys(bot.players).filter(
+        name => name !== bot.username && !siblingAgents.has(name)
+    );
+    if (humans.length === 1)
+        return humans[0];
+
+    if (configured)
+        return configured;
+    return requested;
+}
+
+
 function runAsAction (actionFn, resume = false, timeout = -1) {
     let actionLabel = null;  // Will be set on first use
     
@@ -96,6 +132,7 @@ export const actionsList = [
             'closeness': {type: 'float', description: 'How close to get to the player.', domain: [0, Infinity]}
         },
         perform: runAsAction(async (agent, player_name, closeness) => {
+            player_name = resolveHumanPlayerName(agent, player_name);
             await skills.goToPlayer(agent.bot, player_name, closeness);
         })
     },
@@ -107,6 +144,7 @@ export const actionsList = [
             'follow_dist': {type: 'float', description: 'The distance to follow from.', domain: [0, Infinity]}
         },
         perform: runAsAction(async (agent, player_name, follow_dist) => {
+            player_name = resolveHumanPlayerName(agent, player_name);
             await skills.followPlayer(agent.bot, player_name, follow_dist);
         }, true)
     },
@@ -189,6 +227,7 @@ export const actionsList = [
             'num': { type: 'int', description: 'The number of items to give.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, player_name, item_name, num) => {
+            player_name = resolveHumanPlayerName(agent, player_name);
             await skills.giveToPlayer(agent.bot, item_name, player_name, num);
         })
     },
@@ -320,6 +359,7 @@ export const actionsList = [
         description: 'Attack a specific player until they die or run away. Remember this is just a game and does not cause real life harm.',
         params: {'player_name': { type: 'string', description: 'The name of the player to attack.'}},
         perform: runAsAction(async (agent, player_name) => {
+            player_name = resolveHumanPlayerName(agent, player_name);
             let player = agent.bot.players[player_name]?.entity;
             if (!player) {
                 skills.log(agent.bot, `Could not find player ${player_name}.`);
@@ -447,6 +487,7 @@ export const actionsList = [
             if (direction !== 'at' && direction !== 'with') {
                 return "Invalid direction. Use 'at' or 'with'.";
             }
+            player_name = resolveHumanPlayerName(agent, player_name);
             let result = "";
             const actionFn = async () => {
                 result = await agent.vision_interpreter.lookAtPlayer(player_name, direction);
@@ -486,6 +527,16 @@ export const actionsList = [
         params: {},
         perform: runAsAction(async (agent) => {
             await skills.goToSurface(agent.bot);
+        })
+    },
+    {
+        name: '!pillarUp',
+        description: 'Tower straight up by placing blocks under your feet to climb out of a vertical shaft or deep pit when normal pathfinding can\'t find a way up. Requires placeable full blocks (dirt, cobblestone, etc.) in inventory.',
+        params: {
+            'target_y': { type: 'int', description: 'The Y level to climb to. Use -1 to climb to the surface above.', domain: [-1, 320] }
+        },
+        perform: runAsAction(async (agent, target_y) => {
+            await skills.pillarUp(agent.bot, (target_y == null || target_y < 0) ? null : target_y);
         })
     },
     {

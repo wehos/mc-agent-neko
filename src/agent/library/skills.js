@@ -1118,7 +1118,7 @@ export async function giveToPlayer(bot, itemType, username, num=1) {
         log(bot, `You cannot give items to yourself.`);
         return false;
     }
-    let player = bot.players[username].entity
+    let player = bot.players[username]?.entity
     if (!player) {
         log(bot, `Could not find ${username}.`);
         return false;
@@ -1656,7 +1656,7 @@ export async function goToPlayer(bot, username, distance=3) {
 
     bot.modes.pause('self_defense');
     bot.modes.pause('cowardice');
-    let player = bot.players[username].entity
+    let player = bot.players[username]?.entity
     if (!player) {
         log(bot, `Could not find ${username}.`);
         return false;
@@ -1680,7 +1680,7 @@ export async function followPlayer(bot, username, distance=4) {
      * @example
      * await skills.followPlayer(bot, "player");
      **/
-    let player = bot.players[username].entity
+    let player = bot.players[username]?.entity
     if (!player)
         return false;
 
@@ -2330,11 +2330,149 @@ export async function goToSurface(bot) {
         if (!block || block.name === 'air' || block.name === 'cave_air') {
             continue;
         }
-        await goToPosition(bot, block.position.x, block.position.y + 1, block.position.z, 0); // this will probably work most of the time but a custom mining and towering up implementation could be added if needed
-        log(bot, `Going to the surface at y=${y+1}.`);``
-        return true;
+        const targetY = block.position.y + 1;
+        try {
+            await goToPosition(bot, block.position.x, targetY, block.position.z, 0);
+            log(bot, `Going to the surface at y=${targetY}.`);
+            return true;
+        } catch (err) {
+            // The pathfinder couldn't walk a route up — the classic case is
+            // being trapped at the bottom of a vertical shaft, where there is
+            // no foothold to climb. Fall back to towering straight up.
+            log(bot, `No walkable route to the surface, towering up instead...`);
+            return await pillarUp(bot, targetY);
+        }
     }
     return false;
+}
+
+export async function pillarUp(bot, targetY = null) {
+    /**
+     * Tower straight up (the classic "jump and place a block under your feet"
+     * climb) to escape a vertical shaft / deep pit where the pathfinder can't
+     * find a walking route. Locates the open column to climb in, then leans on
+     * the pathfinder's built-in 1x1 tower support — but in short vertical
+     * increments and with digging disabled, so it never times out searching a
+     * tall shaft (the failure that makes plain navigation tunnel sideways and
+     * get stuck) and never wanders off to dig instead of climb.
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {number} [targetY], Y to climb to. Defaults to the surface above
+     *   the chosen column (clamped to the open part of that column).
+     * @returns {Promise<boolean>} true if it reached (within 1 of) targetY.
+     * @example
+     * await skills.pillarUp(bot); // climb out of a shaft up to daylight
+     **/
+    const MAX_Y = 319;
+    const isPassable = (b) => !b || b.boundingBox === 'empty';
+
+    // How many open (non-solid) blocks rise above (x, fromY) before a ceiling.
+    const openRunUp = (x, z, fromY) => {
+        let y = fromY;
+        while (y <= MAX_Y && isPassable(bot.blockAt(new Vec3(x, y, z)))) y++;
+        return y - fromY;
+    };
+    // Highest solid block at (x,z) — i.e. the "surface".
+    const surfaceY = (x, z) => {
+        for (let y = MAX_Y; y > -64; y--) {
+            if (!isPassable(bot.blockAt(new Vec3(x, y, z)))) return y;
+        }
+        return null;
+    };
+
+    // Only tower with full solid blocks we actually hold (no slabs/stairs/etc,
+    // which don't make a reliable 1-high step).
+    const SCAFFOLD = ['dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'deepslate',
+        'netherrack', 'granite', 'andesite', 'diorite', 'tuff', 'blackstone', 'gravel',
+        'sand', 'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks',
+        'acacia_planks', 'dark_oak_planks'];
+    const held = new Set(bot.inventory.items().map(i => i.name));
+    const usable = SCAFFOLD.filter(n => held.has(n));
+    if (usable.length === 0) {
+        log(bot, `Can't pillar up: no placeable full blocks (dirt/cobblestone/etc.) in inventory.`);
+        return false;
+    }
+
+    const start = bot.entity.position;
+    const bx = Math.floor(start.x), by = Math.floor(start.y), bz = Math.floor(start.z);
+
+    // --- Find the shaft column ---------------------------------------------
+    // Prefer the column the bot already stands in. Only scan around when it's
+    // capped low (bot tucked in a side pocket, not under the open shaft).
+    let sx = bx, sz = bz;
+    let bestRun = openRunUp(bx, bz, by + 1);
+    if (bestRun < 3) {
+        for (let dx = -2; dx <= 2; dx++) {
+            for (let dz = -2; dz <= 2; dz++) {
+                if (dx === 0 && dz === 0) continue;
+                const nx = bx + dx, nz = bz + dz;
+                // Must be a spot the bot could stand in: feet open, floor solid.
+                const feet = bot.blockAt(new Vec3(nx, by, nz));
+                const floor = bot.blockAt(new Vec3(nx, by - 1, nz));
+                if (!isPassable(feet) || isPassable(floor)) continue;
+                const run = openRunUp(nx, nz, by + 1);
+                if (run > bestRun) { bestRun = run; sx = nx; sz = nz; }
+            }
+        }
+    }
+    if (bestRun < 2) {
+        log(bot, `Can't pillar up: the ceiling is right overhead. You may need to dig up first.`);
+        return false;
+    }
+
+    // --- Decide how high to climb ------------------------------------------
+    if (targetY == null) {
+        const sy = surfaceY(sx, sz);
+        targetY = sy != null ? sy + 1 : by + bestRun;
+    }
+    // Never aim past the open part of the column — towering can't pass a ceiling.
+    targetY = Math.min(Math.floor(targetY), by + bestRun);
+    if (targetY <= by + 1) {
+        log(bot, `Already at the top of this column (y=${by}).`);
+        return true;
+    }
+    log(bot, `Pillaring up column (${sx}, ${sz}) from y=${by} to y=${targetY}.`);
+
+    // Walk under the chosen column first when it isn't the current one.
+    if (sx !== bx || sz !== bz) {
+        try { await goToPosition(bot, sx + 0.5, by, sz + 0.5, 0.5); } catch (e) { /* best effort */ }
+    }
+
+    // --- Tower up in increments --------------------------------------------
+    const moves = new pf.Movements(bot);
+    moves.canDig = false;            // only tower, never tunnel
+    moves.allow1by1towers = true;
+    moves.scafoldingBlocks = usable.map(n => mc.getBlockId(n)).filter(id => id != null);
+    moves.placeCost = 1;
+    bot.pathfinder.setMovements(moves);
+
+    const STEP = 6; // short legs so A* never times out searching a tall shaft
+    try {
+        while (Math.floor(bot.entity.position.y) < targetY) {
+            if (bot.interrupt_code) { log(bot, `Pillar up interrupted.`); break; }
+            if (!bot.inventory.items().some(i => usable.includes(i.name))) {
+                log(bot, `Ran out of blocks to pillar up with.`);
+                break;
+            }
+            const curY = Math.floor(bot.entity.position.y);
+            const nextY = Math.min(curY + STEP, targetY);
+            try {
+                await bot.pathfinder.goto(new pf.goals.GoalBlock(sx, nextY, sz));
+            } catch (e) {
+                // pathfinder gave up on this leg; progress check below decides.
+            }
+            if (Math.floor(bot.entity.position.y) <= curY) {
+                log(bot, `Stopped climbing at y=${Math.floor(bot.entity.position.y)} (couldn't place higher).`);
+                break;
+            }
+        }
+    } finally {
+        bot.pathfinder.setGoal(null);
+    }
+
+    const finalY = Math.floor(bot.entity.position.y);
+    const reached = finalY >= targetY - 1;
+    log(bot, reached ? `Pillared up and reached y=${finalY}.` : `Pillared up to y=${finalY} (target was ${targetY}).`);
+    return reached;
 }
 
 export async function useToolOn(bot, toolName, targetName) {

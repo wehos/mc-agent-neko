@@ -25,6 +25,11 @@
         "default": "offline",
         "options": ["offline", "microsoft"]
     },
+    "player_username": {
+        "type": "string",
+        "description": "The real in-game username of the human player the bot should treat as its owner (used by !goToPlayer/!followPlayer/etc. when the chat sender isn't a real player). Leave empty to auto-detect the LAN host / single-player owner at runtime.",
+        "default": ""
+    },
     "base_profile": {
         "type": "string",
         "description": "Allowed values: survival, assistant, creative, god_mode. Each has fine tuned settings for different game modes.",

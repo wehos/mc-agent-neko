@@ -3,6 +3,7 @@ const settings = {
     "host": "localhost", // or "localhost", "your.ip.address.here"
     "port": 55916, // set to -1 to automatically scan for open ports
     "auth": "offline", // or "microsoft"
+    "player_username": "", // real in-game name of the human owner the bot follows/serves. empty = auto-detect LAN host / single-player owner at runtime
 
     // the mindserver manages all agents and hosts the UI
     "mindserver_port": 8765,
