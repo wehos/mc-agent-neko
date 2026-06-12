@@ -496,6 +496,11 @@ export default async function prepNether(bot, ctx) {
     // we're out AND truly hungry (≤6), surface and hunt — but only by day (feedUp itself
     // bails on night/hostiles, surfaceUp is the long climb we already know how to do).
     const FOOD_RE2 = /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|^cod$|^salmon$|melon_slice|sweet_berries|_stew|^rabbit$|baked_/;
+    const woodEqNow = () => {
+        const c = world.getInventoryCounts(bot);
+        return Object.keys(c).filter(k => k.endsWith('_planks')).reduce((s, k) => s + c[k], 0)
+            + Object.keys(c).filter(k => k.endsWith('_log')).reduce((s, k) => s + c[k], 0) * 4;
+    };
     const keepFed = async () => {
         // 维持线必须≥18 (回血阈值): 旧值14让bot吃到14就停 — 永远差4点回不了血,
         // 全天挂着hp1-2的慢性病根(磕碰伤一辈子不愈合)。19留1点余量。
@@ -508,6 +513,10 @@ export default async function prepNether(bot, ctx) {
         try { if (bot.entity.position.y < 55) await skills.customSkill(bot, 'surfaceUp'); } catch (e) { prog(`prepNether: surfaceUp err ${e.message}`); }
         try { await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: feedUp err ${e.message}`); }
         prog(`prepNether: hunt done — food=${bot.food} hp=${Math.round(bot.health)}`);
+        if (bot.food <= 2 && bot.health <= 6 && woodEqNow() < 2) {
+            prog(`prepNether: FAMINE forage — feedUp found no food; trying nearby wood/apples once before holding`);
+            try { await skills.customSkill(bot, 'chopWood', 2); } catch (e) { prog(`prepNether: famine chopWood err ${e.message}`); }
+        }
     };
 
     // ★人类式资源管理 (#21, 用户提出"想想人类玩家怎么做"): humans manage FUTURE consumption,
@@ -562,6 +571,10 @@ export default async function prepNether(bot, ctx) {
         // 3) wood buffer — top up ONLY where it's cheap: surface + daylight. 8 planks-worth
         //    covers a full expedition of pick/stick replacements.
         if (planksEq() < 8 && onSurface && !isNightNow()) {
+            if (bot.food <= 2 && bot.health <= 6) {
+                prog(`prepNether: SKIP wood buffer during famine (food=${bot.food}, hp=${Math.round(bot.health)})`);
+                return;
+            }
             prog(`prepNether: KIT — wood buffer low (${planksEq()} planks-eq) → chopWood before descending`);
             try { await skills.customSkill(bot, 'chopWood', 3); } catch (e) { prog(`prepNether: wood buffer err ${e.message}`); }
         }
@@ -618,6 +631,11 @@ export default async function prepNether(bot, ctx) {
             } catch (e) {}
         }
     };
+    const famineCritical = () => {
+        const edible = bot.inventory.items().some(i => FOOD_RE2.test(i.name));
+        const hasPick = bot.inventory.items().some(i => /_pickaxe$/.test(i.name));
+        return bot.food <= 2 && bot.health <= 6 && !edible && woodEqNow() < 2 && !hasPick;
+    };
 
     // ★死亡不清零: once we've earned a KEY piece of gear (shield / diamond_sword), bank a
     // copy so a death doesn't reset us to naked (bankRecover withdraws it next life). Gated to
@@ -629,6 +647,10 @@ export default async function prepNether(bot, ctx) {
         await tryHome();   // keep planting the home bed in any safe window (no-op once set) — top priority
         await stockTorches();   // light the mines before deep diamond runs — kills the cave-mob swarm deaths
         await keepFed();   // food<18=no regen — eat held food / surface-hunt before the next dive
+        if (famineCritical()) {
+            prog(`prepNether: FAMINE gate — no edible food and food=${bot.food}, hp=${Math.round(bot.health)}; yield before kit goal ${g.item}`);
+            return false;
+        }
         await keepKit();   // 家当自愈: replace lost furnace/table/pickaxe from cobble stock
         let tries = 0;
         while (has(g.item) < g.count && tries++ < 3) {
@@ -638,6 +660,10 @@ export default async function prepNether(bot, ctx) {
                                // only fired once per goal at the top. Self-gated → cheap no-op.
             await keepFed();   // and keep the hunger floor mid-goal too (a single achieve goal
                                // can grind underground for an hour — between-goal checks miss it)
+            if (famineCritical()) {
+                prog(`prepNether: FAMINE gate mid-goal — no edible food and food=${bot.food}, hp=${Math.round(bot.health)}; stop ${g.item}`);
+                return false;
+            }
             if (bot.interrupt_code) try { bot.interrupt_code = false; } catch (e) {}
             prog(`prepNether: need ${g.item} ${has(g.item)}/${g.count} (try ${tries})`);
             try { await skills.customSkill(bot, 'achieve', g); }

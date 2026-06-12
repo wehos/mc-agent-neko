@@ -113,14 +113,15 @@ WorldModel(黑板, 1-2Hz) ──→ Arbiter(唯一仲裁器) ──→ BodyGate(
 
 ## §6 监控手册（接手后第一小时照此搭）
 
-1. 读 `heartbeat.log` + `ALERTS.txt` 尾部补回交接间隙的状态（这两个是不死记录）。
-2. 重挂监听栈（Monitor 是会话级的，上任的已随会话死亡）：
+1. **先跑 `node bots/_supervisor/fresh_status.mjs`**。它会给出 `classification`、端口状态和各遥测文件年龄。只有 `classification=live` 且关键文件 fresh 时，才允许把 `heartbeat.log`/`progress.txt`/`vitals.json` tail 当作实时现场；否则只能报告 offline / minecraft-only / stale，不得根据旧日志推断 bot 当前行为。
+2. 读 `heartbeat.log` + `ALERTS.txt` 尾部补回交接间隙的状态（这两个是不死记录），但必须同时报告 mtime/age。
+3. 重挂监听栈（Monitor 是会话级的，上任的已随会话死亡）：
    - ALERTS.txt 全行转发（**行里不含 'ALERT' 字样，不能 grep**）；
    - death_log.jsonl 新增行；
    - vitals/mobility 转换 + 崩溃/掉血（带 radar 快照）；
-   - **节拍器**：8 分钟强制对账（硬指标：pos/y/hp/food/ms 里程碑/progress 尾；"推送回声不算情报，必须主动读"）。
-3. 巡检判据速查：progress 新+err 老=半死 wedge；双老=真冻；"iter 在转但 pos/y/total 不变"=任务死循环（watchdog 抓不到，要人看）；死亡率只信 death_log 累计；判死活看 agent.err mtime。
-4. 桌面通知/跨会话告警走 watchdog 的 ALERTS.txt + scheduled-tasks MCP（CronCreate/Monitor 都是会话级，会话回收即死）。
+   - **节拍器**：1-8 分钟强制对账（硬指标：fresh_status classification、pos/y/hp/food/ms 里程碑/progress 尾；"推送回声不算情报，必须主动读"）。
+4. 巡检判据速查：progress 新+err 老=半死 wedge；双老=真冻；"iter 在转但 pos/y/total 不变"=任务死循环（watchdog 抓不到，要人看）；死亡率只信 death_log 累计；判死活看 agent.err mtime。**所有这些判据只对 fresh 文件成立**，stale tail 只能当历史证据。
+5. 桌面通知/跨会话告警走 watchdog 的 ALERTS.txt + scheduled-tasks MCP（CronCreate/Monitor 都是会话级，会话回收即死）。
 
 ## §7 改进流程（怎么让每一滴血都变成代码)
 

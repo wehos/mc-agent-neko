@@ -238,12 +238,35 @@ class WSMessageServer {
                 // This is the reliable execution path for scripted progression.
                 this.runSkill(data.skill, data.args || []);
                 break;
+            case 'cancel_skill':
+                this.cancelSkill(data.reason || 'supervisor requested cancel');
+                break;
             default:
                 this.broadcast({
                     type: 'error',
                     error: `Unknown message type: ${data.type}`
                 });
         }
+    }
+
+    cancelSkill(reason) {
+        const bot = this.agent && this.agent.bot;
+        if (!bot) {
+            this.broadcast({ type: 'cancel_result', ok: false, error: 'no agent online', reason });
+            return;
+        }
+        try { bot.interrupt_code = true; } catch (e) {}
+        try { bot._chopGen = (bot._chopGen || 0) + 1; } catch (e) {}
+        try { bot._supervisorCancelAt = Date.now(); } catch (e) {}
+        try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+        try { bot.clearControlStates(); } catch (e) {}
+        console.log(`🧯 cancel_skill: ${reason}`);
+        this.broadcast({
+            type: 'cancel_result',
+            ok: true,
+            reason,
+            running: this._skillRunningName || null,
+        });
     }
 
     async runSkill(skillName, args) {

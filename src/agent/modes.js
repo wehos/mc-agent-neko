@@ -310,6 +310,13 @@ const modes_list = [
                     // DWELL, don't fast-return: an instant return re-fires the mode every
                     // ~300ms ("Nightfall securing" spam round 3) and the interrupt storm
                     // starves every other system. We're sheltered — sit 5s per pass.
+                    if (Date.now() - (this._nightDwellAt || 0) > 30000) {
+                        this._nightDwellAt = Date.now();
+                        try {
+                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                `[${new Date().toISOString()}] [self_preservation] night bunker dwell: covered=true hp=${Math.round(bot.health)} food=${bot.food} hostiles=${this.nearbyHostiles(bot).length}\n`);
+                        } catch (e) {}
+                    }
                     await new Promise(r => setTimeout(r, 5000));
                     return;
                 }
@@ -601,6 +608,12 @@ const modes_list = [
                 if (bot.interrupt_code || bot.health <= 0) break;   // real stop / death — return promptly, never refuse
                 const food = bot.inventory.items().find(i => /cooked_|_bread|^bread$|^apple$|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|baked_|_stew/.test(i.name));
                 if (food && bot.food < 20) { try { await skills.consume(bot, food.name); } catch (e) {} }
+                if (w % 10 === 0) {
+                    try {
+                        fs.appendFileSync('bots/_supervisor/progress.txt',
+                            `[${new Date().toISOString()}] [self_preservation] sealed night hold: w=${w} hp=${Math.round(bot.health)} food=${bot.food}\n`);
+                    } catch (e) {}
+                }
                 await skills.wait(bot, 3000);
             }
         },
@@ -971,7 +984,10 @@ const modes_list = [
                 });
             }
             else if (this.shouldNightShelter(bot)) {
-                say(agent, 'Nightfall — securing till dawn (proactive, before mobs swarm).');
+                if (Date.now() - (this._lastNightfallSayAt || 0) > 30000) {
+                    this._lastNightfallSayAt = Date.now();
+                    say(agent, 'Nightfall — securing till dawn (proactive, before mobs swarm).');
+                }
                 execute(this, agent, () => this.bunkerDown(agent));
             }
             else if (this.shouldFlee(bot)) {
@@ -1298,6 +1314,8 @@ const modes_list = [
                         this.pinKick = now;
                         say(agent, 'Pinned 15min+ — kicking the stack (forced interrupt).');
                         try { bot.interrupt_code = true; } catch (e) {}
+                        try { bot._chopGen = (bot._chopGen || 0) + 1; } catch (e) {}
+                        try { bot._supervisorCancelAt = Date.now(); } catch (e) {}
                         try { bot.pathfinder.setGoal(null); } catch (e) {}
                         try { bot.clearControlStates(); } catch (e) {}
                     }
@@ -1478,6 +1496,33 @@ const modes_list = [
                 }
                 bot._mobility = { state: st, since: this.stateSince, exits, enclosed };
             } catch (e) { return; }
+            const STONY_MOBILITY = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
+            const hasPick = () => bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+            const heldIsPick = () => !!(bot.heldItem && /_pickaxe$/.test(bot.heldItem.name));
+            const plannedNoPickStone = () => Date.now() < (bot._plannedNoPickStoneUntil || 0);
+            const ensurePickForStone = async (block, why = '') => {
+                if (!block || !STONY_MOBILITY.test(block.name || '')) return true;
+                if (!hasPick()) return plannedNoPickStone();
+                if (heldIsPick()) return true;
+                const pick = bot.inventory.items().find(it => /_pickaxe$/.test(it.name));
+                try { if (pick) await bot.equip(pick, 'hand'); } catch (e) {}
+                await new Promise(r => setTimeout(r, 80));
+                if (heldIsPick()) return true;
+                try { await bot.tool.equipForBlock(block); } catch (e) {}
+                await new Promise(r => setTimeout(r, 80));
+                if (heldIsPick()) return true;
+                try {
+                    fs.appendFileSync('bots/_supervisor/progress.txt',
+                        `[${new Date().toISOString()}] [mobility] stone dig blocked (${why}): ${block.name} @${block.position.x},${block.position.y},${block.position.z} held=${bot.heldItem ? bot.heldItem.name : 'empty'}\n`);
+                } catch (e) {}
+                return false;
+            };
+            const guardedDig = async (block, why = '') => {
+                if (!block) return false;
+                if (!(await ensurePickForStone(block, why))) return false;
+                if (!STONY_MOBILITY.test(block.name || '')) { try { await bot.tool.equipForBlock(block); } catch (e) {} }
+                try { await bot.dig(block); return true; } catch (e) { return false; }
+            };
             // ── reactions ──
             if (st === 'ENTOMBED') {
                 // instant dig-out, reflex priority — no stagnation timer, no material
@@ -1497,8 +1542,7 @@ const modes_list = [
                     for (const c of [m2.offset(sx, 1, sz), m2.offset(sx, 0, sz)]) {
                         const b = bot.blockAt(c);
                         if (b && b.boundingBox === 'block' && !/bedrock|water|lava/.test(b.name)) {
-                            try { await bot.tool.equipForBlock(b); } catch (e) {}
-                            try { await bot.dig(b); } catch (e) {}
+                            await guardedDig(b, 'ENTOMBED');
                         }
                     }
                     try { await bot.lookAt(m2.offset(sx + 0.5, 1.6, sz + 0.5), true); } catch (e) {}
@@ -1510,7 +1554,7 @@ const modes_list = [
                 // ★ENGINEERED MARCH — locally free but every pathfind dead-ends (shattered
                 // cliff/lake terrain): stop asking the planner, BUILD the road. Locked
                 // heading toward the anchor; per segment: clear the 2-high cell ahead
-                // (dig, no material gate — MAROONED is an exception state), bridge a gap
+                // (material-gated: no-pick never bare-hands stone), bridge a gap
                 // (place into the NEIGHBOR cell at foot height, body-clearance checked,
                 // no self-place race), step in. ~6 cells per burst, state re-evaluated
                 // between bursts; >20 blocks of net displacement re-anchors to FREE.
@@ -1557,16 +1601,33 @@ const modes_list = [
                     const [sx, sz] = bot._marchDir;
                     const _mStart = bot.entity.position.clone();
                     const FILLR = /^dirt$|cobblestone|cobbled|granite|andesite|diorite|^stone$|tuff|gravel|_planks$|_log$/;
+                    const canMarchDig = (b) => b
+                        && b.boundingBox === 'block'
+                        && !/bedrock|water|lava/.test(b.name)
+                        && (hasPick() || !STONY_MOBILITY.test(b.name));
                     for (let seg = 0; seg < 6; seg++) {
                         if (bot.interrupt_code || bot.health <= 0) break;
                         const m2 = bot.entity.position.floored();
+                        let stoneBlocked = null;
                         // clear the 2-high cell ahead
                         for (const c of [m2.offset(sx, 1, sz), m2.offset(sx, 0, sz)]) {
                             const b = bot.blockAt(c);
                             if (b && b.boundingBox === 'block' && !/bedrock|water|lava/.test(b.name)) {
-                                try { await bot.tool.equipForBlock(b); } catch (e) {}
-                                try { await bot.dig(b); } catch (e) {}
+                                if (!canMarchDig(b)) { stoneBlocked = b; break; }
+                                await guardedDig(b, 'MAROONED');
                             }
+                        }
+                        if (stoneBlocked) {
+                            try { bot.clearControlStates(); } catch (e) {}
+                            try { bot._maroonedNoPickBlockedAt = Date.now(); } catch (e) {}
+                            try {
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [mobility] MAROONED no-pick stone gate: ${stoneBlocked.name} @${stoneBlocked.position.x},${stoneBlocked.position.y},${stoneBlocked.position.z}\n`);
+                            } catch (e) {}
+                            bot._marchDir = [-sz, sx];
+                            bot._marchFails = 0;
+                            await new Promise(r => setTimeout(r, 1200));
+                            break;
                         }
                         // bridge: no floor within 3 below the cell ahead → place a block at
                         // its foot level (neighbor-cell place, no race; body-clearance check)
@@ -1603,13 +1664,141 @@ const modes_list = [
                     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
                         const b1 = bot.blockAt(m2.offset(dx, 1, dz));
                         if (b1 && b1.boundingBox === 'block' && !/bedrock|water|lava/.test(b1.name)) {
-                            try { await bot.tool.equipForBlock(b1); } catch (e) {}
-                            try { await bot.dig(b1); } catch (e) {}
+                            if (!hasPick() && STONY_MOBILITY.test(b1.name)) {
+                                try { bot._pocketNoPickBlockedAt = Date.now(); } catch (e) {}
+                                try {
+                                    fs.appendFileSync('bots/_supervisor/progress.txt',
+                                        `[${new Date().toISOString()}] [mobility] POCKET no-pick stone gate: ${b1.name} @${b1.position.x},${b1.position.y},${b1.position.z}\n`);
+                                } catch (e) {}
+                                continue;
+                            }
+                            await guardedDig(b1, 'POCKET');
                             break;
                         }
                     }
                 });
             }
+        }
+    },
+    {
+        name: 'mine_motion_audit',
+        description: 'Telemetry: wraps dig/placeBlock with structured operation logs for cave movement debugging.',
+        interrupts: [],
+        on: true,
+        active: false,
+        always: true,
+        update: async function (agent) {
+            const bot = agent.bot;
+            if (!bot || bot._mineMotionAuditPatched) return;
+            bot._mineMotionAuditPatched = true;
+            bot._mineMotionSeq = bot._mineMotionSeq || 0;
+            const file = 'bots/_supervisor/mine_motion.jsonl';
+            const posObj = (p) => p ? ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }) : null;
+            const exactPos = () => {
+                const p = bot.entity && bot.entity.position;
+                return p ? { x: Number(p.x.toFixed(3)), y: Number(p.y.toFixed(3)), z: Number(p.z.toFixed(3)) } : null;
+            };
+            const blockObj = (b) => b ? ({
+                name: b.name,
+                position: posObj(b.position),
+                boundingBox: b.boundingBox,
+            }) : null;
+            const blockAt = (p) => {
+                try { return blockObj(bot.blockAt(p)); } catch (e) { return null; }
+            };
+            const envSnap = () => {
+                const m = bot.entity && bot.entity.position && bot.entity.position.floored();
+                if (!m) return [];
+                const cells = [];
+                for (const dy of [-1, 0, 1, 2]) {
+                    for (const dz of [-1, 0, 1]) {
+                        for (const dx of [-1, 0, 1]) {
+                            const b = bot.blockAt(m.offset(dx, dy, dz));
+                            cells.push({ d: [dx, dy, dz], n: b ? b.name : 'unknown', bb: b ? b.boundingBox : '?' });
+                        }
+                    }
+                }
+                return cells;
+            };
+            const write = (event, data = {}) => {
+                try {
+                    fs.appendFileSync(file, JSON.stringify({
+                        ts: new Date().toISOString(),
+                        event,
+                        seq: data.seq,
+                        pos: exactPos(),
+                        foot: blockAt(bot.entity.position),
+                        head: blockAt(bot.entity.position.offset(0, 1, 0)),
+                        above: blockAt(bot.entity.position.offset(0, 2, 0)),
+                        held: bot.heldItem ? bot.heldItem.name : 'empty',
+                        hp: Math.round(bot.health || 0),
+                        food: bot.food,
+                        skill: bot._currentSkill || null,
+                        mob: bot._mobility ? bot._mobility.state : null,
+                        data,
+                    }) + '\n');
+                } catch (e) {}
+            };
+            const stony = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
+            const heldIsPick = () => !!(bot.heldItem && /_pickaxe$/.test(bot.heldItem.name));
+            const pickItem = () => bot.inventory.items().find(it => /_pickaxe$/.test(it.name));
+            const ensurePickForDig = async (block, seq) => {
+                if (!block || !stony.test(block.name || '')) return true;
+                if (!pickItem()) return Date.now() < (bot._plannedNoPickStoneUntil || 0);
+                if (heldIsPick()) return true;
+                try { await bot.equip(pickItem(), 'hand'); } catch (e) {}
+                await new Promise(r => setTimeout(r, 80));
+                if (heldIsPick()) return true;
+                try { await bot.tool.equipForBlock(block); } catch (e) {}
+                await new Promise(r => setTimeout(r, 80));
+                if (heldIsPick()) return true;
+                write('dig.blocked', { seq, target: blockObj(block), reason: 'stony-without-held-pick' });
+                return false;
+            };
+            const originalDig = bot.dig.bind(bot);
+            bot.dig = async (block, ...args) => {
+                const seq = ++bot._mineMotionSeq;
+                const startedAt = Date.now();
+                write('dig.begin', { seq, target: blockObj(block), args, env: envSnap() });
+                if (!(await ensurePickForDig(block, seq))) {
+                    const err = new Error(`stone dig blocked without held pick: ${block ? block.name : 'unknown'}`);
+                    write('dig.end', { seq, ok: false, ms: Date.now() - startedAt, target: blockObj(block), error: err.message, env: envSnap() });
+                    throw err;
+                }
+                try {
+                    const result = await originalDig(block, ...args);
+                    write('dig.end', { seq, ok: true, ms: Date.now() - startedAt, target: blockObj(block), env: envSnap() });
+                    return result;
+                } catch (e) {
+                    write('dig.end', { seq, ok: false, ms: Date.now() - startedAt, target: blockObj(block), error: e.message, env: envSnap() });
+                    throw e;
+                }
+            };
+            const originalPlaceBlock = bot.placeBlock.bind(bot);
+            bot.placeBlock = async (referenceBlock, faceVector, ...args) => {
+                const seq = ++bot._mineMotionSeq;
+                const startedAt = Date.now();
+                const placeAt = referenceBlock && referenceBlock.position && faceVector
+                    ? referenceBlock.position.offset(faceVector.x, faceVector.y, faceVector.z)
+                    : null;
+                write('place.begin', {
+                    seq,
+                    reference: blockObj(referenceBlock),
+                    face: faceVector ? { x: faceVector.x, y: faceVector.y, z: faceVector.z } : null,
+                    placeAt: posObj(placeAt),
+                    args,
+                    env: envSnap(),
+                });
+                try {
+                    const result = await originalPlaceBlock(referenceBlock, faceVector, ...args);
+                    write('place.end', { seq, ok: true, ms: Date.now() - startedAt, placeAt: posObj(placeAt), env: envSnap() });
+                    return result;
+                } catch (e) {
+                    write('place.end', { seq, ok: false, ms: Date.now() - startedAt, placeAt: posObj(placeAt), error: e.message, env: envSnap() });
+                    throw e;
+                }
+            };
+            write('audit.installed', {});
         }
     },
     {
@@ -1668,6 +1857,7 @@ const modes_list = [
             const held = bot.heldItem;
             if (held && /_pickaxe$/.test(held.name)) return;
             if (!/stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/.test(tgt.name)) return;
+            if (bot._plannedNoPickStoneUntil && Date.now() < bot._plannedNoPickStoneUntil) return;
             // REGIONAL dedupe: a legit NOPICK climb chews stone for many minutes in one
             // area — per-block 30s dedupe pushed 5+ alerts per climb (pure noise once
             // the supervisor knows). One alert per ~16-block region per 10 minutes; a
@@ -1677,6 +1867,11 @@ const modes_list = [
             if (this.regions[rk] && Date.now() - this.regions[rk] < 600000) return;
             this.regions[rk] = Date.now();
             this.lastAlert = Date.now();
+            try { bot.interrupt_code = true; } catch (e) {}
+            try { bot._chopGen = (bot._chopGen || 0) + 1; } catch (e) {}
+            try { bot._supervisorCancelAt = Date.now(); } catch (e) {}
+            try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+            try { bot.clearControlStates(); } catch (e) {}
             try {
                 const p = bot.entity.position;
                 fs.appendFileSync('ALERTS.txt',

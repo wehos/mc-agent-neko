@@ -160,6 +160,18 @@ export default async function missionNether(bot, ctx) {
         // hands, the eyes, and the feet.
         try {
             if (bot._mobility && bot._mobility.state === 'MAROONED') {
+                const noPick = !bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+                const scaffold = ['gravel', 'dirt', 'sand', 'cobblestone', 'cobbled_deepslate']
+                    .reduce((s, n) => s + (has(n) || 0), 0);
+                const blockedRecent = bot._maroonedNoPickBlockedAt && Date.now() - bot._maroonedNoPickBlockedAt < 15000;
+                if (noPick && scaffold > 0 && blockedRecent && (!bot._lastMaroonedRescueAt || Date.now() - bot._lastMaroonedRescueAt > 60000)) {
+                    bot._lastMaroonedRescueAt = Date.now();
+                    bot._climbingAt = Date.now();
+                    const ty = Math.max(84, Math.floor(bot.entity.position.y) + 8);
+                    prog(`[mission] MAROONED no-pick stone gate + scaffold=${scaffold} → surfaceUp rescue target=${ty}`);
+                    try { await skills.customSkill(bot, 'surfaceUp', ty); } catch (e) { prog(`surfaceUp rescue threw: ${e.message}`); }
+                    continue;
+                }
                 prog(`[mission] standing down: MAROONED — march owns the body`);
                 await wait(5000);
                 continue;
@@ -169,10 +181,10 @@ export default async function missionNether(bot, ctx) {
         // ★LAST-RESORT BREAKOUT (the cliff-hole entrapment: stuck in a 6-block pocket
         // for HOURS — every polite escape (door-probe, stair-place, pillar) failed, the
         // material gate forbade bare-hand stone, and NOTHING was left running. Rule:
-        // pinned within 10 blocks for 20+ min = all subtle options are exhausted —
-        // tunnel STRAIGHT toward the anchor at any cost, material gates suspended.
-        // Bare-hand stone here is CORRECT (it fires the BARE-HAND alarm = supervisor
-        // sees the breakout in progress; slow beats entombed).
+        // pinned within 10 blocks for several minutes = subtle options are exhausted —
+        // tunnel toward the anchor, but keep the human material invariant: no-pick never
+        // punches stone. Dirt/gravel/wood are fair game; stone requires a pick or a real
+        // planner/scaffold route.
         try {
             const fp = bot.entity.position;
             if (!bot._stagPos || fp.distanceTo(bot._stagPos) > 10) { bot._stagPos = fp.clone(); bot._stagAt = Date.now(); }
@@ -206,16 +218,29 @@ export default async function missionNether(bot, ctx) {
                 const L = Math.hypot(vx, vz) || 1; vx /= L; vz /= L;
                 const sx = Math.abs(vx) > Math.abs(vz) ? Math.sign(vx) : 0;
                 const sz = sx === 0 ? Math.sign(vz) || 1 : 0;
-                prog(`★BREAKOUT: pinned 20min — tunneling toward anchor dir=${sx},${sz}, material gates OFF`);
+                const STONY = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
+                const hasPick = () => bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+                const canBreakoutDig = (b) => b
+                    && b.boundingBox === 'block'
+                    && !/water|lava|bedrock/.test(b.name)
+                    && (hasPick() || !STONY.test(b.name));
+                prog(`★BREAKOUT: pinned 4min — tunneling toward anchor dir=${sx},${sz}, material-gated`);
+                let blocked = null;
                 for (let st = 0; st < 10; st++) {
                     if (bot.interrupt_code || bot.health <= 0) break;
                     const m = bot.entity.position.floored();
                     for (const c of [m.offset(sx, 1, sz), m.offset(sx, 0, sz)]) {
                         const b = bot.blockAt(c);
                         if (b && b.boundingBox === 'block' && !/water|lava|bedrock/.test(b.name)) {
+                            if (!canBreakoutDig(b)) { blocked = b; break; }
                             try { await bot.tool.equipForBlock(b); } catch (e) {}
                             try { await bot.dig(b); } catch (e) {}
                         }
+                    }
+                    if (blocked) {
+                        prog(`★BREAKOUT gated: no-pick stone ${blocked.name} @${blocked.position.x},${blocked.position.y},${blocked.position.z}; yielding to scaffold/planner path`);
+                        bot._breakoutBlockedAt = Date.now();
+                        break;
                     }
                     try { await bot.lookAt(m.offset(sx + 0.5, 1.6, sz + 0.5), true); } catch (e) {}
                     bot.setControlState('forward', true);
@@ -266,6 +291,16 @@ export default async function missionNether(bot, ctx) {
         prog(`not kitted (obsidian=${has('obsidian')} f&s=${has('flint_and_steel')}) → prepNether`);
         try { await skills.customSkill(bot, 'prepNether'); }
         catch (e) { prog(`prepNether threw: ${e.message}`); }
+        try {
+            const t = (bot.time && bot.time.timeOfDay) || 0;
+            const night = t >= 13000 && t <= 23000;
+            const edible = bot.inventory.items().some(i => /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|^cod$|^salmon$|melon_slice|sweet_berries|_stew|^rabbit$|baked_/.test(i.name));
+            if (bot.food <= 2 && !edible) {
+                prog(`FAMINE backoff: food=${bot.food}, edible=false, night=${night} — ${night ? 'hold until safer window' : 'avoid hot-loop'}`);
+                await wait(night ? 30000 : 10000);
+                continue;
+            }
+        } catch (e) {}
         await wait(3000);
     }
     prog('missionNether: iter cap reached (5000) — returning; sticky re-arm will resume');

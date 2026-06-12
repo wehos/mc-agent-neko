@@ -134,6 +134,17 @@ function relayInbox() {
         let o;
         try { o = JSON.parse(line); } catch { o = line; }
         const online = connected && ws && ws.readyState === ws.OPEN;
+        // Raw typed control frame. This is the real-time trigger path for supervisor
+        // interrupts such as cancel_skill: watchdog/monitor appends one JSON line, and
+        // bridge relays it on the next 1s inbox tick.
+        if (o && typeof o === 'object' && o.type) {
+            if (online) {
+                ws.send(JSON.stringify(o));
+                logEvent({ type: 'sent_control', control: o.type, reason: o.reason || null });
+                writeStatus();
+            } else { logEvent({ type: 'send_failed_offline', control: o.type }); }
+            continue;
+        }
         // Direct skill execution (bypasses the LLM coder): {"skill":"name","args":[...]}
         if (o && typeof o === 'object' && o.skill) {
             if (online) {

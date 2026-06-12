@@ -8,6 +8,7 @@
 import fs from 'fs';
 import path from 'path';
 const _CHOP_PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
+const _MINE_MOTION = path.resolve(process.cwd(), 'bots', '_supervisor', 'mine_motion.jsonl');
 const _dbg = (s) => { try { fs.appendFileSync(_CHOP_PROG, `[${new Date().toISOString()}] [chopDBG] ${s}\n`); } catch (e) {} };
 // ★UNREACHABLE-TREE BLACKLIST (module-level → survives the achieve-loop's repeated re-ENTER of
 // chopWood within one process). Root cause of a ~40min bootstrap deadlock: 40-block scan finds ONE
@@ -68,6 +69,63 @@ export default async function chopWood(bot, ctx, count = 8) {
     const LOGS = ['jungle_log', 'oak_log', 'birch_log', 'spruce_log',
                   'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
     const total = () => LOGS.reduce((s, t) => s + (world.getInventoryCounts(bot)[t] || 0), 0);
+    const _motion = (event, data = {}) => {
+        try {
+            const p = bot.entity.position;
+            const fp = p.floored();
+            const blk = (pos) => {
+                const b = bot.blockAt(pos);
+                return b ? { name: b.name, bb: b.boundingBox, pos: { x: b.position.x, y: b.position.y, z: b.position.z } } : null;
+            };
+            const env = [];
+            for (const dy of [-1, 0, 1, 2]) {
+                for (const dz of [-1, 0, 1]) {
+                    for (const dx of [-1, 0, 1]) {
+                        const b = bot.blockAt(fp.offset(dx, dy, dz));
+                        env.push({ d: [dx, dy, dz], n: b ? b.name : 'unknown', bb: b ? b.boundingBox : '?' });
+                    }
+                }
+            }
+            fs.appendFileSync(_MINE_MOTION, JSON.stringify({
+                ts: new Date().toISOString(),
+                event,
+                pos: { x: Number(p.x.toFixed(3)), y: Number(p.y.toFixed(3)), z: Number(p.z.toFixed(3)) },
+                cell: { x: fp.x, y: fp.y, z: fp.z },
+                held: bot.heldItem ? bot.heldItem.name : 'empty',
+                hp: Math.round(bot.health || 0),
+                food: bot.food,
+                foot: blk(p),
+                head: blk(p.offset(0, 1, 0)),
+                above: blk(p.offset(0, 2, 0)),
+                env,
+                data,
+            }) + '\n');
+        } catch (e) {}
+    };
+    const STONY_BLOCK = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
+    const hasPick = () => bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+    const heldIsPick = () => !!(bot.heldItem && /_pickaxe$/.test(bot.heldItem.name));
+    const plannedNoPickStone = () => Date.now() < (bot._plannedNoPickStoneUntil || 0);
+    const ensurePickForStone = async (block, why = '') => {
+        if (!block || !STONY_BLOCK.test(block.name || '')) return true;
+        if (!hasPick()) return plannedNoPickStone();
+        if (heldIsPick()) return true;
+        const pick = bot.inventory.items().find(it => /_pickaxe$/.test(it.name));
+        try { if (pick) await bot.equip(pick, 'hand'); } catch (e) {}
+        await new Promise(r => setTimeout(r, 80));
+        if (heldIsPick()) return true;
+        try { await bot.tool.equipForBlock(block); } catch (e) {}
+        await new Promise(r => setTimeout(r, 80));
+        if (heldIsPick()) return true;
+        _dbg(`stone dig blocked: no pick actually held for ${block.name}${why ? ' ' + why : ''} held=${bot.heldItem ? bot.heldItem.name : 'empty'}`);
+        return false;
+    };
+    const guardedDig = async (block, why = '') => {
+        if (!block) return false;
+        if (!(await ensurePickForStone(block, why))) return false;
+        if (!STONY_BLOCK.test(block.name || '')) { try { await bot.tool.equipForBlock(block); } catch (e) {} }
+        try { await bot.dig(block); return true; } catch (e) { return false; }
+    };
 
     // Equip an axe if we have one (faster, still works barehanded).
     // ★Tool for wood: AXE if we have one, else BARE HAND — NEVER a sword (chops wood slowly +
@@ -108,6 +166,52 @@ export default async function chopWood(bot, ctx, count = 8) {
         const m3 = bot.entity.position;
         return Math.hypot(m3.x - cx, m3.z - cz) < 0.18;
     };
+    const _ascendStep = async (dx, dz, label = 'ascend-step', attempts = 3) => {
+        const stepCenter = (cell) => cell.offset(dx + 0.5, 1.15, dz + 0.5);
+        for (let attempt = 0; attempt < attempts; attempt++) {
+            try { bot.clearControlStates(); } catch (e) {}
+            await _centerOnBlock();
+            const start = bot.entity.position.clone();
+            const cell = start.floored();
+            const targetCell = cell.offset(dx, 0, dz);
+            _motion('ascend.begin', { label, attempt, dir: [dx, dz], targetCell: { x: targetCell.x, y: targetCell.y, z: targetCell.z } });
+            try { await bot.lookAt(stepCenter(cell), true); } catch (e) {}
+            let maxY = start.y;
+            bot.setControlState('sprint', false);
+            bot.setControlState('forward', true);
+            bot.setControlState('jump', true);
+            const t0 = Date.now();
+            while (Date.now() - t0 < 760) {
+                if (bot.entity.position.y > maxY) maxY = bot.entity.position.y;
+                if (Math.floor(bot.entity.position.y) > cell.y) break;
+                await new Promise(r => setTimeout(r, 40));
+            }
+            bot.setControlState('jump', false);
+            await new Promise(r => setTimeout(r, 180));
+            try { bot.clearControlStates(); } catch (e) {}
+            const end = bot.entity.position.clone();
+            const rose = Math.floor(end.y) > cell.y || end.y > start.y + 0.72;
+            const targetDist = Math.hypot(end.x - (targetCell.x + 0.5), end.z - (targetCell.z + 0.5));
+            _motion('ascend.end', {
+                label, attempt, dir: [dx, dz], ok: rose,
+                start: { x: Number(start.x.toFixed(3)), y: Number(start.y.toFixed(3)), z: Number(start.z.toFixed(3)) },
+                end: { x: Number(end.x.toFixed(3)), y: Number(end.y.toFixed(3)), z: Number(end.z.toFixed(3)) },
+                maxRise: Number((maxY - start.y).toFixed(3)),
+                targetDist: Number(targetDist.toFixed(3)),
+            });
+            if (rose) return true;
+            // Common failure: the hitbox rides the stair edge but never pops up. Back out,
+            // recenter, then retry with a fresh run-up instead of scraping the same edge.
+            try { await bot.lookAt(cell.offset(0.5 - dx * 0.6, 1.2, 0.5 - dz * 0.6), true); } catch (e) {}
+            bot.setControlState('back', true);
+            bot.setControlState('sneak', true);
+            await new Promise(r => setTimeout(r, 260));
+            try { bot.clearControlStates(); } catch (e) {}
+            await _centerOnBlock();
+        }
+        _dbg(`${label} failed dir=${dx},${dz} y=${Math.floor(bot.entity.position.y)}`);
+        return false;
+    };
     const digToSurface = async () => {
         // ★备用镐自愈 (in-skill, NOT boundary-dependent): the orchestrator's kit checks run
         // at goal/try boundaries, but a long chopWood loop can hold the stack for 20+ min —
@@ -128,6 +232,18 @@ export default async function chopWood(bot, ctx, count = 8) {
             }
         } catch (e) {}
         { const _ic = world.getInventoryCounts(bot); _dbg(`digToSurface START y=${Math.floor(bot.entity.position.y)} pick=${bot.inventory.items().some(it => /pickaxe/.test(it.name))} cob=${_ic['cobblestone'] || 0} dirt=${_ic['dirt'] || 0}`); }
+        const _trueSurfaceNow = () => {
+            const py = Math.floor(bot.entity.position.y);
+            let sky = true;
+            try {
+                const m = bot.entity.position.floored();
+                for (let dd = 2; dd <= 36; dd++) {
+                    const b = bot.blockAt(m.offset(0, dd, 0));
+                    if (b && b.boundingBox === 'block') { sky = false; break; }
+                }
+            } catch (e) { sky = false; }
+            return py >= 60 && sky && !(bot._mobility && bot._mobility.enclosed);
+        };
         // ★深层断镐陷阱 (#23实锤: 铁镐断在y-60+木头耗尽=做不了新镐,徒手啃深板岩7s+/块,
         // 120格=数小时): NOPICK且在深层时,先让寻路器试走天然洞穴通道上去(零挖掘),
         // 比硬啃快几个数量级。120s timebox,爬到y>40就算成功;失败再回硬啃路线。
@@ -144,6 +260,25 @@ export default async function chopWood(bot, ctx, count = 8) {
                 const _ynow = Math.floor(bot.entity.position.y);
                 _dbg(`cave-route result y=${_ynow}`);
                 if (_ynow >= 55) return true;
+            }
+        }
+        {
+            const _noPick = !bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+            const _lowResources = bot.health <= 8 || bot.food <= 8;
+            if (_noPick && _lowResources && !_trueSurfaceNow()) {
+                const _targetY = Math.max(82, Math.floor(bot.entity.position.y) + 12);
+                _dbg(`digToSurface NOPICK-low-resource → surfaceUp natural-route target=${_targetY}`);
+                try {
+                    await Promise.race([
+                        skills.customSkill ? skills.customSkill(bot, 'surfaceUp', _targetY) : skills.goToSurface(bot),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('surfaceUp timeout')), 90000)),
+                    ]);
+                } catch (e) {
+                    try { bot.pathfinder.stop(); } catch (_) {}
+                    try { bot.clearControlStates(); } catch (_) {}
+                    _dbg(`surfaceUp natural-route result err=${e.message}`);
+                }
+                if (_trueSurfaceNow()) { _dbg(`digToSurface DONE via surfaceUp y=${Math.floor(bot.entity.position.y)}`); return true; }
             }
         }
         let _lastY = -999, _stuck = 0;
@@ -184,15 +319,25 @@ export default async function chopWood(bot, ctx, count = 8) {
                 // 挖 [前+1(踏步), 前+2(净空), own head] 然后走跳上台阶。零放块依赖,
                 // 任何天花板下都保证 +1 格,是 pinned 楼梯同款已验证原语。
                 _dbg(`surf STUCK y=${py} → 阶梯上行 d=${ddx},${ddz}`);
+                let _blockedByNoPickStone = false;
+                const _pickForStuck = () => bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+                const _STONY_STUCK = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
+                let _plannedStoneStair = 0;
                 for (const c of [mm.offset(ddx, 1, ddz), mm.offset(ddx, 2, ddz), mm.offset(0, 2, 0)]) {
                     const b = bot.blockAt(c);
-                    if (b && !UP_OPEN.has(b.name) && !NO_DIG_UP.has(b.name)) { try { await bot.tool.equipForBlock(b); } catch (e) {} try { await bot.dig(b); } catch (e) {} }
+                    if (b && !UP_OPEN.has(b.name) && !NO_DIG_UP.has(b.name)) {
+                        if (!_pickForStuck() && _STONY_STUCK.test(b.name)) {
+                            if (py >= 80 && bot.food <= 2 && _plannedStoneStair < 3) {
+                                _plannedStoneStair++;
+                                _dbg(`surf STUCK planned no-pick stone stair ${_plannedStoneStair}/3 y=${py} name=${b.name}`);
+                                try { bot._plannedNoPickStoneUntil = Date.now() + 15000; } catch (e) {}
+                            } else { _blockedByNoPickStone = true; break; }
+                        }
+                        await guardedDig(b, 'surf-stuck');
+                    }
                 }
-                await _centerOnBlock();   // ★对中再上台阶 (斜站起跳会卡台阶棱)
-                try { await bot.lookAt(mm.offset(ddx + 0.5, 1.5, ddz + 0.5), true); } catch (e) {}
-                bot.setControlState('forward', true); bot.setControlState('jump', true);
-                await new Promise(r => setTimeout(r, 900));
-                bot.clearControlStates();
+                if (_blockedByNoPickStone) { _dbg(`surf STUCK y=${py} → no-pick stone gate, yielding instead of punching`); return false; }
+                await _ascendStep(ddx, ddz, 'surf-stuck-stair');
                 _stuck = 0; _lastY = -999;
                 continue;
             }
@@ -221,12 +366,11 @@ export default async function chopWood(bot, ctx, count = 8) {
             // was material-blind. Now: without a pickaxe only dirt-class blocks are
             // diggable; stone walls mean "find another way" (stair directions get a
             // strict all-dirt pass first), not "punch for a minute per block".
-            const _pickIn = () => bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
-            const _STONY = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
-            const _digOK = (b) => !!b && (_pickIn() || !_STONY.test(b.name));
+            const _pickIn = hasPick;
+            const _digOK = (b) => !!b && (_pickIn() || plannedNoPickStone() || !STONY_BLOCK.test(b.name));
             const headUp = bot.blockAt(bot.entity.position.offset(0, 2, 0));
             if (headUp && NO_DIG_UP.has(headUp.name)) { try { await skills.goToSurface(bot); } catch (e) {} return Math.floor(bot.entity.position.y) >= 62; }
-            if (headUp && !UP_OPEN.has(headUp.name) && _digOK(headUp)) { try { await bot.tool.equipForBlock(headUp); } catch (e) {} try { await bot.dig(headUp); } catch (e) {} }
+            if (headUp && !UP_OPEN.has(headUp.name) && _digOK(headUp)) await guardedDig(headUp, 'head-up');
             const before = Math.floor(bot.entity.position.y);
             // ★Manual MLG pillar — skills.pillarUp FAILED to lift us despite filler (chopDBG:
             // dirt=21 yet it fell through to the unstable staircase). Do it by hand reliably:
@@ -253,10 +397,7 @@ export default async function chopWood(bot, ctx, count = 8) {
                         if (!(refD && refD.boundingBox === 'block') || !faceD) continue;
                         try { await bot.equip(_fill, 'hand'); } catch (e) {}
                         try { await bot.placeBlock(refD, faceD); } catch (e) { continue; }
-                        try { await bot.lookAt(scD.offset(dx + 0.5, 1.6, dz + 0.5), true); } catch (e) {}
-                        bot.setControlState('forward', true); bot.setControlState('jump', true);
-                        await new Promise(r => setTimeout(r, 900));
-                        try { bot.clearControlStates(); } catch (_) {}
+                        await _ascendStep(dx, dz, 'surf-stair-place');
                         if (bot.entity.position.floored().y > scD.y) _dbg(`surf stair-step +1 → y=${Math.floor(bot.entity.position.y)}`);
                         break;
                     }
@@ -264,7 +405,7 @@ export default async function chopWood(bot, ctx, count = 8) {
             }
             if (_fill && Math.floor(bot.entity.position.y) <= before) {
                 const _h = bot.blockAt(bot.entity.position.offset(0, 2, 0));
-                if (_h && !UP_OPEN.has(_h.name) && !NO_DIG_UP.has(_h.name) && _digOK(_h)) { try { await bot.tool.equipForBlock(_h); } catch (e) {} try { await bot.dig(_h); } catch (e) {} }
+                if (_h && !UP_OPEN.has(_h.name) && !NO_DIG_UP.has(_h.name) && _digOK(_h)) await guardedDig(_h, 'pillar-head');
                 await _centerOnBlock();   // ★对中再跳 (不对中=跳起卡邻格边缘,实拍十跳九空)
                 try { await bot.equip(_fill, 'hand'); } catch (e) {}
                 const _ref = bot.blockAt(bot.entity.position.offset(0, -1, 0));
@@ -291,7 +432,7 @@ export default async function chopWood(bot, ctx, count = 8) {
                 // ANTI-SUFFOCATION: if a solid block ended up at head level (entombed), dig free at once.
                 try {
                     const _head = bot.blockAt(bot.entity.position.offset(0, 1, 0));
-                    if (_head && _head.boundingBox === 'block' && !NO_DIG_UP.has(_head.name)) { try { await bot.tool.equipForBlock(_head); } catch (e) {} await bot.dig(_head); }
+                    if (_head && _head.boundingBox === 'block' && !NO_DIG_UP.has(_head.name)) await guardedDig(_head, 'anti-suffocation');
                 } catch (e) {}
             }
             if (Math.floor(bot.entity.position.y) <= before) {
@@ -307,11 +448,10 @@ export default async function chopWood(bot, ctx, count = 8) {
                 // side with a SOLID step to stand on, clear the 2-high space above that step + our
                 // own head, then physically walk+jump onto it. Zero filler needed.
                 let rose = false;
-                // two passes: strict (bare hands → only directions whose blocks are ALL
-                // dirt-class) then relaxed (stone allowed — true bootstrap deadlock where
-                // every face is rock; slow but better than standing still). With a pick
-                // in inventory the strict pass already allows everything.
-                for (const relax of [false, true]) {
+                // two passes normally; low-resource no-pick famine must not relax into
+                // punching stone, because that burns minutes and drops nothing.
+                const _allowRelaxedStone = _pickIn() || (bot.health > 8 && bot.food > 8);
+                for (const relax of (_allowRelaxedStone ? [false, true] : [false])) {
                     for (const [dx, dz] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
                         const m = bot.entity.position.floored();
                         const under = bot.blockAt(m.offset(dx, 0, dz));
@@ -320,12 +460,9 @@ export default async function chopWood(bot, ctx, count = 8) {
                         if (!relax && cells.some(c => { const b = bot.blockAt(c); return b && !UP_OPEN.has(b.name) && !_digOK(b); })) continue;
                         for (const c of cells) {
                             const b = bot.blockAt(c);
-                            if (b && !UP_OPEN.has(b.name) && !NO_DIG_UP.has(b.name) && (relax || _digOK(b))) { try { await bot.tool.equipForBlock(b); } catch (e) {} try { await bot.dig(b); } catch (e) {} }
+                            if (b && !UP_OPEN.has(b.name) && !NO_DIG_UP.has(b.name) && (relax || _digOK(b))) await guardedDig(b, 'raw-stair');
                         }
-                        try { await bot.lookAt(m.offset(dx + 0.5, 0.5, dz + 0.5), true); } catch (e) {}
-                        bot.setControlState('forward', true); bot.setControlState('jump', true);
-                        await new Promise(r => setTimeout(r, 600));
-                        bot.setControlState('jump', false); bot.setControlState('forward', false);
+                        await _ascendStep(dx, dz, 'raw-stair');
                         if (Math.floor(bot.entity.position.y) > before) { rose = true; break; }
                     }
                     if (rose) break;
@@ -359,6 +496,17 @@ export default async function chopWood(bot, ctx, count = 8) {
             }
         } catch (e) {}
     };
+    const _skyAboveHere = () => {
+        try {
+            const m = bot.entity.position.floored();
+            for (let dy = 2; dy <= 36; dy++) {
+                const b = bot.blockAt(m.offset(0, dy, 0));
+                if (b && b.boundingBox === 'block') return false;
+            }
+            return true;
+        } catch (e) { return false; }
+    };
+    const _highOpenSurface = () => Math.floor(bot.entity.position.y) >= 70 && _skyAboveHere();
     const target = total() + count;
     let stale = 0, surfaced = 0;
     let _stairDir = null;   // LOCKED dig-out direction (set on first pinned stall, reused all call)
@@ -423,6 +571,10 @@ export default async function chopWood(bot, ctx, count = 8) {
             // extension below, or the hard pull cancels the wider roam immediately)
             const _pullR = (bot._chopUnreach && bot._chopUnreach.size >= 8) ? 160 : 80;
             if (distHome > _pullR && !_pulledHome) {
+                if (_highOpenSurface()) {
+                    _pulledHome = true;
+                    _dbg(`chopWood LEASH SKIP: high open surface y=${Math.floor(bot.entity.position.y)} dist=${Math.round(distHome)} — don't raw-walk back into mine/shaft`);
+                } else {
                 // ★一次性硬回拉 (v2的40格软拉被各种中断打成了越拉越远115→168,20min零木头):
                 // 圈外直接全程走回锚点附近,90s timebox,本次调用只拉一次 — 拉完树自然可见。
                 _pulledHome = true;
@@ -517,10 +669,7 @@ export default async function chopWood(bot, ctx, count = 8) {
                                             if (!(refS && refS.boundingBox === 'block') || !faceS) continue;
                                             try { await bot.equip(fillS, 'hand'); } catch (e) {}
                                             try { await bot.placeBlock(refS, faceS); } catch (e) { _dbg(`LEASH stair-place ERR(${dx},${dz}): ${String(e.message).slice(0, 50)}`); continue; }
-                                            try { await bot.lookAt(sc0.offset(dx + 0.5, 1.6, dz + 0.5), true); } catch (e) {}
-                                            bot.setControlState('forward', true); bot.setControlState('jump', true);
-                                            await new Promise(r => setTimeout(r, 900));
-                                            try { bot.clearControlStates(); } catch (_) {}
+                                            await _ascendStep(dx, dz, 'leash-stair-place');
                                             const nowF = bot.entity.position.floored();
                                             _dbg(`LEASH stair-step (${dx},${dz}): y ${sc0.y}→${nowF.y}`);
                                             if (nowF.y > sc0.y) { escaped = true; }   // rose a level — re-run LEASH next call from up there
@@ -544,8 +693,10 @@ export default async function chopWood(bot, ctx, count = 8) {
                                             // fires the BARE-HAND alarm — which is correct: the
                                             // supervisor SHOULD see a coffin escape in progress.
                                             _dbg(`LEASH coffin: overhang above — bare-hand chewing 1 ceiling block (last resort)`);
-                                            try { await bot.tool.equipForBlock(hL); } catch (e) {}
-                                            try { await bot.dig(hL); } catch (e) {}
+                                            if (!hasPick() && STONY_BLOCK.test(hL.name || '')) {
+                                                try { bot._plannedNoPickStoneUntil = Date.now() + 15000; } catch (e) {}
+                                            }
+                                            await guardedDig(hL, 'leash-coffin');
                                             // ★continue, NOT break (the alcove perpetual-motion machine,
                                             // exposed by act_trace: pillar jumps only reached +0.4 —
                                             // capped by the very ceiling block we'd chewed earlier,
@@ -570,8 +721,10 @@ export default async function chopWood(bot, ctx, count = 8) {
                                                     const ob = bot.blockAt(m1.offset(ox, 2, oz));
                                                     if (ob && ob.boundingBox === 'block' && !/water|lava/.test(ob.name)) {
                                                         _dbg(`LEASH pillar: off-center (${offC.toFixed(2)}) → chewing overhang ${ob.name}@${ox},2,${oz}`);
-                                                        try { await bot.tool.equipForBlock(ob); } catch (e) {}
-                                                        try { await bot.dig(ob); } catch (e) {}
+                                                        if (!hasPick() && STONY_BLOCK.test(ob.name || '')) {
+                                                            try { bot._plannedNoPickStoneUntil = Date.now() + 15000; } catch (e) {}
+                                                        }
+                                                        await guardedDig(ob, 'leash-overhang');
                                                         break;   // one per round — stay inside the breaker window
                                                     }
                                                 }
@@ -616,6 +769,7 @@ export default async function chopWood(bot, ctx, count = 8) {
                         }
                     }
                 } catch (e) {} finally { try { bot.clearControlStates(); } catch (_) {} }
+                }
             }
         } catch (e) {}
         const before = total();
@@ -652,11 +806,26 @@ export default async function chopWood(bot, ctx, count = 8) {
         // we're underground and the nearest log is FAR (>8b → almost surely up top) or we've already
         // stalled on it, dig UP to daylight instead of futilely chasing it.
         const _yNow = Math.floor(bot.entity.position.y);
-        if (_yNow < 58 && surfaced < 4 && (!nearest || ndist > 8 || stale >= 2)) {
-            _dbg(`underground y=${_yNow} tree=${nearest ? ndist.toFixed(1) + 'b' : 'none'} unreachable → surfacing (try ${surfaced + 1})`);
-            log(bot, `Underground (y=${_yNow}), no reachable tree — digging up to the surface.`);
+        let _skyAboveNow = true;
+        try {
+            const _mNow = bot.entity.position.floored();
+            for (let _dd = 2; _dd <= 36; _dd++) {
+                const _cb = bot.blockAt(_mNow.offset(0, _dd, 0));
+                if (_cb && _cb.boundingBox === 'block') { _skyAboveNow = false; break; }
+            }
+        } catch (e) { _skyAboveNow = false; }
+        const _enclosedNow = !!(bot._mobility && bot._mobility.enclosed);
+        const _notSurface = _yNow < 58 || _enclosedNow || !_skyAboveNow;
+        if (_notSurface && surfaced < 4 && (!nearest || ndist > 12 || stale >= 2)) {
+            _dbg(`not-surface y=${_yNow} enclosed=${_enclosedNow} sky=${_skyAboveNow} tree=${nearest ? ndist.toFixed(1) + 'b' : 'none'} unreachable → surfacing (try ${surfaced + 1})`);
+            log(bot, `Not on true surface (y=${_yNow}, enclosed=${_enclosedNow}, sky=${_skyAboveNow}), no reachable tree — digging up to the surface.`);
             surfaced++;
-            try { await digToSurface(); } catch (e) { try { await skills.goToSurface(bot); } catch (e2) {} }
+            let _surfOk = false;
+            try { _surfOk = await digToSurface(); } catch (e) { try { await skills.goToSurface(bot); } catch (e2) {} }
+            if (!_surfOk && bot.food <= 2 && !bot.inventory.items().some(it => /_pickaxe$/.test(it.name))) {
+                _dbg(`surfacing hard-failed under famine (food=${bot.food}, no pick) — return control`);
+                return false;
+            }
             continue;
         }
         if (!nearest) {
@@ -666,10 +835,15 @@ export default async function chopWood(bot, ctx, count = 8) {
             // with "3 diamonds but no wood for sticks" deep underground, unable to
             // craft the diamond pickaxe. goToSurface pathfinds up (pillarUp fallback
             // for sheer shafts). Try it a couple of times before giving up.
-            if (surfaced < 3 && Math.floor(bot.entity.position.y) < 62) {
-                log(bot, `No logs nearby and underground (y=${Math.floor(bot.entity.position.y)}) — digging a shaft up to the surface for trees.`);
+            if (surfaced < 3 && (Math.floor(bot.entity.position.y) < 62 || _enclosedNow || !_skyAboveNow)) {
+                log(bot, `No logs nearby and not on true surface (y=${Math.floor(bot.entity.position.y)}, enclosed=${_enclosedNow}, sky=${_skyAboveNow}) — digging a shaft up to the surface for trees.`);
                 surfaced++;
-                try { await digToSurface(); } catch (e) { log(bot, `digToSurface failed: ${e.message}`); try { await skills.goToSurface(bot); } catch (e2) {} }
+                let _surfOk = false;
+                try { _surfOk = await digToSurface(); } catch (e) { log(bot, `digToSurface failed: ${e.message}`); try { await skills.goToSurface(bot); } catch (e2) {} }
+                if (!_surfOk && bot.food <= 2 && !bot.inventory.items().some(it => /_pickaxe$/.test(it.name))) {
+                    _dbg(`no-log surfacing hard-failed under famine (food=${bot.food}, no pick) — return control`);
+                    return false;
+                }
                 continue;
             }
             // No trees in 40-block range and we're at/near the surface — we're in a BARREN
@@ -880,11 +1054,12 @@ export default async function chopWood(bot, ctx, count = 8) {
                             throw new Error('stone-no-pick');
                         }
                         _dbg(`pinned-stair NOPICK-FAMINE: all headings stone, no pick, no wood — bare-hand climb accepted (d=${dx},${dz})`);
+                        try { bot._plannedNoPickStoneUntil = Date.now() + 15000; } catch (e) {}
                     }
                     // foot+head ahead (tunnel through wall), step-up block ahead (make a stair), own head (avoid entomb)
                     for (const c of cells2) {
                         const b = bot.blockAt(c);
-                        if (b && b.boundingBox === 'block' && !/water|lava/.test(b.name)) { try { await bot.tool.equipForBlock(b); } catch (e) {} try { await bot.dig(b); } catch (e) {} }
+                        if (b && b.boundingBox === 'block' && !/water|lava/.test(b.name)) await guardedDig(b, 'pinned-stair');
                     }
                     // Face the LOCKED dig direction (not the shifting nearest tree) so forward-walk
                     // climbs the staircase we just carved, keeping the heading consistent.
@@ -909,10 +1084,7 @@ export default async function chopWood(bot, ctx, count = 8) {
                             throw new Error('hole-ahead');   // caught below; clearControlStates, next stall marches new dir
                         }
                     }
-                    try { await bot.lookAt(bot.entity.position.offset(dx, 0, dz), true); } catch (e) {}
-                    bot.setControlState('forward', true); bot.setControlState('jump', true);
-                    await new Promise(r => setTimeout(r, 1400));
-                    bot.clearControlStates();
+                    await _ascendStep(dx, dz, 'pinned-stair-climb');
                     const _yNow = Math.floor(bot.entity.position.y);
                     if (_yNow > _lastCY) { _flatRounds = 0; _lastCY = _yNow; }
                     else if (++_flatRounds >= 4) { _dbg(`climb STALL (4 flat rounds at y=${_yNow}) — exit loop`); break; }

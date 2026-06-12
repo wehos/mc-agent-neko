@@ -376,6 +376,20 @@
 - **观测**: 🟡 01:59:46 重启上线(pid63324)。重启命令管道杀进程两次 exit 255——改直接 Stop-Process -Id 列表,流程v3注记
 - **回滚**: 水评分恢复无条件 -15
 
+## C41. 监控新鲜度门 + 裸挖石实时 trigger/body guard（监工链+①/③层）
+- **触发**: 新监工误把历史 tail 当实时现场,用户指出"游戏还没启动,你看到的应该不是实时日志";随后 live 现场连续出现 `BARE-HAND STONE DIG`(04:12 POCKET,04:14 ENTOMBED/chopWood,04:21 重启前手空)——轮询能事后看见,但动作已经发生。机理: 监工缺 fresh/live 判定;同时 5类控制流(尤其 mobility tick mode)能直接 `equipForBlock→dig`,策略层以为有 pick,身体实际 held=dirt/empty,没有统一身体门
+- **改动**: ①新增/修 `fresh_status.mjs`: 端口+文件 mtime 给 `classification`,且同时 probe `127.0.0.1`/`::1` 防 mindserver 只监听 IPv6 被误报 closed;交接文档要求先跑 fresh_status 再解读日志。②bridge/ws_server/watchdog 接入 `cancel_skill` 控制帧,watchdog 在 stuck/death-spiral 可实时打断而非只轮询重启。③`chopWood`/`surfaceUp`/`mobility` 增 `guardedDig`: 挖 stony block 前必须确认**实际 held item 是 pickaxe**;确认不了就不 dig,只有显式 `_plannedNoPickStoneUntil` emergency window 才允许 no-pick stone。④POCKET/MAROONED/ENTOMBED 走同一 guard,把本轮旁路收口
+- **预测(可证伪)**: live 状态下 `ALERTS.txt` 不再新增非 planned 的 bare-hand stone;若出现新条,用 lastEvent+act_trace 定位剩余 `bot.dig` 旁路并继续下沉 BodyGate。fresh_status 不再把 `[::1]:8765` 误判 closed
+- **观测**: 🟢 12:23:25 重启上线(pid 48909=18088,8765=41216,MC 55916=8620 未动);12:25 fresh_status=live 且 mindserver=open;12:26 bot 从 y21→y34 持 stone_pickaxe 爬升,无新 bare-hand alert(最后一条仍是重启前 04:21:27)。仍见 self_preservation night hold 与 chopWood/surfaceUp 交错,说明 BodyGate 结构重构仍是主线而非已解决
+- **回滚**: fresh_status 回退单 host probe;删 guardedDig helper并恢复裸 `equipForBlock→dig`;ws_server/bridge/watchdog 去掉 cancel_skill 控制帧
+
+## C42. 矿洞动作黑匣子 + 台阶上坡/地表回拉修复（①/③层）
+- **触发**: 用户指出矿洞行进质量差: 挖砖路线、垫砖时机、上坡卡台阶边缘都必须看全量轨迹/操作日志。C41 后仍出现两条 post-restart `BARE-HAND STONE DIG`(held=cobblestone/granite),说明只在局部 skill 加 guard 不够;同时 progress 复盘显示 bot 曾 digToSurface 到 y83/y85 真地表,随后 `chopWood LEASH`/raw-walk 又把它往锚点硬拖,跌回 y50-60 的矿洞/崖壁区域。
+- **改动**: ①`modes.js` 新增 `mine_motion_audit` 常驻模式,包装 `bot.dig`/`bot.placeBlock`,把每次操作的 bot 坐标、目标/参考方块、held item、hp/food、skill/mobility、3x3x4 周围图景、耗时和结果写入 `bots/_supervisor/mine_motion.jsonl`;同时作为最后一道 BodyGate,非 planned 的 stony dig 必须实际手持 pickaxe。②`chopWood` 增 `_motion` 本地记录和 `_ascendStep` 上坡原语,所有 surf/raw/LEASH/pinned 的台阶/垫块上坡改走"清控制→居中→非 sprint forward+jump→失败后后撤再试"。③`chopWood LEASH` 增 high-open-surface 豁免: y≥70 且头顶见天时不再 raw-walk 回锚点,避免刚出矿洞又被拖回矿洞/shaft。
+- **预测(可证伪)**: 新进程或热加载后 `mine_motion.jsonl` 持续出现 `dig.begin/end`, `place.begin/end`, `ascend.begin/end`;任何新裸挖石会先落 `dig.blocked` 而不是真实开挖。上坡卡边缘时应看到 ascend 多次尝试后 rise 成功或明确失败,不再长时间 forward+jump 原地磨。digToSurface 到高处开阔地表后出现 `chopWood LEASH SKIP`,不再立刻向旧锚点硬拉回矿洞。
+- **观测**: 🟡 12:41 live 但 hp=4 food=2,处于危险低血低饥饿窗口;代码语法检查通过,暂不硬重启抢控制。待安全窗加载全局 audit 后用 `mine_motion.jsonl` 和 ALERTS 验证。
+- **回滚**: 去掉 `mine_motion_audit`;`chopWood` 恢复 raw forward+jump 台阶动作;删 `highOpenSurface` LEASH 豁免。
+
 ## 待修队列
 - **enderman 视线豁免**(死276根因,已二次): 行军/凿崖 lookAt 扫过 enderman 脸=激怒。修: lookAt 前查路径上 enderman,目标点压低绕开头部。①层,下个重启窗
 - **tool_keeper 备镐失灵**(16:40): 木镐磨尽无备——根因=木材buffer没囤够就开挖矿(#21 资源节奏)

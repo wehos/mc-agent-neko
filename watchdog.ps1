@@ -12,7 +12,7 @@ $proj = 'C:\Users\wehos\Project\mc-agent-upstream-sync'
 Set-Location $proj
 $log = Join-Path $proj 'watchdog.log'
 Add-Content $log "[$(Get-Date -Format o)] watchdog started (pid $PID)"
-$env:NEKO_AGENT_SCREENSHOT_INTERVAL_MS = '2000'   # screenshots ON (1 frame/2s) for visual diagnosis; wedge root fixed so renderer churn should be gone. Set '0' to disable again.
+$env:NEKO_AGENT_SCREENSHOT_INTERVAL_MS = '0'      # screenshots OFF by default; keep the prismarine renderer out of unattended restarts.
 
 $progFile = Join-Path $proj 'bots\_supervisor\progress.txt'
 $freezeLimitSec = 360    # progress.txt stale this long while agent is up = skill hung -> restart
@@ -54,6 +54,15 @@ function Restart-Agent($reason) {
         -RedirectStandardError (Join-Path $proj 'agent.err') -WindowStyle Hidden
     Add-Content $log "[$(Get-Date -Format o)] relaunched node main.js"
     Start-Sleep -Seconds 25   # boot grace; also gives the skill time to write progress
+}
+
+function Send-Control($type, $reason) {
+    try {
+        $inbox = Join-Path $proj 'bots\_supervisor\inbox.jsonl'
+        $payload = [ordered]@{ type = $type; reason = $reason; ts = (Get-Date -Format o) } | ConvertTo-Json -Compress
+        Add-Content $inbox $payload
+        Add-Content (Join-Path $proj 'ALERTS.txt') ("[{0}] CONTROL SENT: {1} — {2}" -f (Get-Date -Format 'MM-dd HH:mm:ss'), $type, $reason)
+    } catch {}
 }
 
 # ★wedge 判据用"stale 新增"而非"累积>0":正常长挖矿/爬升会让 agent.err 静默 20+min,若本次
@@ -188,6 +197,9 @@ while ($true) {
         }
         $hbLine = "[{0}] up={1} err={2}s frame={3}s deaths={4} stale={5} bed={6}{7} | {8}" -f (Get-Date -Format 'MM-dd HH:mm'), $hbUp, [int]$errAge, $hbFrame, $hbDeaths, $hbStale, $hbBed, $vitStr, $progLast
         Add-Content (Join-Path $proj 'heartbeat.log') $hbLine
+        if (($tick % 4) -eq 0) {
+            Add-Content $log ("[{0}] heartbeat up={1} err={2}s deaths={3}{4}" -f (Get-Date -Format o), $hbUp, [int]$errAge, $hbDeaths, $vitStr)
+        }
         $prevStale = $hbStale   # 记录本轮 stale 计数,供下一轮 wedge "新增"判断(agent restart 会截断 agent.log→归0→自然跟随)
         # ── STUCK DETECTION v2: ANCHORED WINDOW (process alive but task dead) ──
         # v1 compared ADJACENT ticks (moved<3) — a bot jittering ±2 blocks (door-probe
@@ -206,10 +218,23 @@ while ($true) {
                     # escaped the anchor radius — re-anchor here, all clear
                     $lastVitPos = @([double]$vit.x, [double]$vit.y, [double]$vit.z); $script:anchorT = $nowT; $script:anchorAlerted = $false
                 } else {
+                    $nightHold = $false
+                    try {
+                        $todN = [int]$vit.tod
+                        $nightHold = ($todN -ge 13000 -and $todN -le 23000 -and ("" + $vit.skill) -eq 'missionNether' -and $progLast -match 'NIGHT|入夜|hole up|蹲')
+                    } catch {}
+                    if ($nightHold) {
+                        # Legit sheltering is intentionally stationary; don't convert a bunker
+                        # into a cancel/restart event. Re-anchor so the 25min restart path is
+                        # also suppressed while night-hold remains fresh.
+                        $lastVitPos = @([double]$vit.x, [double]$vit.y, [double]$vit.z); $script:anchorT = $nowT; $script:anchorAlerted = $false
+                        continue
+                    }
                     $stuckMin = ($nowT - $script:anchorT).TotalMinutes
                     if ($stuckMin -ge 10 -and -not $script:anchorAlerted) {
                         $script:anchorAlerted = $true
                         Add-Content (Join-Path $proj 'ALERTS.txt') ("[{0}] STUCK-ZONE: bot within 10b of {1},{2},{3} for {4:n0}min (skill={5} hp={6} food={7}) - ENTRAPMENT?" -f (Get-Date -Format 'MM-dd HH:mm:ss'), $lastVitPos[0], $lastVitPos[1], $lastVitPos[2], $stuckMin, $vit.skill, $vit.hp, $vit.food)
+                        Send-Control 'cancel_skill' ("STUCK-ZONE within 10b for " + [int]$stuckMin + "min")
                     }
                     if ($stuckMin -ge 25) {
                         $lastVitPos = $null
@@ -224,6 +249,7 @@ while ($true) {
         elseif (($hbDeaths - $deathAnchor) -ge 4 -and ($tick - $lastSpiralAlertTick) -gt 30) {
             $lastSpiralAlertTick = $tick
             Add-Content (Join-Path $proj 'ALERTS.txt') ("[{0}] DEATH SPIRAL: +{1} deaths in <10min (now {2})" -f (Get-Date -Format 'MM-dd HH:mm:ss'), ($hbDeaths - $deathAnchor), $hbDeaths)
+            Send-Control 'cancel_skill' ("DEATH SPIRAL +" + ($hbDeaths - $deathAnchor) + " deaths")
         }
         # ── LOG ROTATION (hourly; unbounded files kill a 24h+ unattended run) ──
         if ($tick % 120 -eq 1) {
