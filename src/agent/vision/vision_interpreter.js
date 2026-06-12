@@ -5,11 +5,15 @@ import fs from 'fs';
 export class VisionInterpreter {
     constructor(agent, allow_vision) {
         this.agent = agent;
-        this.allow_vision = allow_vision;
+        // HARD-DISABLED vision: this `new Camera(...)` is the THIRD prismarine-viewer
+        // renderer (besides ws_server's screenshot Camera and agent.js's addBrowserViewer),
+        // and it's the residual source of the agent-subprocess crash churn (texture errors
+        // → exit 1 → auto-restart → bot offline → AFK death). Force vision off so the Camera
+        // is never created; all vision methods below already guard on this.allow_vision and
+        // return "disabled". (We've given up the visual feed to keep the bot alive/online.)
+        this.allow_vision = false;
         this.fp = './bots/'+agent.name+'/screenshots/';
-        if (allow_vision) {
-            this.camera = new Camera(agent.bot, this.fp);
-        }
+        // Camera intentionally NOT created (renderer churn). To restore vision, revert this.
     }
 
     async lookAtPlayer(player_name, direction) {

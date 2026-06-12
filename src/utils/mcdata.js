@@ -130,7 +130,9 @@ export function initBot(username) {
 
 export function isHuntable(mob) {
     if (!mob || !mob.name) return false;
-    const animals = ['chicken', 'cow', 'llama', 'mooshroom', 'pig', 'rabbit', 'sheep'];
+    // llama removed: drops NO meat (leather only), spits back, and comes with wandering
+    // traders — hunting it = the "swinging at air next to a trader" waste the user filmed.
+    const animals = ['chicken', 'cow', 'mooshroom', 'pig', 'rabbit', 'sheep'];
     return animals.includes(mob.name.toLowerCase()) && !mob.metadata[16]; // metadata 16 is not baby
 }
 

@@ -144,7 +144,15 @@ export async function getFullStateAsync(agent, useCache = true) {
             firstBlockAboveHead: isDead ? 'unknown' : 'air' // Skip expensive operation
         },
         inventory: {
-            counts: getInventoryCounts(bot),
+            // ★WEDGE ROOT FIX: getInventoryCounts() reads bot.inventory.slots UNGUARDED.
+            // During death/respawn windows bot.inventory is briefly undefined → this threw
+            // "Cannot read properties of undefined (reading 'slots')", which bubbled out of
+            // getFullStateAsync → the mindserver state-push (mindserver_proxy) was SKIPPED →
+            // the mindserver stopped receiving state → marked the agent stale → "Cleaned up
+            // stale state for agent" → half-dead WEDGE (progress.txt spinning, agent.err
+            // silent). In a death spiral this fired constantly → chronic wedge. Guard it the
+            // same way every other inventory read here already is.
+            counts: inventoryReady ? getInventoryCounts(bot) : {},
             stacksUsed: inventoryReady ? bot.inventory.items().length : 0,
             totalSlots: inventoryReady ? bot.inventory.slots.length : 0,
             equipment: {
@@ -241,10 +249,15 @@ export function getFullState(agent, useCache = true) {
         // Silent fail - blocks may not be loaded
     }
 
-    const helmet = bot.inventory.slots[5];
-    const chestplate = bot.inventory.slots[6];
-    const leggings = bot.inventory.slots[7];
-    const boots = bot.inventory.slots[8];
+    // bot.inventory is undefined until the bot has spawned. State polling can
+    // fire before that (e.g. while the bot is still retrying to connect — see
+    // the LoginGuard AggregateError path), so guard every inventory read the
+    // same way getFullStateAsync does, instead of throwing "reading 'slots'".
+    const inventoryReady = bot.inventory && bot.inventory.slots;
+    const helmet = inventoryReady ? bot.inventory.slots[5] : null;
+    const chestplate = inventoryReady ? bot.inventory.slots[6] : null;
+    const leggings = inventoryReady ? bot.inventory.slots[7] : null;
+    const boots = inventoryReady ? bot.inventory.slots[8] : null;
 
     const state = {
         name: agent.name,
@@ -271,9 +284,9 @@ export function getFullState(agent, useCache = true) {
             firstBlockAboveHead: isDead ? 'unknown' : 'air' // Skip expensive operation
         },
         inventory: {
-            counts: getInventoryCounts(bot),
-            stacksUsed: bot.inventory.items().length,
-            totalSlots: bot.inventory.slots.length,
+            counts: inventoryReady ? getInventoryCounts(bot) : {},
+            stacksUsed: inventoryReady ? bot.inventory.items().length : 0,
+            totalSlots: inventoryReady ? bot.inventory.slots.length : 0,
             equipment: {
                 helmet: helmet ? helmet.name : null,
                 chestplate: chestplate ? chestplate.name : null,

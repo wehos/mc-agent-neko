@@ -1,6 +1,10 @@
 import { WebSocketServer } from 'ws';
 import { serverProxy } from '../agent/mindserver_proxy.js';
 import { Camera } from '../agent/vision/camera.js';
+// CameraProc runs the fragile headless-gl renderer in an ISOLATED child process so
+// its intermittent NATIVE crash (Windows exit -1 / 4294967295, uncatchable by JS)
+// kills only the renderer worker, not the agent. See camera_proc.js / render_worker.mjs.
+import { CameraProc } from '../agent/vision/camera_proc.js';
 
 class WSMessageServer {
     constructor(port = 48909) {
@@ -73,6 +77,67 @@ class WSMessageServer {
 
         // Wait for bot to be properly spawned before initializing camera
         this.waitForBotSpawn(agent);
+
+        // Periodic hard-state telemetry for the OS-level watchdog. The watchdog's old
+        // signals (file mtimes, port liveness) all said "alive" while the bot was stuck
+        // in a 2.5h task-level loop — only pos/inventory/skill HARD metrics can expose
+        // "process alive but task dead". Broadcast every 15s; the bridge persists the
+        // latest snapshot to vitals.json for the watchdog/patrol to read.
+        this.startVitalsTimer();
+    }
+
+    startVitalsTimer() {
+        if (this.vitalsInterval) clearInterval(this.vitalsInterval);
+        this.vitalsInterval = setInterval(() => {
+            try {
+                const bot = this.agent && this.agent.bot;
+                if (!bot || !bot.entity || !bot.entity.position) return;
+                const pos = bot.entity.position;
+                // FULL-slot scan (5..45: armor + main + hotbar + offhand), not items()
+                // (9-44 only) — an equipped shield/armor or offhand-parked item vanished
+                // from telemetry and fired false "gear lost" alerts (saw both live).
+                const inv = {};
+                try {
+                    const sl = bot.inventory.slots || [];
+                    for (let i = 5; i < sl.length; i++) {
+                        const s = sl[i];
+                        if (s && s.name) inv[s.name] = (inv[s.name] || 0) + s.count;
+                    }
+                } catch (e) {}
+                let hostiles = 0;
+                try {
+                    for (const id in bot.entities) {
+                        const e = bot.entities[id];
+                        if (e && e.kind === 'Hostile mobs' && e.position && pos.distanceTo(e.position) < 16) hostiles++;
+                    }
+                } catch (e) {}
+                // EFFECTIVE picks: a >85%-worn pickaxe is about to snap — count only real
+                // life. Surfaces the human "durability sense" to the watchdog/patrol so a
+                // dying last pick is visible BEFORE the bot ends up punching stone.
+                let pickFx = 0;
+                try {
+                    for (const it of bot.inventory.items()) {
+                        if (!/_pickaxe$/.test(it.name)) continue;
+                        const max = it.maxDurability || 0;
+                        const used = (typeof it.durabilityUsed === 'number') ? it.durabilityUsed : 0;
+                        if (!max || (used / max) < 0.85) pickFx++;
+                    }
+                } catch (e) {}
+                this.broadcast({
+                    type: 'vitals', ts: Date.now(),
+                    x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z),
+                    dim: (bot.game && bot.game.dimension) || '?',
+                    hp: Math.round(bot.health ?? -1), food: (bot.food ?? -1),
+                    tod: (bot.time && bot.time.timeOfDay) ?? -1,
+                    hostiles,
+                    skill: this._skillRunningName || null,
+                    held: (bot.heldItem && bot.heldItem.name) || 'empty',   // exposes digging-with-wrong-tool
+                    pickFx,                                                  // effective (non-worn-out) pickaxes
+                    mob: ((bot._mobility && bot._mobility.state) || '?') + (bot._mobility && bot._mobility.enclosed ? '/ENC' : ''),   // mobility state machine (FREE/POCKET/ENTOMBED/SWIM[/ENC=封闭地穴])
+                    inv,
+                });
+            } catch (e) { /* telemetry must never hurt the agent */ }
+        }, 15000);
     }
 
     waitForBotSpawn(agent) {
@@ -91,9 +156,34 @@ class WSMessageServer {
             return;
         }
 
-        // Bot is ready, initialize camera
+        // Bot is ready, initialize camera — UNLESS screenshots are disabled. The
+        // prismarine-viewer headless WebGL renderer (created here) keeps rendering the
+        // world even when we never capture, and it crashes the agent subprocess (exit 1)
+        // intermittently → auto-restart → ~15s offline → the bot dies AFK at the surface
+        // spawn at night. Disabling captures alone wasn't enough (the renderer still ran);
+        // skipping Camera creation entirely when NEKO_AGENT_SCREENSHOT_INTERVAL_MS<=0
+        // removes the renderer and the churn with it. (We lose the visual feed, but the
+        // bot staying ALIVE and online matters far more.)
+        // RE-ENABLED via env gate. The "prismarine-viewer renderer crashes the agent
+        // subprocess (exit 1)" blamed here was almost certainly the getFullStateAsync WEDGE
+        // (unguarded getInventoryCounts → throw → mindserver marks agent stale → half-dead,
+        // which looked like a crash/auto-restart). That root is now fixed in
+        // library/full_state.js, so we restore the visual feed for diagnosis. Gate on
+        // NEKO_AGENT_SCREENSHOT_INTERVAL_MS: init the camera ONLY when it's >0. Defaults OFF
+        // when unset/≤0 — so if the env fails to propagate to a subprocess restart it stays
+        // safely OFF (no renderer, no churn), the OPPOSITE of the old default-ON failure mode.
+        const _ssMs = parseInt(process.env.NEKO_AGENT_SCREENSHOT_INTERVAL_MS || '0', 10);
+        if (!Number.isFinite(_ssMs) || _ssMs <= 0) {
+            console.log('🛑 Camera/viewer init disabled (NEKO_AGENT_SCREENSHOT_INTERVAL_MS<=0)');
+            return;
+        }
+        console.log(`📷 Camera/viewer init ENABLED (screenshot interval ${_ssMs}ms)`);
+        /* eslint-disable no-unreachable */
         try {
-            this.camera = new Camera(agent.bot, `./bots/${agent.name}/screenshots/`);
+            // CameraProc isolates the GL renderer in a child process (crash-safe).
+            // It exposes the same {.on('ready'), .capture() -> base64 jpeg} surface
+            // we rely on below, so the rest of the screenshot loop is unchanged.
+            this.camera = new CameraProc(agent.bot, `./bots/${agent.name}/screenshots/`);
             this.camera.on('ready', () => {
                 console.log('Camera initialized for WebSocket screenshots (forced initialization)');
                 // Wait a bit more for bot to be fully ready before starting screenshots
@@ -141,11 +231,65 @@ class WSMessageServer {
                 // outdated 持有物 lists like a robot).
                 this.broadcastCurrentInventory();
                 break;
+            case 'run_skill':
+                // Supervisor-direct skill execution. Bypasses the LLM coder
+                // (newAction) entirely — the named custom skill runs exactly as
+                // written, with the given args, no rewriting/dropping of steps.
+                // This is the reliable execution path for scripted progression.
+                this.runSkill(data.skill, data.args || []);
+                break;
             default:
                 this.broadcast({
                     type: 'error',
                     error: `Unknown message type: ${data.type}`
                 });
+        }
+    }
+
+    async runSkill(skillName, args) {
+        if (!this.agent || !this.agent.bot) {
+            this.broadcast({ type: 'skill_result', skill: skillName, ok: false, error: 'no agent online' });
+            return;
+        }
+        // RE-ENTRY GUARD: never run two supervised skills at once. The bridge re-arms a
+        // sticky skill on every (re)connect, so a WS blip can fire a SECOND achieveLoop
+        // while one is already running — two loops then fight over the SAME bot.pathfinder,
+        // each cancelling the other's goal ("goal was changed before it could be completed"),
+        // which pinned the bot (couldn't climb/move). One supervised skill at a time.
+        if (this._skillRunning) {
+            console.log(`🛠️ run_skill ${skillName} REJECTED — '${this._skillRunningName}' already running`);
+            this.broadcast({ type: 'skill_result', skill: skillName, ok: false, error: `busy: ${this._skillRunningName} already running` });
+            return;
+        }
+        this._skillRunning = true; this._skillRunningName = skillName;
+        console.log(`🛠️ run_skill direct: ${skillName}(${JSON.stringify(args)})`);
+        // Clear any stale interrupt + death-abort so the freshly-started supervised skill
+        // isn't pre-empted before it begins (death sets death_abort to bail the PREVIOUS skill).
+        try { this.agent.bot.interrupt_code = false; this.agent.bot.death_abort = false; } catch (e) {}
+        // SUPERVISED LOCK: take exclusive control. Pause the bot's autonomous LLM
+        // brain (self-prompt loop) and flag handleMessage to ignore system/self
+        // prompts, so the scripted skill isn't fought/interrupted by the LLM
+        // issuing !goToBed/!moveAway on death/hurt (which preempts the skill AND
+        // the survival modes -> bot thrashes and dies). Tick modes still protect it.
+        try { this.agent.supervised_skill = true; } catch (e) {}
+        try { if (this.agent.self_prompter && this.agent.self_prompter.isActive()) this.agent.self_prompter.stop(false); } catch (e) {}
+        try {
+            const skills = await import('../agent/library/skills.js');
+            const result = await skills.customSkill(this.agent.bot, skillName, ...args);
+            let inv = {};
+            try { for (const it of this.agent.bot.inventory.items()) inv[it.name] = (inv[it.name] || 0) + it.count; } catch (e) {}
+            this.broadcast({
+                type: 'skill_result', skill: skillName, ok: true,
+                result: (result && typeof result === 'object') ? JSON.stringify(result) : (result ?? null),
+                inventory: inv,
+            });
+        } catch (e) {
+            this.broadcast({ type: 'skill_result', skill: skillName, ok: false, error: String(e && e.message || e) });
+        } finally {
+            // Release the supervised lock so the bot's autonomous brain resumes
+            // once the scripted skill is done (or threw).
+            try { this.agent.supervised_skill = false; } catch (e) {}
+            this._skillRunning = false; this._skillRunningName = null;
         }
     }
 
@@ -500,6 +644,15 @@ class WSMessageServer {
         // clamped to [200, 10000] so a misconfig can't either DoS the
         // socket (sub-200ms) or freeze the visual feed (>10s).
         const envMs = parseInt(process.env.NEKO_AGENT_SCREENSHOT_INTERVAL_MS || '', 10);
+        // DISABLE switch: env <= 0 turns the screenshot/viewer-capture loop OFF entirely.
+        // The prismarine-viewer headless render is the prime suspect for the intermittent
+        // agent-subprocess crash (exit 1 → agent_process.js auto-restart → ~15s offline →
+        // the bot dies AFK at the surface spawn if it's night). Disabling captures lets us
+        // confirm/eliminate that churn so the survival instincts (bunker/flee) actually run.
+        if (Number.isFinite(envMs) && envMs <= 0) {
+            console.log('📷 Screenshot timer DISABLED (NEKO_AGENT_SCREENSHOT_INTERVAL_MS<=0)');
+            return;
+        }
         const intervalMs = Number.isFinite(envMs)
             ? Math.max(200, Math.min(10000, envMs))
             : 1000;
@@ -608,48 +761,18 @@ class WSMessageServer {
                 return;
             }
 
-            // Set camera position and update world view
-            this.camera.viewer.camera.position.set(center.x, center.y, center.z);
-            await this.camera.worldView.updatePosition(center);
-
-            // Force first-person camera with validated bot's current yaw and pitch
-            this.camera.viewer.setFirstPersonCamera(pos, yaw, pitch);
-
-            // Update and render the scene
-            this.camera.viewer.update();
-            this.camera.renderer.render(this.camera.viewer.scene, this.camera.viewer.camera);
-
-            // Create JPEG stream with quality optimized for WebSocket transmission
-            const imageStream = this.camera.canvas.createJPEGStream({
-                bufsize: 4096,
-                quality: 50,
-                progressive: false
-            });
-
-            // Convert stream to base64 for WebSocket transmission
-            // Use Promise to properly wait for stream completion
-            const base64Image = await new Promise((resolve, reject) => {
-                const chunks = [];
-                const timeoutId = setTimeout(() => {
-                    // Timeout after 5 seconds - stream is stuck
-                    reject(new Error('Screenshot stream timeout after 5s'));
-                }, 5000);
-
-                imageStream.on('data', chunk => chunks.push(chunk));
-                imageStream.on('end', () => {
-                    clearTimeout(timeoutId);
-                    const buffer = Buffer.concat(chunks);
-                    const base64 = buffer.toString('base64');
-                    // Explicitly clear chunks array to help GC
-                    chunks.length = 0;
-                    resolve(base64);
-                });
-                imageStream.on('error', (err) => {
-                    clearTimeout(timeoutId);
-                    chunks.length = 0;
-                    reject(err);
-                });
-            });
+            // Render + JPEG-encode happen in the ISOLATED renderer child process.
+            // CameraProc.capture() forwards the bot's current pos/yaw/pitch, the child
+            // renders against the chunk/entity stream it has been fed, and returns a
+            // base64 JPEG (or null on skip / worker-restarting / timeout — never throws).
+            // 'center' above is still used only for the NaN validation guards.
+            void center;
+            const base64Image = await this.camera.capture();
+            if (!base64Image) {
+                // Worker (re)starting, bot dead, or a frame was skipped — just wait for
+                // the next tick. The agent process is never affected by a renderer fault.
+                return;
+            }
 
             this.broadcast({
                 type: 'screenshot',
@@ -701,6 +824,10 @@ class WSMessageServer {
         if (this.screenshotInterval) {
             clearInterval(this.screenshotInterval);
             this.screenshotInterval = null;
+        }
+        if (this.vitalsInterval) {
+            clearInterval(this.vitalsInterval);
+            this.vitalsInterval = null;
         }
         if (this.wss) {
             this.wss.close();

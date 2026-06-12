@@ -1,0 +1,929 @@
+// Hot-reloadable REAL skill: gather logs robustly, even in awkward terrain
+// (jungle/hills) where the default collectBlocks keeps failing pathfinding.
+// Strategy: unstick to open ground first, then repeatedly find the nearest
+// reachable log of ANY tree type and collect one at a time, re-positioning
+// when a target can't be reached. No cheats. Invoked via:
+//   !newAction("await skills.customSkill(bot, 'chopWood', 8)")
+// ctx = { skills, world, mc, Vec3, log }
+import fs from 'fs';
+import path from 'path';
+const _CHOP_PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
+const _dbg = (s) => { try { fs.appendFileSync(_CHOP_PROG, `[${new Date().toISOString()}] [chopDBG] ${s}\n`); } catch (e) {} };
+// ★UNREACHABLE-TREE BLACKLIST (module-level → survives the achieve-loop's repeated re-ENTER of
+// chopWood within one process). Root cause of a ~40min bootstrap deadlock: 40-block scan finds ONE
+// lone log (e.g. oak_log@8.3b across water / on a ledge) that the pathfinder can NEVER reach;
+// world.getNearestBlock keeps returning that SAME tree, collectBlock fails (total never rises),
+// moveAway 12-32b can't escape it (still the only tree in range) → chopWood returns 0 logs →
+// achieve re-enters "chop for planks" forever. Fix: on a failed collect, blacklist that tree's
+// coords; skip blacklisted trees when picking the target so we fall through to the NEXT-nearest
+// tree, or (if it was the only one) to the moveAway-relocate path that escapes the barren zone.
+// Entries expire (terrain doesn't change, but a transient fail — e.g. a creeper interrupt — should
+// be retryable later) so we never permanently abandon a tree that was only briefly unreachable.
+const _unreach = new Map();   // "x,y,z" -> expiry ms
+const _colFails = new Map();  // "x,z" 树柱 -> 累计失败次数 (惯犯计罪单位=树,不是单块原木)
+const _colBlock = new Map();  // "x,z" 树柱 -> 整树拉黑过期 ms
+const _UNREACH_TTL = 120000;  // 2 min (首犯)
+// ★惯犯树重刑v2 (v1按单块计数的机理漏洞: 一棵树十几块原木,bot轮着试每块都算"初犯"
+// 120s,树永远凑不满惯犯 — 实测同一棵山顶树刷了一小时): 计罪单位=树柱(x,z)。同柱
+// 失败≥2次 → 整树拉黑10分钟,给绕路/换林子留出真正的时间窗。
+const _colKey = (k) => { const p = k.split(','); return p[0] + ',' + p[2]; };
+const _ttlFor = (k) => {
+    const ck = _colKey(k);
+    const n = (_colFails.get(ck) || 0) + 1;
+    _colFails.set(ck, n);
+    if (n >= 2) { _colBlock.set(ck, Date.now() + 600000); return 600000; }
+    return _UNREACH_TTL;
+};
+const _blk = (k) => {
+    const ce = _colBlock.get(_colKey(k));
+    if (ce && ce > Date.now()) return true;            // 整树在服刑
+    const e = _unreach.get(k);
+    if (e && e > Date.now()) return true;
+    if (e) _unreach.delete(k);
+    return false;
+};
+export default async function chopWood(bot, ctx, count = 8) {
+    const { skills, world, log, Vec3 } = ctx;
+    // ★跨热加载持久化 (实锤: customSkill每次调用重新import本模块,模块级Map全清零 —
+    // 拉黑/树柱计罪从来没跨调用存活过,同一棵树每次调用都重新当"初犯"): 状态挂bot对象。
+    const _unreach = (bot._chopUnreach = bot._chopUnreach || new Map());
+    const _colFails = (bot._chopColFails = bot._chopColFails || new Map());
+    const _colBlock = (bot._chopColBlock = bot._chopColBlock || new Map());
+    const _ttlFor = (k) => {
+        const ck = _colKey(k);
+        const n = (_colFails.get(ck) || 0) + 1;
+        _colFails.set(ck, n);
+        if (n >= 2) { _colBlock.set(ck, Date.now() + 600000); return 600000; }
+        return _UNREACH_TTL;
+    };
+    const _blk = (k) => {
+        const ce = _colBlock.get(_colKey(k));
+        if (ce && ce > Date.now()) return true;
+        const e = _unreach.get(k);
+        if (e && e > Date.now()) return true;
+        if (e) _unreach.delete(k);
+        return false;
+    };
+    _dbg(`ENTER count=${count} y=${Math.floor(bot.entity.position.y)} pos=${Math.floor(bot.entity.position.x)},${Math.floor(bot.entity.position.z)}`);
+    const LOGS = ['jungle_log', 'oak_log', 'birch_log', 'spruce_log',
+                  'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
+    const total = () => LOGS.reduce((s, t) => s + (world.getInventoryCounts(bot)[t] || 0), 0);
+
+    // Equip an axe if we have one (faster, still works barehanded).
+    // ★Tool for wood: AXE if we have one, else BARE HAND — NEVER a sword (chops wood slowly +
+    // burns the combat-durability we need). Unequip a held sword when axe-less. (用户: 别拿木剑砍树)
+    let _axed = false;
+    for (const axe of ['netherite_axe', 'diamond_axe', 'iron_axe', 'stone_axe', 'wooden_axe', 'golden_axe']) {
+        if (world.getInventoryCounts(bot)[axe]) { await skills.equip(bot, axe).catch(() => {}); _axed = true; break; }
+    }
+    if (!_axed) { try { if (bot.heldItem && /_sword$/.test(bot.heldItem.name)) await bot.unequip('hand'); } catch (e) {} }
+
+    // Climb out of a SEALED pit / underground box by DIGGING a vertical shaft up.
+    // goToSurface only PATHFINDS (walks) — it can't break through a dirt ceiling, so
+    // a bot boxed in at y~47 (leftover from a prior mining session) never escapes and
+    // the whole tech-tree bootstrap deadlocks for lack of wood. Here we open headroom
+    // (dig the block above the head) then pillarUp one, repeating to daylight. Dug dirt
+    // drops dirt, which refills the pillar scaffold, so it's self-sustaining through
+    // soil. Never opens a water/lava ceiling. Falls back to goToSurface if it stalls.
+    const UP_OPEN = new Set(['air', 'cave_air', 'void_air']);
+    const NO_DIG_UP = new Set(['water', 'flowing_water', 'lava', 'flowing_lava']);
+    // ★机械对位原语 (用户现场实测纠正: 垫柱卡住的真因=没站格子正中,跳起来卡在邻格边缘。
+    // 原则: 精密操作前必须机械化对位 — 潜行碎步挪到方块正中(潜行防滑出边缘),视线对准,
+    // 误差<0.15格才动手。不在漂移站位上赌时序。)
+    const _centerOnBlock = async () => {
+        const me = bot.entity.position;
+        const cx = Math.floor(me.x) + 0.5, cz = Math.floor(me.z) + 0.5;
+        if (Math.hypot(me.x - cx, me.z - cz) < 0.15) return true;
+        try { await bot.lookAt(new Vec3(cx, me.y + 1.6, cz), true); } catch (e) {}
+        const t0 = Date.now();
+        bot.setControlState('sneak', true);
+        bot.setControlState('forward', true);
+        while (Date.now() - t0 < 1000) {
+            const m2 = bot.entity.position;
+            if (Math.hypot(m2.x - cx, m2.z - cz) < 0.12) break;
+            try { await bot.lookAt(new Vec3(cx, m2.y + 1.6, cz), true); } catch (e) {}
+            await new Promise(r => setTimeout(r, 60));
+        }
+        bot.clearControlStates();
+        const m3 = bot.entity.position;
+        return Math.hypot(m3.x - cx, m3.z - cz) < 0.18;
+    };
+    const digToSurface = async () => {
+        // ★备用镐自愈 (in-skill, NOT boundary-dependent): the orchestrator's kit checks run
+        // at goal/try boundaries, but a long chopWood loop can hold the stack for 20+ min —
+        // exactly when picks wear out (saw all 3 snap mid-climb, then 12min/9-block
+        // bare-hand crawling). Self-heal HERE with what we carry: sticks (2x2 inventory
+        // craft, no table) + stone_pickaxe x2 (craftRecipe places our held table). A human
+        // never climbs stone bare-handed when 3 cobble + 2 sticks are in the bag.
+        try {
+            const _c0 = world.getInventoryCounts(bot);
+            const _havePick = bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+            const _planksEq = Object.keys(_c0).filter(k => k.endsWith('_planks')).reduce((s, k) => s + _c0[k], 0)
+                + Object.keys(_c0).filter(k => k.endsWith('_log')).reduce((s, k) => s + _c0[k], 0) * 4;
+            if (!_havePick && (_c0['cobblestone'] || 0) >= 6 && ((_c0['stick'] || 0) >= 4 || _planksEq >= 4)) {
+                _dbg(`★NOPICK self-heal: crafting sticks + 2 stone pickaxes from stock (cob=${_c0['cobblestone']} planksEq=${_planksEq})`);
+                if ((_c0['stick'] || 0) < 4) { try { await skills.craftRecipe(bot, 'stick', 1); } catch (e) { _dbg(`stick craft err ${e.message}`); } }
+                for (let _t = 0; _t < 2; _t++) { try { await skills.craftRecipe(bot, 'stone_pickaxe', 1); } catch (e) { _dbg(`pick craft err ${e.message}`); break; } }
+                _dbg(`self-heal result: picks=${bot.inventory.items().filter(it => /_pickaxe$/.test(it.name)).length}`);
+            }
+        } catch (e) {}
+        { const _ic = world.getInventoryCounts(bot); _dbg(`digToSurface START y=${Math.floor(bot.entity.position.y)} pick=${bot.inventory.items().some(it => /pickaxe/.test(it.name))} cob=${_ic['cobblestone'] || 0} dirt=${_ic['dirt'] || 0}`); }
+        // ★深层断镐陷阱 (#23实锤: 铁镐断在y-60+木头耗尽=做不了新镐,徒手啃深板岩7s+/块,
+        // 120格=数小时): NOPICK且在深层时,先让寻路器试走天然洞穴通道上去(零挖掘),
+        // 比硬啃快几个数量级。120s timebox,爬到y>40就算成功;失败再回硬啃路线。
+        {
+            const _noPick = !bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+            if (_noPick && bot.entity.position.y < 45) {   // 45 (原20): y36徒手13min爬4格实测,蜂窝区洞穴互通,寻路通道值得先试
+                _dbg(`digToSurface NOPICK-deep → trying cave-route pathfind first (goToSurface)`);
+                try {
+                    await Promise.race([
+                        skills.goToSurface(bot),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('cave-route timeout')), 120000)),
+                    ]);
+                } catch (e) { try { bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} }
+                const _ynow = Math.floor(bot.entity.position.y);
+                _dbg(`cave-route result y=${_ynow}`);
+                if (_ynow >= 55) return true;
+            }
+        }
+        let _lastY = -999, _stuck = 0;
+        for (let i = 0; i < 100; i++) {
+            // ★IMMORTAL-LOOP FIX: blanket-clearing interrupt_code every iteration made this
+            // loop UNKILLABLE — a death couldn't stop it, the orphaned instance kept digging
+            // while the respawn's NEW chopWood started a second climb, and the two loops
+            // fought each other at bedrock for 20+ min (interleaved "surf i=48/76/52/80").
+            // Honor the death/stop signals; clear only the flee-interrupts we're meant to
+            // survive (and only when not dying).
+            if (bot.death_abort || bot.health <= 0) { _dbg(`digToSurface ABORT (death) at i=${i} y=${Math.floor(bot.entity.position.y)}`); return false; }
+            if (bot._chopGen !== _gen) { _dbg(`digToSurface YIELD (superseded gen${_gen}→${bot._chopGen}) at i=${i}`); return false; }
+            // ★危殆让位 (hp0.6事件: 爬升穿过雷区芯被怪缠上,hp掉到0.6还在一步步往上凿 —
+            // 残血时唯一正业是活下来): hp≤6 → 停止爬升,把控制还给编排层的生存路径。
+            if (bot.health <= 4) { _dbg(`digToSurface BAIL (critical hp ${bot.health.toFixed(1)}) at i=${i} — yield to survival`); return false; }   // 6→4 同 chopWood bail线(死水局解锁)
+            try { bot.interrupt_code = false; } catch (e) {}
+            const py = Math.floor(bot.entity.position.y);
+            if (py > _lastY) { _stuck = 0; _lastY = py; } else _stuck++;
+            // ★STUCK-BREAKER: pillar can fail at a specific spot (complex stone ceiling) even WITH
+            // pick+filler — saw it dead-loop 100 iters frozen at y46. Don't die on one spot: bore
+            // ONE block sideways with the pick to relocate to a fresh shaft, then resume climbing.
+            if (_stuck >= 8) {
+                const [ddx, ddz] = [[1, 0], [0, 1], [-1, 0], [0, -1]][i % 4];
+                const mm = bot.entity.position.floored();
+                // ★AQUIFER PROBE before boring (death 210 = the EXACT 200 replay via a new
+                // hole: the bore checked the dug cell itself for water but NOT what's BEHIND
+                // it — punched through an aquifer wall, flooded the sealed shaft, drowned with
+                // 8 blocks of ceiling). Probe one cell deeper + above each dug cell; if ANY is
+                // liquid, rotate to the next direction instead.
+                let wetBehind = false;
+                for (const probe of [mm.offset(ddx * 2, 0, ddz * 2), mm.offset(ddx * 2, 1, ddz * 2), mm.offset(ddx, 2, ddz)]) {
+                    const pb2 = bot.blockAt(probe);
+                    if (pb2 && /water|lava/.test(pb2.name || '')) { wetBehind = true; break; }
+                }
+                if (wetBehind) { _dbg(`surf STUCK y=${py} → stair d=${ddx},${ddz} ABORTED (liquid behind wall) — rotating`); _stuck = 6; continue; }
+                // ★阶梯上行 (实拍: 垫柱顶到厚岩层天花板,低净空跳跃放块成功率骤降,旧的
+                // "平移钻孔"换了位置头顶还是岩层=死循环): STUCK 自救改为凿台阶上行 —
+                // 挖 [前+1(踏步), 前+2(净空), own head] 然后走跳上台阶。零放块依赖,
+                // 任何天花板下都保证 +1 格,是 pinned 楼梯同款已验证原语。
+                _dbg(`surf STUCK y=${py} → 阶梯上行 d=${ddx},${ddz}`);
+                for (const c of [mm.offset(ddx, 1, ddz), mm.offset(ddx, 2, ddz), mm.offset(0, 2, 0)]) {
+                    const b = bot.blockAt(c);
+                    if (b && !UP_OPEN.has(b.name) && !NO_DIG_UP.has(b.name)) { try { await bot.tool.equipForBlock(b); } catch (e) {} try { await bot.dig(b); } catch (e) {} }
+                }
+                await _centerOnBlock();   // ★对中再上台阶 (斜站起跳会卡台阶棱)
+                try { await bot.lookAt(mm.offset(ddx + 0.5, 1.5, ddz + 0.5), true); } catch (e) {}
+                bot.setControlState('forward', true); bot.setControlState('jump', true);
+                await new Promise(r => setTimeout(r, 900));
+                bot.clearControlStates();
+                _stuck = 0; _lastY = -999;
+                continue;
+            }
+            if (i % 4 === 0) {
+                // ★空手碎石是禁忌 (human taboo): punching stone is 5-10x slower AND drops
+                // nothing. We can't always avoid it (true bootstrap deadlock has no choice),
+                // but it must NEVER be silent — shout it so the patrol sees the state.
+                const _hasPick = bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+                _dbg(`surf i=${i} y=${py}${_hasPick ? '' : ' ★NOPICK — climbing bare-handed (prefer dirt/gravel route)'}`);
+            }
+            // ★真地表判定 (16:49 死循环破案: 旧条件 y≥64 是老世界的地表线——重生区真地表
+            // y82,y64 只是个有天窗的洞,DONE→chopWood找不到树→再调→再DONE,在 y64 永动。
+            // 三条件: y≥60 + 头顶整列见天 + enclosed=false(C32 全景列探测,周围也开)。
+            // 单用 enclosed 不行: 1格天窗就翻 false(对夜门保守正确,对出地表过松)。
+            // 状态机未建时退回 y≥70 旧线。)
+            let _surfaced;
+            if (bot._mobility && typeof bot._mobility.enclosed === 'boolean') {
+                let _skyAbove = true;
+                for (let _dd = 2; _dd <= 36; _dd++) { const _cb = bot.blockAt(bot.entity.position.floored().offset(0, _dd, 0)); if (_cb && _cb.boundingBox === 'block') { _skyAbove = false; break; } }
+                _surfaced = py >= 60 && _skyAbove && !bot._mobility.enclosed;
+            } else _surfaced = py >= 70;
+            if (_surfaced) { _dbg(`digToSurface DONE y=${py} (true surface: sky above + not enclosed)`); return true; }
+            // ★徒手禁撸石 (用户实拍怒斥"你见过哪个人类玩家这样挖石头的?"): bare hands on
+            // stone = 7.5s/block AND drops nothing — pure waste. The old "prefer dirt/
+            // gravel route" was a LOG LINE with no implementation; every dig call below
+            // was material-blind. Now: without a pickaxe only dirt-class blocks are
+            // diggable; stone walls mean "find another way" (stair directions get a
+            // strict all-dirt pass first), not "punch for a minute per block".
+            const _pickIn = () => bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+            const _STONY = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
+            const _digOK = (b) => !!b && (_pickIn() || !_STONY.test(b.name));
+            const headUp = bot.blockAt(bot.entity.position.offset(0, 2, 0));
+            if (headUp && NO_DIG_UP.has(headUp.name)) { try { await skills.goToSurface(bot); } catch (e) {} return Math.floor(bot.entity.position.y) >= 62; }
+            if (headUp && !UP_OPEN.has(headUp.name) && _digOK(headUp)) { try { await bot.tool.equipForBlock(headUp); } catch (e) {} try { await bot.dig(headUp); } catch (e) {} }
+            const before = Math.floor(bot.entity.position.y);
+            // ★Manual MLG pillar — skills.pillarUp FAILED to lift us despite filler (chopDBG:
+            // dirt=21 yet it fell through to the unstable staircase). Do it by hand reliably:
+            // clear the head, equip filler, jump, and place a block under our feet at the apex.
+            // Vertical rise that CANNOT fall back (unlike raw stair-climbing in cave terrain).
+            const _fill = bot.inventory.items().find(it => /dirt|cobblestone|cobbled|granite|andesite|diorite|^stone$|tuff|gravel|^sand$|_planks$|_log$/.test(it.name));
+            // ★STAIR-PLACE first (deterministic +1, proven in LEASH; the self-pillar
+            // below is a hitbox race that mostly loses — saw y oscillate 60↔62 for 5min
+            // with 22 dirt in the bag). Place into an ADJACENT cell at foot height
+            // (with body-clearance check) and step up; fall through to the old pillar
+            // only when no neighbor qualifies.
+            if (_fill) {
+                try {
+                    const scD = bot.entity.position.floored();
+                    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                        const openD = (b) => !b || b.boundingBox !== 'block';
+                        if (!openD(bot.blockAt(scD.offset(dx, 0, dz)))) continue;
+                        if (!openD(bot.blockAt(scD.offset(dx, 1, dz)))) continue;
+                        if (!openD(bot.blockAt(scD.offset(dx, 2, dz)))) continue;
+                        const bp = bot.entity.position;
+                        if (Math.hypot(bp.x - (scD.x + dx + 0.5), bp.z - (scD.z + dz + 0.5)) < 0.85) continue;
+                        let refD = bot.blockAt(scD.offset(dx, -1, dz)), faceD = Vec3 ? new Vec3(0, 1, 0) : null;
+                        if (!(refD && refD.boundingBox === 'block')) { refD = bot.blockAt(scD.offset(0, -1, 0)); faceD = Vec3 ? new Vec3(dx, 0, dz) : null; }
+                        if (!(refD && refD.boundingBox === 'block') || !faceD) continue;
+                        try { await bot.equip(_fill, 'hand'); } catch (e) {}
+                        try { await bot.placeBlock(refD, faceD); } catch (e) { continue; }
+                        try { await bot.lookAt(scD.offset(dx + 0.5, 1.6, dz + 0.5), true); } catch (e) {}
+                        bot.setControlState('forward', true); bot.setControlState('jump', true);
+                        await new Promise(r => setTimeout(r, 900));
+                        try { bot.clearControlStates(); } catch (_) {}
+                        if (bot.entity.position.floored().y > scD.y) _dbg(`surf stair-step +1 → y=${Math.floor(bot.entity.position.y)}`);
+                        break;
+                    }
+                } catch (e) {}
+            }
+            if (_fill && Math.floor(bot.entity.position.y) <= before) {
+                const _h = bot.blockAt(bot.entity.position.offset(0, 2, 0));
+                if (_h && !UP_OPEN.has(_h.name) && !NO_DIG_UP.has(_h.name) && _digOK(_h)) { try { await bot.tool.equipForBlock(_h); } catch (e) {} try { await bot.dig(_h); } catch (e) {} }
+                await _centerOnBlock();   // ★对中再跳 (不对中=跳起卡邻格边缘,实拍十跳九空)
+                try { await bot.equip(_fill, 'hand'); } catch (e) {}
+                const _ref = bot.blockAt(bot.entity.position.offset(0, -1, 0));
+                try { await bot.lookAt(bot.entity.position.offset(0, -1, 0), true); } catch (e) {}   // 视线对准脚下放置面
+                // ★PLACE-WINDOW FIX (same hidden bug as the LEASH pillar): the fixed 380ms
+                // wait sampled AFTER the jump apex — by place time the bot's hitbox had sunk
+                // back into the target cell and the server rejected every placement
+                // ("blockUpdate did not fire"). The cell is vacated only while y > start+1.01
+                // (~200ms around apex): poll and place inside that window. This is why manual
+                // MLG pillaring "worked" only via the staircase fallback all along.
+                bot.setControlState('jump', true);
+                {
+                    const _tJ = Date.now();
+                    let _pl = false;
+                    while (Date.now() - _tJ < 700 && !_pl) {
+                        if (bot.entity.position.y > before + 1.01) {
+                            try { if (_ref && Vec3) { await bot.placeBlock(_ref, new Vec3(0, 1, 0)); _pl = true; } } catch (e) {}
+                        }
+                        if (!_pl) await new Promise(r => setTimeout(r, 30));
+                    }
+                }
+                bot.setControlState('jump', false);
+                await new Promise(r => setTimeout(r, 150));
+                // ANTI-SUFFOCATION: if a solid block ended up at head level (entombed), dig free at once.
+                try {
+                    const _head = bot.blockAt(bot.entity.position.offset(0, 1, 0));
+                    if (_head && _head.boundingBox === 'block' && !NO_DIG_UP.has(_head.name)) { try { await bot.tool.equipForBlock(_head); } catch (e) {} await bot.dig(_head); }
+                } catch (e) {}
+            }
+            if (Math.floor(bot.entity.position.y) <= before) {
+                // ★pillarUp didn't lift us → we're NAKED with NO filler in a STONE pocket: digging
+                // stone barehanded drops NOTHING, so there's never cap material and pillaring is
+                // impossible. This is the bootstrap deadlock (saw 50min stuck in a stone hole, 0
+                // logs: no pickaxe→can't get filler→can't pillar→can't surface→no wood→no pickaxe).
+                // BREAK IT with a STAIRCASE: carve the 2-high space one step ahead-and-up and walk
+                // onto the stair left below. Needs ZERO blocks — just time. Rotate direction each
+                // pass so one unbreakable face (bedrock/unreachable) can't stall us.
+                // RAW-climb the stair — do NOT goToPosition: chopDBG showed the pathfinder stalled
+                // ~110s on the half-dug step and even fell the bot DOWN (y28→25) chasing it. Pick a
+                // side with a SOLID step to stand on, clear the 2-high space above that step + our
+                // own head, then physically walk+jump onto it. Zero filler needed.
+                let rose = false;
+                // two passes: strict (bare hands → only directions whose blocks are ALL
+                // dirt-class) then relaxed (stone allowed — true bootstrap deadlock where
+                // every face is rock; slow but better than standing still). With a pick
+                // in inventory the strict pass already allows everything.
+                for (const relax of [false, true]) {
+                    for (const [dx, dz] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
+                        const m = bot.entity.position.floored();
+                        const under = bot.blockAt(m.offset(dx, 0, dz));
+                        if (!under || under.boundingBox !== 'block') continue;   // need a stair to climb onto
+                        const cells = [m.offset(dx, 1, dz), m.offset(dx, 2, dz), m.offset(0, 2, 0)];
+                        if (!relax && cells.some(c => { const b = bot.blockAt(c); return b && !UP_OPEN.has(b.name) && !_digOK(b); })) continue;
+                        for (const c of cells) {
+                            const b = bot.blockAt(c);
+                            if (b && !UP_OPEN.has(b.name) && !NO_DIG_UP.has(b.name) && (relax || _digOK(b))) { try { await bot.tool.equipForBlock(b); } catch (e) {} try { await bot.dig(b); } catch (e) {} }
+                        }
+                        try { await bot.lookAt(m.offset(dx + 0.5, 0.5, dz + 0.5), true); } catch (e) {}
+                        bot.setControlState('forward', true); bot.setControlState('jump', true);
+                        await new Promise(r => setTimeout(r, 600));
+                        bot.setControlState('jump', false); bot.setControlState('forward', false);
+                        if (Math.floor(bot.entity.position.y) > before) { rose = true; break; }
+                    }
+                    if (rose) break;
+                }
+                if (!rose) { bot.setControlState('jump', true); await new Promise(r => setTimeout(r, 300)); bot.setControlState('jump', false); }
+            }
+        }
+        _dbg(`digToSurface END y=${Math.floor(bot.entity.position.y)}`);
+        return Math.floor(bot.entity.position.y) >= 62;
+    };
+
+    // ★GENERATION TOKEN (orphan killer): every Promise.race timeout up the stack
+    // (achieve's 90s wood-buffer box, the 45s chop box) ABANDONS the loser without
+    // cancelling it — the abandoned chopWood keeps digging in the background and the
+    // next invocation then runs INTERLEAVED with it (saw "surf i=16/96" dual climbs
+    // fighting at bedrock for 20+ min, twice). New instance bumps the generation;
+    // every loop in THIS file yields the moment it's superseded.
+    bot._chopGen = (bot._chopGen || 0) + 1;
+    const _gen = bot._chopGen;
+    // ★走格子扫荡 (用户实拍×2: 挖了树不捡 — item_collecting 模式在 achieve 期间是被禁用的,
+    // 所以掉落必须由我们显式走过去踩格子捡): walk onto each dropped item entity within r.
+    const _sweepDrops = async (r = 8, maxN = 6) => {
+        try {
+            const items = Object.values(bot.entities)
+                .filter(e => e && e.position && e.name === 'item' && e.position.distanceTo(bot.entity.position) < r)
+                .slice(0, maxN);
+            for (const it of items) {
+                if (bot.interrupt_code || bot.death_abort || bot._chopGen !== _gen) break;
+                try { await skills.goToPosition(bot, it.position.x, it.position.y, it.position.z, 0); } catch (e) {}
+                await new Promise(rr => setTimeout(rr, 200));
+            }
+        } catch (e) {}
+    };
+    const target = total() + count;
+    let stale = 0, surfaced = 0;
+    let _stairDir = null;   // LOCKED dig-out direction (set on first pinned stall, reused all call)
+    let _stoneAborts = 0;   // NOPICK-FAMINE: stone-face aborts this call; ≥4 = all headings stone → bare-hand climb
+    // ★缰绳锚点 (220复盘: v1锚在bed.json,但那是幽灵床坐标 — 床丢了文件还在,圈心错位80格
+    // → -157,112 算出来"在圈内",缰绳没绷). 锚 = bed.json(家应该在的位置) ,半径收紧80。
+    let _ax = 0, _az = 0, _pulledHome = false;
+    try { const bj = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'bed.json'), 'utf8')); if (typeof bj.x === 'number') { _ax = bj.x; _az = bj.z; } } catch (e) {}
+    // ghost-bed guard (C39 同款,第三处): 死276后 bed.json 还是崖壁区老床(96,-34),缰绳
+    // 回拉会把 bot 拉回被诅咒地形 → 距床>60 用 spawn_pos(真锚,且 spawn 高地有树)
+    try { if (Math.hypot(_ax - bot.entity.position.x, _az - bot.entity.position.z) > 60) { const sj = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'spawn_pos.json'), 'utf8')); if (typeof sj.x === 'number') { _ax = sj.x; _az = sj.z; } } } catch (e) {}
+    for (let i = 0; i < count * 5 && total() < target; i++) {
+        // honor death/stop — an immortal chop loop orphans across respawn and fights the
+        // replacement instance (same class as the digToSurface dual-loop wedge)
+        if (bot.death_abort || bot.health <= 0) { _dbg(`chopWood ABORT (death) at iter${i}`); return total(); }
+        if (bot._chopGen !== _gen) { _dbg(`chopWood YIELD (superseded gen${_gen}→${bot._chopGen}) at iter${i}`); return total(); }
+        // ★MAROONED 让位 (打转终极一环,act_trace实拍: mobility行军把bot从x112修路推进到
+        // x123,20秒后vitals又回x112 — chopWood的LEASH远征/unstick/moveAway与行军拔河。
+        // missionNether的STAND-DOWN只在它的iter开头查,而chopWood一进来就是分钟级控制流,
+        // 检查形同虚设): 被困态=行军独占身体,砍树循环整体让位,状态机宣布FREE再回来。
+        if (bot._mobility && bot._mobility.state === 'MAROONED') { _dbg(`chopWood BAIL (MAROONED) at iter${i} — march owns movement`); return total(); }
+        // ★危殆让位 (hp0.6事件: bot 半血都不到还在雷区里推进爬升找树,overseer 的 evac 警报
+        // 发了2分钟没有消费点 — 人类残血绝不继续作业): hp≤6 → 立即归还控制,编排层
+        // (prepNether/missionNether) 持有生存路径(蹲坑/进食/evac/advisory消费)。
+        // bail线 6→4 (hp6/food0 死水局: 保命线锁死回血路径——hp6 不作业就永远 hp6,
+        // 每夜赌命。木头→工具→武器→猎食 才是回血链,hp5-6 的低险作业收益>风险)
+        if (bot.health <= 4) { _dbg(`chopWood BAIL (critical hp ${bot.health.toFixed(1)}) at iter${i} — yield to survival`); return total(); }
+        // ★夜不猎树 (219: 白天开始的砍树跑过黄昏继续夜猎,黄昏漫游路上被蜘蛛逮住 — chopWood
+        // 自己没有夜晚意识,外层夜门只拦"新发起"的砍树): exposed surface + night → bail,
+        // the orchestrator's hold owns the night; the hunt resumes at dawn.
+        try {
+            const _t = bot.time.timeOfDay;
+            // enclosed(封闭地穴,mobility状态机全知判定)豁免夜门: 全实心包围里夜=昼,
+            // 凿崖/挖隧道不必因为天黑停手(用户指点,与 sp.shouldNightShelter 同款豁免)
+            if (_t >= 13000 && _t <= 23000 && bot.entity.position.y >= 50 && !(bot._mobility && bot._mobility.enclosed)) {
+                await _sweepDrops(6, 4);   // 撤退前先把脚边掉落捡完 — 别给世界留垃圾
+                _dbg(`chopWood NIGHT-BAIL at iter${i} (night+exposed, hold owns it)`);
+                return total();
+            }
+        } catch (e) {}
+        // ★漫游缰绳 (218/219: 搬迁升级12/22/32无限漂移,两次死在130-170格外的远游路上 — 越远
+        // 离庇护越远,夜变/怪窝风险放大): anchor = bed.json(家床) else 世界出生点. 超过120格
+        // 不再继续外漂,转头向锚点方向走30格再继续找树.
+        // ★死亡热图避区 (240: 12,-40 杀人井第三次得手,这次是砍树过境跌入 — 避区检查原本
+        // 只在采矿循环): 身处"16格内3+死"雷区 → 背质心撤24格再找树。与 achieve 同款。
+        try {
+            const dl2 = fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'death_log.jsonl'), 'utf8').trim().split('\n').slice(-50);
+            const meD = bot.entity.position;
+            let ndD = 0, cxD = 0, czD = 0;
+            for (const ln of dl2) { try { const r = JSON.parse(ln); if (typeof r.x === 'number' && Math.hypot(r.x - meD.x, r.z - meD.z) < 16) { ndD++; cxD += r.x; czD += r.z; } } catch (e) {} }
+            if (ndD >= 3) {
+                cxD /= ndD; czD /= ndD;
+                const dD = Math.hypot(meD.x - cxD, meD.z - czD) || 1;
+                _dbg(`★DEATH-ZONE (${ndD}死/16格内) — 背质心撤24格再找树`);
+                try { await skills.goToPosition(bot, Math.round(meD.x + (meD.x - cxD) / dD * 24), null, Math.round(meD.z + (meD.z - czD) / dD * 24), 3); } catch (e) {}
+            }
+        } catch (e) {}
+        try {
+            const me0 = bot.entity.position;
+            const distHome = Math.hypot(me0.x - _ax, me0.z - _az);
+            // leash trigger widens with tree famine (must match the candidate-ring
+            // extension below, or the hard pull cancels the wider roam immediately)
+            const _pullR = (bot._chopUnreach && bot._chopUnreach.size >= 8) ? 160 : 80;
+            if (distHome > _pullR && !_pulledHome) {
+                // ★一次性硬回拉 (v2的40格软拉被各种中断打成了越拉越远115→168,20min零木头):
+                // 圈外直接全程走回锚点附近,90s timebox,本次调用只拉一次 — 拉完树自然可见。
+                _pulledHome = true;
+                _dbg(`chopWood LEASH: ${Math.round(distHome)}格离锚(${_ax},${_az}) — 硬回拉至锚点`);
+                try {
+                    await Promise.race([
+                        skills.goToPosition(bot, _ax, null, _az, 8),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('leash-timeout')), 90000)),
+                    ]);
+                } catch (e) { try { bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} }
+                // ★raw-walk fallback (the cliff-pendulum: pathfinder NoPaths instantly on
+                // cliff terrain — worse now that bare-hand dig-costs price out tunnel
+                // routes — so the "hard pull" did NOTHING and the bot sat in a barren
+                // cliff pocket for a day: 8 trees blacklisted, no food, no progress).
+                // If the pull didn't actually move us, sprint-walk toward the anchor in a
+                // short probed hop; repeated chopWood calls inch us home through terrain
+                // the planner refuses.
+                try {
+                    const me9 = bot.entity.position;
+                    if (Math.hypot(me9.x - _ax, me9.z - _az) > distHome - 6) {
+                        let vx = _ax - me9.x, vz = _az - me9.z;
+                        const L9 = Math.hypot(vx, vz) || 1; vx /= L9; vz /= L9;
+                        // hole probe: no floor within 4 below the next 2 cells → don't blind-march
+                        const holey9 = [[vx * 1.2, vz * 1.2], [vx * 2.2, vz * 2.2]].some(([fx, fz]) => {
+                            for (let dd = 0; dd <= 4; dd++) {
+                                const fb = bot.blockAt(me9.offset(fx, -dd, fz));
+                                if (fb && (fb.boundingBox === 'block' || /water/.test(fb.name || ''))) return false;
+                            }
+                            return true;
+                        });
+                        if (!holey9) {
+                            _dbg(`LEASH raw-walk fallback toward anchor (pathfinder refused)`);
+                            try { await bot.lookAt(me9.offset(vx * 8, 1.6, vz * 8), true); } catch (e) {}
+                            bot.setControlState('forward', true); bot.setControlState('sprint', true); bot.setControlState('jump', true);
+                            await new Promise(r => setTimeout(r, 5000));
+                            try { bot.clearControlStates(); } catch (_) {}
+                            // ★WALLED IN (the cliff-alcove deadlock: raw walk fired twice and
+                            // moved ZERO blocks — anchor side is a 15-block stone face, and
+                            // the material gate rightly refuses bare-hand chewing): a human
+                            // with 19 blocks in the bag just PILLARS over the lip. Rise 3
+                            // with carried filler (jump-place under feet, apex-gated like
+                            // digToSurface's MLG pillar), then next call's raw walk crests.
+                            if (bot.entity.position.distanceTo(me9) < 2) {
+                                // ESCAPE PASS 1 — any open side. The raw walk only tried the
+                                // ANCHOR heading; but we WALKED into this alcove, so a doorway
+                                // exists on some other side. Find a 2-high opening with floor
+                                // and step out — leaving the coffin beats beelining the anchor.
+                                let escaped = false;
+                                for (const [ex, ez] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                                    const m0 = bot.entity.position.floored();
+                                    const open = (b) => !b || b.boundingBox !== 'block';
+                                    if (!open(bot.blockAt(m0.offset(ex, 0, ez))) || !open(bot.blockAt(m0.offset(ex, 1, ez)))) continue;
+                                    // floor within 7: a 4-6 block drop costs 1-4 hp — at hp10 that
+                                    // beats staying entombed (the alcove's only open side is a ledge,
+                                    // and the strict 4-block probe rejected the ONLY exit for a day).
+                                    let floor9 = false;
+                                    for (let dd = 1; dd <= 7; dd++) { const fb = bot.blockAt(m0.offset(ex, -dd, ez)); if (fb && (fb.boundingBox === 'block' || /water/.test(fb.name || ''))) { floor9 = true; break; } }
+                                    if (!floor9) continue;
+                                    try { await bot.lookAt(m0.offset(ex + 0.5, 1.6, ez + 0.5), true); } catch (e) {}
+                                    bot.setControlState('forward', true); bot.setControlState('sprint', true); bot.setControlState('jump', true);
+                                    await new Promise(r => setTimeout(r, 2500));
+                                    try { bot.clearControlStates(); } catch (_) {}
+                                    if (bot.entity.position.floored().distanceTo(m0) >= 1.5) { escaped = true; _dbg(`LEASH escaped alcove via ${ex},${ez}`); break; }
+                                }
+                                // ESCAPE PASS 2a — STAIR-PLACE (deterministic, replaces the racy
+                                // self-pillar as primary): placing a block in the cell you occupy
+                                // is a race against the server's hitbox check — apex +1.20 and a
+                                // ±0.2 centering gate STILL got "blockUpdate did not fire" (0.2 +
+                                // 0.3 half-width = exactly on the cell border). Instead place a
+                                // block in an ADJACENT cell at foot height (no body conflict ever),
+                                // then step up onto it: +1 per round, zero races.
+                                if (!escaped) {
+                                    const sc0 = bot.entity.position.floored();
+                                    const fillS = bot.inventory.items().find(it => /^dirt$|cobblestone|cobbled|granite|andesite|diorite|^stone$|tuff|gravel|_planks$|_log$/.test(it.name));
+                                    if (fillS) {
+                                        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                                            const open = (b) => !b || b.boundingBox !== 'block';
+                                            if (!open(bot.blockAt(sc0.offset(dx, 0, dz)))) continue;   // need air at foot height to place into
+                                            if (!open(bot.blockAt(sc0.offset(dx, 1, dz)))) continue;   // body space after stepping up
+                                            if (!open(bot.blockAt(sc0.offset(dx, 2, dz)))) continue;   // head space after stepping up
+                                            // ★BODY-CLEARANCE (death #271: the open() checks see BLOCKS,
+                                            // not the bot's own hitbox — straddling the cell border got the
+                                            // block placed INTO the body → suffocation, and bare-hand
+                                            // cobble digging (7.5s) loses to suffocation damage (~6s at
+                                            // hp10). Never place into a cell our hitbox is within 0.85 of.)
+                                            {
+                                                const bp = bot.entity.position;
+                                                if (Math.hypot(bp.x - (sc0.x + dx + 0.5), bp.z - (sc0.z + dz + 0.5)) < 0.85) continue;
+                                            }
+                                            let refS = bot.blockAt(sc0.offset(dx, -1, dz)), faceS = Vec3 ? new Vec3(0, 1, 0) : null;
+                                            if (!(refS && refS.boundingBox === 'block')) { refS = bot.blockAt(sc0.offset(0, -1, 0)); faceS = Vec3 ? new Vec3(dx, 0, dz) : null; }
+                                            if (!(refS && refS.boundingBox === 'block') || !faceS) continue;
+                                            try { await bot.equip(fillS, 'hand'); } catch (e) {}
+                                            try { await bot.placeBlock(refS, faceS); } catch (e) { _dbg(`LEASH stair-place ERR(${dx},${dz}): ${String(e.message).slice(0, 50)}`); continue; }
+                                            try { await bot.lookAt(sc0.offset(dx + 0.5, 1.6, dz + 0.5), true); } catch (e) {}
+                                            bot.setControlState('forward', true); bot.setControlState('jump', true);
+                                            await new Promise(r => setTimeout(r, 900));
+                                            try { bot.clearControlStates(); } catch (_) {}
+                                            const nowF = bot.entity.position.floored();
+                                            _dbg(`LEASH stair-step (${dx},${dz}): y ${sc0.y}→${nowF.y}`);
+                                            if (nowF.y > sc0.y) { escaped = true; }   // rose a level — re-run LEASH next call from up there
+                                            break;
+                                        }
+                                    }
+                                }
+                                // ESCAPE PASS 2b — legacy self-pillar (kept as fallback when no
+                                // adjacent cell qualifies; the racy place rarely lands but costs little).
+                                if (!escaped) {
+                                    _dbg(`LEASH walled-in → pillar up 3 with carried blocks`);
+                                    for (let pu = 0; pu < 3; pu++) {
+                                        const fillL = bot.inventory.items().find(it => /^dirt$|cobblestone|cobbled|granite|andesite|diorite|^stone$|tuff|gravel|_planks$|_log$/.test(it.name));
+                                        if (!fillL) break;
+                                        const yb = bot.entity.position.y;
+                                        const hL = bot.blockAt(bot.entity.position.offset(0, 2, 0));
+                                        if (hL && hL.boundingBox === 'block') {
+                                            // ESCAPE PASS 3 — true coffin (walls + overhang +
+                                            // material gate refusing stone). Last resort: chew ONE
+                                            // ceiling block bare-handed per call. Slow (~60s) and it
+                                            // fires the BARE-HAND alarm — which is correct: the
+                                            // supervisor SHOULD see a coffin escape in progress.
+                                            _dbg(`LEASH coffin: overhang above — bare-hand chewing 1 ceiling block (last resort)`);
+                                            try { await bot.tool.equipForBlock(hL); } catch (e) {}
+                                            try { await bot.dig(hL); } catch (e) {}
+                                            // ★continue, NOT break (the alcove perpetual-motion machine,
+                                            // exposed by act_trace: pillar jumps only reached +0.4 —
+                                            // capped by the very ceiling block we'd chewed earlier,
+                                            // because bunkerDown RE-CAPS that same cell every night/mob
+                                            // pass and the old break exited before jumping. Chew → jump
+                                            // → place in ONE round, before anything re-caps it.)
+                                            continue;
+                                        }
+                                        try { await _centerOnBlock(); } catch (e) {}
+                                        // ★centering check (why C22 still failed here: jump apex was
+                                        // +0.74, never reaching the +1.01 vacate line — the alcove wall
+                                        // blocks the centering shuffle, the off-center hitbox clips the
+                                        // NEIGHBOR cell's overhang at y+2 and the jump caps early). If
+                                        // we couldn't center, don't waste the jump: chew ONE overhang
+                                        // ring block instead, then retry next round with headroom.
+                                        {
+                                            const pc = bot.entity.position;
+                                            const offC = Math.hypot(((pc.x % 1) + 1) % 1 - 0.5, ((pc.z % 1) + 1) % 1 - 0.5);
+                                            if (offC > 0.2) {   // aligned with the 0.2 place gate — no dead zone between thresholds
+                                                const m1 = pc.floored();
+                                                for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                                                    const ob = bot.blockAt(m1.offset(ox, 2, oz));
+                                                    if (ob && ob.boundingBox === 'block' && !/water|lava/.test(ob.name)) {
+                                                        _dbg(`LEASH pillar: off-center (${offC.toFixed(2)}) → chewing overhang ${ob.name}@${ox},2,${oz}`);
+                                                        try { await bot.tool.equipForBlock(ob); } catch (e) {}
+                                                        try { await bot.dig(ob); } catch (e) {}
+                                                        break;   // one per round — stay inside the breaker window
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        try { await bot.equip(fillL, 'hand'); } catch (e) {}
+                                        const refL = bot.blockAt(bot.entity.position.offset(0, -1, 0));
+                                        try { await bot.lookAt(bot.entity.position.offset(0, -1, 0), true); } catch (e) {}
+                                        // ★PLACE-WINDOW FIX (the long-hidden pillar bug, finally caught by
+                                        // the ERR log: "blockUpdate (x,65,z) did not fire" = the SERVER
+                                        // REJECTED the place because the bot's own hitbox still occupied
+                                        // the target cell). A jump peaks at +1.25 around ~290ms; the old
+                                        // fixed 380ms wait checked AFTER the apex, when the body had sunk
+                                        // back into the cell. The cell is only fully vacated while
+                                        // y > start+1.01 — a ~200ms window. Poll for it and place THEN.
+                                        bot.setControlState('jump', true);
+                                        let placedL = false, hi = yb, perr = '';
+                                        const tJ = Date.now();
+                                        const standCell = bot.entity.position.floored();
+                                        while (Date.now() - tJ < 700 && !placedL) {
+                                            const cp = bot.entity.position, cy = cp.y;
+                                            if (cy > hi) hi = cy;
+                                            // ★HITBOX-CENTERED check (the FINAL piece: apex cleared +1.17
+                                            // yet the server still refused — at x=40.7 the 0.6-wide hitbox
+                                            // straddles cells 40 AND 41, so the target cell was never fully
+                                            // vacated. Only place when we're within 0.2 of the cell center
+                                            // at the moment of placement.)
+                                            const ctr = Math.abs(cp.x - (standCell.x + 0.5)) < 0.2 && Math.abs(cp.z - (standCell.z + 0.5)) < 0.2;
+                                            if (cy > yb + 1.01 && ctr) {
+                                                try { if (refL && Vec3) { await bot.placeBlock(refL, new Vec3(0, 1, 0)); placedL = true; } } catch (e) { perr = e.message; }
+                                            }
+                                            if (!placedL) await new Promise(r => setTimeout(r, 30));
+                                        }
+                                        bot.setControlState('jump', false);
+                                        await new Promise(r => setTimeout(r, 200));
+                                        _dbg(`LEASH pillar pu=${pu}: placed=${placedL} apex=+${(hi - yb).toFixed(2)} nowY=${bot.entity.position.y.toFixed(1)}${perr ? ' ERR=' + perr.slice(0, 60) : ''}`);
+                                    }
+                                }
+                            }
+                        } else {
+                            _dbg(`LEASH raw-walk ABORT (hole ahead toward anchor)`);
+                        }
+                    }
+                } catch (e) {} finally { try { bot.clearControlStates(); } catch (_) {} }
+            }
+        } catch (e) {}
+        const before = total();
+        // Find nearest log of any type — but consider MULTIPLE candidates per type and SKIP any
+        // tree on the unreachable-blacklist, so a lone unreachable trunk doesn't trap us: we fall
+        // through to the next-nearest reachable tree (or to relocate if all nearby are blacklisted).
+        // bot.findBlocks returns many coords (getNearestBlock returns only the single closest, which
+        // is exactly what kept handing us back the same unreachable tree every pass).
+        let nearest = null, ndist = Infinity;
+        // ★TREE-FAMINE leash extension: with 8+ trees blacklisted (all unreachable
+        // jungle canopies), an 80-block leash re-scans the same dead orchard forever —
+        // the whole rebuild is gated on ONE log. Famine (blacklist≥8) temporarily
+        // widens the visible ring to 160; first successful chop shrinks it back (the
+        // blacklist empties as TTLs expire after we leave the area).
+        const _leashR = _unreach.size >= 8 ? 160 : 80;
+        for (const t of LOGS) {
+            const id = bot.registry && bot.registry.blocksByName[t] ? bot.registry.blocksByName[t].id : null;
+            let cands = [];
+            if (id != null) { try { cands = bot.findBlocks({ matching: id, maxDistance: 40, count: 16 }) || []; } catch (e) { cands = []; } }
+            if (!cands.length) { const b = world.getNearestBlock(bot, t, 40); if (b) cands = [b.position]; }  // fallback
+            for (const p of cands) {
+                const key = `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
+                if (_blk(key)) continue;                       // skip blacklisted unreachable tree
+                if (Math.hypot(p.x - _ax, p.z - _az) > _leashR) continue;   // 缰绳源头过滤(树荒时放宽)
+                const d = bot.entity.position.distanceTo(p);
+                if (d < ndist) { ndist = d; nearest = { b: bot.blockAt(p), t, key }; }
+            }
+        }
+        _dbg(`iter${i} y=${Math.floor(bot.entity.position.y)} nearest=${nearest ? nearest.t + '@' + ndist.toFixed(1) + 'b' : 'NONE'} total=${total()} stale=${stale} surfaced=${surfaced} blk=${_unreach.size}`);
+        // ★UNDERGROUND + no REACHABLE tree → SURFACE FIRST (fixes the y28 deadlock). The 40-block
+        // scan picks up trees on the SURFACE (e.g. oak_log@38b while at y28), so `nearest` is
+        // non-null and the OLD `if(!nearest)` surface-check never fired — the bot just kept failing
+        // to path to a tree it can't reach through dozens of blocks of rock (total=0 forever). If
+        // we're underground and the nearest log is FAR (>8b → almost surely up top) or we've already
+        // stalled on it, dig UP to daylight instead of futilely chasing it.
+        const _yNow = Math.floor(bot.entity.position.y);
+        if (_yNow < 58 && surfaced < 4 && (!nearest || ndist > 8 || stale >= 2)) {
+            _dbg(`underground y=${_yNow} tree=${nearest ? ndist.toFixed(1) + 'b' : 'none'} unreachable → surfacing (try ${surfaced + 1})`);
+            log(bot, `Underground (y=${_yNow}), no reachable tree — digging up to the surface.`);
+            surfaced++;
+            try { await digToSurface(); } catch (e) { try { await skills.goToSurface(bot); } catch (e2) {} }
+            continue;
+        }
+        if (!nearest) {
+            // No trees in range. If we're UNDERGROUND (the bot mines diamonds at
+            // y~-50, where there are obviously no trees), shuffling sideways is
+            // futile — climb to the surface first. This is what stranded the bot
+            // with "3 diamonds but no wood for sticks" deep underground, unable to
+            // craft the diamond pickaxe. goToSurface pathfinds up (pillarUp fallback
+            // for sheer shafts). Try it a couple of times before giving up.
+            if (surfaced < 3 && Math.floor(bot.entity.position.y) < 62) {
+                log(bot, `No logs nearby and underground (y=${Math.floor(bot.entity.position.y)}) — digging a shaft up to the surface for trees.`);
+                surfaced++;
+                try { await digToSurface(); } catch (e) { log(bot, `digToSurface failed: ${e.message}`); try { await skills.goToSurface(bot); } catch (e2) {} }
+                continue;
+            }
+            // No trees in 40-block range and we're at/near the surface — we're in a BARREN
+            // or WATER zone (the water-edge spawn: 1hr stuck here, 0 logs). A flat 12-block
+            // moveAway never escapes a big water body, and moveAway often can't even path
+            // across deep water → the bot wandered in place forever. ESCALATE distance hard
+            // (16→28→40→56) AND, if moveAway couldn't actually move us (pinned in water),
+            // raw-swim/sprint a committed heading to physically cover ground and break out.
+            stale++;
+            const dist = stale <= 1 ? 16 : (stale <= 2 ? 28 : (stale <= 3 ? 40 : 56));
+            log(bot, `No logs within 40 blocks (x${stale}) — relocating ${dist} blocks to escape the barren/water zone...`);
+            const _p0 = bot.entity.position.clone();
+            await skills.moveAway(bot, dist).catch(() => {});
+            if (bot.entity.position.distanceTo(_p0) < 4) {
+                // moveAway made no headway (deep water / pinned) — force a raw traverse.
+                // ★LOCKED EXPEDITION HEADING (the quadrant rotation walked N/E/S/W in
+                // turn = a plus-sign with ZERO net displacement; the bot orbited the
+                // same barren lakeshore for hours). Lock one heading on the bot object
+                // (persists across hot-reloads), march it 6s per attempt, and only
+                // rotate 90° when THAT heading provably stalls. Cumulative calls walk
+                // a straight line out of any famine zone.
+                try {
+                    if (typeof bot._chopExpYaw !== 'number') bot._chopExpYaw = Math.random() * Math.PI * 2;
+                    const yaw = bot._chopExpYaw;
+                    const _e0 = bot.entity.position.clone();
+                    await bot.look(yaw, 0, true);
+                    bot.setControlState('forward', true); bot.setControlState('sprint', true); bot.setControlState('jump', true);
+                    await new Promise(r => setTimeout(r, 6000));
+                    bot.clearControlStates();
+                    if (bot.entity.position.distanceTo(_e0) < 4) bot._chopExpYaw = (yaw + Math.PI / 2) % (Math.PI * 2);   // heading blocked — rotate
+                } catch (e) { try { bot.clearControlStates(); } catch (_) {} }
+            }
+            if (stale >= 8) break; continue;
+        }
+        // Collect one log of that type (collectBlock pathfinds + digs + picks up).
+        // TIMEBOX it: collectBlock can HANG indefinitely pathfinding to a tree it can't
+        // reach (trunk on a ledge across water, behind vines), which froze chopWood for
+        // minutes inside a single call — the escalating relocate below never ran because
+        // the loop never iterated. Race against a timeout; on hang, stop the pathfinder
+        // so the next pass can relocate to a reachable grove.
+        try {
+            // ★veinFollow=true → chop the WHOLE connected tree (flood-fill all connected logs)
+            // and pick up every drop, instead of one bottom log then wandering off (用户: "只挖
+            // 第一层就走"). harvestConnectedVein walks to + digs + pickupNearbyItems each log.
+            // Longer timeout (45s) since a full tree is many logs.
+            await Promise.race([
+                skills.collectBlock(bot, nearest.t, 1, null, true),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('chop-timeout')), 45000)),
+            ]);
+        } catch (e) {
+            try { bot.pathfinder.stop(); } catch (_) {}
+            try { bot.clearControlStates(); } catch (_) {}
+        }
+        if (total() <= before) {
+            // ★生走逼近 (黑名单膨胀到33条的根源: 6.8格外平地树被寻路否决,直砍臂展只有
+            // 4.5格,差2格就判死刑): 树在12格内 → 不问寻路,探明前方无坑无水后朝它生走
+            // 1.5秒,把距离走进臂展再直砍。人类不会因为"导航说不行"放弃走向眼前的树。
+            if (nearest && nearest.b && nearest.b.position) {
+                const _tD = () => bot.entity.position.distanceTo(nearest.b.position.offset(0.5, 0.5, 0.5));
+                if (_tD() > 4.5 && _tD() <= 12 && Math.abs(nearest.b.position.y - bot.entity.position.y) <= 3) {
+                    try {
+                        const meW = bot.entity.position;
+                        const dxW = nearest.b.position.x + 0.5 - meW.x, dzW = nearest.b.position.z + 0.5 - meW.z;
+                        const lW = Math.hypot(dxW, dzW) || 1;
+                        const uxW = dxW / lW, uzW = dzW / lW;
+                        let unsafe = false;   // 前方两格探坑/探水 (与盲冲探针同款)
+                        for (const m of [1.2, 2.4]) {
+                            let floor = false;
+                            for (let dd = 0; dd <= 3; dd++) {
+                                const fb = bot.blockAt(meW.offset(uxW * m, -dd, uzW * m));
+                                if (fb && /water|lava/.test(fb.name || '')) { unsafe = true; break; }
+                                if (fb && fb.boundingBox === 'block') { floor = true; break; }
+                            }
+                            if (!floor) unsafe = true;
+                            if (unsafe) break;
+                        }
+                        if (!unsafe) {
+                            try { await bot.lookAt(nearest.b.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
+                            bot.setControlState('forward', true); bot.setControlState('sprint', true);
+                            const tW = Date.now();
+                            while (Date.now() - tW < 2500 && _tD() > 4.2) await new Promise(r => setTimeout(r, 150));
+                            bot.clearControlStates();
+                            _dbg(`raw-approach: ${_tD().toFixed(1)}b after walk (was >4.5)`);
+                        }
+                    } catch (e) { try { bot.clearControlStates(); } catch (_) {} }
+                }
+            }
+            // ★贴脸直砍 (the bootstrap killer: logs 1.6-6 blocks away verdicted
+            // "unreachable" — collectBlock's scan predicate lets the pathfinder's
+            // safeToBreak veto waterside/edge trees wholesale, so it returns in 0.2s
+            // with nothing and we blacklisted tree after tree, naked, at night).
+            // A human standing at a tree just chops it: if the log is in ARM'S REACH,
+            // bypass the pathfinder verdict entirely — equip, dig, grab drops.
+            if (nearest && nearest.b && nearest.b.position
+                && bot.entity.position.distanceTo(nearest.b.position.offset(0.5, 0.5, 0.5)) <= 4.5) {
+                try {
+                    // ★整柱砍 (用户实拍: 直砍v1只挖一根就走→满地浮空半棵树): walk the trunk
+                    // COLUMN — drop to the lowest log at this x,z, then dig upward through
+                    // every in-reach log. Sweep the drops by stepping on them afterward.
+                    const bp = nearest.b.position;
+                    let lowDy = 0;
+                    while (lowDy > -4) { const b2 = bot.blockAt(bp.offset(0, lowDy - 1, 0)); if (b2 && /_log$|_wood$/.test(b2.name)) lowDy--; else break; }
+                    let dug = 0;
+                    for (let dy = lowDy; dy <= 8; dy++) {
+                        if (bot.interrupt_code || bot.death_abort || bot._chopGen !== _gen) break;
+                        const lb = bot.blockAt(bp.offset(0, dy, 0));
+                        if (!lb || !/_log$|_wood$/.test(lb.name)) { if (dy > 0) break; else continue; }
+                        if (bot.entity.position.offset(0, 1.6, 0).distanceTo(lb.position.offset(0.5, 0.5, 0.5)) > 4.8) break;   // out of arm's reach — stop, don't leave a swing-at-air loop
+                        try { await bot.tool.equipForBlock(lb); } catch (e) {}
+                        if (bot.heldItem && /_sword$/.test(bot.heldItem.name)) { try { await bot.unequip('hand'); } catch (e) {} }
+                        try { await bot.dig(lb); dug++; } catch (e) { break; }
+                    }
+                    await _sweepDrops(8, 6);   // 踩格子捡掉落 — pickupNearbyItems 不够可靠
+                    if (dug > 0) _dbg(`direct-chop: dug ${dug} logs (full column, drops swept) total=${total()}`);
+                } catch (e) { _dbg(`direct-chop fail: ${e.message}`); }
+                if (total() > before) { stale = 0; continue; }   // it worked — no blacklist
+            }
+            // No progress this pass. The killer case: weaponless after a death, a
+            // skeleton arrows the bot from a ledge it can't path to, and small shuffles
+            // keep us in range / in the same water-edge trap (chopWood spun 7 min at 1
+            // log here). ESCALATE the relocation distance hard (12 -> 22 -> 32) to break
+            // the attacker's line-of-sight/pursuit and reach a different, reachable
+            // grove on open ground. Give up sooner so achieveLoop re-enters fresh.
+            stale++;
+            // Blacklist this exact tree: it didn't yield a log this pass (unreachable across
+            // water / on a ledge, or a mob kept interrupting). Next iter skips it and picks the
+            // next-nearest reachable tree instead of handing us back the same trap. Expires in 2min.
+            if (nearest && nearest.key) { const _ttl = _ttlFor(nearest.key); _unreach.set(nearest.key, Date.now() + _ttl); _dbg(`blacklist ${nearest.t}@${nearest.key} (unreachable, ttl ${_ttl / 1000}s, 树柱fails=${_colFails.get(_colKey(nearest.key))})`); }
+            const dist = stale <= 1 ? 12 : (stale === 2 ? 22 : 32);
+            log(bot, `chop stalled (x${stale}) — relocating ${dist} blocks to escape pin/terrain.`);
+            const _p0 = bot.entity.position.clone();
+            await skills.moveAway(bot, dist).catch(() => {});
+            // ★PINNED-IN-PLACE breaker: the real-world trap here is a bot in a low pocket (y66)
+            // ringed by trees up a steep hillside (y74-77) it can't path up to — every tree blacklists
+            // as unreachable but moveAway makes NO headway (walls/water/cliff pin it), so it never
+            // reaches the !nearest raw-traverse path and spins in place forever. If moveAway didn't
+            // actually move us, force a committed sprint+jump traverse (rotate heading each stall) to
+            // physically break out of the pocket toward flatter, reachable groves. Same primitive the
+            // !nearest barren-zone path uses — applied here so a tree-RINGED pin escapes too.
+            // ★高树触发补充 (同一棵山顶树16min拉黑循环: 树高+8格,寻路上不去但moveAway能
+            // 小挪=永不算"被困"→楼梯永不触发): 目标树高于我8格且连败2轮 → 也走楼梯,
+            // 主动凿上山,不必等到被困。
+            const _highTree = nearest && nearest.b && nearest.b.position
+                && (nearest.b.position.y - bot.entity.position.y) >= 8 && stale >= 2;
+            if (bot.entity.position.distanceTo(_p0) < 4 || _highTree) {
+                // ★PINNED & WALK-BLOCKED: forced sprint+jump (walk-only) was proven useless here —
+                // ENTER pos sat at 18,-39 for 27min while the bot was boxed in a y66 pocket ringed by
+                // trees up a y73-77 hillside it couldn't path or walk up. Walking just face-plants the
+                // wall. So DIG OUT: carve a staircase TOWARD the nearest (just-failed) tree — clear the
+                // foot+head block ahead, the step above (so it becomes a stair), and our own head — then
+                // step+jump up. Repeated across stalls this tunnels through the wall and climbs the slope
+                // until the hilltop tree is finally reachable. Pure digging, no filler needed (works
+                // barehanded; equipForBlock picks the best tool). Never digs water/lava.
+                // LOCK the dig-out heading on the FIRST pinned stall and reuse it every stall this
+                // call. Earlier each stall re-aimed at whatever tree was nearest → the heading
+                // ping-ponged (-1,-1 ↔ 1,-1) so we chipped one diagonal step at each of several
+                // directions and y crept up only ~1 block per 30min. A LOCKED heading drives a single
+                // consistent staircase up the slope so y climbs steadily to the hilltop trees.
+                const tgt = (nearest && nearest.b) ? nearest.b.position : null;
+                let dx, dz;
+                if (_stairDir) { [dx, dz] = _stairDir; }
+                else if (tgt) { dx = Math.sign(Math.round(tgt.x) - Math.floor(bot.entity.position.x)) || 1; dz = Math.sign(Math.round(tgt.z) - Math.floor(bot.entity.position.z)) || 0; _stairDir = [dx, dz]; }
+                else { [dx, dz] = [[1, 0], [0, 1], [-1, 0], [0, -1]][stale % 4]; _stairDir = [dx, dz]; }
+                _dbg(`pinned → dig-staircase dir=${dx},${dz} (locked)${tgt ? ' tgt=' + Math.round(tgt.x) + ',' + Math.round(tgt.y) + ',' + Math.round(tgt.z) : ''}`);
+                bot._climbingAt = Date.now();   // 凿崖心跳: mobility 看到它就不判 MAROONED(爬山=有目的工程,不是被困;否则行军90s插队把凿崖斩在半路——FREE窗口2min<凿崖启动3-4min,结构性饿死)
+                try {
+                    // ★CLIMB LOOP (凿崖不积累的根修,16:02 对账: 旧版每 stall 凿一格,chopWood
+                    // 重入位置漂移(tgt 114↔122),5次accepted y 纹丝不动。改: 一次进入连续凿,
+                    // 每轮重算位置+刷新心跳,退出条件=登顶(tgt.y-2)/4轮零爬升/危殆/打断。)
+                    let _lastCY = Math.floor(bot.entity.position.y), _flatRounds = 0;
+                    const _climbMax = tgt ? 40 : 3;
+                    for (let _climb = 0; _climb < _climbMax; _climb++) {
+                    if (bot.death_abort || bot.health <= 4 || bot.interrupt_code) break;
+                    if (tgt && bot.entity.position.y >= tgt.y - 2) { _dbg(`climb DONE y=${Math.floor(bot.entity.position.y)} (tgt y${Math.round(tgt.y)})`); break; }
+                    bot._climbingAt = Date.now();
+                    const m = bot.entity.position.floored();
+                    // ★徒手禁撸石 here too (the SECOND material-blind dig path the alarm
+                    // caught, 05:01): bare-handed, stone in the staircase line means
+                    // re-aim the locked heading at a dirt face — not minutes of fruitless
+                    // punching per block. With a pick, dig anything as before.
+                    const _pick2 = bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+                    const _STONY2 = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
+                    // ★STAIR vs TUNNEL cell 选择 (16:09 STALL 破案: 旧 cells2 把前方脚位
+                    // (dx,0,dz) 也挖了——"凿台阶"被挖成水平隧道,forward+jump 走平地,y 永不
+                    // 涨(climb STALL 4平轮×N)。人类凿崖上行: 保留前方脚位当台阶,只挖它上面
+                    // 头位+头上+自己头顶,跳上去站高1格。前方脚位本来就空(平地/坑)才用旧
+                    // 隧道模式穿墙。)
+                    const _stepB = bot.blockAt(m.offset(dx, 0, dz));
+                    const cells2 = (_stepB && _stepB.boundingBox === 'block')
+                        ? [m.offset(dx, 1, dz), m.offset(dx, 2, dz), m.offset(0, 2, 0)]
+                        : [m.offset(dx, 0, dz), m.offset(dx, 1, dz), m.offset(dx, 2, dz), m.offset(0, 2, 0)];
+                    if (!_pick2 && cells2.some(c => { const b = bot.blockAt(c); return b && b.boundingBox === 'block' && _STONY2.test(b.name); })) {
+                        // ★NOPICK-FAMINE 破例 (死结实拍: 树全在y87-92崖顶,bot y63,四方向
+                        // 阶梯路线全是石面→轮一圈全ABORT→树全拉黑→"上崖要凿石→凿石要镐→
+                        // 做镐要木→木在崖顶"闭环锁死。这个门的本意是"换方向找土面",全石
+                        // 地形没有土面可找——徒手凿石10s/块×~50块≈9分钟买下整条科技树,
+                        // 比死结强无限。轮完4方向(确认无土面)才放开,优先土面的策略保留。)
+                        _stoneAborts++;
+                        // famine flag 挂 bot 跨调用持久 (bug实拍: 计数器是本函数局部量,
+                        // missionNether 每 iter 重新调 chopWood → 每次到 4/4 就归零重数,
+                        // 永远轮不到第5次。4/4=本轮已确认四方向全石,arm 10分钟持久豁免)
+                        const _famine = bot._nopickFamineAt && (Date.now() - bot._nopickFamineAt < 600000);
+                        if (_stoneAborts <= 4 && !_famine) {
+                            if (_stoneAborts === 4) { bot._nopickFamineAt = Date.now(); _dbg(`NOPICK-FAMINE armed (4/4 headings stone) — bare-hand climb unlocked for 10min`); }
+                            const [ndx, ndz] = [[1, 0], [0, 1], [-1, 0], [0, -1]][(stale + 1) % 4];
+                            _dbg(`pinned-stair ABORT (stone face, no pick, d=${dx},${dz}) → re-lock dir=${ndx},${ndz} (${_stoneAborts}/4 before bare-hand)`);
+                            _stairDir = [ndx, ndz];
+                            throw new Error('stone-no-pick');
+                        }
+                        _dbg(`pinned-stair NOPICK-FAMINE: all headings stone, no pick, no wood — bare-hand climb accepted (d=${dx},${dz})`);
+                    }
+                    // foot+head ahead (tunnel through wall), step-up block ahead (make a stair), own head (avoid entomb)
+                    for (const c of cells2) {
+                        const b = bot.blockAt(c);
+                        if (b && b.boundingBox === 'block' && !/water|lava/.test(b.name)) { try { await bot.tool.equipForBlock(b); } catch (e) {} try { await bot.dig(b); } catch (e) {} }
+                    }
+                    // Face the LOCKED dig direction (not the shifting nearest tree) so forward-walk
+                    // climbs the staircase we just carved, keeping the heading consistent.
+                    // ★HOLE PROBE before the blind march (deaths 216+217: IDENTICAL coords
+                    // x12,z-40 falling to y-34 — the forced traverse marched into the same
+                    // open 1x1 shaft twice, ~30min apart; raw setControlState walking has no
+                    // pathfinder hole-avoidance). If the next 1-2 cells have no floor within
+                    // 4 blocks, rotate the locked heading instead of stepping in.
+                    {
+                        const mp = bot.entity.position;
+                        const holey = (cells) => cells.some(([fx, fz]) => {
+                            for (let dd = 0; dd <= 4; dd++) {
+                                const fb = bot.blockAt(mp.offset(fx, -dd, fz));
+                                if (fb && (fb.boundingBox === 'block' || /water/.test(fb.name || ''))) return false;
+                            }
+                            return true;
+                        });
+                        if (holey([[dx * 1.2, dz * 1.2], [dx * 2.2, dz * 2.2]])) {
+                            const [ndx, ndz] = [[1, 0], [0, 1], [-1, 0], [0, -1]][(stale + 1) % 4];
+                            _dbg(`pinned-march ABORT (open shaft ahead d=${dx},${dz}) → re-lock dir=${ndx},${ndz}`);
+                            _stairDir = [ndx, ndz];
+                            throw new Error('hole-ahead');   // caught below; clearControlStates, next stall marches new dir
+                        }
+                    }
+                    try { await bot.lookAt(bot.entity.position.offset(dx, 0, dz), true); } catch (e) {}
+                    bot.setControlState('forward', true); bot.setControlState('jump', true);
+                    await new Promise(r => setTimeout(r, 1400));
+                    bot.clearControlStates();
+                    const _yNow = Math.floor(bot.entity.position.y);
+                    if (_yNow > _lastCY) { _flatRounds = 0; _lastCY = _yNow; }
+                    else if (++_flatRounds >= 4) { _dbg(`climb STALL (4 flat rounds at y=${_yNow}) — exit loop`); break; }
+                    }   // end CLIMB LOOP
+                } catch (e) { try { bot.clearControlStates(); } catch (_) {} }
+            }
+            if (stale >= 5) { log(bot, 'Stuck with no progress, stopping.'); break; }
+        } else {
+            stale = 0;
+        }
+    }
+    log(bot, `chopWood done: logs=${total()} (wanted +${count}).`);
+    return total();
+}

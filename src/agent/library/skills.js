@@ -4,9 +4,65 @@ import * as tickConfirm from "./tick_confirm.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import settings from "../../../settings.js";
+import path from 'path';
+import { pathToFileURL } from 'url';
 
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
 const useDelay = blockPlaceDelay > 0;
+
+// ★禁用寻路器自动脚手架 (用户实拍"想垫上台子→错位→诡异乱垫"): mineflayer-pathfinder
+// 的 Movements 默认带 scafoldingBlocks(泥土/圆石),目标在高台/对岸时自动垫块搭桥/搭塔。
+// 但其放块对时序/站位极敏感 — 偏一格就连锁错位(横向圆石脊/散乱土柱,社区著名顽疾)。
+// 人类规则: 赶路绕障碍,垫块是专门受控动作(digToSurface 的手动MLG垫/pillarUp)。
+// 子类替换让全部 `new pf.Movements(bot)`(本文件13处+其他引用方)统一禁脚手架:
+// 寻路器从此只走/挖,不放块 — 过不去就快速失败,调用方换路,绝不边走边乱垫。
+const _PFMovements = pf.Movements;
+// ★KILL-BOX PATH AVOIDANCE (death #269: roaming for trees pathed OVER the death
+// cluster and fell through its cave-riddled roof — the expulsion checks live at loop
+// boundaries and can't stop a mid-walk drop). The overseer clusters deaths into
+// advisory.json dzone {cx,cz,r}; here the pathfinder itself prices every step inside
+// that circle +60, so routes bend around the kill-box automatically. Soft cost, not a
+// ban: if the only path crosses (or we're being expelled FROM inside), it still works.
+import fs_dz from 'fs';
+let _dzPath = { t: 0, z: null };
+function _pathDangerZone() {
+    if (Date.now() - _dzPath.t < 5000) return _dzPath.z;
+    _dzPath.t = Date.now();
+    try {
+        const a = JSON.parse(fs_dz.readFileSync('bots/_supervisor/advisory.json', 'utf8'));
+        _dzPath.z = (a && a.dzone) ? a.dzone : null;
+    } catch (e) { _dzPath.z = null; }
+    return _dzPath.z;
+}
+class _NoScaffoldMovements extends _PFMovements {
+    constructor(...args) {
+        super(...args);
+        this.scafoldingBlocks = [];
+        if (Array.isArray(this.exclusionAreasStep)) {
+            this.exclusionAreasStep.push((block) => {
+                const z = _pathDangerZone();
+                if (!z || !block.position) return 0;
+                const dx = block.position.x - z.cx, dz0 = block.position.z - z.cz;
+                return (dx * dx + dz0 * dz0 < z.r * z.r) ? 60 : 0;
+            });
+        }
+        // ★BARE-HAND STONE = pathfinder too (the fifth material-blind dig path the
+        // alarm caught: collectBlock('dirt')'s pathfinding punched through the bot's
+        // own cobblestone bunker wall). Without a pickaxe, breaking a stone-class
+        // block costs +100 — the planner routes around stone (or digs dirt) instead
+        // of scheduling minute-long zero-drop punches. With a pick: no penalty.
+        if (Array.isArray(this.exclusionAreasBreak)) {
+            const _bot = args[0];
+            this.exclusionAreasBreak.push((block) => {
+                if (!block.name || !/stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/.test(block.name)) return 0;
+                try {
+                    return _bot.inventory.items().some(i => /_pickaxe$/.test(i.name)) ? 0 : 100;
+                } catch (e) { return 0; }
+            });
+        }
+    }
+}
+pf.Movements = _NoScaffoldMovements;
 
 export function log(bot, message) {
     bot.output += message + '\n';
@@ -44,6 +100,23 @@ export async function craftRecipe(bot, itemName, num=1) {
      * await skills.craftRecipe(bot, "stick");
      **/
     let placedTable = false;
+
+    // Reclaim a crafting table WE placed — pick it back up so we carry ONE table and
+    // re-use it, instead of littering a fresh table at every craft spot as we roam (the
+    // plains were carpeted with abandoned tables). Robust by design: break the EXACT block
+    // we placed (not a fuzzy nearest-search), sweep the drop, retry a few times. The caller
+    // runs this while interrupting modes are still suppressed, so a mode can't walk the bot
+    // off mid-reclaim and strand the table (the old failure that caused the litter).
+    const reclaimTable = async (pos) => {
+        if (!pos) return;
+        for (let t = 0; t < 3; t++) {
+            const blk = bot.blockAt(pos);
+            if (blk && blk.name === 'crafting_table') { try { await breakBlockAt(bot, pos.x, pos.y, pos.z); } catch (e) {} }
+            try { await pickupNearbyItems(bot); } catch (e) {}
+            if (world.getInventoryCounts(bot)['crafting_table'] > 0) return;
+            await new Promise(r => setTimeout(r, 200));
+        }
+    };
 
     if (mc.getItemCraftingRecipes(itemName).length == 0) {
         log(bot, `${itemName} is either not an item, or it does not have a crafting recipe!`);
@@ -84,12 +157,12 @@ export async function craftRecipe(bot, itemName, num=1) {
     }
     if (!recipes || recipes.length === 0) {
         log(bot, `You do not have the resources to craft a ${itemName}. It requires: ${Object.entries(mc.getItemCraftingRecipes(itemName)[0][0]).map(([key, value]) => `${key}: ${value}`).join(', ')}.`);
-        if (placedTable) {
-            await collectBlock(bot, 'crafting_table', 1);
+        if (placedTable && craftingTable) {
+            await reclaimTable(craftingTable.position);
         }
         return false;
     }
-    
+
     if (craftingTable && bot.entity.position.distanceTo(craftingTable.position) > 4) {
         await goToNearestBlock(bot, 'crafting_table', 4, craftingTableRange);
     }
@@ -101,12 +174,29 @@ export async function craftRecipe(bot, itemName, num=1) {
     const requiredIngredients = mc.ingredientsFromPrismarineRecipe(recipe); //Items required to use the recipe once.
     const craftLimit = mc.calculateLimitingResource(inventory, requiredIngredients);
     
-    await bot.craft(recipe, Math.min(craftLimit.num, num), craftingTable);
-    if(craftLimit.num<num) log(bot, `Not enough ${craftLimit.limitingResource} to craft ${num}, crafted ${craftLimit.num}. You now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
-    else log(bot, `Successfully crafted ${itemName}, you now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
-    if (placedTable) {
-        await collectBlock(bot, 'crafting_table', 1);
+    // Protect the craft from concurrent tick-driven MODE actions. A mode firing
+    // mid-craft (item_collecting walking off to grab a dropped item, auto_eat,
+    // self_preservation moveAway, ...) moves the bot / swaps the held item / opens
+    // another window and CORRUPTS the in-progress craft window — ingredients get
+    // consumed but the product is never retrieved (silent item loss). Freeze
+    // movement + disable interrupting modes for the brief craft, then restore.
+    const _guardModes = ['item_collecting', 'auto_eat', 'self_defense', 'self_preservation', 'hunting', 'torch_placing', 'unstuck', 'cowardice', 'idle_staring', 'elbow_room'];
+    const _prevModes = {};
+    try { bot.clearControlStates(); } catch (e) {}
+    try { for (const m of _guardModes) if (bot.modes && bot.modes.exists(m)) { _prevModes[m] = bot.modes.isOn(m); bot.modes.setOn(m, false); } } catch (e) {}
+    try {
+        await bot.craft(recipe, Math.min(craftLimit.num, num), craftingTable);
+        if(craftLimit.num<num) log(bot, `Not enough ${craftLimit.limitingResource} to craft ${num}, crafted ${craftLimit.num}. You now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
+        else log(bot, `Successfully crafted ${itemName}, you now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
     }
+    finally { try { for (const m in _prevModes) bot.modes.setOn(m, _prevModes[m]); } catch (e) {} }
+    // NOTE: we deliberately DO NOT reclaim (pick up) the table after every craft. Doing so
+    // crippled the grind — each subsequent craft then had to re-make a table (chop planks ->
+    // place -> craft -> pick up -> repeat), trapping the bot in a wood/table loop that never
+    // reached stone/iron. Instead we RELY ON the 16-block reuse above: at a work area we place
+    // ONE table and reuse it for every craft there. Worst case is one leftover table per area
+    // we roam to (minor), which is far better than a grind that can't progress. (reclaimTable
+    // is kept defined for deliberate cleanup use, but not auto-invoked.)
 
     //Equip any armor the bot may have crafted.
     //There is probablly a more efficient method than checking the entire inventory but this is all mineflayer-armor-manager provides. :P
@@ -357,11 +447,38 @@ export async function attackEntity(bot, entity, kill=true) {
         await tickConfirm.sleepMs(100);
     }
     else {
+        // ★够不到不出手 (用户实拍"对空气挥舞"的机理根治,与 safeDig 臂展守卫同款):
+        // bot.pvp 对不可达目标照样接近+挥砍。先做可达性预检 — 远于4格且无清晰路径
+        // 的目标直接放弃(返回false让调用方换目标),不开始一场注定空挥的攻击。
+        if (bot.entity.position.distanceTo(entity.position) > 4) {
+            let clear = false;
+            try { clear = await world.isClearPath(bot, entity); } catch (e) { clear = true; }
+            if (!clear) {
+                log(bot, `⚠️ ${entity.name} unreachable (no clear path) — not engaging.`);
+                return false;
+            }
+        }
         bot.pvp.attack(entity);
+        // ★HARD TIMEOUT. The kill-loop used to spin until the target died/left 24-blocks or
+        // an interrupt fired — with NO time cap. A mob we CAN'T reach (spider on a ledge /
+        // behind a wall / across water) never dies and never leaves, so bot.pvp keeps trying
+        // forever and this await-loop hangs indefinitely. That silently froze setBed's daylight
+        // spider-string hunt for 15min (its 60s for-cap lives in the loop condition, which a
+        // non-returning attackEntity never reaches). Bail after 30s of no kill: stop pvp, sweep
+        // any drops, return false so the caller relocates to a reachable target. Reset the clock
+        // whenever we land a hit (HP drops) so a long-but-progressing fight isn't cut short.
+        const start = Date.now();
+        let lastHp = entity.health != null ? entity.health : null, lastProgress = start;
         while (world.getNearbyEntities(bot, 24).includes(entity)) {
             await new Promise(resolve => setTimeout(resolve, 1000));
-            if (bot.interrupt_code) {
+            if (bot.interrupt_code) { bot.pvp.stop(); return false; }
+            if (entity.health != null && lastHp != null && entity.health < lastHp) lastProgress = Date.now();
+            if (entity.health != null) lastHp = entity.health;
+            // 12s (was 30s): 零伤害挥 12 秒=在打空气 — 旧 30 秒窗口正是实拍空挥的主体
+            if (Date.now() - lastProgress > 12000) {
                 bot.pvp.stop();
+                log(bot, `⚠️ Can't kill ${entity.name} in 12s (unreachable?) — breaking off.`);
+                try { await pickupNearbyItems(bot); } catch (e) {}
                 return false;
             }
         }
@@ -415,14 +532,71 @@ export async function defendSelf(bot, range=9) {
 }
 
 
+// ───────────────────────── DIG PRIMITIVES (用户铁律) ─────────────────────────
+// Basic, reusable digging mechanics live HERE as low-level primitives, NOT copy-pasted
+// into every skill / sub-loop. One spot to fix = every dig path fixed; no sub-path can
+// silently miss the guard (that's exactly how the "抬头空挥" regression slipped into the
+// vein flood-fill while the main collectBlock path already had it).
 
-export async function collectBlock(bot, blockType, num=1, exclude=null) {
+// Pick the right tool for a block, but NEVER hold a sword to break wood — equipForBlock
+// leaves a combat sword in hand when axe-less → "用木剑砍树" (slow + burns combat durability).
+// Drop to bare hand for logs/wood when we have no axe. Every dig path uses this.
+async function equipForDig(bot, block) {
+    try { await bot.tool.equipForBlock(block); } catch (e) {}
+    if (/_log$|_wood$|_stem$|_hyphae$/.test(block.name) && bot.heldItem && /_sword$/.test(bot.heldItem.name)
+        && !bot.inventory.items().some(i => /_axe$/.test(i.name))) {
+        try { await bot.unequip('hand'); } catch (e) {}
+    }
+}
+
+// THE one block-break primitive. Walk adjacent if needed, verify eye→block-centre reach
+// (≤4.6 — past that bot.dig swings at air forever on out-of-reach / leaf-occluded blocks),
+// equip the right tool, dig with a hard time backstop, and STOP the swing on failure.
+// Returns 'ok' | 'gone' | 'unreachable' | 'timeout' | 'error'. Caller decides cleanup
+// (exclude, expand neighbours, relocate, ...). Opts: maxMs dig backstop, approach (path
+// closer), equip (run equipForDig — false if caller already equipped), pickup (vacuum drop).
+async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = true, pickup = false } = {}) {
+    const dead = (b) => !b || b.boundingBox === 'empty' || b.name === 'air';
+    if (dead(block)) return 'gone';
+    const reachOf = () => bot.entity.position.offset(0, 1.62, 0).distanceTo(block.position.offset(0.5, 0.5, 0.5));
+    try {
+        if (approach && reachOf() > 4.4)
+            await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
+        if (reachOf() > 4.6) return 'unreachable';
+        const cur = bot.blockAt(block.position);
+        if (dead(cur)) return 'gone';
+        if (equip) await equipForDig(bot, cur);
+        // ★Shorter timeout for normal blocks: a mineral/block we CAN'T actually break (wedged in
+        // a corner / behind rock whose face we can't reach — the "对着夹角拼命空挥" the user keeps
+        // seeing) gets abandoned in ~8s instead of flailing the full 15s. 8s safely covers every
+        // legit slow break (barehand stone 7.5s, any pick far less); only genuinely hard blocks
+        // (obsidian ~9.4s w/ diamond pick, for the nether portal) keep the long backstop. We can't
+        // use canSeeBlock to pre-skip — x-ray ore is buried (6 faces hidden) and would all be skipped.
+        const _hard = /obsidian|ancient_debris|reinforced/.test(cur.name || '');
+        const _digMs = _hard ? maxMs : Math.min(maxMs, 8000);
+        await Promise.race([
+            bot.dig(cur),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('dig-timeout')), _digMs)),
+        ]);
+        if (pickup) { try { await pickupNearbyItems(bot); } catch (e) {} }
+        return 'ok';
+    } catch (e) {
+        try { bot.stopDigging(); } catch (_) {}
+        return (e && e.message === 'dig-timeout') ? 'timeout' : 'error';
+    }
+}
+
+export async function collectBlock(bot, blockType, num=1, exclude=null, veinFollow='auto') {
     /**
      * Collect one of the given block type.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {string} blockType, the type of block to collect.
      * @param {number} num, the number of blocks to collect. Defaults to 1.
      * @param {list} exclude, a list of positions to exclude from the search. Defaults to null.
+     * @param {boolean|string} veinFollow, when collecting an ORE, exhaust the whole
+     *   connected vein once one block is found (so we never leave residual ore and
+     *   pick up a natural buffer). 'auto' (default) = on for *_ore families, off for
+     *   everything else (logs, stone, dirt…); pass true/false to force.
      * @returns {Promise<boolean>} true if the block was collected, false if the block type was not found.
      * @example
      * await skills.collectBlock(bot, "oak_log");
@@ -432,8 +606,11 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         return false;
     }
     let blocktypes = [blockType];
-    if (blockType === 'coal' || blockType === 'diamond' || blockType === 'emerald' || blockType === 'iron' || blockType === 'gold' || blockType === 'lapis_lazuli' || blockType === 'redstone')
+    const oreDrops = ['coal','diamond','emerald','iron','gold','lapis_lazuli','redstone','copper'];
+    if (oreDrops.includes(blockType)) {
         blocktypes.push(blockType+'_ore');
+        blocktypes.push('deepslate_'+blockType+'_ore'); // diamond/iron/etc at deepslate depth
+    }
     if (blockType.endsWith('ore'))
         blocktypes.push('deepslate_'+blockType);
     if (blockType === 'dirt')
@@ -441,39 +618,101 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
     if (blockType === 'cobblestone')
         blocktypes.push('stone');
     const isLiquid = blockType === 'lava' || blockType === 'water';
+    // ★HARVESTABILITY GATE: digging a pick-requiring block bare-handed drops NOTHING,
+    // so "collect stone with no pickaxe" is a dead plan that wastes minutes per block
+    // (the BARE-HAND STONE DIG alarm caught achieve's collect-stone loop punching its
+    // own feet at 0/3 forever). Fail FAST so the caller pivots (e.g. get wood → craft
+    // a pick) instead of grinding a guaranteed-zero path.
+    const PICK_REQ = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble|^iron_|^copper_|^gold_/;
+    // `some`, not `every`: collectBlock('coal') searches ['coal','coal_ore',...] and the
+    // ITEM name 'coal' doesn't match the block regex — `every` let the gate pass and the
+    // bot punched a coal vein bare-handed (zero drops). Any pick-requiring member in the
+    // search set means the dig itself needs a pick.
+    if (!isLiquid && blocktypes.some(n => PICK_REQ.test(n))
+        && !bot.inventory.items().some(i => /_pickaxe$/.test(i.name))) {
+        log(bot, `Cannot collect ${blockType} bare-handed (drops nothing without a pickaxe) — get/craft a pickaxe first.`);
+        return false;
+    }
+    // Vein-follow only makes sense for ores (you don't want to chain-mine every
+    // nearby stone/dirt/log). 'auto' = on iff the search set contains an ore block.
+    const veinActive = !isLiquid && (veinFollow === true || (veinFollow === 'auto' && blocktypes.some(n => n.endsWith('_ore'))));
 
     let collected = 0;
 
     const movements = new pf.Movements(bot);
     movements.dontMineUnderFallingBlock = false;
     movements.dontCreateFlow = true;
-    
-    // Enable water movement for collectBlock
-    movements.liquids.add(mc.getBlockId('water'));
-    movements.liquids.add(mc.getBlockId('flowing_water'));
+    // ★RAVINE DISCIPLINE (deaths 196/197 — both "fall" mid-iron-grind; filmstrip shows a
+    // huge ravine/mineshaft complex with the ore embedded in cliff walls): the default
+    // maxDropDown=4 lets the pathfinder descend cliffs via chained 4-block hops — at
+    // armor0 that's cumulative chip damage and ONE mis-evaluated landing from death.
+    // A human in a ravine takes 2-block steps or doesn't go. Clamp it.
+    movements.maxDropDown = 2;
+
+    // Enable water movement for collectBlock — but ONLY near the surface. Underground
+    // (y<55) the pathfinder happily routes through flooded aquifer tunnels; with a sealed
+    // ceiling overhead the drowning-escape reflex can't chew through rock in time (death
+    // 200: drowning y47, coveredAbove 8, no mobs — the recurring deep-water bucket).
+    // Surface swims (rivers/shores) stay enabled: open air above, the swim reflex works.
+    if (bot.entity.position.y >= 55) {
+        movements.liquids.add(mc.getBlockId('water'));
+        movements.liquids.add(mc.getBlockId('flowing_water'));
+    }
 
     // Blocks to ignore safety for, usually next to lava/water
     const unsafeBlocks = ['obsidian'];
 
-    for (let i=0; i<num; i++) {
-        let blocks = world.getNearestBlocksWhere(bot, block => {
-            if (!blocktypes.includes(block.name)) {
-                return false;
-            }
-            if (exclude) {
-                for (let position of exclude) {
-                    if (block.position.x === position.x && block.position.y === position.y && block.position.z === position.z) {
+    // Bound the work: normally `num` finds, but vein-follow can satisfy `num` in
+    // fewer outer iterations (and may overshoot a little — desired for ores), so
+    // loop on `collected < num` with an attempt cap to avoid spinning on
+    // unreachable targets.
+    const maxAttempts = num * 4 + 8;
+    for (let i=0; i<maxAttempts && collected < num; i++) {
+        // ★死亡区矿物不可见 (242/243/244 17分钟三连死: 蜂窝雷区裸露矿脉是x-ray磁铁 —
+        // 采集选target吸进去,避区撤退推出来,两逻辑打架死在往返路上。修在源头: 聚集区内
+        // 的方块从候选里消失)。零开销缓存: 每次collect调用读一次death_log近50条,预算
+        // 出"16格内有2+邻死"的雷点,谓词里拒绝雷点14格内的目标。
+        let _dzones = [];
+        try {
+            const _dlraw = (await import('fs')).readFileSync('bots/_supervisor/death_log.jsonl', 'utf8').trim().split('\n').slice(-50);
+            const _dpts = _dlraw.map(l => { try { const r = JSON.parse(l); return (typeof r.x === 'number') ? r : null; } catch (e) { return null; } }).filter(Boolean);
+            _dzones = _dpts.filter(p => _dpts.filter(q => q !== p && Math.hypot(q.x - p.x, q.z - p.z) < 16).length >= 2);
+        } catch (e) {}
+        const _inDeathZone = (p) => _dzones.some(z => Math.hypot(z.x - p.x, z.z - p.z) < 14);
+
+        // The scan + per-block predicate (incl. pathfinder's safeToBreak, which walks
+        // neighbour blocks) can null-deref inside dependency code — that throw used to
+        // escape collectBlock entirely and kill the caller's whole collect loop (seen
+        // live: "collect iron_ore: Cannot read properties of null (reading 'x')" every
+        // cycle). Guard per-block (skip the offending block) and around the scan.
+        let blocks = [];
+        try {
+            blocks = world.getNearestBlocksWhere(bot, block => {
+                try {
+                    if (!block || !block.position || !blocktypes.includes(block.name)) {
                         return false;
                     }
-                }
-            }
-            if (isLiquid) {
-                // collect only source blocks
-                return block.metadata === 0;
-            }
-            
-            return movements.safeToBreak(block) || unsafeBlocks.includes(block.name);
-        }, 64, 1);
+                    if (_inDeathZone(block.position)) return false;   // 雷区矿物不可见
+                    if (exclude) {
+                        for (let position of exclude) {
+                            if (block.position.x === position.x && block.position.y === position.y && block.position.z === position.z) {
+                                return false;
+                            }
+                        }
+                    }
+                    if (isLiquid) {
+                        // collect only source blocks
+                        return block.metadata === 0;
+                    }
+                    return movements.safeToBreak(block) || unsafeBlocks.includes(block.name);
+                } catch (e) { return false; }
+            }, 64, 1);
+        } catch (err) {
+            const frame = (err.stack || '').split('\n')[1] || '';
+            log(bot, `⚠️ ${blockType} scan failed: ${err}.${frame ? ' @' + frame.trim() : ''} — retrying next pass.`);
+            await new Promise(r => setTimeout(r, 1000));
+            continue;
+        }
 
         if (blocks.length === 0) {
             if (collected === 0)
@@ -483,7 +722,16 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             break;
         }
         const block = blocks[0];
+        try {
         await bot.tool.equipForBlock(block);
+        // ★Never harvest WOOD with a SWORD (chops slowly + burns the sword durability we need
+        // for combat). equipForBlock leaves a combat-equipped sword in hand when we have no axe
+        // → the bot "用木剑砍树". For logs/wood, if we're holding a sword and have no axe, drop
+        // to BARE HAND (same speed on wood, saves the sword).
+        if (/_log$|_wood$|_stem$|_hyphae$/.test(block.name) && bot.heldItem && /_sword$/.test(bot.heldItem.name)
+            && !bot.inventory.items().some(i => /_axe$/.test(i.name))) {
+            try { await bot.unequip('hand'); } catch (e) {}
+        }
         if (isLiquid) {
             const bucket = bot.inventory.findInventoryItem('bucket');
             if (!bucket) {
@@ -497,40 +745,49 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             log(bot, `Don't have right tools to harvest ${blockType}.`);
             return false;
         }
-        try {
             let success = false;
             if (isLiquid) {
                 success = await useToolOnBlock(bot, 'bucket', block);
             }
-            else if (mc.mustCollectManually(blockType)) {
-                await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
-                
-                // Add timeout for manual digging
-                const digTimeout = 60000;
-                try {
-                    await Promise.race([
-                        bot.dig(block),
-                        new Promise((_, reject) => 
-                            setTimeout(() => reject(new Error('Dig timeout')), digTimeout)
-                        )
-                    ]);
+            else {
+                // ★HUMAN-LIKE HARVEST for ALL solid blocks (logs/stone/dirt/ores/crops). ROOT FIX
+                // for "天天空挥": the old code routed the common targets (wood/stone/ore — what we
+                // mine MOST; mustCollectManually is only true for crops/torches/vines) through
+                // `bot.collectBlock.collect` (mineflayer-collectblock plugin), which in jungle
+                // terrain pathfinds toward a block it never actually reaches and then SWINGS AT
+                // AIR. A human just walks adjacent, looks at the block, breaks it, and moves on if
+                // it won't break. So for EVERY block: path to within 2, VERIFY reach (≤4.6), then
+                // a bounded 10s dig; skip+exclude anything we can't reach or can't break (no more
+                // swinging at air, no re-locking the same unreachable target). The flaky plugin
+                // path is removed entirely.
+                // ★Break via the unified safeDig primitive (reach-guard + bounded dig +
+                // stopDigging all live there). equip:false — we already equipped + ran the
+                // sword-guard above (537-545). 15s backstop covers the slowest legit break
+                // (obsidian ~9.4s w/ diamond pick, for the nether portal) with margin.
+                exclude = exclude || [];
+                const r = await safeDig(bot, block, { maxMs: 15000, equip: false });
+                if (r === 'ok') {
+                    // ★Actually COLLECT the drop (fixes "挖了树不捡木头"): step ONTO the broken
+                    // block's spot via a dig-capable path so mineflayer auto-vacuums the item,
+                    // THEN sweep any stragglers (drops land a couple blocks off through leaves/vines).
+                    try { await goToPosition(bot, block.position.x, block.position.y, block.position.z, 1); } catch (e) {}
                     await pickupNearbyItems(bot);
                     success = true;
-                } catch (error) {
-                    if (error.message === 'Dig timeout') {
-                        log(bot, `⚠️ Digging ${blockType} timed out, skipping.`);
-                        bot.stopDigging();
-                        continue;
-                    }
-                    throw error;
+                } else if (r === 'gone') {
+                    continue; // vanished before we dug — move on
+                } else {
+                    log(bot, `⚠️ ${block.name} ${r} — skip+exclude, next.`);
+                    exclude.push(block.position);
+                    continue;
                 }
             }
-            else {
-                await bot.collectBlock.collect(block);
-                success = true;
-            }
-            if (success)
+            if (success) {
                 collected++;
+                // Exhaust the rest of this connected ore vein so we never leave
+                // remnants behind (and gather a natural buffer beyond `num`).
+                if (veinActive)
+                    collected += await harvestConnectedVein(bot, block.position, blocktypes);
+            }
             await autoLight(bot);
         }
         catch (err) {
@@ -543,7 +800,10 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 continue;
             }
             else {
-                log(bot, `Failed to collect ${blockType}: ${err}.`);
+                // include the top stack frame so a null-deref inside a dependency
+                // (tool plugin / pathfinder / canHarvest) is locatable from the log
+                const frame = (err.stack || '').split('\n')[1] || '';
+                log(bot, `Failed to collect ${blockType}: ${err}.${frame ? ' @' + frame.trim() : ''}`);
                 continue;
             }
         }
@@ -553,6 +813,42 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
     }
     log(bot, `Collected ${collected} ${blockType}.`);
     return collected > 0;
+}
+
+// Flood-fill mine a connected ore vein starting from a just-mined block position.
+// MC ore blobs often touch only diagonally, so we expand over face- AND
+// diagonal-adjacent cells. Digs each reachable block of `blocktypes`, equipping
+// the right pickaxe per block (so it actually drops) and pathing close so the
+// pathfinder doesn't thrash. Bounded by `max`. Returns how many blocks it mined.
+async function harvestConnectedVein(bot, startPos, blocktypes, max=64) {
+    const NB = [
+        [1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1],
+        [1,1,0],[1,-1,0],[-1,1,0],[-1,-1,0],[0,1,1],[0,1,-1],[0,-1,1],[0,-1,-1],
+        [1,0,1],[1,0,-1],[-1,0,1],[-1,0,-1],
+    ];
+    const isTarget = (b) => b && blocktypes.includes(b.name);
+    const seen = new Set();
+    const queue = [];
+    // Seed with the neighbours of the already-mined start block.
+    for (const [dx,dy,dz] of NB) queue.push(startPos.offset(dx,dy,dz));
+    let mined = 0;
+    while (queue.length && mined < max) {
+        if (bot.interrupt_code) break;
+        const p = queue.shift();
+        const k = `${p.x},${p.y},${p.z}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        const b = bot.blockAt(p);
+        if (!isTarget(b)) continue;
+        // ★Break via the same safeDig primitive as the main path — reach-guard prevents the
+        // "抬头空挥" on a tall tree's high logs, the equip step keeps a sword off wood, and the
+        // 8s backstop bounds each log. Expand neighbours regardless of outcome (a leaning/bent
+        // trunk unreachable from here may be reachable from an adjacent cell).
+        const r = await safeDig(bot, b, { maxMs: 8000, pickup: true });
+        if (r === 'ok') mined++;
+        for (const [dx,dy,dz] of NB) queue.push(p.offset(dx,dy,dz));
+    }
+    return mined;
 }
 
 export async function pickupNearbyItems(bot) {
@@ -890,6 +1186,99 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         log(bot, `Failed to place ${blockType} at ${target_dest}.`);
         return false;
     }
+}
+
+export async function placeBlockNearby(bot, blockName, maxTries=4) {
+    /**
+     * Robustly place a block somewhere reachable next to the bot, on solid footing,
+     * WITHOUT cheating. Finds an adjacent floor cell that has a solid block beneath
+     * it, clears the cell + headroom (digging a small niche if the spot is cramped,
+     * e.g. a 1-wide mine tunnel), then places the block on that floor. Retries across
+     * several cells and relocates to opener ground if needed. This replaces the old
+     * "try a few spots, else /setblock" pattern — survival placement that just works,
+     * so we never fall back to the cheat command.
+     * @param {MinecraftBot} bot
+     * @param {string} blockName, e.g. 'crafting_table' or 'furnace' (must be in inventory).
+     * @param {number} maxTries, relocate-and-retry rounds. Defaults to 4.
+     * @returns {Promise<boolean>} true if the block ended up placed.
+     **/
+    const empty = new Set(['air','cave_air','void_air','water','flowing_water','grass','short_grass','tall_grass','snow','dead_bush','fern','large_fern','vine','seagrass']);
+    const noBuild = new Set(['lava','flowing_lava','water','flowing_water','bedrock']);
+    const isSolidFloor = (b) => b && !empty.has(b.name) && !noBuild.has(b.name) && b.boundingBox === 'block';
+    const tryCell = async (cell) => {
+        if (bot.interrupt_code) return false;
+        const below = bot.blockAt(cell.offset(0, -1, 0));
+        if (!isSolidFloor(below)) return false; // need something solid to build off
+        // Clear the target cell and the headroom above it (dig a niche if cramped).
+        for (const c of [cell, cell.offset(0, 1, 0)]) {
+            const b = bot.blockAt(c);
+            if (!b) return false;
+            if (noBuild.has(b.name)) return false; // don't dig into lava/water/bedrock
+            if (!empty.has(b.name)) {
+                try { const ok = await breakBlockAt(bot, c.x, c.y, c.z); if (!ok) return false; await new Promise(r => setTimeout(r, 150)); }
+                catch (e) { return false; }
+            }
+        }
+        return await placeBlock(bot, blockName, cell.x, cell.y, cell.z, 'bottom', true);
+    };
+    // ★PRE-ESCAPE if sealed/cramped (THE "place table" deadlock deep underground). If NO
+    // horizontal neighbor is open air, the offset loop below would try to DIG each stone cell —
+    // barehanded ~7.5s/block, which blows achieve's place-timebox before anything ever places.
+    // So FIRST pillar UP on filler (FAST: placing ~0.4s) until a side opens or we surface — a
+    // human just towers out of the hole. Then place normally in the opener space. (用户:"原地
+    // 垫石头就能上去"。)
+    const _fill2 = () => { const c = world.getInventoryCounts(bot); return ['dirt','cobblestone','cobbled_deepslate','stone','andesite','diorite','granite','tuff','gravel','netherrack'].find(n => (c[n]||0) > 0) || Object.keys(c).find(n => /_planks$/.test(n) && c[n] > 0); };
+    const _crampedNow = () => ![[1,0,0],[-1,0,0],[0,0,1],[0,0,-1]].some(o => { const bl = bot.blockAt(bot.entity.position.offset(o[0],o[1],o[2])); return bl && empty.has(bl.name); });
+    for (let up = 0; up < 8 && _crampedNow() && Math.floor(bot.entity.position.y) < 70 && !bot.interrupt_code; up++) {
+        const f = _fill2(); if (!f) break;
+        const h = bot.blockAt(bot.entity.position.offset(0, 2, 0));
+        if (h && h.boundingBox === 'block' && !noBuild.has(h.name)) { try { await breakBlockAt(bot, h.x, h.y, h.z); } catch (e) {} }
+        try { bot.setControlState('jump', true); await new Promise(r => setTimeout(r, 280)); const p = bot.entity.position.floored(); await placeBlock(bot, f, p.x, p.y - 1, p.z, 'top', true); bot.setControlState('jump', false); await new Promise(r => setTimeout(r, 150)); }
+        catch (e) { try { bot.setControlState('jump', false); } catch (e2) {} }
+    }
+    for (let t = 0; t < maxTries; t++) {
+        if (bot.interrupt_code) break;
+        const base = bot.entity.position.floored();
+        const offs = [[1,0,0],[-1,0,0],[0,0,1],[0,0,-1],[1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],[2,0,0],[0,0,2]];
+        for (const [dx, dy, dz] of offs) {
+            if (await tryCell(new Vec3(base.x + dx, base.y + dy, base.z + dz))) {
+                log(bot, `Placed ${blockName} nearby.`);
+                return true;
+            }
+        }
+        // Relocate to opener ground, then retry. ★If we CAN'T move (sealed 1-wide mine shaft —
+        // the classic "place table" infinite loop deep underground: nowhere to relocate, every
+        // neighbor is stone), CARVE an alcove with the pickaxe: clear the 4 horizontal neighbors
+        // + their headroom so the next round has an open floor cell to place on. Bounded (≤8
+        // blocks), skips lava/water/bedrock. This is what a human does — dig a side-pocket to
+        // craft in instead of standing in the cramped shaft forever.
+        // Couldn't place at this level — step to opener ground and retry. (A sealed/cramped
+        // pocket is already handled by the FAST pre-escape pillar-up above; no slow barehanded
+        // stone-carving here, which would blow the timebox.)
+        try { await moveAway(bot, 3); } catch (e) {}
+    }
+    // ★STUCK ESCAPE (用户: "原地垫石头就能上去"). Couldn't place after carving — we're sealed in
+    // a cramped pocket (naked in a stone shaft: can't dig stone fast, no room). PILLAR UP on any
+    // filler we carry (planks/dirt/cobble) toward open sky so the caller's retry lands in the
+    // open. Bounded to 6 — escapes a shallow pocket; a human just towers out.
+    const FILL2 = ['dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'andesite', 'diorite', 'granite', 'tuff', 'gravel', 'netherrack', 'oak_planks', 'spruce_planks', 'jungle_planks', 'birch_planks', 'dark_oak_planks', 'acacia_planks', 'mangrove_planks', 'cherry_planks'];
+    const filler2 = () => { const c = world.getInventoryCounts(bot); return FILL2.find(n => (c[n] || 0) > 0) || Object.keys(c).find(n => /_planks$|_log$/.test(n) && c[n] > 0); };
+    const headOpen = () => { const h = bot.blockAt(bot.entity.position.offset(0, 2, 0)); return !h || /^(air|cave_air|void_air|short_grass|tall_grass|snow)$/.test(h.name || ''); };
+    for (let up = 0; up < 6 && filler2() && !bot.interrupt_code; up++) {
+        if (!headOpen()) { const h = bot.blockAt(bot.entity.position.offset(0, 2, 0)); try { if (h) await breakBlockAt(bot, h.x, h.y, h.z); } catch (e) {} }
+        const f = filler2(); if (!f) break;
+        try {
+            bot.setControlState('jump', true);
+            await new Promise(r => setTimeout(r, 280));
+            const p = bot.entity.position.floored();
+            await placeBlock(bot, f, p.x, p.y - 1, p.z, 'top', true);
+            bot.setControlState('jump', false);
+            await new Promise(r => setTimeout(r, 160));
+        } catch (e) { try { bot.setControlState('jump', false); } catch (e2) {} }
+        if (Math.floor(bot.entity.position.y) >= 63) break;   // surfaced
+    }
+    log(bot, `Could not place ${blockName} nearby after ${maxTries} tries (pillared up to retry).`);
+    return false;
 }
 
 export async function equip(bot, itemName) {
@@ -1300,6 +1689,24 @@ export async function goToGoal(bot, goal) {
      * @param {pf.goals.Goal} goal, the goal to navigate to.
      **/
 
+    // ★MAROONED gate at the COMMON pathfinding entry (打转终极机理: 只给 goToPosition
+    // 加门漏掉了 moveAway/moveAwayFromEntity/avoidEnemies — 它们直接走 goToGoal。
+    // act_trace 实拍: 行军把 bot 修路推进 x112→x123,任务层 unstick 的 moveAway 20 秒
+    // 又拉回 x112,两控制流拔河。被困态下一切寻路注定 NoPath 还干扰行军 — 在公共入口
+    // 一刀拦掉。例外: 6 格内有敌对时放行(逃命寻路优先,与 sp 让位判定对称)。)
+    if (bot._mobility && bot._mobility.state === 'MAROONED') {
+        let closeThreat = false;
+        try {
+            closeThreat = Object.values(bot.entities || {}).some(e =>
+                e && e !== bot.entity && e.position && mc.isHostile(e)
+                && e.position.distanceTo(bot.entity.position) < 6);
+        } catch (e) {}
+        if (!closeThreat) {
+            log(bot, `goToGoal suppressed: MAROONED (march owns movement)`);
+            return;
+        }
+    }
+
     // Setup movements
     const nonDestructiveMovements = new pf.Movements(bot);
     const dontBreakBlocks = ['glass', 'glass_pane'];
@@ -1334,6 +1741,19 @@ export async function goToGoal(bot, goal) {
             destructiveMovements.scafoldingBlocks.push(blockId);
         }
     });
+
+    // ★JUNGLE VINE FIX (user: 寻路特别容易卡在藤蔓面前动不了). Vines are CLIMBABLE in
+    // mineflayer-pathfinder by default → the planner invents bogus "climb the vine" paths up
+    // trunks/walls that the bot can't actually execute, so it stalls in front of the vine
+    // curtain. Remove vine-family from climbables on BOTH movement sets so they're treated as
+    // ordinary walk-through (empty bounding box) / break-through blocks. delete() is a no-op if
+    // the id isn't present, so this is safe regardless of pathfinder version.
+    for (const m of [nonDestructiveMovements, destructiveMovements]) {
+        for (const cn of ['vine', 'weeping_vines', 'twisting_vines', 'cave_vines', 'cave_vines_plant', 'glow_lichen']) {
+            const id = mc.getBlockId(cn);
+            if (id != null && m.climbables && typeof m.climbables.delete === 'function') { try { m.climbables.delete(id); } catch (e) {} }
+        }
+    }
 
     const doorCheckInterval = startDoorInterval(bot);
     const totalStartTime = Date.now();
@@ -1505,6 +1925,13 @@ function startDoorInterval(bot) {
 }
 
 export async function goToPosition(bot, x, y, z, min_distance=2) {
+    // ★MAROONED = the engineered march owns ALL movement (打转机理之二: 任务层寻路
+    // 目标在西、行军向东开路,两个系统拔河,bot 被来回拖。被困状态下任务层的每次
+    // goToPosition 注定 NoPath 还干扰行军 — 快速让位,等状态机宣布自由再恢复寻路。)
+    if (bot._mobility && bot._mobility.state === 'MAROONED') {
+        log(bot, `goToPosition suppressed: MAROONED (march owns movement)`);
+        return false;
+    }
     /**
      * Navigate to the given position.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
@@ -2281,10 +2708,17 @@ export async function digDown(bot, distance = 10) {
             return true;
         }
 
-        // Check for lava, water
-        if (targetBlock.name === 'lava' || targetBlock.name === 'water' || 
-            belowBlock.name === 'lava' || belowBlock.name === 'water') {
-            log(bot, `Dug down ${i-1} blocks, but reached ${belowBlock ? belowBlock.name : '(lava/water)'}`)
+        // Check for lava/water in target, below, AND the 4 HORIZONTAL neighbours + block above.
+        // An aquifer floods the shaft from the SIDE (the old check only looked straight down) —
+        // that's the recurring y~45 underground drowning that掉装备→ignites the death spiral.
+        // Include flowing_water/flowing_lava (aquifers flow). Stop BEFORE breaking into the pocket.
+        const _WL = new Set(['water', 'flowing_water', 'lava', 'flowing_lava']);
+        const _around = [targetBlock, belowBlock,
+            bot.blockAt(targetBlock.position.offset(1, 0, 0)), bot.blockAt(targetBlock.position.offset(-1, 0, 0)),
+            bot.blockAt(targetBlock.position.offset(0, 0, 1)), bot.blockAt(targetBlock.position.offset(0, 0, -1)),
+            bot.blockAt(targetBlock.position.offset(0, 1, 0))];
+        if (_around.some(b => b && _WL.has(b.name))) {
+            log(bot, `Dug down ${i - 1} blocks, stopping — water/lava adjacent (don't flood the shaft).`);
             return false;
         }
 
@@ -2623,3 +3057,34 @@ export async function useToolOn(bot, toolName, targetName) {
     log(bot, `Used ${toolName} on ${block.name}.`);
     return true;
  }
+
+export async function customSkill(bot, skillName, ...args) {
+    /**
+     * Load and run a hot-reloadable custom skill written to bots/_supervisor/skills/<skillName>.js. The supervisor adds these files at runtime to teach the bot a procedure; the file is re-imported fresh on every call so edits take effect with NO agent restart. The skill module must export a default async function with signature (bot, ctx, ...args) where ctx = { skills, world, mc, Vec3, log }.
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {string} skillName, the file name without extension of the custom skill to run, e.g. "buildNetherPortal".
+     * @param {...any} args, additional arguments forwarded to the custom skill.
+     * @returns {Promise<any>} whatever the custom skill returns, or false if it could not be loaded.
+     * @example
+     * await skills.customSkill(bot, "buildNetherPortal");
+     **/
+    if (typeof skillName !== 'string' || !/^[A-Za-z0-9_-]+$/.test(skillName)) {
+        log(bot, `Invalid custom skill name: ${skillName}`);
+        return false;
+    }
+    const abs = path.resolve(process.cwd(), 'bots', '_supervisor', 'skills', `${skillName}.js`);
+    let mod;
+    try {
+        mod = await import(pathToFileURL(abs).href + `?t=${Date.now()}`);
+    } catch (err) {
+        log(bot, `Custom skill '${skillName}' failed to load: ${err.message}`);
+        return false;
+    }
+    const fn = mod.default || mod[skillName];
+    if (typeof fn !== 'function') {
+        log(bot, `Custom skill '${skillName}' has no default export function.`);
+        return false;
+    }
+    const ctx = { skills: await import('./skills.js'), world, mc, Vec3, log };
+    return await fn(bot, ctx, ...args);
+}

@@ -14,6 +14,9 @@
   <a href="https://github.com/mindcraft-bots/mindcraft/blob/main/minecollab.md">MineCollab</a>
 </p>
 
+> [!IMPORTANT]
+> **本 fork 的监工/接管者必读**：[docs/HANDOFF.md](docs/HANDOFF.md)（交接书：现状、红线、重构方案、操作/监控/改进手册、教训全集）与 [docs/agent-architecture.md](docs/agent-architecture.md)（六模块架构图谱：慢脑/快脑/身体/感知/记忆/监督）。改动台账在 `bots/_supervisor/CHANGELOG.md`。
+
 > [!Caution]
 Do not connect this bot to public servers with coding enabled. This project allows an LLM to write/execute code on your computer. The code is sandboxed, but still vulnerable to injection attacks. Code writing is disabled by default, you can enable it by setting `allow_insecure_coding` to `true` in `settings.js`. Ye be warned.
 

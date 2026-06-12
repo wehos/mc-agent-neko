@@ -18,6 +18,7 @@ import { Task } from './tasks/tasks.js';
 import { speak } from './speak.js';
 import { wsServer } from '../websocket/ws_server.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
+import fs from 'fs';
 
 export class Agent {
     async start(load_mem=false, init_message=null, count_id=0) {
@@ -219,7 +220,13 @@ export class Agent {
         this.bot.once('spawn', async () => {
             try {
                 clearTimeout(spawnTimeout);
-                addBrowserViewer(this.bot, this.count_id);
+                // HARD-DISABLED (unconditional): the prismarine-viewer browser renderer
+                // crashes the agent subprocess (exit 1) → auto-restart → ~15s offline → bot
+                // dies AFK. Env-gating didn't survive subprocess restarts, so the viewer (and
+                // the churn) came back on every restart. Never start it. (Visual feed gone;
+                // bot staying alive matters more. To restore the feed, re-enable this line.)
+                // addBrowserViewer(this.bot, this.count_id);
+                console.log('🛑 addBrowserViewer HARD-DISABLED (no renderer, no churn)');
                 console.log('Initializing vision intepreter...');
                 this.vision_interpreter = new VisionInterpreter(this, settings.allow_vision);
 
@@ -276,6 +283,12 @@ export class Agent {
             console.log(`${this.name} died, stopping current actions...`);
             this.actions.cancelResume();
             this.actions.stop();
+            // NOTE: do NOT set a death-abort flag here. An earlier attempt (bot.death_abort
+            // polled by prepNether) backfired: at a death-prone spawn it created a tight
+            // re-arm/​bail loop (prepNether bailed instantly every 2s, never grinding, frozen
+            // for 20+ min even in daylight). The running supervised skill survives the
+            // in-place respawn and resumes on its own — that's the behavior that previously
+            // got the bot all the way to diamonds. Leave it alone.
 
             // Fire a critical-severity alert before the task_finished
             // broadcast below. Rationale: task_finished is only meaningful
@@ -318,6 +331,88 @@ export class Agent {
                 console.log('Agent died: ', message);
                 let death_pos = this.bot.entity.position;
                 this.memory_bank.rememberPlace('last_death_position', death_pos.x, death_pos.y, death_pos.z);
+                // Persist the death spot to disk so the supervised grind skill can do a
+                // bounded "corpse run" on respawn and reclaim the gear we just dropped
+                // (items despawn ~5 min). The skill consumes (deletes) this file once.
+                try {
+                    // v = corpse VALUE flag. Three junk-corpse runs in one day burned entire
+                    // daytime rebuild windows (food 20→8 hiking to recover 19 tuff) — the trip
+                    // itself then killed the bot twice (203 water, 211 nightfall). Only iron+
+                    // tools/weapons, diamonds, or a real ingot stash justify the journey;
+                    // cobble/planks re-gather faster than the walk.
+                    let v = false;
+                    try {
+                        const inWaterAtDeath = (() => { try { const bl = this.bot.blockAt(death_pos); return !!bl && /water/.test(bl.name || ''); } catch (e) { return false; } })();
+                        const items2 = (this.bot.inventory ? this.bot.inventory.items() : []) || [];
+                        v = items2.some(i =>
+                            /^(iron|diamond|netherite)_(sword|pickaxe|axe|shovel|helmet|chestplate|leggings|boots)$/.test(i.name)
+                            || i.name === 'shield' || i.name === 'diamond' || i.name === 'obsidian' || i.name === 'flint_and_steel'
+                            || /_bed$/.test(i.name) || i.name === 'white_wool'   // 床/羊毛=重生锚级资产,值得跑
+                            || (i.name === 'iron_ingot' && i.count >= 2) || (i.name === 'raw_iron' && i.count >= 4));
+                        fs.writeFileSync('bots/_supervisor/death_pos.json',
+                            JSON.stringify({ x: death_pos.x, y: death_pos.y, z: death_pos.z, t: Date.now(), v, inWater: inWaterAtDeath }));
+                    } catch (e2) {
+                        fs.writeFileSync('bots/_supervisor/death_pos.json',
+                            JSON.stringify({ x: death_pos.x, y: death_pos.y, z: death_pos.z, t: Date.now() }));
+                    }
+                } catch (e) { console.warn('death_pos write failed:', e); }
+                // ★COMBAT-EXPERIENCE RECORDER (用户: 死亡时自动记战斗快照,积累成可学习的"何时打/何时溜"
+                // 数据集). Append one JSON line per death to death_log.jsonl — the situation that
+                // killed us: cause, depth/underground, water, light, nearby hostile types+counts+
+                // distances, our gear (sword/shield/armor), time, and what we were doing. The
+                // fight-vs-flee policy reads this to learn which situations are deadly (→ avoid/
+                // flee) vs winnable (→ fight). Captured at the death message: the killer mobs are
+                // still right here, gear/pos still readable.
+                try {
+                    const b = this.bot, p = death_pos;
+                    const y = Math.round(p.y);
+                    let cause = 'unknown';
+                    let mm;
+                    if ((mm = /slain by ([A-Za-z ]+?)(?: using|\.|$)/.exec(message))) cause = mm[1].trim();
+                    else if ((mm = /shot by ([A-Za-z ]+?)(?: using|\.|$)/.exec(message))) cause = 'shot:' + mm[1].trim();
+                    else if (/blew up|blown up|intentional game design/i.test(message)) cause = 'creeper';
+                    else if (/drown/i.test(message)) cause = 'drowning';
+                    else if (/hit the ground|fell|doomed to fall|fly into a wall/i.test(message)) cause = 'fall';
+                    else if (/lava|burn|in fire|fire tick/i.test(message)) cause = 'fire/lava';
+                    else if (/suffocat/i.test(message)) cause = 'suffocation';
+                    else if (/starv/i.test(message)) cause = 'starve';
+                    const HRE = /zombie|skeleton|spider|creeper|witch|drowned|husk|stray|phantom|slime|enderman|pillager|vindicator|silverfish|cave_spider|warden|piglin|hoglin/i;
+                    const hostiles = Object.values(b.entities || {})
+                        .filter(e => e && e.position && e.name && HRE.test(e.name) && e.position.distanceTo(p) < 16)
+                        .map(e => ({ name: e.name, dist: +e.position.distanceTo(p).toFixed(1) }))
+                        .sort((a, x) => a.dist - x.dist).slice(0, 10);
+                    const items = (b.inventory ? b.inventory.items() : []) || [];
+                    const sword = items.find(i => /_sword$/.test(i.name));
+                    const axe = items.find(i => /_axe$/.test(i.name));
+                    const shield = items.some(i => i.name === 'shield') || (b.inventory && b.inventory.slots[45] && b.inventory.slots[45].name === 'shield');
+                    const armorCount = b.inventory ? [5, 6, 7, 8].filter(s => b.inventory.slots[s]).length : 0;
+                    let coveredAbove = 0;
+                    try { for (let dy = 2; dy <= 9; dy++) { const blk = b.blockAt(p.offset(0, dy, 0)); if (blk && blk.boundingBox === 'block') coveredAbove++; } } catch (e) {}
+                    let inWater = false; try { const bl = b.blockAt(p); inWater = !!bl && /water/.test(bl.name || ''); } catch (e) {}
+                    const t = (b.time && b.time.timeOfDay) || 0;
+                    const rec = {
+                        ts: new Date().toISOString(), cause, y,
+                        // x/z: without them fall deaths couldn't be clustered spatially —
+                        // took a filmstrip dig to discover 196+197 were the SAME ravine.
+                        x: Math.round(p.x), z: Math.round(p.z),
+                        underground: y < 50 || coveredAbove >= 3, coveredAbove, inWater,
+                        timeOfDay: t, isNight: t >= 13000 && t <= 23000,
+                        hostileCount: hostiles.length, hostiles,
+                        gear: { sword: sword ? sword.name : null, axe: axe ? axe.name : null, shield, armorCount },
+                        action: (this.actions && this.actions.currentActionLabel) || null,
+                    };
+                    fs.appendFileSync('bots/_supervisor/death_log.jsonl', JSON.stringify(rec) + '\n');
+                    console.log('💀 death snapshot recorded:', cause, `y=${y}`, `mobs=${hostiles.length}`, `gear=${rec.gear.sword ? 'sword' : 'no-sword'}/${shield ? 'shield' : 'no-shield'}`);
+                } catch (e) { console.warn('death snapshot failed:', e.message); }
+                // ADAPTIVE: if we FELL to death, leave a flag so the grind preps a water
+                // bucket — the MLG water-clutch reflex (modes.js) needs a bucket as ammo.
+                // We invest in a bucket only AFTER falling has actually killed us (learn).
+                try {
+                    if (/hit the ground|fell|doomed to fall|fly into a wall/i.test(message) ||
+                        (jsonMsg.translate && /fell|fall|flyIntoWall/i.test(jsonMsg.translate))) {
+                        fs.writeFileSync('bots/_supervisor/prep_water.json', JSON.stringify({ t: Date.now(), reason: 'fall_death' }));
+                    }
+                } catch (e) {}
             }
         });
     }
@@ -404,6 +499,20 @@ export class Agent {
             await this.checkTaskDone();
             if (!source || !message) {
                 console.warn('Received empty message from', source);
+                return false;
+            }
+
+            // SUPERVISED LOCK: while a supervisor-driven scripted skill (run_skill,
+            // e.g. achieve) is in control of the bot, suppress AUTONOMOUS LLM
+            // command generation — i.e. system self-prompts and the bot's own
+            // self-prompt loop (death-recovery "!goToBed/!moveAway", idle wandering).
+            // Without this the LLM brain issues !commands that go through
+            // ActionManager.stop() -> requestInterrupt(), which preempts BOTH the
+            // scripted skill AND the survival modes mid-action, so the bot thrashes
+            // between mining/fleeing/fighting and gets killed. Tick-based modes
+            // (self_defense/self_preservation/auto_eat) still run for survival.
+            // User-typed commands (non-self_prompt) are still honored.
+            if (this.supervised_skill && (source === 'system' || source === this.name)) {
                 return false;
             }
 
@@ -796,8 +905,42 @@ export class Agent {
             if (this.isValidPosition(pos)) {
                 clearInterval(respawnCheck);
                 console.log(`✅ Bot respawned successfully at (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})`);
+                // RESPAWN ANCHOR: record the *actual* respawn coordinate as a bank anchor.
+                // This LAN server never sends a real world spawn (bot.spawnPoint stays at the
+                // (0,0) sentinel), so spawn-anchored banking fails. But with no bed the bot
+                // always respawns at the same fixed world-spawn position — so the live respawn
+                // position IS a reliable anchor. Overwrite each respawn (point is fixed when
+                // bedless; if a bed ever sets the spawn, the bankGear chain prefers bed.json
+                // anyway and this file is harmless). Pure-additive, swallow all errors.
+                try {
+                    fs.writeFileSync('bots/_supervisor/spawn_pos.json',
+                        JSON.stringify({ x: pos.x, y: pos.y, z: pos.z, t: Date.now() }));
+                } catch (e) { console.warn('respawn spawn_pos write failed:', e); }
                 // Reset reconnect attempts on successful respawn
                 this.reconnectAttempts = 0;
+                // AUTO-RESUME supervised control after an IN-PLACE respawn. A death does NOT
+                // reconnect the WS, so the bridge's reconnect-sticky never fires and the LLM
+                // brain resumes — its post-death !goToRememberedPlace walks straight back into
+                // the mobs that just killed it (the death spiral). Re-arm the sticky supervised
+                // skill ourselves (mirrors the bridge) so the scripted grind takes over and
+                // runs its bounded corpse-run to reclaim dropped gear. Re-entry-guarded in
+                // runSkill, so a concurrent bridge resend is harmless.
+                try {
+                    if (fs.existsSync('bots/_supervisor/sticky_skill.json')) {
+                        const sticky = JSON.parse(fs.readFileSync('bots/_supervisor/sticky_skill.json', 'utf8'));
+                        if (sticky && sticky.skill) {
+                            // Single-shot re-arm: if a supervised skill is still running it'll
+                            // be rejected as "busy" and simply keep running (that survives the
+                            // in-place respawn fine). Only when nothing is running does this
+                            // kick the grind back off. (A retry-loop here caused a runSkill
+                            // spam storm when combined with the reverted death-abort.)
+                            setTimeout(() => {
+                                try { if (!wsServer._skillRunning) wsServer.runSkill(sticky.skill, sticky.args || []); }
+                                catch (e) { console.warn('respawn re-arm runSkill failed:', e); }
+                            }, 3500);
+                        }
+                    }
+                } catch (e) { console.warn('respawn sticky read failed:', e); }
             } else if (elapsed >= maxWaitTime) {
                 clearInterval(respawnCheck);
                 console.warn('⚠️ Bot position invalid after respawn, may need reconnection');
