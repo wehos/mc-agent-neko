@@ -29,3 +29,15 @@ server_data*
 **/.DS_Store
 src/mindcraft-py/__pycache__/
 .claude/
+
+# supervisor runtime artifacts (live logs/state, never commit)
+crash-*
+agent.log
+agent.err
+render.err
+exit.log
+ALERTS.txt
+heartbeat.log
+watchdog.log
+watchdog.stop
+.mon_state
