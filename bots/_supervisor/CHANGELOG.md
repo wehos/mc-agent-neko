@@ -10,6 +10,13 @@
 
 ---
 
+## C210. ⚠️监工事故复盘：反射式 live 干预把稳定 bot 推进 food=0 软锁（操作纪律失败，非技术）
+- **触发**: escapePlan 把 bot 从死亡区凿出(C209)后，bot 在 `25,76,3 food=2` 又进 FAMINE backoff hold。scanFood 诊断显示最近食物=24 只鲑鱼在 ~40 格外 y57 水里(无陆地牲口/作物)。我部署 forage 让 bot 远行去猎——结果走/下降耗光最后 2 点食物(2→0)，到 food=0 时 tick 层 `self_preservation FAMINE body freeze` 冻住身体，forage 走不到鱼，hp 从 15 掉到 floor=2(Hard 饥饿伤害)。bot 现 `40,63,-17 hp=2 food=0` 永久软锁。
+- **机理(双重)**: ①**操作错误**：bot 本来 food=4/hp=15 是"稳定卡住但饿不死"，我连下两个 live 动作(escapePlan 挪动 4→2、forage 远行 2→0)把稳定态推成濒死软锁——在脆弱 bot 上凭"想让它进展"反射式干预、未做耗食预算。②**结构 bug**：`food=0 FAMINE 冻结反射没有出口**——库存无食物时冻住=永远拿不到食物=永久卡死(与 kill-box hold 同类：保命 hold 无退出条件)。forage 与冻结抢身体=无 BodyGate 仲裁的老病。
+- **改动**: 本条仅复盘+止损，**不对 hp=2 的 bot 再做任何 live 干预**(改 core 解冻结要重启，hp<8 触红线)。让其自然了结(phantom 大概率击杀→重生满食重置)。真正修复离线进行(见预测)，只在安全时机(满血/重生后)部署。
+- **预测/待办**: ①forage v2：仅在 food≤9 且仍有缓冲、食物可达、耗食预算够时**提前**触发；禁冲刺；优先陆地食物避免下水；绝不当 food≤2 的最后一搏。②core modes.js：FAMINE 冻结加退出——无存粮+食物可达时让位觅食(BodyGate 仲裁，等安全窗重启)。③根治：食物充足时主动建食物源，不饿瘫才反应。④Arbiter 的 ESCAPE 当前混淆了"被困"与"饥饿"，饥饿应走 FORAGE 而非 relocate。
+- **教训(★最高，用户两次批评换来)**: **改完 live 动作必须密集盯+理解机理，绝不反射式连续干预脆弱 bot；"想让它进展"的冲动是危险的——稳定卡住 ≫ 濒死软锁；任何移动型干预先算耗食/耗血预算；层间冲突(skill vs tick 反射)未仲裁前不要硬碰。**
+
 ## C209. EscapePlanner dig-tunnel 执行器 live 生效——2h+ 活锁被 planner 打破（③层 escapePlan 热加载，bot 实测脱困）
 - **触发**: C208 建好决策层后，live 部署 escapePlan execute 首跑 `abort="no advance after dig at step 1"`——挖了块但 bot 没动(仍 9,52,-11)。
 - **机理**: 两个执行 bug。①`tunnelPath` 出**对角步**(如 9,-11→10,-10)，mineflayer pathfinder/walker 不能穿未挖的实心拐角→NoPath。②`goToPosition(...,min_distance=1)` 对 1 格外相邻格判定"已到达"(GoalNear 距离≤1 即满足)直接不动；且 MAROONED 门会整体否决 goToGoal。
