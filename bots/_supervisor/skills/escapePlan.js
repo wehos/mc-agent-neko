@@ -157,10 +157,47 @@ function planEscape(state) {
 }
 
 // ---------------------------------------------------------------------------
+// PURE TUNNEL GEOMETRY + SAFETY (offline-testable — the dangerous decisions live here)
+// ---------------------------------------------------------------------------
+
+// The feet-level cell sequence of a 1-wide tunnel from `start` along unit heading, n steps.
+// DDA / Bresenham-style: advance the dominant axis every step, the secondary when its
+// accumulated error crosses 1. Pure: deterministic from (start, heading, n).
+function tunnelPath(start, heading, n) {
+    const cells = [];
+    let x = start.x, z = start.z;
+    const ax = Math.abs(heading.x), az = Math.abs(heading.z);
+    const sx = Math.sign(heading.x) || 0, sz = Math.sign(heading.z) || 0;
+    let ex = 0, ez = 0;
+    for (let i = 0; i < n; i++) {
+        ex += ax; ez += az;
+        let dx = 0, dz = 0;
+        if (ex >= ez) { if (sx !== 0 && ex >= 0.5) { dx = sx; ex -= 1; } }
+        if (ez >= ex || dx === 0) { if (sz !== 0 && ez >= 0.5) { dz = sz; ez -= 1; } }
+        if (dx === 0 && dz === 0) { dx = sx || 0; dz = sx === 0 ? sz : 0; } // never stall
+        x += dx; z += dz;
+        cells.push({ x, y: start.y, z });
+    }
+    return cells;
+}
+
+// Given the blocks read around a cell we're about to dig, is it safe to dig+step into?
+// `reads`: { feet, head, floor, lavaAdjacent, headUnbreakable } (block names / booleans)
+// Pure. Returns {safe, reason, needFloor}.
+function cellSafety(reads) {
+    const FLUID = /(lava|flowing_lava)/;
+    if (reads.lavaAdjacent) return { safe: false, reason: 'lava adjacent to dig cell', needFloor: false };
+    if (FLUID.test(reads.feet || '') || FLUID.test(reads.head || '')) return { safe: false, reason: 'dig cell is lava', needFloor: false };
+    if (FLUID.test(reads.floor || '')) return { safe: false, reason: 'floor is lava', needFloor: false };
+    if (reads.headUnbreakable) return { safe: false, reason: `head block ${reads.head} unbreakable`, needFloor: false };
+    const floorIsAir = /^(air|cave_air|void_air|water|flowing_water)$/.test(reads.floor || 'air');
+    return { safe: true, reason: 'ok', needFloor: floorIsAir };
+}
+
+// ---------------------------------------------------------------------------
 // HOT-LOADABLE SKILL
 //   default (no args / {execute:false})  -> DRY-RUN: compute + log the plan, never move.
-//   {execute:true}                       -> EXECUTE: walk the relocation waypoints out
-//                                           of the death-zone, re-planning each leg.
+//   {execute:true}                       -> EXECUTE: dig-tunnel out of the death-zone.
 // ---------------------------------------------------------------------------
 
 export default async function escapePlan(bot, ctx, opts = {}) {
@@ -174,50 +211,67 @@ export default async function escapePlan(bot, ctx, opts = {}) {
         return { dryRun: !execute, plan, state: { pos: state.pos, food: state.food, hp: state.hp, hostiles: state.hostiles.length } };
     }
 
-    // ---- EXECUTE: horizontal relocation out of the death-zone --------------
-    // Insight: missionNether's KILL-BOX hold is death-zone-gated. Leaving the death-zone
-    // radius dissolves the hold's premise, so we do NOT need to dig to the surface here —
-    // just walk clear of the trap at depth, re-planning each leg so a new actionable
-    // hostile (or arrival in fresh terrain) aborts cleanly. Surface ascent stays a later
-    // enhancement, not a prerequisite for breaking the livelock.
+    // ---- EXECUTE: dig-tunnel out of the death-zone -------------------------
+    // THE missing primitive: the stock pathfinder fast-fails NoPath when sealed in stone, so
+    // we carve our own 1-wide tunnel along the escape heading. missionNether's KILL-BOX hold
+    // is death-zone-gated, so simply clearing the death-zone radius dissolves the livelock —
+    // no surface ascent needed. Every block is gated by the PURE cellSafety() check so we
+    // never dig into / next to lava. The planner is the movement authority here: if a stale
+    // MAROONED flag would veto stepping, we clear it (this is exactly the deadlock the refactor
+    // exists to resolve — one owner of the body, not N silent vetoes).
     const dz = state.dzone;
     const startPos = { ...state.pos };
     const log_ = (m) => log(bot, `[escapePlan] ${m}`);
-    let reached = false, lastDist = 0;
+    const { Vec3 } = ctx;
+    const MAX_STEPS = 22;
+    const bn = (x, y, z) => { try { return bot.blockAt(new Vec3(x, y, z)); } catch (e) { return null; } };
+    const name = (b) => (b && b.name) || 'air';
+    const UNBREAKABLE = /(bedrock|barrier|obsidian|reinforced_deepslate|end_portal)/;
 
-    for (let i = 0; i < plan.waypoints.length; i++) {
-        const wp = plan.waypoints[i];
-
-        // Re-plan from live state before each leg — never trust the stale opening snapshot.
+    let stepped = 0, reached = false, abortReason = null;
+    for (let i = 0; i < MAX_STEPS; i++) {
         const live = readState(bot, ctx);
-        const rePlan = planEscape(live);
-        if (rePlan.action === 'defer') { log_(`abort leg ${i + 1}: ${rePlan.reason}`); break; }
-
-        // Already clear of the death-zone? Then the hold's premise is gone — done.
-        if (dz) {
-            const dFromCenter = Math.hypot(live.pos.x - dz.cx, live.pos.z - dz.cz);
-            if (dFromCenter > dz.r + 2) { reached = true; log_(`cleared death-zone (d=${dFromCenter.toFixed(1)} > r=${dz.r}) at leg ${i + 1}`); break; }
+        // Re-decide each step: a fresh close hostile hands the body to the defense layer.
+        if (planEscape(live).action === 'defer') { abortReason = 'defer (close actionable hostile)'; break; }
+        if (dz && Math.hypot(live.pos.x - dz.cx, live.pos.z - dz.cz) > dz.r + 2) {
+            reached = true; log_(`cleared death-zone at step ${i} (d>${dz.r})`); break;
         }
+        // Next feet-cell one block along the heading.
+        const cur = bot.entity.position;
+        const cx = Math.round(cur.x), cy = Math.round(cur.y), cz = Math.round(cur.z);
+        const next = tunnelPath({ x: cx, y: cy, z: cz }, plan.heading, 1)[0];
 
-        log_(`leg ${i + 1}/${plan.waypoints.length} -> ${wp.x},${live.pos.y},${wp.z} (food=${live.food} hp=${live.hp})`);
-        let ok = false;
-        try { ok = await ctx.skills.goToPosition(bot, wp.x, live.pos.y, wp.z, 2); } catch (e) { log_(`leg ${i + 1} threw: ${e && e.message || e}`); }
+        // Gather block reads and run the PURE safety gate before touching anything.
+        const feet = bn(next.x, cy, next.z), head = bn(next.x, cy + 1, next.z), floor = bn(next.x, cy - 1, next.z);
+        let lavaAdjacent = false;
+        for (const [dx, dy, dz2] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]) {
+            if (/lava/.test(name(bn(next.x + dx, cy + dy, next.z + dz2))) || /lava/.test(name(bn(next.x + dx, cy + 1 + dy, next.z + dz2)))) { lavaAdjacent = true; break; }
+        }
+        const safety = cellSafety({ feet: name(feet), head: name(head), floor: name(floor), lavaAdjacent, headUnbreakable: UNBREAKABLE.test(name(head)) || UNBREAKABLE.test(name(feet)) });
+        if (!safety.safe) { abortReason = `unsafe cell ${next.x},${cy},${next.z}: ${safety.reason}`; break; }
 
-        const now = bot.entity && bot.entity.position;
-        const moved = now ? Math.hypot(now.x - startPos.x, now.z - startPos.z) : 0;
-        log_(`leg ${i + 1} ok=${ok} movedFromStart=${moved.toFixed(1)}b pos=${now ? `${Math.round(now.x)},${Math.round(now.y)},${Math.round(now.z)}` : '?'}`);
+        try {
+            if (safety.needFloor) { await ctx.skills.placeBlock(bot, 'cobblestone', next.x, cy - 1, next.z, 'bottom', true); }
+            await ctx.skills.breakBlockAt(bot, next.x, cy, next.z);       // feet
+            await ctx.skills.breakBlockAt(bot, next.x, cy + 1, next.z);   // head
+        } catch (e) { abortReason = `dig threw: ${e && e.message || e}`; break; }
 
-        // Stall guard: if two consecutive legs make no net progress, stop (don't grind the
-        // body budget the way the patch layers did). The planner will be re-invoked later.
-        if (Math.abs(moved - lastDist) < 1.5 && i > 0) { log_(`stalled at leg ${i + 1} (no net progress) — yielding`); break; }
-        lastDist = moved;
+        // Take movement authority: clear a stale MAROONED veto, then step into the cleared cell.
+        try { if (bot._mobility && bot._mobility.state === 'MAROONED') { bot._mobility.state = 'FREE'; log_('cleared stale MAROONED — planner owns movement'); } } catch (e) {}
+        try { await ctx.skills.goToPosition(bot, next.x, cy, next.z, 1); } catch (e) {}
+
+        const np = bot.entity.position;
+        const adv = Math.hypot(np.x - cur.x, np.z - cur.z);
+        stepped++;
+        if (i % 3 === 0 || adv < 0.5) log_(`step ${i + 1} dug ${next.x},${cy},${next.z} adv=${adv.toFixed(1)} pos=${Math.round(np.x)},${Math.round(np.y)},${Math.round(np.z)} food=${live.food} hp=${live.hp}`);
+        if (adv < 0.3) { abortReason = `no advance after dig at step ${i + 1} (pos ${Math.round(np.x)},${Math.round(np.y)},${Math.round(np.z)})`; break; }
     }
 
     const end = bot.entity && bot.entity.position;
     const movedTotal = end ? Math.hypot(end.x - startPos.x, end.z - startPos.z) : 0;
-    const clearedDZ = dz && end ? Math.hypot(end.x - dz.cx, end.z - dz.cz) > (dz.r) : null;
-    log_(`relocation done reached=${reached} movedTotal=${movedTotal.toFixed(1)}b clearedDeathZone=${clearedDZ} end=${end ? `${Math.round(end.x)},${Math.round(end.y)},${Math.round(end.z)}` : '?'}`);
-    return { dryRun: false, plan, reached, movedTotal: +movedTotal.toFixed(1), clearedDeathZone: clearedDZ };
+    const clearedDZ = dz && end ? Math.hypot(end.x - dz.cx, end.z - dz.cz) > dz.r : null;
+    log_(`tunnel done reached=${reached} steps=${stepped} movedTotal=${movedTotal.toFixed(1)}b clearedDeathZone=${clearedDZ} abort=${abortReason || 'none'} end=${end ? `${Math.round(end.x)},${Math.round(end.y)},${Math.round(end.z)}` : '?'}`);
+    return { dryRun: false, plan, reached, steps: stepped, movedTotal: +movedTotal.toFixed(1), clearedDeathZone: clearedDZ, abort: abortReason };
 }
 
 // Build the planEscape input snapshot from the live bot + supervisor telemetry.
@@ -278,4 +332,4 @@ function readAdvisory() {
     } catch (e) { return null; }
 }
 
-export { planEscape };
+export { planEscape, tunnelPath, cellSafety };
