@@ -10,6 +10,16 @@
 
 ---
 
+## C209. EscapePlanner dig-tunnel 执行器 live 生效——2h+ 活锁被 planner 打破（③层 escapePlan 热加载，bot 实测脱困）
+- **触发**: C208 建好决策层后，live 部署 escapePlan execute 首跑 `abort="no advance after dig at step 1"`——挖了块但 bot 没动(仍 9,52,-11)。
+- **机理**: 两个执行 bug。①`tunnelPath` 出**对角步**(如 9,-11→10,-10)，mineflayer pathfinder/walker 不能穿未挖的实心拐角→NoPath。②`goToPosition(...,min_distance=1)` 对 1 格外相邻格判定"已到达"(GoalNear 距离≤1 即满足)直接不动；且 MAROONED 门会整体否决 goToGoal。
+- **改动**: ①`tunnelPath` 改**纯基本方向步**(每步只动一个轴的1格，accumulator 让 x:z 比例跟踪 heading，绝不对角)。②新增 `stepToCardinal()`——底层 `lookAt`+`setControlState('forward')` 手动行走1格(planner 直接接管身体，绕开 GoalNear/MAROONED；带 late jump-assist + finally 释放控制)。两者均纯几何/可测。
+- **预测**: escapePlan execute 应连续 dig+step 把 bot 沿 ENE 凿出死亡区(dist>r28)，clearedDeathZone=true，sticky 交回 missionNether 时 bot 已在死亡区外新地形→KILL-BOX hold 前提消失不再复发。
+- **观测**: ✅ live 实测打破活锁：bot `9,52,-11`→`8,52,-2`(净~9格)，distFromDZcenter `23→31.3`(清出 r28)，vitals.skill 全程 escapePlan，无死亡(deaths=306 不变)，sticky 还原后 missionNether 在 `8,52,-2` 新地形接管。**165 条补丁+stock pathfinder 都打不破的 2h+ 吸收态活锁，被 EscapePlanner 一次脱困解决。** 离线 planEscape.test.mjs 22/22。commit `135ec93`。
+- **操作教训**: PowerShell **工具调用间变量不持久**——`$abs` 在下一次调用为空导致 WriteAllText 抛错、sticky 还原失败。写 supervisor 文件一律用硬编码绝对路径，且仍须无 BOM(见 C208)。
+- **遗留**: ①escapePlan 还是手动 inbox 部署，下一步建 Arbiter control-runner 让 ESCAPE 自动触发(影子→实控)，无须人工。②bot 仍 food=4 无存粮，出死亡区后觅食仍是未解结构问题。③stepToCardinal 首步 x 微抖(9→8)，方向大体对、清出成功，可后续打磨。
+- **回滚**: `git revert 135ec93`(回到对角+goToPosition 版，会复现 no-advance)；或整体弃用 escapePlan(纯新增，不影响补丁层)。
+
 ## C208. 架构重构起点：WorldModel 黑板 + Arbiter 单一仲裁器（影子模式先行；新 core/，与补丁层并行，零 live 风险）
 > 这不是补丁，是 HANDOFF §4 重构的 P0。前 165 条（C42–C207）补丁路线触底——见下"机理"。新 Claude agent 接手当班。
 - **触发**: (1) 用户判决："继续在这个架构上加补丁已经没用了"——bot 卡在 `pos=9,52,-11 food=4 hp=15` 干坐 **2h8m**（progress 同一行刷 237 次），food 单调下滑、hp 钉死 15、位置不动，三个"出口条件"(actionable hostile/本地食物信号/watchdog interrupt) 全部物理不可能触发或被 C206/C207 亲手焊死 = **吸收态活锁**。(2) live 取证：直接 run_skill escapePlan 算出正确逃生向量后，**90ms 返回、bot 没动 0.5 格**——根因是 bot 封在 y=52 石头口袋，连 `canDig=true` 的破坏式 mineflayer pathfinder 也**秒判 NoPath 抛错**（狭小搜索空间），goToGoal 立即放弃。这是"卡洞出不来"的字面机制。
