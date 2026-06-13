@@ -65,20 +65,24 @@ export default async function mineDown(bot, ctx, opts = {}) {
 
         const cx = Math.round(cur.x), cz = Math.round(cur.z);
         const fx = cx + sx, fz = cz + sz;                  // forward column
-        // Cells to clear: forward feet (fx,cy,fz) + forward head (fx,cy+1,fz) to walk in, then
-        // forward floor (fx,cy-1,fz) to drop one. Safety scan around them for lava.
-        const feet = bn(fx, cy, fz), head = bn(fx, cy + 1, fz), floor = bn(fx, cy - 1, fz);
+        // DESCEND-forward: the new standing cell is ONE block down-and-forward. New feet at
+        // (fx,cy-1,fz), new head at (fx,cy,fz), plus (fx,cy+1,fz) headroom. The support under
+        // the new feet is (fx,cy-2,fz) and MUST stay solid or the bot free-falls.
+        const newFeet = bn(fx, cy - 1, fz), newHead = bn(fx, cy, fz), clear = bn(fx, cy + 1, fz);
+        const support = bn(fx, cy - 2, fz);
         let lavaNear = false;
         for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0], [0, -2, 0]]) {
-            if (/lava/.test(nm(bn(fx + dx, cy + dy, fz + dz)))) { lavaNear = true; break; }
+            if (/lava/.test(nm(bn(fx + dx, cy - 1 + dy, fz + dz)))) { lavaNear = true; break; }
         }
-        const safe = stairSafety({ feet: nm(feet), head: nm(head), floor: nm(floor), lavaNear });
-        if (!safe.safe) { abort = `unsafe at ${fx},${cy},${fz}: ${safe.reason}`; break; }
+        const safe = stairSafety({ feet: nm(newFeet), head: nm(newHead), floor: nm(support), lavaNear });
+        if (!safe.safe) { abort = `unsafe at ${fx},${cy - 1},${fz}: ${safe.reason}`; break; }
+        // No solid support under the new feet (cliff/cave) => don't blind-drop; stop.
+        if (/^(air|cave_air|void_air|water|flowing_water)$/.test(nm(support))) { abort = `no floor support under ${fx},${cy - 2},${fz} (${nm(support)}) — stop, don't free-fall`; break; }
 
         try {
-            await skills.breakBlockAt(bot, fx, cy + 1, fz);   // head clearance
-            await skills.breakBlockAt(bot, fx, cy, fz);       // forward feet
-            await skills.breakBlockAt(bot, fx, cy - 1, fz);   // step-down floor (drop target)
+            await skills.breakBlockAt(bot, fx, cy + 1, fz);   // headroom (old head level)
+            await skills.breakBlockAt(bot, fx, cy, fz);       // new head
+            await skills.breakBlockAt(bot, fx, cy - 1, fz);   // new feet (one down-forward)
             dug += 3;
             // opportunistic ore around the dug column (one ring)
             for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, 1, 0]]) {
