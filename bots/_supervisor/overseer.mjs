@@ -61,6 +61,34 @@ const deathsNear = (x, z, r) => {
     return n;
 };
 
+function classifyMobThreat(m, v) {
+    const name = String(m.name || '').toLowerCase();
+    const d = Number(m.d ?? Infinity);
+    const dy = Math.abs(Number(m.y ?? v.y) - Number(v.y));
+    const ranged = /skeleton|stray|pillager|witch|blaze|ghast/.test(name);
+    const creeper = /creeper/.test(name);
+    const pointBlank = d < 4.25 || (creeper && d < 5.5);
+    const sameLayer = dy <= 3.25;
+    let actionable = false;
+    let reason = 'far';
+
+    if (pointBlank) {
+        actionable = true;
+        reason = creeper ? 'creeper-close' : 'point-blank';
+    } else if (creeper) {
+        actionable = d < 8 && sameLayer;
+        reason = actionable ? 'creeper-same-layer' : (dy >= 4.5 ? 'layered-creeper' : 'creeper-far');
+    } else if (ranged) {
+        actionable = (d < 14 && dy <= 5.5) || d < 6.5;
+        reason = actionable ? 'ranged-los-risk' : (dy >= 6 ? 'layered-ranged' : 'ranged-far');
+    } else {
+        actionable = d < 6.5 || (d < 10 && sameLayer);
+        reason = actionable ? 'melee-path-risk' : (dy >= 4.5 && d >= 5.5 ? 'layered-melee' : 'melee-far');
+    }
+
+    return { ...m, d, dy, actionable, layered: !actionable && dy >= 4.5 && d >= 5.5, reason };
+}
+
 // densest death cluster = the kill-box (honeycomb spawner area). Deaths #259/261/263/266
 // all happened inside one ~30b patch riddled with cave openings — point-level avoidance
 // can't stop FALLING IN while passing over it (#266: dropped 18 blocks through the roof
@@ -93,15 +121,31 @@ function assess() {
 
     const inv = v.inv || {};
     const armed = Object.keys(inv).some(n => /_sword$|_axe$/.test(n));
+    const normalFoodRe = /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|^cod$|^salmon$|melon_slice|sweet_berries|_stew|^rabbit$|baked_/;
+    const hasNormalFood = Object.entries(inv).some(([n, c]) => Number(c) > 0 && normalFoodRe.test(n));
     const radar = readJson(F('radar.json'));                  // layer-1 snapshot; null until that code is live
     const mobs = (radar && Date.now() - radar.ts < 20000) ? (radar.mobs || []) : null;
-    const hostiles = mobs ? mobs.length : (v.hostiles || 0);
-    const nearest = mobs && mobs.length ? Math.min(...mobs.map(m => m.d)) : null;
+    const threatMobs = mobs ? mobs.map(m => classifyMobThreat(m, v)) : null;
+    const hostiles = threatMobs ? threatMobs.length : (v.hostiles || 0);
+    const actionableMobs = threatMobs ? threatMobs.filter(m => m.actionable) : null;
+    const layeredMobs = threatMobs ? threatMobs.filter(m => m.layered) : [];
+    const actionableHostiles = actionableMobs ? actionableMobs.length : hostiles;
+    const nearest = threatMobs && threatMobs.length ? Math.min(...threatMobs.map(m => m.d)) : null;
+    const actionableNearest = actionableMobs && actionableMobs.length ? Math.min(...actionableMobs.map(m => m.d)) : null;
+    const closestCreeper = threatMobs && threatMobs.length
+        ? threatMobs.filter(m => /creeper/i.test(m.name || '')).reduce((best, m) => Math.min(best, m.d), Infinity)
+        : Infinity;
+    const pointBlankHostile = (nearest != null && nearest < 4.25) || closestCreeper < 5.5;
+    const lowNoRegenNoFood = v.hp <= 8 && v.food <= 6 && !hasNormalFood;
+    const mobilitySealed = /ENC|POCKET|MAROONED|ENTOMBED/.test(String(v.mob || ''));
+    const layeredOnlyLowResource = lowNoRegenNoFood && threatMobs && hostiles > 0
+        && actionableHostiles === 0 && layeredMobs.length > 0 && nearest >= 5.5;
+    const sealedBodyBudgetHold = lowNoRegenNoFood && (mobilitySealed || layeredOnlyLowResource) && !pointBlankHostile;
 
     // hostile-count trend over the last ~75s of vitals history
     const hist = tail(F('vitals.jsonl'), 6).map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
     const avgHostiles = hist.length ? hist.reduce((s, h) => s + (h.hostiles || 0), 0) / hist.length : 0;
-    const gathering = hostiles > avgHostiles + 1;
+    const gathering = !sealedBodyBudgetHold && hostiles > avgHostiles + 1;
 
     // engagement state from the blackbox tail
     const cl = tail(F('combat_log.jsonl'), 30);
@@ -120,28 +164,35 @@ function assess() {
     const exposed = v.y >= 60;                                // rough "on the surface"
 
     let risk = 0; const why = [];
-    if (hostiles) { risk += Math.min(40, hostiles * 8); why.push(`${hostiles} hostiles`); }
-    if (nearest != null && nearest < 10) { risk += 10; why.push(`nearest ${nearest}b`); }
+    if (actionableHostiles) { risk += Math.min(40, actionableHostiles * 10); why.push(`${actionableHostiles}/${hostiles} actionable hostiles`); }
+    else if (hostiles) { why.push(`${hostiles} nonactionable hostiles`); }
+    if (actionableNearest != null && actionableNearest < 10) { risk += 10; why.push(`nearest actionable ${actionableNearest}b`); }
+    else if (nearest != null && nearest < 10) { why.push(`nearest layered ${nearest}b`); }
     if (gathering) { risk += 10; why.push('mobs gathering'); }
     if (engaged) { risk += 25; why.push('ENGAGED'); }
     if (v.hp < 6) { risk += 30; why.push(`hp ${v.hp}`); }
     else if (v.hp < 10) { risk += 20; why.push(`hp ${v.hp}`); }
     else if (v.hp < 14) { risk += 10; why.push(`hp ${v.hp}`); }
     if (v.food < 8) { risk += 10; why.push(`food ${v.food}`); }
-    if (!armed && hostiles > 0) { risk += 15; why.push('unarmed'); }
-    if (isNight && exposed) { risk += 15; why.push('night+surface'); }
-    if (isDusk && exposed) { risk += 15; why.push('dusk+surface'); }
+    if (!armed && actionableHostiles > 0) { risk += 15; why.push('unarmed'); }
+    if (isNight && exposed && !sealedBodyBudgetHold) { risk += 15; why.push('night+surface'); }
+    if (isDusk && exposed && !sealedBodyBudgetHold) { risk += 15; why.push('dusk+surface'); }
     if (dz >= 3) { risk += 20; why.push(`death-zone(${dz} deaths<16b)`); }
     risk = Math.min(100, risk);
+    if (sealedBodyBudgetHold) {
+        risk = Math.min(risk, 69);
+        why.push('sealed body-budget hold');
+    }
 
     // directive (priority order). The strategy layer maps these to its own skills.
     let directive = null;
-    if (hostiles >= 2 && !armed) directive = 'evac';
-    else if (v.hp < 8 && hostiles > 0) directive = 'evac';
+    if (sealedBodyBudgetHold) directive = null;
+    else if (actionableHostiles >= 2 && !armed) directive = 'evac';
+    else if (v.hp < 8 && actionableHostiles > 0) directive = 'evac';
     // unarmed + ANY hostile closing inside 10b = disengage now (death #265: one
     // drowned at 2-4b chased the weaponless bot through water for 22s and won —
     // the old >=2-mob gate never fired; with no weapon there is no second option).
-    else if (nearest != null && nearest < 10 && !armed) directive = 'evac';
+    else if (actionableNearest != null && actionableNearest < 10 && !armed) directive = 'evac';
     else if ((isDusk || isNight) && exposed && hostiles === 0) directive = 'shelter_now';
     // hunger-bleed was the shared root cause of deaths #260/#262: below food 18 regen
     // stops, so the bot grinds on at 6-7hp until any scratch kills it. food<=6 in
@@ -153,15 +204,17 @@ function assess() {
     // edge blocked eating for an entire day (hp10/food0 stuck at a cliff). A mob 12+
     // blocks away is not a foraging threat; feedUp itself still bails if one closes in.
     else if ((v.food <= 6 || (v.hp < 8 && v.food < 18)) && !isNight && !isDusk
-        && (hostiles === 0 || (nearest != null && nearest >= 12))) directive = 'eat_now';
+        && (actionableHostiles === 0 || (actionableNearest != null && actionableNearest >= 12))) directive = 'eat_now';
     else if (dz >= 3 && hostiles === 0 && !engaged) directive = 'leave_zone';
 
     return {
         ts: Date.now(), risk, directive, reason: why.join(', ') || 'calm',
         pos: [v.x, v.y, v.z], hp: v.hp, food: v.food, tod: v.tod,
-        hostiles, nearest, armed, deathsNear16: dz, engaged,
-        mobs: mobs ? mobs.slice(0, 8) : null,
+        hostiles, actionableHostiles, layeredHostiles: layeredMobs.length,
+        nearest, actionableNearest, armed, deathsNear16: dz, engaged,
+        mobs: threatMobs ? threatMobs.slice(0, 8) : null,
         dzone: dangerZone(),
+        sealedBodyBudgetHold,
         llm: null, src: 'rules',
     };
 }
@@ -176,7 +229,8 @@ async function consultLLM(a) {
 `You are the tactical overseer for a Minecraft survival bot (MC 1.21). Judge its IMMEDIATE survival situation.
 Current assessment by rules engine: risk=${a.risk}/100, directive=${a.directive || 'none'}, reason: ${a.reason}.
 Bot: pos=${a.pos.join(',')} hp=${a.hp}/20 food=${a.food}/20 timeOfDay=${a.tod} armed=${a.armed} deaths_within_16b=${a.deathsNear16}.
-Radar mobs (name,dist): ${a.mobs ? a.mobs.map(m => `${m.name}@${m.d}b`).join(' ') : 'n/a'}.
+Threat model: raw=${a.hostiles} actionable=${a.actionableHostiles} layered=${a.layeredHostiles} nearest_actionable=${a.actionableNearest ?? 'n/a'} bodyBudgetHold=${a.sealedBodyBudgetHold}.
+Radar mobs (name,dist,dy,reason): ${a.mobs ? a.mobs.map(m => `${m.name}@${m.d}b dy=${m.dy} ${m.reason}`).join(' ') : 'n/a'}.
 Recent vitals:\n${vh}
 Combat blackbox tail:\n${ch}
 Reply ONLY compact JSON: {"directive":"none|evac|shelter_now|leave_zone|eat_now","hint":"<one tactical sentence, <=140 chars>"}`;
@@ -207,13 +261,14 @@ async function tick() {
     if (!a) return;
 
     const now = Date.now();
-    const wantLlm = (a.risk >= 60 && now - lastLlmAt > 90000) || (now - lastLlmAt > 360000 && a.risk >= 25);
+    const wantLlm = !a.sealedBodyBudgetHold
+        && ((a.risk >= 60 && now - lastLlmAt > 90000) || (now - lastLlmAt > 360000 && a.risk >= 25));
     if (wantLlm) {
         lastLlmAt = now;
         const l = await consultLLM(a);
         if (l) {
             a.llm = { hint: l.hint, model: LLM_MODEL, at: new Date().toISOString() };
-            if (l.directive && l.directive !== a.directive) { a.directive = l.directive; a.src = 'llm'; }
+            if (!a.sealedBodyBudgetHold && l.directive && l.directive !== a.directive) { a.directive = l.directive; a.src = 'llm'; }
             log(`LLM: directive=${l.directive || 'agree'} hint="${l.hint}"`);
         }
     }

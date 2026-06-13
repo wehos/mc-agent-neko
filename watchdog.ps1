@@ -11,6 +11,21 @@ $ErrorActionPreference = 'SilentlyContinue'
 $proj = 'C:\Users\wehos\Project\mc-agent-upstream-sync'
 Set-Location $proj
 $log = Join-Path $proj 'watchdog.log'
+try {
+    $self = $PID
+    $watchdogPath = Join-Path $proj 'watchdog.ps1'
+    $watchdogPathPattern = [regex]::Escape($watchdogPath)
+    $watchdogRelativePattern = '(?i)-File\s+["'']?watchdog\.ps1(?:["'']|\s|$)'
+    Get-CimInstance Win32_Process |
+        Where-Object {
+            $_.ProcessId -ne $self -and
+            ($_.CommandLine -match $watchdogPathPattern -or $_.CommandLine -match $watchdogRelativePattern)
+        } |
+        ForEach-Object {
+            Add-Content $log "[$(Get-Date -Format o)] watchdog singleton: stopping duplicate pid $($_.ProcessId)"
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+} catch {}
 Add-Content $log "[$(Get-Date -Format o)] watchdog started (pid $PID)"
 $env:NEKO_AGENT_SCREENSHOT_INTERVAL_MS = '0'      # screenshots OFF by default; keep the prismarine renderer out of unattended restarts.
 
@@ -193,7 +208,7 @@ while ($true) {
                 $ipick = [int]$vit.inv.iron_pickaxe; $fns = [int]$vit.inv.flint_and_steel
             } catch {}
             $dimS = ("" + $vit.dim) -replace 'minecraft:', ''
-            $vitStr = " pos={0},{1},{2} dim={3} hp={4} food={5} host={6} skill={7} inv={8} ms=ip{9}/d{10}/o{11}/f{12}" -f $vit.x, $vit.y, $vit.z, $dimS, $vit.hp, $vit.food, $vit.hostiles, $vit.skill, $invTotal, $ipick, $dia, $obs, $fns
+            $vitStr = " pos={0},{1},{2} dim={3} hp={4} food={5} host={6} skill={7} mob={8} inv={9} ms=ip{10}/d{11}/o{12}/f{13}" -f $vit.x, $vit.y, $vit.z, $dimS, $vit.hp, $vit.food, $vit.hostiles, $vit.skill, $vit.mob, $invTotal, $ipick, $dia, $obs, $fns
         }
         $hbLine = "[{0}] up={1} err={2}s frame={3}s deaths={4} stale={5} bed={6}{7} | {8}" -f (Get-Date -Format 'MM-dd HH:mm'), $hbUp, [int]$errAge, $hbFrame, $hbDeaths, $hbStale, $hbBed, $vitStr, $progLast
         Add-Content (Join-Path $proj 'heartbeat.log') $hbLine
@@ -223,22 +238,63 @@ while ($true) {
                         $todN = [int]$vit.tod
                         $nightHold = ($todN -ge 13000 -and $todN -le 23000 -and ("" + $vit.skill) -eq 'missionNether' -and $progLast -match 'NIGHT|入夜|hole up|蹲')
                     } catch {}
-                    if ($nightHold) {
-                        # Legit sheltering is intentionally stationary; don't convert a bunker
-                        # into a cancel/restart event. Re-anchor so the 25min restart path is
-                        # also suppressed while night-hold remains fresh.
+                    $noRegenHold = $false
+                    $sealedBodyBudgetHold = $false
+                    $lowFoodNightShelterHold = $false
+                    $tableRecoveryHold = $false
+                    $killBoxLowFoodHold = $false
+                    try {
+                        $normalFood = $false
+                        foreach ($pp in $vit.inv.PSObject.Properties) {
+                            if ([int]$pp.Value -gt 0 -and $pp.Name -match 'cooked_|_bread|^bread$|apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_') {
+                                $normalFood = $true
+                                break
+                            }
+                        }
+                        $advSealed = $false
+                        $advFresh = $false
+                        $advActionable = 999
+                        $advF = Join-Path $proj 'bots\_supervisor\advisory.json'
+                        if (Test-Path $advF) {
+                            try {
+                                $adv = Get-Content $advF -Raw -ErrorAction Stop | ConvertFrom-Json
+                                $advAge = [int](([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [double]$adv.ts) / 1000)
+                                $advFresh = ($advAge -ge -60 -and $advAge -lt 45)
+                                $advSealed = ($advFresh -and $adv.sealedBodyBudgetHold -eq $true)
+                                try { $advActionable = [int]$adv.actionableHostiles } catch {}
+                            } catch {}
+                        }
+                        $mobContained = ("" + $vit.mob) -match 'ENC|POCKET|MAROONED|ENTOMBED'
+                        $sealedBodyBudgetHold = (("" + $vit.skill) -eq 'missionNether' -and [double]$vit.hp -le 8 -and [int]$vit.food -le 6 -and -not $normalFood -and ($mobContained -or $advSealed))
+                        $noRegenHold = (("" + $vit.skill) -eq 'missionNether' -and [double]$vit.hp -lt 14 -and [int]$vit.food -lt 18 -and -not $normalFood -and [int]$vit.hostiles -eq 0 -and $progLast -match 'low-hp/no-food|HUNGER/LOWHP|BREAKOUT gated: no-regen|SKIP torch kit')
+                        $progTailText = ''
+                        try {
+                            if (Test-Path $progFile) {
+                                $progTailText = ((Get-Content $progFile -Tail 12 -ErrorAction Stop) -join "`n")
+                            }
+                        } catch {}
+                        $lowFoodNightShelterHold = (("" + $vit.skill) -eq 'missionNether' -and [int]$vit.food -le 6 -and [double]$vit.hp -ge 10 -and -not $normalFood -and [int]$vit.hostiles -eq 0 -and $mobContained -and $progTailText -match 'HUNGRY/LOWHP .*night|famine-night gate|BREAKOUT gated: prepNether low-food hold evidence|inside cluster but night\+covered|dug-in bunker SEALED')
+                        $killBoxLowFoodHold = (("" + $vit.skill) -eq 'missionNether' -and [int]$vit.food -le 6 -and [double]$vit.hp -ge 10 -and -not $normalFood -and $mobContained -and $progTailText -match 'KILL-BOX gated: low-food pocket recovery' -and (($advFresh -and $advActionable -eq 0) -or [int]$vit.hostiles -eq 0))
+                        $tableRecoveryHold = (("" + $vit.skill) -eq 'missionNether' -and [double]$vit.hp -ge 14 -and [int]$vit.food -ge 14 -and [int]$vit.hostiles -eq 0 -and $progTailText -match 'TABLE gate for|TABLE recovery for')
+                    } catch {}
+                    if ($nightHold -or $noRegenHold -or $sealedBodyBudgetHold -or $lowFoodNightShelterHold -or $killBoxLowFoodHold -or $tableRecoveryHold) {
+                        # Legit sheltering / no-regen stand-down is intentionally stationary;
+                        # don't convert it into a cancel/restart event. Re-anchor so the 25min
+                        # restart path is also suppressed while the protected hold remains fresh.
+                        # Keep flowing to loop bookkeeping/sleep; a continue here makes the
+                        # watchdog look stale and can tight-loop during a valid body-budget hold.
                         $lastVitPos = @([double]$vit.x, [double]$vit.y, [double]$vit.z); $script:anchorT = $nowT; $script:anchorAlerted = $false
-                        continue
-                    }
-                    $stuckMin = ($nowT - $script:anchorT).TotalMinutes
-                    if ($stuckMin -ge 10 -and -not $script:anchorAlerted) {
-                        $script:anchorAlerted = $true
-                        Add-Content (Join-Path $proj 'ALERTS.txt') ("[{0}] STUCK-ZONE: bot within 10b of {1},{2},{3} for {4:n0}min (skill={5} hp={6} food={7}) - ENTRAPMENT?" -f (Get-Date -Format 'MM-dd HH:mm:ss'), $lastVitPos[0], $lastVitPos[1], $lastVitPos[2], $stuckMin, $vit.skill, $vit.hp, $vit.food)
-                        Send-Control 'cancel_skill' ("STUCK-ZONE within 10b for " + [int]$stuckMin + "min")
-                    }
-                    if ($stuckMin -ge 25) {
-                        $lastVitPos = $null
-                        Restart-Agent ("STUCK-ZONE - bot pinned within 10b for 25min at " + $vit.x + "," + $vit.y + "," + $vit.z)
+                    } else {
+                        $stuckMin = ($nowT - $script:anchorT).TotalMinutes
+                        if ($stuckMin -ge 10 -and -not $script:anchorAlerted) {
+                            $script:anchorAlerted = $true
+                            Add-Content (Join-Path $proj 'ALERTS.txt') ("[{0}] STUCK-ZONE: bot within 10b of {1},{2},{3} for {4:n0}min (skill={5} hp={6} food={7}) - ENTRAPMENT?" -f (Get-Date -Format 'MM-dd HH:mm:ss'), $lastVitPos[0], $lastVitPos[1], $lastVitPos[2], $stuckMin, $vit.skill, $vit.hp, $vit.food)
+                            Send-Control 'cancel_skill' ("STUCK-ZONE within 10b for " + [int]$stuckMin + "min")
+                        }
+                        if ($stuckMin -ge 25) {
+                            $lastVitPos = $null
+                            Restart-Agent ("STUCK-ZONE - bot pinned within 10b for 25min at " + $vit.x + "," + $vit.y + "," + $vit.z)
+                        }
                     }
                 }
             }

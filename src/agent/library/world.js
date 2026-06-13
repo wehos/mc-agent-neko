@@ -511,6 +511,10 @@ export function shouldPlaceTorch(bot) {
     if (!nearest_torch) {
         const block = bot.blockAt(pos);
         let has_torch = bot.inventory.findInventoryItem('torch');
+        const cell = bot.entity && bot.entity.position ? bot.entity.position.floored() : pos;
+        const head = cell ? bot.blockAt(cell.offset(0, 1, 0)) : null;
+        const above = cell ? bot.blockAt(cell.offset(0, 2, 0)) : null;
+        if (head && head.boundingBox !== 'block' && above && above.boundingBox === 'block') return false;
         return has_torch && block?.name === 'air';
     }
     return false;

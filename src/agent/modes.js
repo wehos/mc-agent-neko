@@ -6,10 +6,144 @@ import convoManager from './conversation.js';
 import fs from 'fs';
 import Vec3 from 'vec3';
 
+const FAMINE_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_|rotten_flesh|spider_eye/;
+const NORMAL_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_/;
+
 async function say(agent, message) {
     agent.bot.modes.behavior_log += message + '\n';
     if (agent.shut_up || !settings.narrate_behavior) return;
     agent.openChat(message);
+}
+
+function famineBodyFreeze(agent, owner) {
+    const bot = agent && agent.bot;
+    if (!bot || !bot.entity) return false;
+    if (bot.food > 0 && !(bot.food <= 2 && bot.health <= 8)) return false;
+    const skill = bot._currentSkill || '';
+    if (/feedUp|surfaceUp|consume|auto_eat/i.test(skill)) return false;
+    const edible = bot.inventory && bot.inventory.items().some(i => i && i.name && FAMINE_FOOD_RE.test(i.name));
+    if (edible) return false;
+    const p = bot.entity.position;
+    const feet = bot.blockAt(p) || { name: 'air' };
+    const head = bot.blockAt(p.offset(0, 1, 0)) || { name: 'air' };
+    if (/water|lava|fire/.test(feet.name || '') || /water|lava|fire/.test(head.name || '')) return false;
+    if (!bot.entity.onGround && bot.entity.velocity && bot.entity.velocity.y < -0.25) return false;
+    if (Date.now() - (bot.lastDamageTime || 0) < 4000) return false;
+    const hostile = Object.values(bot.entities || {}).some(e =>
+        e && e !== bot.entity && e.position && mc.isHostile(e) && e.position.distanceTo(p) < 12);
+    if (hostile) return false;
+    try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
+    try { bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop(); } catch (e) {}
+    try { bot.clearControlStates(); } catch (e) {}
+    if (Date.now() - (bot._lastFamineFreezeLogAt || 0) > 15000) {
+        bot._lastFamineFreezeLogAt = Date.now();
+        try {
+            fs.appendFileSync('bots/_supervisor/progress.txt',
+                `[${new Date().toISOString()}] [${owner}] FAMINE body freeze: food=${bot.food} hp=${Math.round(bot.health)} pos=${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)} skill=${skill || '-'}\n`);
+        } catch (e) {}
+    }
+    return true;
+}
+
+function lowHpNoRegenContainedHold(bot) {
+    if (!bot || !bot.entity) return null;
+    if (!(bot.health <= 8 && bot.food < 18)) return null;
+    const hasNormalFood = bot.inventory && bot.inventory.items().some(i => i && i.name && NORMAL_FOOD_RE.test(i.name));
+    if (hasNormalFood) return null;
+    const p = bot.entity.position;
+    const feet = bot.blockAt(p) || { name: 'air' };
+    const head = bot.blockAt(p.offset(0, 1, 0)) || { name: 'air' };
+    if (/water|lava|fire/.test(feet.name || '') || /water|lava|fire/.test(head.name || '')) return null;
+    if (!bot.entity.onGround && bot.entity.velocity && bot.entity.velocity.y < -0.25) return null;
+    if (Date.now() - (bot.lastDamageTime || 0) < 4000) return null;
+
+    let covered = false;
+    try {
+        for (let dy = 2; dy <= 6; dy++) {
+            const b = bot.blockAt(p.offset(0, dy, 0));
+            if (b && b.boundingBox === 'block') { covered = true; break; }
+        }
+    } catch (e) {}
+    const mob = bot._mobility ? (bot._mobility.state || '') : '';
+    const enclosed = !!(bot._mobility && bot._mobility.enclosed);
+    if (!(/MAROONED|POCKET|ENTOMBED/.test(mob) || enclosed || covered)) return null;
+
+    let closest = Infinity;
+    let closestName = null;
+    for (const e of Object.values(bot.entities || {})) {
+        if (!(e && e !== bot.entity && e.position && mc.isHostile(e))) continue;
+        const d = e.position.distanceTo(p);
+        if (d < closest) {
+            closest = d;
+            closestName = e.name || 'hostile';
+        }
+    }
+    if (closestName && (closest < 4.25 || (/creeper/i.test(closestName) && closest < 5.5))) return null;
+    return { mob, enclosed, covered, closest, closestName };
+}
+
+function tableRecoveryHold(bot) {
+    if (!bot || !bot.entity) return null;
+    let isNight = false;
+    try {
+        const t = bot.time && bot.time.timeOfDay;
+        isNight = t >= 13000 && t <= 23000;
+    } catch (e) {}
+    if (bot.health < 14 || bot.food < 14) return null;
+    const mob = bot._mobility ? (bot._mobility.state || '') : '';
+    const enclosed = !!(bot._mobility && bot._mobility.enclosed);
+    if (!(/POCKET|ENTOMBED/.test(mob) || enclosed)) return null;
+    const counts = {};
+    try {
+        for (const it of bot.inventory.items()) counts[it.name] = (counts[it.name] || 0) + it.count;
+    } catch (e) {}
+    const planksMax = Math.max(0, ...Object.keys(counts).filter(k => k.endsWith('_planks')).map(k => counts[k] || 0));
+    const logs = Object.keys(counts).filter(k => k.endsWith('_log')).reduce((s, k) => s + (counts[k] || 0), 0);
+    if ((counts.crafting_table || 0) > 0 || planksMax >= 4 || logs > 0) return null;
+    let progressFresh = false;
+    try {
+        const p = 'bots/_supervisor/progress.txt';
+        const stat = fs.statSync(p);
+        if (Date.now() - stat.mtimeMs < 90000) {
+            const len = Math.min(8192, stat.size);
+            const fd = fs.openSync(p, 'r');
+            try {
+                const buf = Buffer.alloc(len);
+                fs.readSync(fd, buf, 0, len, stat.size - len);
+                progressFresh = /TABLE (gate|recovery) for /.test(buf.toString('utf8'));
+            } finally {
+                fs.closeSync(fd);
+            }
+        }
+    } catch (e) {}
+    if (!progressFresh) return null;
+    let raw = 0, actionable = null, layered = 0, nearest = Infinity;
+    try {
+        const a = JSON.parse(fs.readFileSync('bots/_supervisor/advisory.json', 'utf8'));
+        if (a && Date.now() - a.ts < 45000 && typeof a.actionableHostiles === 'number') {
+            raw = typeof a.hostiles === 'number' ? a.hostiles : 0;
+            actionable = a.actionableHostiles;
+            layered = typeof a.layeredHostiles === 'number' ? a.layeredHostiles : 0;
+            nearest = typeof a.nearest === 'number' ? a.nearest : Infinity;
+        }
+    } catch (e) {}
+    if (actionable == null) {
+        actionable = 0;
+        const p = bot.entity.position;
+        for (const e of Object.values(bot.entities || {})) {
+            if (!(e && e !== bot.entity && e.position && mc.isHostile(e))) continue;
+            const d = e.position.distanceTo(p);
+            if (d >= 16) continue;
+            raw++;
+            if (d < nearest) nearest = d;
+            const dy = Math.abs(e.position.y - p.y);
+            const ranged = /skeleton|stray|pillager|witch|blaze|ghast/i.test(e.name || '');
+            if (d < 4.25 || (/creeper/i.test(e.name || '') && d < 5.5) || dy < 5 || (ranged && dy < 8)) actionable++;
+            else layered++;
+        }
+    }
+    if (actionable > 0) return null;
+    return { raw, actionable, layered, nearest, mob, enclosed, isNight };
 }
 
 // a mode is a function that is called every tick to respond immediately to the world
@@ -60,6 +194,62 @@ const modes_list = [
                 }
                 return best;
             } catch (e) { return null; }
+        },
+        creeperBackoffTarget: function (bot) {
+            const cr = this.nearestCreeper(bot, 12);
+            if (!cr) return null;
+            const d = cr.position.distanceTo(bot.entity.position);
+            const bunkerHold = this.coveredNightHoldStatus(bot);
+            if (bunkerHold.hold && d > 3.6) return null;
+            const swarmClose = this.nearbyHostiles(bot).some(e => e.position && e.position.distanceTo(bot.entity.position) < 8);
+            if (this.isDay(bot)) {
+                // Hysteresis: the backoff loop exits at >9m, so re-entering at 11m
+                // produces day-long body theft around harmless distant creepers.
+                return d <= (bot.health < 12 || swarmClose ? 10 : 8.25) ? cr : null;
+            }
+            return d <= (swarmClose ? 11 : 9.5) ? cr : null;
+        },
+        hasOverheadCover: function (bot, minDy = 2, maxDy = 6) {
+            try {
+                const p = bot.entity.position;
+                for (let dy = minDy; dy <= maxDy; dy++) {
+                    const b = bot.blockAt(p.offset(0, dy, 0));
+                    if (b && b.boundingBox === 'block') return true;
+                }
+            } catch (e) {}
+            return false;
+        },
+        coveredNightHoldStatus: function (bot) {
+            const status = {
+                hold: false, covered: false, recentDamage: false,
+                hostiles: 0, closest: Infinity, creeperDist: Infinity
+            };
+            try {
+                if (!bot || !bot.entity || this.isDay(bot)) return status;
+                const p = bot.entity.position;
+                const feet = bot.blockAt(p) || { name: 'air' };
+                const head = bot.blockAt(p.offset(0, 1, 0)) || { name: 'air' };
+                if (/water|lava|fire/.test(feet.name || '') || /water|lava|fire/.test(head.name || '')) return status;
+                status.covered = this.hasOverheadCover(bot, 2, 6);
+                if (!status.covered) return status;
+                status.recentDamage = Date.now() - (bot.lastDamageTime || 0) < 4000;
+                const hs = this.nearbyHostiles(bot);
+                status.hostiles = hs.length;
+                for (const h of hs) {
+                    if (!h || !h.position) continue;
+                    const d = h.position.distanceTo(p);
+                    if (d < status.closest) status.closest = d;
+                }
+                const cr = this.nearestCreeper(bot, 12);
+                if (cr && cr.position) status.creeperDist = cr.position.distanceTo(p);
+                // A sealed/covered night bunker is safer than opening the body and running.
+                // Only recent damage or a point-blank creeper is allowed to break the hold.
+                // This is threat arbitration, not a generic night curfew: quiet enclosed
+                // mines are already exempted by shouldNightShelter and should keep working.
+                const threatPressure = status.hostiles > 0 || Number.isFinite(status.creeperDist);
+                status.hold = threatPressure && !status.recentDamage && status.creeperDist > 3.6;
+            } catch (e) {}
+            return status;
         },
         // SMART ESCAPE ROUTING (uses the world block-scan — don't flee blindly!). The naive
         // "sprint opposite the mob centroid" kept running the bot INTO water (drown/slow) or
@@ -140,6 +330,7 @@ const modes_list = [
             // block arrows → FLEE so the dispatch's run-fallback can 蛇皮走位 toward cover.
             const _hurt = Date.now() - bot.lastDamageTime < 3000;
             const _shield0 = bot.inventory.items().some(i => i.name === 'shield') || (bot.inventory.slots[45] && bot.inventory.slots[45].name === 'shield');
+            if (this.coveredNightHoldStatus(bot).hold) return false;
             // ★POINT-BLANK EXCEPTION (death #263, must beat the ranged-flee check below):
             // ONE non-creeper hostile already inside melee reach while we hold a weapon →
             // do NOT flee/wall — return false so self_defense takes it. At 1.6-4b a
@@ -306,7 +497,9 @@ const modes_list = [
                     const bC = bot.blockAt(pC.offset(0, dyC, 0));
                     if (bC && bC.boundingBox === 'block') { covered = true; break; }
                 }
-                if (covered && !this.nearbyHostiles(bot).some(e => e.position && e.position.distanceTo(pC) < 6)) {
+                const nightHold = this.coveredNightHoldStatus(bot);
+                const quietCovered = covered && !this.nearbyHostiles(bot).some(e => e.position && e.position.distanceTo(pC) < 6);
+                if (nightHold.hold || quietCovered) {
                     // DWELL, don't fast-return: an instant return re-fires the mode every
                     // ~300ms ("Nightfall securing" spam round 3) and the interrupt storm
                     // starves every other system. We're sheltered — sit 5s per pass.
@@ -314,7 +507,7 @@ const modes_list = [
                         this._nightDwellAt = Date.now();
                         try {
                             fs.appendFileSync('bots/_supervisor/progress.txt',
-                                `[${new Date().toISOString()}] [self_preservation] night bunker dwell: covered=true hp=${Math.round(bot.health)} food=${bot.food} hostiles=${this.nearbyHostiles(bot).length}\n`);
+                                `[${new Date().toISOString()}] [self_preservation] night bunker dwell: covered=true hold=${nightHold.hold} hp=${Math.round(bot.health)} food=${bot.food} hostiles=${this.nearbyHostiles(bot).length} closest=${Number.isFinite(nightHold.closest) ? nightHold.closest.toFixed(1) : '-'} creeper=${Number.isFinite(nightHold.creeperDist) ? nightHold.creeperDist.toFixed(1) : '-'}\n`);
                         } catch (e) {}
                     }
                     await new Promise(r => setTimeout(r, 5000));
@@ -464,11 +657,7 @@ const modes_list = [
             if (!headBlocked() && fillerOf()) {
                 for (let up = 0; up < 2 && fillerOf(); up++) {
                     const fb = fillerOf();
-                    try { bot.setControlState('jump', true); } catch (e) {}
-                    await new Promise(r => setTimeout(r, 260));
-                    const pp = bot.entity.position.floored();
-                    try { await skills.placeBlock(bot, fb, pp.x, pp.y - 1, pp.z, 'top', true); } catch (e) {}
-                    try { bot.setControlState('jump', false); } catch (e) {}
+                    try { await skills.placeBlockUnderFeet(bot, fb, { retries: 1, settleMs: 160 }); } catch (e) { try { bot.setControlState('jump', false); } catch (e2) {} }
                     await new Promise(r => setTimeout(r, 160));
                 }
                 const q = bot.entity.position.floored();
@@ -487,6 +676,19 @@ const modes_list = [
                 }
             }
             if (!headBlocked()) {
+                const nightHold = this.coveredNightHoldStatus(bot);
+                if (nightHold.hold) {
+                    if (Date.now() - (this._coveredSealFailHoldAt || 0) > 12000) {
+                        this._coveredSealFailHoldAt = Date.now();
+                        try {
+                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                `[${new Date().toISOString()}] [self_preservation] covered seal-fail hold: hp=${Math.round(bot.health)} food=${bot.food} hostiles=${nightHold.hostiles} closest=${Number.isFinite(nightHold.closest) ? nightHold.closest.toFixed(1) : '-'} creeper=${Number.isFinite(nightHold.creeperDist) ? nightHold.creeperDist.toFixed(1) : '-'}\n`);
+                        } catch (e) {}
+                    }
+                    try { bot.clearControlStates(); } catch (e) {}
+                    await new Promise(r => setTimeout(r, 3000));
+                    return;
+                }
                 // seal failed with no mobs in sight → back off 45s (see cooldown at entry)
                 // instead of kiting nothing / re-firing every tick.
                 if (this.nearbyHostiles(bot).length === 0 && !this.nearestCreeper(bot, 12)) {
@@ -619,6 +821,7 @@ const modes_list = [
         },
         update: async function (agent) {
             const bot = agent.bot;
+            if (famineBodyFreeze(agent, 'self_preservation')) return;
             // ★YIELD TO THE MARCH (the 60s act_trace tape: sp's night-bunker dwell held
             // `active` continuously, and the scheduler's active-break meant the MAROONED
             // march NEVER got a turn — right diagnosis, starved reaction. While the
@@ -808,12 +1011,8 @@ const modes_list = [
                             const f = filler();
                             if ((!target || stuck) && f) {
                                 // PILLAR UP — jump + place a block under our feet, rise out of water.
-                                const p0 = bot.entity.position.floored();
                                 bot.setControlState('forward', false);
-                                bot.setControlState('jump', true);
-                                await new Promise(r => setTimeout(r, 280));
-                                try { await skills.placeBlock(bot, f, p0.x, p0.y, p0.z, 'bottom', true); } catch (e) {}
-                                bot.setControlState('jump', false);
+                                try { await skills.placeBlockUnderFeet(bot, f, { retries: 1, settleMs: 160 }); } catch (e) { try { bot.setControlState('jump', false); } catch (e2) {} }
                                 await new Promise(r => setTimeout(r, 160));
                                 stall = 0; lastDist = 1e9;
                             } else if (target && !stuck) {
@@ -933,7 +1132,23 @@ const modes_list = [
                     });
                 }
             }
-            else if (this.nearestCreeper(bot)) {
+            else if (this.coveredNightHoldStatus(bot).hold) {
+                const hold0 = this.coveredNightHoldStatus(bot);
+                if (Date.now() - (this._coveredNightHoldSayAt || 0) > 15000) {
+                    this._coveredNightHoldSayAt = Date.now();
+                    say(agent, `Covered night hold (${hold0.hostiles} mob, nearest ${Number.isFinite(hold0.closest) ? hold0.closest.toFixed(1) : '-'}m) — staying sealed.`);
+                }
+                execute(this, agent, async () => {
+                    try { bot.clearControlStates(); } catch (e) {}
+                    try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
+                    try {
+                        fs.appendFileSync('bots/_supervisor/progress.txt',
+                            `[${new Date().toISOString()}] [self_preservation] covered night hold: hp=${Math.round(bot.health)} food=${bot.food} hostiles=${hold0.hostiles} closest=${Number.isFinite(hold0.closest) ? hold0.closest.toFixed(1) : '-'} creeper=${Number.isFinite(hold0.creeperDist) ? hold0.creeperDist.toFixed(1) : '-'}\n`);
+                    } catch (e) {}
+                    await skills.wait(bot, 3000);
+                });
+            }
+            else if (this.creeperBackoffTarget(bot)) {
                 // ===== CREEPER REFLEX (highest-priority hostile response) =============
                 // A creeper is the ONE mob you must never bunker or melee beside: stopping
                 // to dig a shelter (or trading blows) lets it close to ~3 blocks, fuse, and
@@ -943,7 +1158,43 @@ const modes_list = [
                 // sprint directly away from the creeper until it's >9 blocks (fuse resets and
                 // it stops tracking). No digging, no fighting — just back off. Watchdog
                 // discipline: honor a real interrupt/death so we never refuse stop (churn).
-                const cr0 = this.nearestCreeper(bot);
+                const cr0 = this.creeperBackoffTarget(bot) || this.nearestCreeper(bot);
+                const cr0Dist = cr0 && cr0.position ? cr0.position.distanceTo(bot.entity.position) : Infinity;
+                const hasNormalFood = bot.inventory.items().some(i => i && i.name && NORMAL_FOOD_RE.test(i.name));
+                const lowHpNoRegenNoFood = bot.health <= 8 && bot.food < 18 && !hasNormalFood;
+                const coveredOrEnclosed = (bot._mobility && bot._mobility.enclosed) || this.hasOverheadCover(bot, 2, 6);
+                const hungryNoFoodCovered = bot.food <= 8 && !hasNormalFood && coveredOrEnclosed;
+                if ((lowHpNoRegenNoFood || hungryNoFoodCovered) && coveredOrEnclosed && cr0Dist > 5.5) {
+                    if (Date.now() - (this._creeperCoveredLowHpHoldAt || 0) > 5000) {
+                        this._creeperCoveredLowHpHoldAt = Date.now();
+                        try {
+                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                `[${new Date().toISOString()}] [self_preservation] creeper covered hunger hold: cdist=${cr0Dist.toFixed(1)} hp=${Math.round(bot.health)} food=${bot.food} enclosed=${!!(bot._mobility && bot._mobility.enclosed)} covered=${this.hasOverheadCover(bot, 2, 6)} lowHp=${lowHpNoRegenNoFood} — no calorie-burning backoff\n`);
+                        } catch (e) {}
+                    }
+                    execute(this, agent, async () => {
+                        try { bot.clearControlStates(); } catch (e) {}
+                        try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
+                        await skills.wait(bot, 2000);
+                    });
+                    return;
+                }
+                const tableHold = tableRecoveryHold(bot);
+                if (tableHold && cr0Dist > 5.5) {
+                    if (Date.now() - (this._creeperTableRecoveryHoldAt || 0) > 5000) {
+                        this._creeperTableRecoveryHoldAt = Date.now();
+                        try {
+                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                `[${new Date().toISOString()}] [self_preservation] creeper table-recovery hold: cdist=${cr0Dist.toFixed(1)} raw16=${tableHold.raw} layered16=${tableHold.layered} day=${!tableHold.isNight} — suppress raw backoff for advisory-nonactionable layered threat\n`);
+                        } catch (e) {}
+                    }
+                    execute(this, agent, async () => {
+                        try { bot.clearControlStates(); } catch (e) {}
+                        try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
+                        await skills.wait(bot, 2000);
+                    });
+                    return;
+                }
                 say(agent, `Creeper ${Math.round(cr0.position.distanceTo(bot.entity.position))}m — backing off!`);
                 execute(this, agent, async () => {
                     try { bot.interrupt_code = false; } catch (e) {}   // consume activation interrupt once
@@ -955,6 +1206,10 @@ const modes_list = [
                     // thrash, hp→2). So in DAY we back off until the creeper is clear then resume;
                     // at NIGHT we MERGE into kite-till-dawn — keep moving from creeper+swarm
                     // continuously until daybreak, never returning to re-thrash.
+                    let lastRunPos = bot.entity.position.clone();
+                    let stuckRun = 0;
+                    let sideFlip = 1;
+                    let lastWedgeLog = 0;
                     for (let i = 0; i < 4000; i++) {
                         if (bot.interrupt_code || bot.health <= 0) break;
                         if (bot.oxygenLevel !== undefined && bot.oxygenLevel <= 6) break; // drowning → swim reflex
@@ -970,14 +1225,118 @@ const modes_list = [
                         else if (c) { dx = me.x - c.position.x; dz = me.z - c.position.z; }
                         else { const hs = this.nearbyHostiles(bot); let sx = 0, sz = 0; for (const e of hs) { sx += e.position.x; sz += e.position.z; } sx /= (hs.length || 1); sz /= (hs.length || 1); dx = me.x - sx; dz = me.z - sz; }
                         const len = Math.hypot(dx, dz) || 1; dx /= len; dz /= len;
+                        if (stuckRun >= 8) {
+                            // Raw creeper backoff can wedge on cliff/step lips: it keeps
+                            // forward+jump+sprint in the same cell until the fuse catches up.
+                            // Rotate sideways first; if point-blank and still wedged, stop
+                            // "running" and attempt an emergency seal/pillar instead.
+                            const odx = dx, odz = dz;
+                            dx = -odz * sideFlip; dz = odx * sideFlip;
+                            if (i % 12 === 0) sideFlip *= -1;
+                            if (Date.now() - lastWedgeLog > 1500) {
+                                lastWedgeLog = Date.now();
+                                try {
+                                    fs.appendFileSync('bots/_supervisor/progress.txt',
+                                        `[${new Date().toISOString()}] [self_preservation] creeper backoff wedged: stuck=${stuckRun} pos=${Math.floor(me.x)},${Math.floor(me.y)},${Math.floor(me.z)} cdist=${c ? c.position.distanceTo(me).toFixed(1) : '-'} rotate=${dx.toFixed(2)},${dz.toFixed(2)}\n`);
+                                } catch (e) {}
+                            }
+                            if (stuckRun >= 16 && c && c.position.distanceTo(me) < 5) {
+                                try { bot.clearControlStates(); } catch (e) {}
+                                try {
+                                    fs.appendFileSync('bots/_supervisor/progress.txt',
+                                        `[${new Date().toISOString()}] [self_preservation] creeper backoff failed point-blank — emergency bunker fallback\n`);
+                                } catch (e) {}
+                                await this.bunkerDown(agent);
+                                break;
+                            }
+                        }
                         try { await bot.lookAt(me.offset(dx * 4, 0, dz * 4), true); } catch (e) {}
-                        const fwd = bot.entity.position.offset(dx, 0, dz).floored();
-                        let dropAhead = 0; for (let d = 0; d <= 4; d++) { const b = bot.blockAt(fwd.offset(0, -d, 0)); if (b && b.boundingBox === 'block') break; dropAhead = d; }
-                        const ledge = dropAhead > 3;                     // don't sprint off a cliff
+                        const inspectRunDir = (rx, rz) => {
+                            try {
+                                const fwd = bot.entity.position.offset(rx, 0, rz).floored();
+                                const foot = bot.blockAt(fwd);
+                                const head = bot.blockAt(fwd.offset(0, 1, 0));
+                                const bad = (b) => b && /water|lava|fire|cactus|magma/.test(b.name || '');
+                                let drop = 5;
+                                for (let d = 0; d <= 4; d++) {
+                                    const b = bot.blockAt(fwd.offset(0, -d, 0));
+                                    if (b && b.boundingBox === 'block') { drop = d; break; }
+                                }
+                                return { fwd, foot, head, drop, hazard: bad(foot) || bad(head) };
+                            } catch (e) { return { fwd: null, foot: null, head: null, drop: 5, hazard: true }; }
+                        };
+                        const creeperCorridorRisk = (rx, rz, target) => {
+                            try {
+                                const p0 = bot.entity.position;
+                                for (const e of Object.values(bot.entities || {})) {
+                                    if (!e || !e.position || !/creeper/i.test(e.name || '')) continue;
+                                    const d0 = e.position.distanceTo(p0);
+                                    if (d0 > 24) continue;
+                                    const vx = e.position.x - p0.x;
+                                    const vz = e.position.z - p0.z;
+                                    const h = Math.hypot(vx, vz);
+                                    if (h < 0.001) return { risk: true, name: e.name || 'creeper', d: d0, toward: 1, projected: 0 };
+                                    const toward = (rx * vx + rz * vz) / h;
+                                    let projected = d0;
+                                    for (const step of [2, 4, 6]) {
+                                        const px = p0.x + rx * step;
+                                        const pz = p0.z + rz * step;
+                                        projected = Math.min(projected, Math.hypot(e.position.x - px, e.position.z - pz));
+                                    }
+                                    if (e === target) {
+                                        if (d0 <= 5.5 && toward > -0.1) return { risk: true, name: e.name || 'creeper', d: d0, toward, projected };
+                                        if (d0 > 5.5 && d0 < 10 && toward > 0.25) return { risk: true, name: e.name || 'creeper', d: d0, toward, projected };
+                                        continue;
+                                    }
+                                    if ((d0 < 18 && toward > 0.15) || projected < 7.5) {
+                                        return { risk: true, name: e.name || 'creeper', d: d0, toward, projected };
+                                    }
+                                }
+                            } catch (e) {}
+                            return { risk: false };
+                        };
+                        const rotate = (rx, rz, a) => {
+                            const ca = Math.cos(a), sa = Math.sin(a);
+                            return [rx * ca - rz * sa, rx * sa + rz * ca];
+                        };
+                        const maxDrop = bot.health <= 8 ? 1 : 2;
+                        let runDir = null;
+                        let runInfo = null;
+                        let runRisk = null;
+                        for (const a of [0, Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2]) {
+                            const [tx, tz] = rotate(dx, dz, a);
+                            const info = inspectRunDir(tx, tz);
+                            const risk = creeperCorridorRisk(tx, tz, c);
+                            if (!info.hazard && info.drop <= maxDrop && !risk.risk) {
+                                runDir = [tx, tz];
+                                runInfo = info;
+                                break;
+                            } else if (!info.hazard && info.drop <= maxDrop && !runRisk) {
+                                runRisk = risk;
+                            }
+                        }
+                        if (!runDir) {
+                            try { bot.clearControlStates(); } catch (e) {}
+                            const bad = inspectRunDir(dx, dz);
+                            try {
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [self_preservation] creeper backoff gated: pos=${Math.floor(me.x)},${Math.floor(me.y)},${Math.floor(me.z)} cdist=${c ? c.position.distanceTo(me).toFixed(1) : '-'} drop=${bad.drop} hp=${Math.round(bot.health)} food=${bot.food} risk=${runRisk && runRisk.risk ? `${runRisk.name}@${runRisk.d.toFixed(1)} proj=${runRisk.projected.toFixed(1)} toward=${runRisk.toward.toFixed(2)}` : 'cliff'}; emergency bunker/hold\n`);
+                            } catch (e) {}
+                            await this.bunkerDown(agent);
+                            break;
+                        }
+                        dx = runDir[0]; dz = runDir[1];
+                        const ledge = runInfo.drop > 1;                     // cautious walk only on a small step-down
+                        try { await bot.lookAt(me.offset(dx * 4, 0, dz * 4), true); } catch (e) {}
                         bot.setControlState('forward', true);
                         bot.setControlState('sprint', !ledge);
                         bot.setControlState('jump', !ledge);
                         await new Promise(r => setTimeout(r, 160));
+                        const nowPos = bot.entity.position.clone();
+                        const moved = Math.hypot(nowPos.x - lastRunPos.x, nowPos.z - lastRunPos.z);
+                        if (moved < 0.12 && (c || swarm)) stuckRun++;
+                        else stuckRun = 0;
+                        lastRunPos = nowPos;
                         if (i % 10 === 9) { try { say(agent, 'Kiting creeper+swarm till dawn…'); } catch (e) {} } // agent.err heartbeat (watchdog alive-signal)
                     }
                     try { bot.clearControlStates(); } catch (e) {}
@@ -999,6 +1358,24 @@ const modes_list = [
                 // ALIVE preserves the inventory so the re-entrant achieve run can
                 // resume — far better than dying and rebuilding from nothing.
                 const hostiles = this.nearbyHostiles(bot);
+                const noRegenHold = lowHpNoRegenContainedHold(bot);
+                if (noRegenHold) {
+                    if (Date.now() - (this._noRegenFleeHoldAt || 0) > 5000) {
+                        this._noRegenFleeHoldAt = Date.now();
+                        try {
+                            const p = bot.entity.position.floored();
+                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                `[${new Date().toISOString()}] [self_preservation] no-regen flee hold: food=${bot.food} hp=${Math.round(bot.health || 0)} pos=${p.x},${p.y},${p.z} mob=${noRegenHold.mob || '-'} enclosed=${noRegenHold.enclosed} covered=${noRegenHold.covered} closest=${noRegenHold.closestName || '-'}@${Number.isFinite(noRegenHold.closest) ? noRegenHold.closest.toFixed(1) : '-'} — no bunkerDown/dig\n`);
+                        } catch (e) {}
+                    }
+                    execute(this, agent, async () => {
+                        try { bot.clearControlStates(); } catch (e) {}
+                        try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
+                        try { bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop(); } catch (e) {}
+                        await skills.wait(bot, 2500);
+                    });
+                    return;
+                }
                 say(agent, `Outmatched (${hostiles.length} mob, hp ${Math.round(bot.health)}) — digging in!`);
                 execute(this, agent, async () => {
                     // ★UNDERGROUND RANGED WALL-OFF (deaths 196+197, same shape twice: cave
@@ -1064,13 +1441,488 @@ const modes_list = [
         last_time: Date.now(),
         max_stuck_time: 20,
         prev_dig_block: null,
+        step_prev_location: null,
+        step_prev_time: 0,
+        step_guard_until: 0,
+        step_skip_key: null,
+        step_skip_first_at: 0,
+        step_skip_count: 0,
+        step_skip_last_log_at: 0,
         update: async function (agent) {
-            if (agent.isIdle()) { 
+            const bot = agent.bot;
+            if (famineBodyFreeze(agent, 'unstuck')) {
                 this.prev_location = null;
                 this.stuck_time = 0;
+                this.step_prev_location = null;
+                return;
+            }
+            const containedHold = lowHpNoRegenContainedHold(bot);
+            if (containedHold) {
+                try {
+                    bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null);
+                    bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop();
+                    bot.clearControlStates();
+                } catch (e) {}
+                this.prev_location = null;
+                this.stuck_time = 0;
+                this.prev_dig_block = null;
+                this.step_prev_location = null;
+                if (Date.now() - (bot._lastUnstuckContainedHoldAt || 0) > 15000) {
+                    bot._lastUnstuckContainedHoldAt = Date.now();
+                    const p = bot.entity.position.floored();
+                    try {
+                        fs.appendFileSync('bots/_supervisor/progress.txt',
+                            `[${new Date().toISOString()}] [unstuck] no-regen contained hold: food=${bot.food} hp=${Math.round(bot.health || 0)} pos=${p.x},${p.y},${p.z} mob=${containedHold.mob || '-'} enclosed=${containedHold.enclosed} covered=${containedHold.covered} closest=${containedHold.closestName || '-'}@${Number.isFinite(containedHold.closest) ? containedHold.closest.toFixed(1) : '-'} — suppress moveAway/GoalInvert\n`);
+                    } catch (e) {}
+                }
+                return;
+            }
+            const tableHold = tableRecoveryHold(bot);
+            if (tableHold) {
+                try {
+                    bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null);
+                    bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop();
+                    bot.clearControlStates();
+                } catch (e) {}
+                this.prev_location = null;
+                this.stuck_time = 0;
+                this.prev_dig_block = null;
+                this.step_prev_location = null;
+                if (Date.now() - (bot._lastUnstuckTableRecoveryHoldAt || 0) > 15000) {
+                    bot._lastUnstuckTableRecoveryHoldAt = Date.now();
+                    const p = bot.entity.position.floored();
+                    try {
+                        fs.appendFileSync('bots/_supervisor/progress.txt',
+                            `[${new Date().toISOString()}] [unstuck] table recovery hold: pos=${p.x},${p.y},${p.z} mob=${tableHold.mob || '-'} raw16=${tableHold.raw} layered16=${tableHold.layered} day=${!tableHold.isNight} — suppress GoalInvert/step-edge until actionable threat\n`);
+                    } catch (e) {}
+                }
+                return;
+            }
+            const pathingNow = !!(bot && bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving());
+            const mobilityWorkNow = !!(bot && bot._mobility && /MAROONED|POCKET|ENTOMBED/.test(bot._mobility.state || ''));
+            if (agent.isIdle() && !pathingNow && !mobilityWorkNow) {
+                this.prev_location = null;
+                this.stuck_time = 0;
+                this.step_prev_location = null;
                 return; // don't get stuck when idle
             }
-            const bot = agent.bot;
+            const now = Date.now();
+            try {
+                const cs = bot.controlState || {};
+                const p = bot.entity.position;
+                if (!this.step_prev_location) {
+                    this.step_prev_location = p.clone();
+                    this.step_prev_time = now;
+                } else if (now - this.step_prev_time >= 700) {
+                    const moved = p.distanceTo(this.step_prev_location);
+                    const skill = bot._currentSkill || '';
+                    const yaw = bot.entity.yaw || 0;
+                    const snapDir = (rx, rz) => {
+                        if (!Number.isFinite(rx) || !Number.isFinite(rz) || Math.hypot(rx, rz) < 0.08) return null;
+                        return Math.abs(rx) >= Math.abs(rz)
+                            ? [Math.sign(rx) || 1, 0]
+                            : [0, Math.sign(rz) || 1];
+                    };
+                    const candidates = [];
+                    const addDir = (dir, source) => {
+                        if (!dir) return;
+                        const [cx, cz] = dir;
+                        if (candidates.some(c => c.dx === cx && c.dz === cz)) return;
+                        candidates.push({ dx: cx, dz: cz, source });
+                    };
+                    if (pathingNow && bot._lastPathGoalInfo && Date.now() - (bot._lastPathGoalAt || 0) < 10000) {
+                        const g = bot._lastPathGoalInfo;
+                        if (typeof g.x === 'number' && typeof g.z === 'number') addDir(snapDir(g.x - p.x, g.z - p.z), 'path-goal');
+                        if (g.entity && g.entity.pos) addDir(snapDir(g.entity.pos.x - p.x, g.entity.pos.z - p.z), 'path-entity');
+                        if (g.goal && typeof g.goal.x === 'number' && typeof g.goal.z === 'number') addDir(snapDir(g.goal.x - p.x, g.goal.z - p.z), 'path-inner-goal');
+                    }
+                    addDir(snapDir(p.x - this.step_prev_location.x, p.z - this.step_prev_location.z), 'recent-motion');
+                    addDir(snapDir(-Math.sin(yaw), Math.cos(yaw)), 'yaw');
+                    for (const d0 of [[1, 0], [0, 1], [-1, 0], [0, -1]]) addDir(d0, 'fallback');
+                    let dx = candidates[0] ? candidates[0].dx : 1;
+                    let dz = candidates[0] ? candidates[0].dz : 0;
+                    let dirSource = candidates[0] ? candidates[0].source : 'default';
+                    const cell = p.floored();
+                    let targetCell, frontFoot, frontHead, frontAbove, frontBelow;
+                    const refreshStepProbe = () => {
+                        targetCell = cell.offset(dx, 0, dz);
+                        frontFoot = bot.blockAt(targetCell);
+                        frontHead = bot.blockAt(targetCell.offset(0, 1, 0));
+                        frontAbove = bot.blockAt(targetCell.offset(0, 2, 0));
+                        frontBelow = bot.blockAt(targetCell.offset(0, -1, 0));
+                    };
+                    refreshStepProbe();
+                    const ownHead = bot.blockAt(cell.offset(0, 1, 0));
+                    const ownAbove = bot.blockAt(cell.offset(0, 2, 0));
+                    const solid = (b) => b && b.boundingBox === 'block';
+                    const PASSABLE = new Set(['air', 'cave_air', 'void_air', 'short_grass', 'tall_grass', 'fern', 'large_fern', 'dead_bush', 'snow']);
+                    const open = (b) => !b || b.boundingBox === 'empty' || PASSABLE.has(b.name || '');
+                    const bad = (b) => b && /water|lava|fire|cactus|magma/.test(b.name || '');
+                    const stationStep = (b) => b && /crafting_table|furnace|blast_furnace|smoker|chest|barrel|bed|anvil|enchanting_table|grindstone|stonecutter|loom|cartography_table|smithing_table|fletching_table|lectern|composter/i.test(b.name || '');
+                    const hasPick = () => bot.inventory && bot.inventory.items().some(it => /_pickaxe$/.test(it.name || ''));
+                    const clearableStepRoof = (b) => {
+                        if (!b || b.boundingBox !== 'block') return false;
+                        if (bad(b) || stationStep(b) || /bedrock|obsidian|end_portal|nether_portal/.test(b.name || '')) return false;
+                        const stony = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|cobble/.test(b.name || '');
+                        return !stony || hasPick();
+                    };
+                    const isStepLikeNow = () => solid(frontFoot) && open(frontHead) && open(frontAbove) && open(ownHead) && !stationStep(frontFoot) && !bad(frontFoot) && !bad(frontHead) && !bad(frontAbove);
+                    if (!isStepLikeNow()) {
+                        for (const c of candidates) {
+                            dx = c.dx; dz = c.dz; dirSource = c.source;
+                            refreshStepProbe();
+                            if (isStepLikeNow()) break;
+                        }
+                    }
+                    const stepLike = isStepLikeNow();
+                    const wantsForward = !!(cs.forward || pathingNow || mobilityWorkNow || /surfaceUp|feedUp|chopWood|branchMine/.test(skill));
+                    // Step-edge assist is specifically for traversal stalls. The hard
+                    // guard is active digging/mining, not the surrounding skill name:
+                    // surfaceUp/branchMine are exactly where one-block lip stalls recur.
+                    const hasBodyWork = !!(bot.targetDigBlock || bot._mineMotionActiveDig || (bot._bodyDigLockUntil && Date.now() < bot._bodyDigLockUntil));
+                    const blockName = (b) => b ? `${b.name}@${b.position.x},${b.position.y},${b.position.z}` : 'null';
+                    const famineCriticalNoStep = (() => {
+                        try {
+                            if (!(bot.food <= 2 && bot.health <= 6)) return false;
+                            const edible = bot.inventory && bot.inventory.items().some(i => i && i.name && FAMINE_FOOD_RE.test(i.name));
+                            if (edible) return false;
+                            const feetNow = bot.blockAt(cell);
+                            const headNow = bot.blockAt(cell.offset(0, 1, 0));
+                            if (bad(feetNow) || bad(headNow)) return false;
+                            if (!bot.entity.onGround && bot.entity.velocity && bot.entity.velocity.y < -0.25) return false;
+                            if (Date.now() - (bot.lastDamageTime || 0) < 4000) return false;
+                            return true;
+                        } catch (e) { return false; }
+                    })();
+                    const stepSkipReason = () => {
+                        if (!wantsForward || moved >= 0.12 || hasBodyWork || now <= this.step_guard_until) return null;
+                        if (famineCriticalNoStep) return 'famine-hold';
+                        if (!solid(frontFoot)) return 'front-not-step';
+                        if (stationStep(frontFoot)) return 'front-functional-station';
+                        if (!open(frontHead)) return 'target-foot-blocked';
+                        if (!open(frontAbove)) return 'target-head-blocked';
+                        if (!open(ownHead)) return 'own-head-blocked';
+                        if (bad(frontFoot) || bad(frontHead) || bad(frontAbove)) return 'hazard';
+                        return null;
+                    };
+                    const skipReason = stepSkipReason();
+                    if (skipReason) {
+                        const skipKey = `${skipReason}:${targetCell.x},${targetCell.y},${targetCell.z}:${blockName(frontFoot)}:${blockName(frontHead)}:${blockName(frontAbove)}`;
+                        const repeatedSkip = this.step_skip_key === skipKey && now - (this.step_skip_first_at || 0) < 20000;
+                        this.step_skip_key = skipKey;
+                        this.step_skip_first_at = repeatedSkip ? this.step_skip_first_at : now;
+                        this.step_skip_count = repeatedSkip ? (this.step_skip_count || 0) + 1 : 1;
+                        const structuralBlock = /target-foot-blocked|target-head-blocked|own-head-blocked|own-above-blocked|front-functional-station/.test(skipReason);
+                        const guardMs = structuralBlock && this.step_skip_count >= 2 ? Math.min(15000, 2500 * this.step_skip_count) : 2500;
+                        this.step_guard_until = now + guardMs;
+                        if (guardMs > 2500 && now - (this.step_skip_last_log_at || 0) > 10000) {
+                            this.step_skip_last_log_at = now;
+                            try {
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [step-edge] structural skip backoff reason=${skipReason} count=${this.step_skip_count} guard=${Math.ceil(guardMs / 1000)}s target=${targetCell.x},${targetCell.y},${targetCell.z} step=${frontFoot ? frontFoot.name : 'null'} foot=${frontHead ? frontHead.name : 'null'} head=${frontAbove ? frontAbove.name : 'null'} skill=${skill || '-'}\n`);
+                            } catch (e) {}
+                        }
+                        try {
+                            fs.appendFileSync('bots/_supervisor/mine_motion.jsonl', JSON.stringify({
+                                ts: new Date().toISOString(),
+                                event: 'step_edge.skip',
+                                pos: { x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3) },
+                                skill: bot._currentSkill || null,
+                                mob: bot._mobility ? bot._mobility.state : null,
+                                data: {
+                                    reason: skipReason,
+                                    moved: +moved.toFixed(3),
+                                    dir: [dx, dz],
+                                    dirSource,
+                                    candidateDirs: candidates,
+                                    pathGoal: bot._lastPathGoalInfo || null,
+                                    targetCell: { x: targetCell.x, y: targetCell.y, z: targetCell.z },
+                                    step: blockName(frontFoot),
+                                    targetFoot: blockName(frontHead),
+                                    targetHead: blockName(frontAbove),
+                                    ownHead: blockName(ownHead),
+                                    ownAbove: blockName(ownAbove),
+                                    skipCount: this.step_skip_count,
+                                    guardMs,
+                                },
+                            }) + '\n');
+                        } catch (e) {}
+                    }
+                    if (wantsForward && stepLike && moved < 0.12 && !hasBodyWork && !famineCriticalNoStep && now > this.step_guard_until) {
+                        this.step_guard_until = now + 3000;
+                        try {
+                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                `[${new Date().toISOString()}] [step-edge] assist begin moved=${moved.toFixed(2)} dir=${dx},${dz}/${dirSource} target=${targetCell.x},${targetCell.y},${targetCell.z} step=${frontFoot ? frontFoot.name : 'null'} foot=${frontHead ? frontHead.name : 'null'} head=${frontAbove ? frontAbove.name : 'null'} below=${frontBelow ? frontBelow.name : 'null'} skill=${skill || '-'}\n`);
+                        } catch (e) {}
+                        execute(this, agent, async () => {
+                            const exact = () => {
+                                const q = bot.entity.position;
+                                return { x: +q.x.toFixed(3), y: +q.y.toFixed(3), z: +q.z.toFixed(3) };
+                            };
+                            const envSnap = () => {
+                                const c = bot.entity.position.floored();
+                                const out = [];
+                                for (let dy = -1; dy <= 2; dy++) {
+                                    for (let dz0 = -1; dz0 <= 1; dz0++) {
+                                        for (let dx0 = -1; dx0 <= 1; dx0++) {
+                                            const b = bot.blockAt(c.offset(dx0, dy, dz0));
+                                            out.push({
+                                                d: [dx0, dy, dz0],
+                                                n: b ? b.name : null,
+                                                bb: b ? b.boundingBox : null,
+                                            });
+                                        }
+                                    }
+                                }
+                                return out;
+                            };
+                            const motionLog = (event, data = {}) => {
+                                try {
+                                    fs.appendFileSync('bots/_supervisor/mine_motion.jsonl', JSON.stringify({
+                                        ts: new Date().toISOString(),
+                                        event,
+                                        pos: exact(),
+                                        skill: bot._currentSkill || null,
+                                        mob: bot._mobility ? bot._mobility.state : null,
+                                        env: envSnap(),
+                                        data,
+                                    }) + '\n');
+                                } catch (e) {}
+                            };
+                            const centerOnCurrentCell = async () => {
+                                const c = bot.entity.position.floored();
+                                const center = c.offset(0.5, 0.05, 0.5);
+                                const dist = Math.hypot(bot.entity.position.x - center.x, bot.entity.position.z - center.z);
+                                if (dist < 0.24) return;
+                                try {
+                                    await bot.lookAt(center.offset(0, 1.45, 0), true);
+                                    bot.setControlState('sprint', false);
+                                    bot.setControlState('jump', false);
+                                    bot.setControlState('forward', true);
+                                    await new Promise(r => setTimeout(r, Math.min(260, Math.max(120, dist * 420))));
+                                } finally {
+                                    try { bot.clearControlStates(); } catch (e) {}
+                                }
+                            };
+                            try {
+                                bot._bodyMoveLockOwner = 'unstuck:step-edge';
+                                bot._bodyMoveLockUntil = Date.now() + 2800;
+                                const start = bot.entity.position.clone();
+                                const freshCell = bot.entity.position.floored();
+                                const freshTarget = freshCell.offset(dx, 0, dz);
+                                const freshStep = bot.blockAt(freshTarget);
+                                const freshFoot = bot.blockAt(freshTarget.offset(0, 1, 0));
+                                const freshHead = bot.blockAt(freshTarget.offset(0, 2, 0));
+                                const freshOwnHead = bot.blockAt(freshCell.offset(0, 1, 0));
+                                let freshOwnAbove = bot.blockAt(freshCell.offset(0, 2, 0));
+                                if (!open(freshOwnAbove)) {
+                                    const clearable = clearableStepRoof(freshOwnAbove);
+                                    motionLog('step_edge.own_above_notch.begin', {
+                                        clearable,
+                                        dir: [dx, dz],
+                                        targetCell: { x: freshTarget.x, y: freshTarget.y, z: freshTarget.z },
+                                        block: blockName(freshOwnAbove),
+                                    });
+                                    let notchOk = false;
+                                    let notchErr = null;
+                                    if (clearable) {
+                                        try {
+                                            bot._bodyDigLockOwner = 'unstuck:step-edge-own-above-notch';
+                                            bot._bodyDigLockUntil = Date.now() + 5200;
+                                            try { bot.clearControlStates(); } catch (e) {}
+                                            try { if (bot.tool && bot.tool.equipForBlock) await bot.tool.equipForBlock(freshOwnAbove); } catch (e) {}
+                                            try { await bot.lookAt(freshOwnAbove.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
+                                            await Promise.race([
+                                                bot.dig(freshOwnAbove, true),
+                                                new Promise((_, rej) => setTimeout(() => rej(new Error('own-above-notch-timeout')), 4800)),
+                                            ]);
+                                            await new Promise(r => setTimeout(r, 120));
+                                            freshOwnAbove = bot.blockAt(freshCell.offset(0, 2, 0));
+                                            notchOk = open(freshOwnAbove);
+                                        } catch (e) {
+                                            notchErr = e && e.message ? e.message : String(e);
+                                        } finally {
+                                            try { bot.clearControlStates(); } catch (e) {}
+                                            if (bot._bodyDigLockOwner === 'unstuck:step-edge-own-above-notch') {
+                                                bot._bodyDigLockOwner = null;
+                                                bot._bodyDigLockUntil = 0;
+                                            }
+                                        }
+                                    }
+                                    motionLog('step_edge.own_above_notch.end', {
+                                        ok: notchOk,
+                                        error: notchErr,
+                                        after: blockName(freshOwnAbove),
+                                        dir: [dx, dz],
+                                        targetCell: { x: freshTarget.x, y: freshTarget.y, z: freshTarget.z },
+                                    });
+                                }
+                                if (!(solid(freshStep) && open(freshFoot) && open(freshHead) && open(freshOwnHead) && open(freshOwnAbove))
+                                    || stationStep(freshStep) || bad(freshStep) || bad(freshFoot) || bad(freshHead)) {
+                                    motionLog('step_edge.skip', {
+                                        reason: stationStep(freshStep) ? 'functional-station-before-press' : 'stale-or-invalid-before-press',
+                                        dir: [dx, dz],
+                                        targetCell: { x: freshTarget.x, y: freshTarget.y, z: freshTarget.z },
+                                        step: blockName(freshStep),
+                                        targetFoot: blockName(freshFoot),
+                                        targetHead: blockName(freshHead),
+                                        ownHead: blockName(freshOwnHead),
+                                        ownAbove: blockName(freshOwnAbove),
+                                    });
+                                    return;
+                                }
+                                motionLog('step_edge.begin', {
+                                    dir: [dx, dz],
+                                    dirSource,
+                                    candidateDirs: candidates,
+                                    pathGoal: bot._lastPathGoalInfo || null,
+                                    targetCell: { x: targetCell.x, y: targetCell.y, z: targetCell.z },
+                                    step: blockName(frontFoot),
+                                    targetFoot: blockName(frontHead),
+                                    targetHead: blockName(frontAbove),
+                                    ownHead: blockName(ownHead),
+                                    ownAbove: blockName(ownAbove),
+                                });
+                                try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
+                                await centerOnCurrentCell();
+                                let maxY = bot.entity.position.y;
+                                const targetDistFrom = (q) => Math.hypot(q.x - (targetCell.x + 0.5), q.z - (targetCell.z + 0.5));
+                                const roseEnoughAt = (q) => Math.floor(q.y) > cell.y || q.y > start.y + 0.72;
+                                const settledInTarget = (q) => Math.floor(q.x) === targetCell.x && Math.floor(q.z) === targetCell.z && targetDistFrom(q) <= 0.9;
+                                const stepSucceeded = (q) => roseEnoughAt(q) && settledInTarget(q);
+                                for (let attempt = 0; attempt < 2; attempt++) {
+                                    const c = bot.entity.position.floored();
+                                    const tgt = c.offset(dx + 0.5, 1.15, dz + 0.5);
+                                    await bot.lookAt(tgt, true);
+                                    bot.setControlState('sprint', false);
+                                    bot.setControlState('forward', true);
+                                    bot.setControlState('jump', true);
+                                    const t0 = Date.now();
+                                    while (Date.now() - t0 < 820) {
+                                        if (bot.entity.position.y > maxY) maxY = bot.entity.position.y;
+                                        const cur = bot.entity.position;
+                                        if (stepSucceeded(cur)) break;
+                                        await new Promise(r => setTimeout(r, 40));
+                                    }
+                                    try { bot.clearControlStates(); } catch (e) {}
+                                    await new Promise(r => setTimeout(r, 120));
+                                    const cur = bot.entity.position;
+                                    if (stepSucceeded(cur)) break;
+                                }
+                                let end = bot.entity.position.clone();
+                                let ok = stepSucceeded(end);
+                                if (!ok && roseEnoughAt(end) && !settledInTarget(end)) {
+                                    motionLog('step_edge.edge_miss', {
+                                        dir: [dx, dz],
+                                        targetCell: { x: targetCell.x, y: targetCell.y, z: targetCell.z },
+                                        at: { x: +end.x.toFixed(3), y: +end.y.toFixed(3), z: +end.z.toFixed(3) },
+                                        floor: { x: Math.floor(end.x), y: Math.floor(end.y), z: Math.floor(end.z) },
+                                        targetDist: +targetDistFrom(end).toFixed(3),
+                                        recovery: 'center-press',
+                                    });
+                                    try {
+                                        await bot.lookAt(targetCell.offset(0.5, 1.15, 0.5), true);
+                                        bot.setControlState('sprint', false);
+                                        bot.setControlState('jump', false);
+                                        bot.setControlState('forward', true);
+                                        await new Promise(r => setTimeout(r, 420));
+                                    } finally {
+                                        try { bot.clearControlStates(); } catch (e) {}
+                                    }
+                                    await new Promise(r => setTimeout(r, 120));
+                                    end = bot.entity.position.clone();
+                                    ok = stepSucceeded(end);
+                                }
+                                let notch = null;
+                                if (!ok) {
+                                    const c2 = bot.entity.position.floored();
+                                    const t2 = c2.offset(dx, 0, dz);
+                                    const step2 = bot.blockAt(t2);
+                                    const below2 = bot.blockAt(t2.offset(0, -1, 0));
+                                    const stonyStep = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/.test((step2 && step2.name) || '');
+                                    const hasPick2 = () => bot.inventory.items().some(it => /_pickaxe$/.test(it.name || ''));
+                                    const canNotch = step2 && step2.boundingBox === 'block'
+                                        && below2 && below2.boundingBox === 'block'
+                                        && !/bedrock|water|lava|fire|cactus|magma/.test(step2.name || '')
+                                        && (!stonyStep || hasPick2());
+                                    if (canNotch) {
+                                        notch = {
+                                            block: blockName(step2),
+                                            below: blockName(below2),
+                                            targetCell: { x: t2.x, y: t2.y, z: t2.z },
+                                        };
+                                        motionLog('step_edge.notch.begin', { dir: [dx, dz], ...notch });
+                                        try {
+                                            bot._bodyDigLockOwner = 'unstuck:step-edge-notch';
+                                            bot._bodyDigLockUntil = Date.now() + 5000;
+                                            try { bot.clearControlStates(); } catch (e) {}
+                                            try { await bot.tool.equipForBlock(step2); } catch (e) {}
+                                            try { await bot.lookAt(step2.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
+                                            await Promise.race([
+                                                bot.dig(step2, true),
+                                                new Promise((_, rej) => setTimeout(() => rej(new Error('notch-timeout')), 4500)),
+                                            ]);
+                                            await new Promise(r => setTimeout(r, 120));
+                                            const afterStep = bot.blockAt(t2);
+                                            notch.after = blockName(afterStep);
+                                            if (!afterStep || afterStep.boundingBox !== 'block') {
+                                                try { await bot.lookAt(t2.offset(0.5, 1.25, 0.5), true); } catch (e) {}
+                                                bot.setControlState('sprint', false);
+                                                bot.setControlState('jump', false);
+                                                bot.setControlState('forward', true);
+                                                await new Promise(r => setTimeout(r, 520));
+                                                try { bot.clearControlStates(); } catch (e) {}
+                                                await new Promise(r => setTimeout(r, 120));
+                                                end = bot.entity.position.clone();
+                                                ok = Math.hypot(end.x - (t2.x + 0.5), end.z - (t2.z + 0.5)) < 0.95
+                                                    && end.y >= start.y - 0.35;
+                                            }
+                                            notch.ok = ok;
+                                        } catch (e) {
+                                            notch.error = e.message;
+                                            try { bot.clearControlStates(); } catch (e2) {}
+                                        } finally {
+                                            if (bot._bodyDigLockOwner === 'unstuck:step-edge-notch') {
+                                                bot._bodyDigLockOwner = null;
+                                                bot._bodyDigLockUntil = 0;
+                                            }
+                                        }
+                                        motionLog('step_edge.notch.end', {
+                                            dir: [dx, dz],
+                                            ...notch,
+                                            end: { x: +end.x.toFixed(3), y: +end.y.toFixed(3), z: +end.z.toFixed(3) },
+                                        });
+                                    }
+                                }
+                                motionLog('step_edge.end', {
+                                    ok,
+                                    dir: [dx, dz],
+                                    start: { x: +start.x.toFixed(3), y: +start.y.toFixed(3), z: +start.z.toFixed(3) },
+                                    end: { x: +end.x.toFixed(3), y: +end.y.toFixed(3), z: +end.z.toFixed(3) },
+                                    maxRise: +(maxY - start.y).toFixed(3),
+                                    targetDist: +targetDistFrom(end).toFixed(3),
+                                    settledInTarget: settledInTarget(end),
+                                    notch,
+                                });
+                                try {
+                                    fs.appendFileSync('bots/_supervisor/progress.txt',
+                                        `[${new Date().toISOString()}] [step-edge] assist end ok=${ok} y=${start.y.toFixed(2)}→${end.y.toFixed(2)} dist=${targetDistFrom(end).toFixed(2)} settled=${settledInTarget(end)}${notch ? ' notch=' + (notch.ok ? 'ok' : 'fail') : ''}\n`);
+                                } catch (e) {}
+                            } catch (e) {
+                                try { bot.clearControlStates(); } catch (e2) {}
+                                motionLog('step_edge.end', { ok: false, error: e.message, dir: [dx, dz] });
+                            } finally {
+                                if (bot._bodyMoveLockOwner === 'unstuck:step-edge') {
+                                    bot._bodyMoveLockOwner = null;
+                                    bot._bodyMoveLockUntil = 0;
+                                }
+                            }
+                        });
+                    }
+                    this.step_prev_location = p.clone();
+                    this.step_prev_time = now;
+                }
+            } catch (e) {}
             const cur_dig_block = bot.targetDigBlock;
             if (cur_dig_block && !this.prev_dig_block) {
                 this.prev_dig_block = cur_dig_block;
@@ -1109,6 +1961,7 @@ const modes_list = [
             this.prev_location = null;
             this.stuck_time = 0;
             this.prev_dig_block = null;
+            this.step_prev_location = null;
         }
     },
     {
@@ -1303,14 +2156,115 @@ const modes_list = [
                     // 蹲坑驻留>5min 被判 pinned,每60s强拆一次,bot被踢到夜间地表乱跑,撞上
                     // enderman 拉响 risk83。正当夜蹲(夜间+头顶有盖)的"钉住"是庇护不是死锁。)
                     let nightBunker = false;
+                    let coveredNow = false;
                     const tP = (bot.time && bot.time.timeOfDay) || 0;
-                    if (tP >= 12000 && tP <= 23500) {
-                        for (let dyP = 1; dyP <= 3; dyP++) {
-                            const bP = bot.blockAt(bot.entity.position.offset(0, dyP, 0));
-                            if (bP && bP.boundingBox === 'block') { nightBunker = true; break; }
-                        }
+                    for (let dyP = 1; dyP <= 6; dyP++) {
+                        const bP = bot.blockAt(bot.entity.position.offset(0, dyP, 0));
+                        if (bP && bP.boundingBox === 'block') { coveredNow = true; break; }
                     }
-                    if (!nightBunker) {
+                    if (tP >= 12000 && tP <= 23500 && coveredNow) nightBunker = true;
+                    let lowFoodShelter = false;
+                    let famineHold = false;
+                    let noRegenLowHpHold = false;
+                    let bodyBudgetContainedHold = false;
+                    let tableRecoveryHold = false;
+                    let killBoxLowFoodHold = false;
+                    let closestHostile = Infinity;
+                    let closestCreeper = Infinity;
+                    try {
+                        const normalEdible = bot.inventory.items().some(i => i && i.name && NORMAL_FOOD_RE.test(i.name));
+                        const emergencyEdible = bot.inventory.items().some(i => i && i.name && /rotten_flesh|spider_eye/.test(i.name));
+                        const edible = normalEdible || emergencyEdible;
+                        for (const e of Object.values(bot.entities || {})) {
+                            if (!(e && e.position && e.name && /zombie|skeleton|creeper|spider|witch|drowned|husk|stray|pillager|cave_spider/i.test(e.name))) continue;
+                            const d = e.position.distanceTo(bot.entity.position);
+                            if (d < closestHostile) closestHostile = d;
+                            if (/creeper/i.test(e.name) && d < closestCreeper) closestCreeper = d;
+                        }
+                        const hostileNear = closestHostile < 12;
+                        const pointBlankHostile = closestHostile < 4.25 || closestCreeper < 5.5;
+                        lowFoodShelter = coveredNow && bot.food < 12 && !edible && !hostileNear;
+                        const pNow = bot.entity.position;
+                        const feetNow = bot.blockAt(pNow) || { name: 'air' };
+                        const headNow = bot.blockAt(pNow.offset(0, 1, 0)) || { name: 'air' };
+                        const fluidNow = /water|lava|fire/.test(feetNow.name || '') || /water|lava|fire/.test(headNow.name || '');
+                        const fallingNow = !bot.entity.onGround && bot.entity.velocity && bot.entity.velocity.y < -0.25;
+                        famineHold = bot.food <= 2 && bot.health <= 6 && !edible && !hostileNear && !fluidNow && !fallingNow;
+                        const prepBackoff = (bot._prepLowHpNoFoodUntil && now < bot._prepLowHpNoFoodUntil)
+                            || (bot._prepNoFoodSurfaceBackoffUntil && now < bot._prepNoFoodSurfaceBackoffUntil);
+                        noRegenLowHpHold = bot.health < 14 && bot.food < 18 && !normalEdible
+                            && !!prepBackoff && !hostileNear && !fluidNow && !fallingNow;
+                        const enclosedNow = !!(bot._mobility && bot._mobility.enclosed);
+                        const containedMob = !!(bot._mobility && /POCKET|MAROONED|ENTOMBED/.test(bot._mobility.state || ''));
+                        bodyBudgetContainedHold = bot.health <= 8 && bot.food <= 6 && !normalEdible
+                            && (coveredNow || enclosedNow || containedMob) && !pointBlankHostile && !fluidNow && !fallingNow;
+                        let progressTail = '';
+                        let progressFresh = false;
+                        try {
+                            const progressFile = 'bots/_supervisor/progress.txt';
+                            const stat = fs.statSync(progressFile);
+                            progressFresh = now - stat.mtimeMs < 90000;
+                            const len = Math.min(8192, stat.size);
+                            const fd = fs.openSync(progressFile, 'r');
+                            try {
+                                const buf = Buffer.alloc(len);
+                                fs.readSync(fd, buf, 0, len, stat.size - len);
+                                progressTail = buf.toString('utf8');
+                            } finally {
+                                fs.closeSync(fd);
+                            }
+                        } catch (e) {}
+                        killBoxLowFoodHold = progressFresh
+                            && /\[mission\] ★KILL-BOX gated: low-food pocket recovery/.test(progressTail)
+                            && ((bot._currentSkill || '') === 'missionNether' || /==== missionNether START/.test(progressTail))
+                            && bot.food <= 6
+                            && !normalEdible
+                            && (coveredNow || enclosedNow || containedMob)
+                            && !pointBlankHostile
+                            && !fluidNow
+                            && !fallingNow;
+                        if (bot.health >= 14 && bot.food >= 14 && !fluidNow && !fallingNow) {
+                            const tableProgressHold = progressFresh && /TABLE (gate|recovery) for /.test(progressTail);
+                            const progressSaysNoActionable = /TABLE gate for [^\n]*actionable12=0/.test(progressTail)
+                                || /TABLE recovery for [^\n]*daylight safe window/.test(progressTail);
+                            const missionOwnsProgress = /==== prepNether START|\[mission\] not kitted .*prepNether|TABLE (gate|recovery) for /.test(progressTail);
+                            tableRecoveryHold = tableProgressHold
+                                && ((bot._currentSkill || '') === 'missionNether' || missionOwnsProgress)
+                                && (progressSaysNoActionable || closestHostile >= 16);
+                        }
+                    } catch (e) {}
+                    const activeBodyWork = !!(bot.targetDigBlock || bot._mineMotionActiveDig || (bot._bodyDigLockUntil && Date.now() < bot._bodyDigLockUntil));
+                    const activeEscapeWork = /surfaceUp|feedUp/.test(bot._currentSkill || '');
+                    if ((nightBunker || lowFoodShelter || famineHold || noRegenLowHpHold || bodyBudgetContainedHold || tableRecoveryHold || killBoxLowFoodHold) && !activeBodyWork && !activeEscapeWork) {
+                        // Legit sheltering is deliberate immobility, not a stale stack.
+                        // Reset the pin window so dawn/food recovery gets a fresh grace
+                        // period instead of being kicked immediately by old shelter time.
+                        if (killBoxLowFoodHold && now - (bot._lastPinKillBoxLowFoodExemptAt || 0) > 60000) {
+                            bot._lastPinKillBoxLowFoodExemptAt = now;
+                            try {
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [reflex_watchdog] pinned kill-box low-food hold exempt: food=${bot.food} hp=${Math.round(bot.health || 0)} mob=${bot._mobility ? bot._mobility.state : '-'} enclosed=${!!(bot._mobility && bot._mobility.enclosed)} closestHostile=${Number.isFinite(closestHostile) ? closestHostile.toFixed(1) : 'none'} — no forced interrupt\n`);
+                            } catch (e) {}
+                        }
+                        if (bodyBudgetContainedHold && now - (bot._lastPinBodyBudgetExemptAt || 0) > 60000) {
+                            bot._lastPinBodyBudgetExemptAt = now;
+                            try {
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [reflex_watchdog] pinned body-budget contained hold exempt: food=${bot.food} hp=${Math.round(bot.health || 0)} mob=${bot._mobility ? bot._mobility.state : '-'} enclosed=${!!(bot._mobility && bot._mobility.enclosed)} covered=${coveredNow} — no forced interrupt\n`);
+                            } catch (e) {}
+                        }
+                        if (tableRecoveryHold && now - (bot._lastPinTableRecoveryExemptAt || 0) > 60000) {
+                            bot._lastPinTableRecoveryExemptAt = now;
+                            try {
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [reflex_watchdog] pinned table recovery hold exempt: food=${bot.food} hp=${Math.round(bot.health || 0)} mob=${bot._mobility ? bot._mobility.state : '-'} closestHostile=${Number.isFinite(closestHostile) ? closestHostile.toFixed(1) : 'none'} — no forced interrupt\n`);
+                            } catch (e) {}
+                        }
+                        this.pinAnchor = bot.entity.position.clone();
+                        this.pinAt = now;
+                        this.pinKick = 0;
+                    }
+                    if (!nightBunker && !lowFoodShelter && !famineHold && !noRegenLowHpHold && !bodyBudgetContainedHold && !tableRecoveryHold && !killBoxLowFoodHold && !activeBodyWork && !activeEscapeWork) {
                         this.pinKick = now;
                         say(agent, 'Pinned 15min+ — kicking the stack (forced interrupt).');
                         try { bot.interrupt_code = true; } catch (e) {}
@@ -1363,7 +2317,7 @@ const modes_list = [
                         if (idleWedge) {
                             const t = (bot.time && bot.time.timeOfDay) || 0;
                             if (t >= 12000 && t <= 23500) {
-                                for (let dyB = 1; dyB <= 3; dyB++) {
+                                for (let dyB = 1; dyB <= 6; dyB++) {
                                     const bB = bot.blockAt(bot.entity.position.offset(0, dyB, 0));
                                     if (bB && bB.boundingBox === 'block') { idleWedge = false; break; }
                                 }
@@ -1459,11 +2413,14 @@ const modes_list = [
                     else if (this.lastState === 'MAROONED'
                         && ((this.noPathTimes || []).some(t => now - t < 120000)
                             || now - (this.maroonedAt || 0) < 180000)) st = 'MAROONED';
-                    if (st === 'MAROONED' && this.lastState !== 'MAROONED') this.maroonedAt = now;
+                    if (st === 'MAROONED' && this.lastState !== 'MAROONED') {
+                        this.maroonedAt = now;
+                        try { bot._maroonedMarchOrigin = p.clone(); } catch (e) {}
+                    }
                 }
                 if (st !== this.lastState) {
                     this.lastState = st; this.stateSince = now;
-                    if (st !== 'MAROONED') { bot._marchDir = null; bot._marchFails = 0; }   // fresh heading next entrapment
+                    if (st !== 'MAROONED') { bot._marchDir = null; bot._marchFails = 0; bot._maroonedMarchOrigin = null; }   // fresh heading next entrapment
                     try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [mobility] → ${st}${exits.length ? ' exits=' + JSON.stringify(exits) : ''}\n`); } catch (e) {}
                 }
                 // ★ENCLOSED 正交属性 (用户: "全知视角判断自己是否处在封闭地穴(与地面联通
@@ -1496,16 +2453,117 @@ const modes_list = [
                 }
                 bot._mobility = { state: st, since: this.stateSince, exits, enclosed };
             } catch (e) { return; }
+            if (famineBodyFreeze(agent, 'mobility')) return;
             const STONY_MOBILITY = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
             const hasPick = () => bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+            const normalEdibleHeld = () => {
+                try { return bot.inventory.items().some(i => i && i.name && NORMAL_FOOD_RE.test(i.name)); }
+                catch (e) { return false; }
+            };
+            const noRegenSafeAirHold = () => {
+                const nowHold = Date.now();
+                if (!(bot.health < 14 && bot.food < 18) || normalEdibleHeld()) return null;
+                const prepLow = Math.max(0, (bot._prepLowHpNoFoodUntil || 0) - nowHold);
+                const prepSurface = Math.max(0, (bot._prepNoFoodSurfaceBackoffUntil || 0) - nowHold);
+                const isNight = (() => { try { const t = bot.time && bot.time.timeOfDay; return t >= 12000 && t <= 23500; } catch (e) { return false; } })();
+                const skill = bot._currentSkill || '';
+                const survivalSkill = /prepNether|feedUp|consume|auto_eat/i.test(skill);
+                const bodyBudgetHold = bot.health <= 8 && bot.food <= 6;
+                if (!bodyBudgetHold && !prepLow && !prepSurface && !isNight && !survivalSkill) return null;
+                const p = bot.entity.position;
+                const feet = bot.blockAt(p) || { name: 'air' };
+                const head = bot.blockAt(p.offset(0, 1, 0)) || { name: 'air' };
+                if (feet.boundingBox === 'block' || head.boundingBox === 'block') return null;
+                if (/water|lava|fire/.test(feet.name || '') || /water|lava|fire/.test(head.name || '')) return null;
+                if (!bot.entity.onGround && bot.entity.velocity && bot.entity.velocity.y < -0.25) return null;
+                const hostile = Object.values(bot.entities || {}).some(e =>
+                    e && e !== bot.entity && e.position && mc.isHostile(e) &&
+                    e.position.distanceTo(p) < (/creeper/i.test(e.name || '') ? 5.5 : 4.25));
+                if (hostile) return null;
+                return { prepLow, prepSurface, isNight, skill, bodyBudgetHold, pos: p };
+            };
             const heldIsPick = () => !!(bot.heldItem && /_pickaxe$/.test(bot.heldItem.name));
-            const plannedNoPickStone = () => Date.now() < (bot._plannedNoPickStoneUntil || 0);
+            const plannedNoPickStone = () => Date.now() < (bot._mobilityPlannedNoPickStoneUntil || 0);
+            const invCounts = () => {
+                try {
+                    const out = {};
+                    for (const it of bot.inventory.items()) out[it.name] = (out[it.name] || 0) + it.count;
+                    return out;
+                } catch (e) { return {}; }
+            };
+            const reachableCraftingTable = () => {
+                try {
+                    const c = invCounts();
+                    if ((c.crafting_table || 0) > 0) return true;
+                    const near = world.getNearestBlock(bot, 'crafting_table', 4);
+                    return !!(near && bot.entity.position.distanceTo(near.position) <= 4.5);
+                } catch (e) {
+                    return false;
+                }
+            };
+            const hasTableMaterials = (c) => Object.keys(c || {}).some(n => /_planks$/.test(n) && c[n] >= 4);
+            const emergencyPickBlocked = (why, reason, extra = '') => {
+                const now = Date.now();
+                bot._emergencyPickBlockedUntil = now + 10000;
+                if (now - (bot._lastEmergencyPickBlockedLogAt || 0) > 10000) {
+                    bot._lastEmergencyPickBlockedLogAt = now;
+                    try {
+                        fs.appendFileSync('bots/_supervisor/progress.txt',
+                            `[${new Date().toISOString()}] [mobility] emergency pick blocked (${why}): ${reason}${extra ? ' ' + extra : ''}\n`);
+                    } catch (e) {}
+                }
+                return false;
+            };
+            const ensureEmergencyPick = async (why = '') => {
+                if (hasPick()) return true;
+                if (Date.now() < (bot._emergencyPickBlockedUntil || 0)) return false;
+                const c = invCounts();
+                const plankName = Object.keys(c).find(n => /_planks$/.test(n) && c[n] >= 3);
+                let recipe = null;
+                if ((c.cobblestone || 0) >= 3 && (c.stick || 0) >= 2) recipe = 'stone_pickaxe';
+                else if (plankName && (c.stick || 0) >= 2) recipe = 'wooden_pickaxe';
+                if (!recipe) return false;
+                if (!reachableCraftingTable()) {
+                    if (!hasTableMaterials(c)) {
+                        return emergencyPickBlocked(why, `${recipe} needs reachable crafting_table`, `cobble=${c.cobblestone || 0} stick=${c.stick || 0} table=${c.crafting_table || 0}`);
+                    }
+                    try {
+                        const madeTable = await (skills.craftRecipeLocal || skills.craftRecipe)(bot, 'crafting_table', 1);
+                        if (madeTable === false || !reachableCraftingTable()) {
+                            return emergencyPickBlocked(why, `${recipe} cannot place/reach crafting_table`, `planks=${plankName ? c[plankName] : 0}`);
+                        }
+                    } catch (e) {
+                        return emergencyPickBlocked(why, `crafting_table prep failed: ${e && e.message ? e.message : String(e)}`);
+                    }
+                }
+                try {
+                    fs.appendFileSync('bots/_supervisor/progress.txt',
+                        `[${new Date().toISOString()}] [mobility] emergency pick craft (${why}): ${recipe}\n`);
+                } catch (e) {}
+                try {
+                    const craftLocal = skills.craftRecipeLocal || skills.craftRecipe;
+                    const ok = await Promise.race([
+                        craftLocal(bot, recipe, 1),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('emergency-pick-timeout')), 12000)),
+                    ]);
+                    if (ok === false) emergencyPickBlocked(why, `${recipe} craft returned false`);
+                } catch (e) {
+                    try {
+                        fs.appendFileSync('bots/_supervisor/progress.txt',
+                            `[${new Date().toISOString()}] [mobility] emergency pick failed (${why}): ${e && e.message ? e.message : String(e)}\n`);
+                    } catch (_) {}
+                    try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
+                    try { bot.clearControlStates(); } catch (_) {}
+                }
+                return hasPick();
+            };
             const ensurePickForStone = async (block, why = '') => {
                 if (!block || !STONY_MOBILITY.test(block.name || '')) return true;
+                if (!hasPick()) await ensureEmergencyPick(why);
                 if (!hasPick()) return plannedNoPickStone();
                 if (heldIsPick()) return true;
                 const pick = bot.inventory.items().find(it => /_pickaxe$/.test(it.name));
-                try { if (pick) await bot.equip(pick, 'hand'); } catch (e) {}
+                try { if (pick) await skills.equip(bot, pick.name); } catch (e) {}
                 await new Promise(r => setTimeout(r, 80));
                 if (heldIsPick()) return true;
                 try { await bot.tool.equipForBlock(block); } catch (e) {}
@@ -1519,9 +2577,55 @@ const modes_list = [
             };
             const guardedDig = async (block, why = '') => {
                 if (!block) return false;
-                if (!(await ensurePickForStone(block, why))) return false;
-                if (!STONY_MOBILITY.test(block.name || '')) { try { await bot.tool.equipForBlock(block); } catch (e) {} }
-                try { await bot.dig(block); return true; } catch (e) { return false; }
+                const owner = `mobility:${why || 'dig'}`;
+                const acquire = async () => {
+                    const t0 = Date.now();
+                    while (Date.now() - t0 < 900) {
+                        const busy = bot.targetDigBlock || (bot._bodyDigLockUntil && Date.now() < bot._bodyDigLockUntil);
+                        if (!busy || bot._bodyDigLockOwner === owner) {
+                            bot._bodyDigLockOwner = owner;
+                            bot._bodyDigLockUntil = Date.now() + 6000;
+                            return true;
+                        }
+                        await new Promise(r => setTimeout(r, 80));
+                    }
+                    try {
+                        fs.appendFileSync('bots/_supervisor/progress.txt',
+                            `[${new Date().toISOString()}] [mobility] dig slot busy (${why}) target=${block.name}@${block.position.x},${block.position.y},${block.position.z} heldBy=${bot._bodyDigLockOwner || 'targetDigBlock'}\n`);
+                    } catch (e) {}
+                    return false;
+                };
+                if (!(await acquire())) return false;
+                try {
+                    for (let n = 0; n < 2; n++) {
+                        const fresh = bot.blockAt(block.position);
+                        if (!fresh || fresh.boundingBox !== 'block') return true;
+                        if (!(await ensurePickForStone(fresh, why))) return false;
+                        if (!STONY_MOBILITY.test(fresh.name || '')) { try { await bot.tool.equipForBlock(fresh); } catch (e) {} }
+                        try { bot.clearControlStates(); } catch (e) {}
+                        try { await bot.lookAt(fresh.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
+                        try {
+                            await Promise.race([
+                                bot.dig(fresh, true),
+                                new Promise((_, rej) => setTimeout(() => rej(new Error('dig-timeout')), 5000)),
+                            ]);
+                            return true;
+                        } catch (e) {
+                            try { bot.stopDigging(); } catch (_) {}
+                            try {
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [mobility] dig retry ${n} (${why}) ${fresh.name}@${fresh.position.x},${fresh.position.y},${fresh.position.z}: ${e && e.message ? e.message : String(e)}\n`);
+                            } catch (_) {}
+                            await new Promise(r => setTimeout(r, 140));
+                        }
+                    }
+                    return false;
+                } finally {
+                    if (bot._bodyDigLockOwner === owner) {
+                        bot._bodyDigLockOwner = null;
+                        bot._bodyDigLockUntil = 0;
+                    }
+                }
             };
             // ── reactions ──
             if (st === 'ENTOMBED') {
@@ -1529,6 +2633,44 @@ const modes_list = [
                 // gate (entombed = the gate's exception BY DEFINITION). Head toward the
                 // anchor; one 2-cell column per execute burst, state re-evaluated next tick.
                 execute(this, agent, async () => {
+                    const tableHold = tableRecoveryHold(bot);
+                    if (tableHold) {
+                        try {
+                            bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null);
+                            bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop();
+                            bot.clearControlStates();
+                        } catch (e) {}
+                        if (Date.now() - (bot._lastEntombedTableRecoveryGateAt || 0) > 15000) {
+                            bot._lastEntombedTableRecoveryGateAt = Date.now();
+                            const p = bot.entity.position.floored();
+                            try {
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [mobility] ENTOMBED table recovery hold pos=${p.x},${p.y},${p.z} raw16=${tableHold.raw} layered16=${tableHold.layered} nearest=${Number.isFinite(tableHold.nearest) ? tableHold.nearest.toFixed(1) : '-'} day=${!tableHold.isNight} — hold shaft while prepNether owns surface recovery\n`);
+                            } catch (e) {}
+                        }
+                        try { bot._mobility = { ...(bot._mobility || {}), state: 'ENTOMBED', since: this.stateSince }; } catch (e) {}
+                        return;
+                    }
+                    const noRegenHold = noRegenSafeAirHold();
+                    if (noRegenHold) {
+                        try {
+                            if (!/feedUp|surfaceUp|consume|auto_eat/i.test(bot._currentSkill || '')) {
+                                bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null);
+                                bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop();
+                                bot.clearControlStates();
+                            }
+                        } catch (e) {}
+                        if (Date.now() - (bot._lastEntombedNoRegenGateAt || 0) > 15000) {
+                            bot._lastEntombedNoRegenGateAt = Date.now();
+                            try {
+                                const p = noRegenHold.pos.floored();
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [mobility] ENTOMBED no-regen safe-air gate food=${bot.food} hp=${Math.round(bot.health || 0)} prepLow=${Math.ceil(noRegenHold.prepLow / 1000)}s surface=${Math.ceil(noRegenHold.prepSurface / 1000)}s night=${noRegenHold.isNight} pos=${p.x},${p.y},${p.z} skill=${noRegenHold.skill || '-'} — hold air pocket, no blind dig\n`);
+                            } catch (e) {}
+                        }
+                        try { bot._mobility = { ...(bot._mobility || {}), state: 'ENTOMBED', since: this.stateSince }; } catch (e) {}
+                        return;
+                    }
                     say(agent, 'Entombed — digging out!');
                     let bx = 96, bz = -34;
                     try { const bj = JSON.parse(fs.readFileSync('bots/_supervisor/bed.json', 'utf8')); if (typeof bj.x === 'number') { bx = bj.x; bz = bj.z; } } catch (e) {}
@@ -1559,7 +2701,26 @@ const modes_list = [
                 // no self-place race), step in. ~6 cells per burst, state re-evaluated
                 // between bursts; >20 blocks of net displacement re-anchors to FREE.
                 execute(this, agent, async () => {
+                    const noEdible = !bot.inventory.items().some(i => FAMINE_FOOD_RE.test(i.name || ''));
+                    if (bot.food <= 6 && noEdible) {
+                        try { bot.clearControlStates(); } catch (e) {}
+                        try {
+                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                `[${new Date().toISOString()}] [mobility] MAROONED famine gate food=${bot.food} hp=${Math.round(bot.health || 0)} — release to feedUp, no road dig\n`);
+                        } catch (e) {}
+                        this.lastState = 'FREE';
+                        this.stateSince = Date.now();
+                        this.regAnchor = bot.entity.position.clone();
+                        this.regAt = Date.now();
+                        this.maroonedAt = 0;
+                        bot._marchDir = null;
+                        bot._marchFails = 0;
+                        bot._maroonedMarchOrigin = null;
+                        try { bot._mobility = { ...(bot._mobility || {}), state: 'FREE', since: this.stateSince }; } catch (e) {}
+                        return;
+                    }
                     say(agent, 'Marooned — engineering a road out.');
+                    try { if (!bot._maroonedMarchOrigin) bot._maroonedMarchOrigin = bot.entity.position.clone(); } catch (e) {}
                     // ★LOCKED MARCH DIRECTION (用户实拍"左挖一下右挖一下像无头苍蝇": 旧版每
                     // burst 重算方向,而"距锚<25反向"的翻转边界正好骑在 bot 的徘徊半径上 —
                     // 每轮翻一次=方向振荡。修: 方向第一次算好就挂 bot._marchDir 锁死,全程
@@ -1600,12 +2761,15 @@ const modes_list = [
                     }
                     const [sx, sz] = bot._marchDir;
                     const _mStart = bot.entity.position.clone();
+                    const _origin = bot._maroonedMarchOrigin || _mStart;
+                    const _foodTight = bot.food <= 10 && noEdible;
+                    const _maxSeg = _foodTight ? 2 : 6;
                     const FILLR = /^dirt$|cobblestone|cobbled|granite|andesite|diorite|^stone$|tuff|gravel|_planks$|_log$/;
                     const canMarchDig = (b) => b
                         && b.boundingBox === 'block'
                         && !/bedrock|water|lava/.test(b.name)
                         && (hasPick() || !STONY_MOBILITY.test(b.name));
-                    for (let seg = 0; seg < 6; seg++) {
+                    for (let seg = 0; seg < _maxSeg; seg++) {
                         if (bot.interrupt_code || bot.health <= 0) break;
                         const m2 = bot.entity.position.floored();
                         let stoneBlocked = null;
@@ -1618,8 +2782,39 @@ const modes_list = [
                             }
                         }
                         if (stoneBlocked) {
+                            if (!hasPick() && await ensureEmergencyPick('MAROONED-gate')) {
+                                stoneBlocked = null;
+                                continue;
+                            }
                             try { bot.clearControlStates(); } catch (e) {}
                             try { bot._maroonedNoPickBlockedAt = Date.now(); } catch (e) {}
+                            const nearbyLog = (() => {
+                                try {
+                                    const names = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
+                                    for (const n of names) {
+                                        const id = bot.registry && bot.registry.blocksByName[n] ? bot.registry.blocksByName[n].id : null;
+                                        if (id == null) continue;
+                                        const hits = bot.findBlocks({ matching: id, maxDistance: 16, count: 1 }) || [];
+                                        if (hits.length) return { name: n, pos: hits[0] };
+                                    }
+                                } catch (e) {}
+                                return null;
+                            })();
+                            if (!hasPick() && nearbyLog) {
+                                try {
+                                    fs.appendFileSync('bots/_supervisor/progress.txt',
+                                        `[${new Date().toISOString()}] [mobility] MAROONED no-pick stone gate but ${nearbyLog.name} nearby @${nearbyLog.pos.x},${nearbyLog.pos.y},${nearbyLog.pos.z} — handoff to chopWood\n`);
+                                } catch (e) {}
+                                try { bot._maroonedWoodHandoffUntil = Date.now() + 120000; } catch (e) {}
+                                try { bot._mobility = { ...(bot._mobility || {}), state: 'FREE', since: Date.now() }; } catch (e) {}
+                                this.lastState = 'FREE';
+                                this.regAnchor = bot.entity.position.clone();
+                                this.regAt = Date.now();
+                                this.maroonedAt = 0;
+                                bot._marchDir = null;
+                                bot._marchFails = 0;
+                                break;
+                            }
                             try {
                                 fs.appendFileSync('bots/_supervisor/progress.txt',
                                     `[${new Date().toISOString()}] [mobility] MAROONED no-pick stone gate: ${stoneBlocked.name} @${stoneBlocked.position.x},${stoneBlocked.position.y},${stoneBlocked.position.z}\n`);
@@ -1629,29 +2824,69 @@ const modes_list = [
                             await new Promise(r => setTimeout(r, 1200));
                             break;
                         }
-                        // bridge: no floor within 3 below the cell ahead → place a block at
-                        // its foot level (neighbor-cell place, no race; body-clearance check)
-                        let floorOK = false;
-                        for (let dd = 1; dd <= 3; dd++) { const fb = bot.blockAt(m2.offset(sx, -dd, sz)); if (fb && fb.boundingBox === 'block') { floorOK = true; break; } }
+                        // bridge: require a confirmed safe landing before walking. The old
+                        // code checked for floor within 3, attempted a bridge if absent, but
+                        // walked even when placement failed; on cliff-top MAROONED marches
+                        // that became a fatal fall path.
+                        const safeLandingAhead = () => {
+                            for (let dd = 1; dd <= 2; dd++) {
+                                const fb = bot.blockAt(m2.offset(sx, -dd, sz));
+                                if (fb && /water|lava/.test(fb.name || '')) return false;
+                                if (fb && fb.boundingBox === 'block') return true;
+                            }
+                            return false;
+                        };
+                        let floorOK = safeLandingAhead();
                         if (!floorOK) {
                             const fill = bot.inventory.items().find(it => FILLR.test(it.name));
                             const bp = bot.entity.position;
+                            let placedBridge = false;
                             if (fill && Math.hypot(bp.x - (m2.x + sx + 0.5), bp.z - (m2.z + sz + 0.5)) >= 0.85) {
                                 let ref = bot.blockAt(m2.offset(sx, -1, sz)), face = Vec3 ? new Vec3(0, 1, 0) : null;
                                 if (!(ref && ref.boundingBox === 'block')) { ref = bot.blockAt(m2.offset(0, -1, 0)); face = Vec3 ? new Vec3(sx, 0, sz) : null; }
                                 if (ref && ref.boundingBox === 'block' && face) {
                                     try { await bot.equip(fill, 'hand'); } catch (e) {}
-                                    try { await bot.placeBlock(ref, face); } catch (e) {}
+                                    try { await bot.placeBlock(ref, face); placedBridge = true; } catch (e) {}
                                 }
                             }
+                            await new Promise(r => setTimeout(r, 120));
+                            floorOK = placedBridge && safeLandingAhead();
+                        }
+                        if (!floorOK) {
+                            try {
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [mobility] MAROONED ledge veto dir=${sx},${sz} at ${m2.x},${m2.y},${m2.z} — rotate, no blind step\n`);
+                            } catch (e) {}
+                            bot._marchDir = [-sz, sx];
+                            bot._marchFails = 0;
+                            break;
                         }
                         try { await bot.lookAt(m2.offset(sx + 0.5, 1.6, sz + 0.5), true); } catch (e) {}
                         bot.setControlState('forward', true);
-                        await new Promise(r => setTimeout(r, 700));
+                        await new Promise(r => setTimeout(r, 260));
                         try { bot.clearControlStates(); } catch (e) {}
                     }
                     // heading review: rotate 90° only after 2 consecutive dead bursts
-                    if (bot.entity.position.distanceTo(_mStart) < 2) {
+                    const burstMoved = bot.entity.position.distanceTo(_mStart);
+                    const originMoved = bot.entity.position.distanceTo(_origin);
+                    const releaseDist = _foodTight ? 10 : 22;
+                    if (originMoved >= releaseDist) {
+                        try {
+                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                `[${new Date().toISOString()}] [mobility] MAROONED release: moved ${originMoved.toFixed(1)}b from march origin food=${bot.food} maxSeg=${_maxSeg} — re-anchor FREE\n`);
+                        } catch (e) {}
+                        this.lastState = 'FREE';
+                        this.stateSince = Date.now();
+                        this.regAnchor = bot.entity.position.clone();
+                        this.regAt = Date.now();
+                        this.maroonedAt = 0;
+                        bot._marchDir = null;
+                        bot._marchFails = 0;
+                        bot._maroonedMarchOrigin = null;
+                        try { bot._mobility = { ...(bot._mobility || {}), state: 'FREE', since: this.stateSince }; } catch (e) {}
+                        return;
+                    }
+                    if (burstMoved < 2) {
                         bot._marchFails = (bot._marchFails || 0) + 1;
                         if (bot._marchFails >= 2) { bot._marchDir = [-sz, sx]; bot._marchFails = 0; }   // rotate 90°
                     } else bot._marchFails = 0;
@@ -1659,6 +2894,63 @@ const modes_list = [
             } else if (st === 'POCKET' && now - this.stateSince > 30000) {
                 // stuck in a roofless pit >60s: dig a step-out toward the anchor side
                 execute(this, agent, async () => {
+                    const noRegenHold = noRegenSafeAirHold();
+                    if (noRegenHold) {
+                        try {
+                            if (!/feedUp|surfaceUp|consume|auto_eat/i.test(bot._currentSkill || '')) {
+                                bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null);
+                                bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop();
+                                bot.clearControlStates();
+                            }
+                        } catch (e) {}
+                        if (Date.now() - (bot._lastPocketNoRegenGateAt || 0) > 15000) {
+                            bot._lastPocketNoRegenGateAt = Date.now();
+                            try {
+                                const p = noRegenHold.pos.floored();
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [mobility] POCKET no-regen gate food=${bot.food} hp=${Math.round(bot.health || 0)} bodyBudget=${!!noRegenHold.bodyBudgetHold} prepLow=${Math.ceil(noRegenHold.prepLow / 1000)}s surface=${Math.ceil(noRegenHold.prepSurface / 1000)}s night=${noRegenHold.isNight} pos=${p.x},${p.y},${p.z} skill=${bot._currentSkill || '-'} — hold, no step-out dig\n`);
+                            } catch (e) {}
+                        }
+                        this.stateSince = Date.now();
+                        try { bot._mobility = { ...(bot._mobility || {}), state: 'POCKET', since: this.stateSince }; } catch (e) {}
+                        return;
+                    }
+                    const noEdible = !bot.inventory.items().some(i => FAMINE_FOOD_RE.test(i.name || ''));
+                    const isNight = (() => { try { const t = bot.time && bot.time.timeOfDay; return t >= 13000 && t <= 23000; } catch (e) { return false; } })();
+                    const actionableHostileNear = (() => {
+                        try {
+                            const me = bot.entity.position;
+                            const hostile = /zombie|skeleton|creeper|spider|witch|drowned|husk|stray|pillager|cave_spider/i;
+                            return Object.values(bot.entities || {}).some(e => {
+                                if (!(e && e.position && e.name && hostile.test(e.name))) return false;
+                                const d = e.position.distanceTo(me);
+                                const dy = Math.abs(e.position.y - me.y);
+                                return d <= 12 && dy <= 4;
+                            });
+                        } catch (e) {
+                            return false;
+                        }
+                    })();
+                    if (!isNight && bot.food <= 6 && noEdible && !actionableHostileNear) {
+                        try { bot.clearControlStates(); } catch (e) {}
+                        try {
+                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                `[${new Date().toISOString()}] [mobility] POCKET low-food daylight gate food=${bot.food} hp=${Math.round(bot.health || 0)} — hold pocket, no step-out dig without food signal\n`);
+                        } catch (e) {}
+                        this.stateSince = Date.now();
+                        try { bot._mobility = { ...(bot._mobility || {}), state: 'POCKET', since: this.stateSince }; } catch (e) {}
+                        return;
+                    }
+                    if (isNight && bot.food <= 6 && noEdible) {
+                        try { bot.clearControlStates(); } catch (e) {}
+                        try {
+                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                `[${new Date().toISOString()}] [mobility] POCKET famine-night gate food=${bot.food} hp=${Math.round(bot.health || 0)} — hold bunker, no step-out dig\n`);
+                        } catch (e) {}
+                        this.stateSince = Date.now();
+                        try { bot._mobility = { ...(bot._mobility || {}), state: 'POCKET', since: this.stateSince }; } catch (e) {}
+                        return;
+                    }
                     say(agent, 'Pocketed — carving a step out.');
                     const m2 = bot.entity.position.floored();
                     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -1689,8 +2981,10 @@ const modes_list = [
         always: true,
         update: async function (agent) {
             const bot = agent.bot;
-            if (!bot || bot._mineMotionAuditPatched) return;
+            const AUDIT_VERSION = 3;
+            if (!bot || (bot._mineMotionAuditPatched && (bot._mineMotionAuditVersion || 1) >= AUDIT_VERSION)) return;
             bot._mineMotionAuditPatched = true;
+            bot._mineMotionAuditVersion = AUDIT_VERSION;
             bot._mineMotionSeq = bot._mineMotionSeq || 0;
             const file = 'bots/_supervisor/mine_motion.jsonl';
             const posObj = (p) => p ? ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }) : null;
@@ -1720,6 +3014,17 @@ const modes_list = [
                 }
                 return cells;
             };
+            const supportObj = () => {
+                try {
+                    const m = bot.entity && bot.entity.position && bot.entity.position.floored();
+                    if (!m) return { stable: false, block: null };
+                    const b = bot.blockAt(m.offset(0, -1, 0));
+                    const bad = b && /water|lava|fire|cactus|magma/.test(b.name || '');
+                    return { stable: !!(b && b.boundingBox === 'block' && !bad), block: blockObj(b) };
+                } catch (e) {
+                    return { stable: false, block: null, error: e.message };
+                }
+            };
             const write = (event, data = {}) => {
                 try {
                     fs.appendFileSync(file, JSON.stringify({
@@ -1742,6 +3047,28 @@ const modes_list = [
             const stony = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
             const heldIsPick = () => !!(bot.heldItem && /_pickaxe$/.test(bot.heldItem.name));
             const pickItem = () => bot.inventory.items().find(it => /_pickaxe$/.test(it.name));
+            const delay = (ms) => new Promise(r => setTimeout(r, ms));
+            const isStonyBlock = (block) => !!(block && stony.test(block.name || ''));
+            const itemName = (item) => typeof item === 'string' ? item : (item && item.name);
+            const isWaterBlock = (block) => !!(block && /^(flowing_)?water$/.test(block.name || ''));
+            const inWaterNow = () => isWaterBlock(bot.blockAt(bot.entity.position))
+                || isWaterBlock(bot.blockAt(bot.entity.position.offset(0, 1, 0)));
+            const activeStonyDig = () => {
+                const d = bot._mineMotionActiveDig;
+                if (!d || !d.stony) return null;
+                if (Date.now() - d.startedAt > 15000) { bot._mineMotionActiveDig = null; return null; }
+                return d;
+            };
+            const waitForStonyDig = async (event, seq, data = {}) => {
+                let d = activeStonyDig();
+                if (!d) return true;
+                write(event + '.deferred', { seq, activeDig: d, ...data });
+                const until = Date.now() + 9000;
+                while ((d = activeStonyDig()) && Date.now() < until) await delay(50);
+                if (!activeStonyDig()) return true;
+                write(event + '.blocked', { seq, activeDig: activeStonyDig(), ...data });
+                return false;
+            };
             const ensurePickForDig = async (block, seq) => {
                 if (!block || !stony.test(block.name || '')) return true;
                 if (!pickItem()) return Date.now() < (bot._plannedNoPickStoneUntil || 0);
@@ -1759,12 +3086,17 @@ const modes_list = [
             bot.dig = async (block, ...args) => {
                 const seq = ++bot._mineMotionSeq;
                 const startedAt = Date.now();
-                write('dig.begin', { seq, target: blockObj(block), args, env: envSnap() });
+                const support = supportObj();
+                write('dig.begin', { seq, target: blockObj(block), args, support, env: envSnap() });
+                if (!support.stable) {
+                    write('dig.unsupported_before', { seq, target: blockObj(block), args, support, env: envSnap() });
+                }
                 if (!(await ensurePickForDig(block, seq))) {
                     const err = new Error(`stone dig blocked without held pick: ${block ? block.name : 'unknown'}`);
                     write('dig.end', { seq, ok: false, ms: Date.now() - startedAt, target: blockObj(block), error: err.message, env: envSnap() });
                     throw err;
                 }
+                bot._mineMotionActiveDig = { seq, stony: isStonyBlock(block), target: blockObj(block), startedAt };
                 try {
                     const result = await originalDig(block, ...args);
                     write('dig.end', { seq, ok: true, ms: Date.now() - startedAt, target: blockObj(block), env: envSnap() });
@@ -1772,7 +3104,21 @@ const modes_list = [
                 } catch (e) {
                     write('dig.end', { seq, ok: false, ms: Date.now() - startedAt, target: blockObj(block), error: e.message, env: envSnap() });
                     throw e;
+                } finally {
+                    if (bot._mineMotionActiveDig && bot._mineMotionActiveDig.seq === seq) bot._mineMotionActiveDig = null;
                 }
+            };
+            const originalEquip = bot.equip.bind(bot);
+            bot.equip = async (item, destination, ...args) => {
+                const name = itemName(item);
+                const hand = !destination || destination === 'hand';
+                if (hand && name && !/_pickaxe$/.test(name) && activeStonyDig()) {
+                    const seq = ++bot._mineMotionSeq;
+                    if (!(await waitForStonyDig('equip', seq, { item: name, destination }))) {
+                        throw new Error(`equip ${name} blocked during stony dig`);
+                    }
+                }
+                return await originalEquip(item, destination, ...args);
             };
             const originalPlaceBlock = bot.placeBlock.bind(bot);
             bot.placeBlock = async (referenceBlock, faceVector, ...args) => {
@@ -1789,6 +3135,23 @@ const modes_list = [
                     args,
                     env: envSnap(),
                 });
+                if (inWaterNow()) {
+                    const err = new Error('place blocked while swimming');
+                    write('place.blocked', {
+                        seq,
+                        reason: 'in-water',
+                        placeAt: posObj(placeAt),
+                        placeBlock: blockObj(placeAt ? bot.blockAt(placeAt) : null),
+                        env: envSnap(),
+                    });
+                    write('place.end', { seq, ok: false, ms: Date.now() - startedAt, placeAt: posObj(placeAt), error: err.message, env: envSnap() });
+                    throw err;
+                }
+                if (!(await waitForStonyDig('place', seq, { placeAt: posObj(placeAt) }))) {
+                    const err = new Error('place blocked during stony dig');
+                    write('place.end', { seq, ok: false, ms: Date.now() - startedAt, placeAt: posObj(placeAt), error: err.message, env: envSnap() });
+                    throw err;
+                }
                 try {
                     const result = await originalPlaceBlock(referenceBlock, faceVector, ...args);
                     write('place.end', { seq, ok: true, ms: Date.now() - startedAt, placeAt: posObj(placeAt), env: envSnap() });
@@ -1897,6 +3260,7 @@ const modes_list = [
             // 永远慢半拍,且查时常没料。人类每挥几下瞄一眼耐久条 → 放①层,5s一查,磨损>80%
             // 且无健康同类备件 → 用随身料(圆石+棍+手持工作台)当场补造,2秒换不死一把镐)。
             const bot = agent.bot;
+            if (bot.health <= 10 && bot.food < 18) return;
             if (Date.now() - this.last_check < 5000) return;
             this.last_check = Date.now();
             const held = bot.heldItem;

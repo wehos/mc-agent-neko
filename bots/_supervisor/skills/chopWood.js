@@ -43,8 +43,8 @@ const _blk = (k) => {
     if (e) _unreach.delete(k);
     return false;
 };
-export default async function chopWood(bot, ctx, count = 8) {
-    const { skills, world, log, Vec3 } = ctx;
+export default async function chopWood(bot, ctx, count = 8, opts = {}) {
+    const { skills, world, log, Vec3, mc } = ctx;
     // ★跨热加载持久化 (实锤: customSkill每次调用重新import本模块,模块级Map全清零 —
     // 拉黑/树柱计罪从来没跨调用存活过,同一棵树每次调用都重新当"初犯"): 状态挂bot对象。
     const _unreach = (bot._chopUnreach = bot._chopUnreach || new Map());
@@ -69,6 +69,29 @@ export default async function chopWood(bot, ctx, count = 8) {
     const LOGS = ['jungle_log', 'oak_log', 'birch_log', 'spruce_log',
                   'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
     const total = () => LOGS.reduce((s, t) => s + (world.getInventoryCounts(bot)[t] || 0), 0);
+    const _opts = opts && typeof opts === 'object' ? opts : {};
+    const _planksEq = () => {
+        const c = world.getInventoryCounts(bot);
+        return Object.keys(c).filter(k => /_planks$/.test(k)).reduce((s, k) => s + (c[k] || 0), 0)
+            + LOGS.reduce((s, k) => s + (c[k] || 0), 0) * 4;
+    };
+    const _foodHeld = () => bot.inventory.items().some(i => /beef|porkchop|chicken|mutton|rabbit|cod|salmon|bread|apple|berries|potato|carrot|melon|cookie|pumpkin_pie|beetroot|mushroom_stew|rabbit_stew|suspicious_stew/i.test(i.name || '') && i.name !== 'rotten_flesh');
+    const _hostileNear = (r = 16) => {
+        try {
+            return Object.values(bot.entities).some(e => e && e.position && mc && mc.isHostile && mc.isHostile(e) && e.position.distanceTo(bot.entity.position) < r);
+        } catch (e) { return true; }
+    };
+    const _criticalForageAllowed = () => {
+        const t = bot.time.timeOfDay;
+        return !!_opts.allowCriticalForage
+            && (bot.health > 4 || (_opts.criticalForageLocalOnly && bot.health >= 4))
+            && bot.food <= 2
+            && !_foodHeld()
+            && !(t >= 13000 && t <= 23000)
+            && !_hostileNear(16);
+    };
+    const _needsFoodYield = () => bot.food <= 8 && !_foodHeld() && !_criticalForageAllowed();
+    const _lowHpHostileYield = () => bot.health <= 14 && _hostileNear(12) && !_criticalForageAllowed();
     const _motion = (event, data = {}) => {
         try {
             const p = bot.entity.position;
@@ -102,6 +125,17 @@ export default async function chopWood(bot, ctx, count = 8) {
             }) + '\n');
         } catch (e) {}
     };
+    const _placeConfirmed = async (blockName, target, label) => {
+        _motion('chopWood.place.begin', { label, blockName, target: { x: target.x, y: target.y, z: target.z } });
+        const ok = await skills.placeBlock(bot, blockName, target.x, target.y, target.z, 'bottom', true).catch(e => {
+            _dbg(`${label} place ERR(${target.x},${target.y},${target.z}): ${String(e.message).slice(0, 70)}`);
+            return false;
+        });
+        const placed = bot.blockAt(target);
+        const confirmed = !!ok && placed && placed.boundingBox === 'block';
+        _motion('chopWood.place.end', { label, ok: !!ok, confirmed, placed: placed ? placed.name : null, target: { x: target.x, y: target.y, z: target.z } });
+        return confirmed;
+    };
     const STONY_BLOCK = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
     const hasPick = () => bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
     const heldIsPick = () => !!(bot.heldItem && /_pickaxe$/.test(bot.heldItem.name));
@@ -122,9 +156,54 @@ export default async function chopWood(bot, ctx, count = 8) {
     };
     const guardedDig = async (block, why = '') => {
         if (!block) return false;
-        if (!(await ensurePickForStone(block, why))) return false;
-        if (!STONY_BLOCK.test(block.name || '')) { try { await bot.tool.equipForBlock(block); } catch (e) {} }
-        try { await bot.dig(block); return true; } catch (e) { return false; }
+        const owner = `chopWood:${why || 'dig'}`;
+        const acquire = async () => {
+            const t0 = Date.now();
+            while (Date.now() - t0 < 900) {
+                const busy = bot.targetDigBlock || (bot._bodyDigLockUntil && Date.now() < bot._bodyDigLockUntil);
+                if (!busy || bot._bodyDigLockOwner === owner) {
+                    bot._bodyDigLockOwner = owner;
+                    bot._bodyDigLockUntil = Date.now() + 6000;
+                    return true;
+                }
+                await new Promise(r => setTimeout(r, 80));
+            }
+            _motion('dig.slot.busy', { owner, target: `${block.name}@${block.position.x},${block.position.y},${block.position.z}`, heldBy: bot._bodyDigLockOwner || 'targetDigBlock' });
+            return false;
+        };
+        if (!(await acquire())) return false;
+        try {
+            for (let n = 0; n < 2; n++) {
+                const fresh = bot.blockAt(block.position);
+                if (!fresh || fresh.boundingBox !== 'block') return true;
+                if (!(await ensurePickForStone(fresh, why))) return false;
+                if (!STONY_BLOCK.test(fresh.name || '')) { try { await bot.tool.equipForBlock(fresh); } catch (e) {} }
+                try { bot.clearControlStates(); } catch (e) {}
+                try { await bot.lookAt(fresh.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
+                try {
+                    await Promise.race([
+                        bot.dig(fresh, true),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('dig-timeout')), 5000)),
+                    ]);
+                    return true;
+                } catch (e) {
+                    try { bot.stopDigging(); } catch (_) {}
+                    _motion('dig.retry', {
+                        owner,
+                        attempt: n,
+                        target: `${fresh.name}@${fresh.position.x},${fresh.position.y},${fresh.position.z}`,
+                        error: e && e.message ? e.message : String(e),
+                    });
+                    await new Promise(r => setTimeout(r, 140));
+                }
+            }
+            return false;
+        } finally {
+            if (bot._bodyDigLockOwner === owner) {
+                bot._bodyDigLockOwner = null;
+                bot._bodyDigLockUntil = 0;
+            }
+        }
     };
 
     // Equip an axe if we have one (faster, still works barehanded).
@@ -135,6 +214,10 @@ export default async function chopWood(bot, ctx, count = 8) {
         if (world.getInventoryCounts(bot)[axe]) { await skills.equip(bot, axe).catch(() => {}); _axed = true; break; }
     }
     if (!_axed) { try { if (bot.heldItem && /_sword$/.test(bot.heldItem.name)) await bot.unequip('hand'); } catch (e) {} }
+    // chopWood owns movement while it is carving/approaching a tree. item_collecting
+    // can otherwise yank the body sideways mid-stair, turning a deliberate climb into
+    // a downhill detour; dropped logs are swept explicitly by this skill instead.
+    try { for (const m of ['item_collecting', 'idle_staring', 'unstuck']) if (bot.modes && bot.modes.exists(m)) bot.modes.setOn(m, false); } catch (e) {}
 
     // Climb out of a SEALED pit / underground box by DIGGING a vertical shaft up.
     // goToSurface only PATHFINDS (walks) — it can't break through a dirt ceiling, so
@@ -168,47 +251,251 @@ export default async function chopWood(bot, ctx, count = 8) {
     };
     const _ascendStep = async (dx, dz, label = 'ascend-step', attempts = 3) => {
         const stepCenter = (cell) => cell.offset(dx + 0.5, 1.15, dz + 0.5);
-        for (let attempt = 0; attempt < attempts; attempt++) {
-            try { bot.clearControlStates(); } catch (e) {}
-            await _centerOnBlock();
-            const start = bot.entity.position.clone();
-            const cell = start.floored();
-            const targetCell = cell.offset(dx, 0, dz);
-            _motion('ascend.begin', { label, attempt, dir: [dx, dz], targetCell: { x: targetCell.x, y: targetCell.y, z: targetCell.z } });
-            try { await bot.lookAt(stepCenter(cell), true); } catch (e) {}
-            let maxY = start.y;
-            bot.setControlState('sprint', false);
-            bot.setControlState('forward', true);
-            bot.setControlState('jump', true);
-            const t0 = Date.now();
-            while (Date.now() - t0 < 760) {
-                if (bot.entity.position.y > maxY) maxY = bot.entity.position.y;
-                if (Math.floor(bot.entity.position.y) > cell.y) break;
-                await new Promise(r => setTimeout(r, 40));
+        const openForBody = (b) => !b || b.boundingBox !== 'block' || UP_OPEN.has(b.name || '');
+        const describeBlock = (b) => b ? `${b.name}@${b.position.x},${b.position.y},${b.position.z}` : 'unknown';
+        const mustHaveSolidStep = /stair/.test(label);
+        const moveOwner = `chopWood:${label}:ascend`;
+        const acquireMove = () => {
+            const busy = bot._bodyMoveLockUntil && Date.now() < bot._bodyMoveLockUntil && bot._bodyMoveLockOwner !== moveOwner;
+            if (busy) {
+                _motion('ascend.move_lock.busy', { label, dir: [dx, dz], heldBy: bot._bodyMoveLockOwner || 'unknown' });
+                return false;
             }
-            bot.setControlState('jump', false);
-            await new Promise(r => setTimeout(r, 180));
-            try { bot.clearControlStates(); } catch (e) {}
-            const end = bot.entity.position.clone();
-            const rose = Math.floor(end.y) > cell.y || end.y > start.y + 0.72;
-            const targetDist = Math.hypot(end.x - (targetCell.x + 0.5), end.z - (targetCell.z + 0.5));
-            _motion('ascend.end', {
-                label, attempt, dir: [dx, dz], ok: rose,
-                start: { x: Number(start.x.toFixed(3)), y: Number(start.y.toFixed(3)), z: Number(start.z.toFixed(3)) },
-                end: { x: Number(end.x.toFixed(3)), y: Number(end.y.toFixed(3)), z: Number(end.z.toFixed(3)) },
-                maxRise: Number((maxY - start.y).toFixed(3)),
-                targetDist: Number(targetDist.toFixed(3)),
+            bot._bodyMoveLockOwner = moveOwner;
+            bot._bodyMoveLockUntil = Date.now() + 3400;
+            return true;
+        };
+        const releaseMove = () => {
+            if (bot._bodyMoveLockOwner === moveOwner) {
+                bot._bodyMoveLockOwner = null;
+                bot._bodyMoveLockUntil = 0;
+            }
+        };
+        const runupPrep = async (cell, attempt) => {
+            const p0 = bot.entity.position.clone();
+            const target = stepCenter(cell);
+            _motion('ascend.runup.begin', {
+                label, attempt, dir: [dx, dz],
+                targetCell: { x: cell.x + dx, y: cell.y, z: cell.z + dz },
             });
-            if (rose) return true;
-            // Common failure: the hitbox rides the stair edge but never pops up. Back out,
-            // recenter, then retry with a fresh run-up instead of scraping the same edge.
-            try { await bot.lookAt(cell.offset(0.5 - dx * 0.6, 1.2, 0.5 - dz * 0.6), true); } catch (e) {}
-            bot.setControlState('back', true);
-            bot.setControlState('sneak', true);
-            await new Promise(r => setTimeout(r, 260));
+            try {
+                try { await bot.lookAt(target, true); } catch (e) {}
+                bot.setControlState('sprint', false);
+                bot.setControlState('jump', false);
+                bot.setControlState('sneak', true);
+                bot.setControlState('back', true);
+                const t0 = Date.now();
+                while (Date.now() - t0 < 320) {
+                    const p = bot.entity.position;
+                    if (Math.floor(p.x) !== cell.x || Math.floor(p.z) !== cell.z || Math.floor(p.y) !== cell.y) break;
+                    await new Promise(r => setTimeout(r, 40));
+                }
+            } finally {
+                try { bot.clearControlStates(); } catch (e) {}
+            }
+            await new Promise(r => setTimeout(r, 90));
+            const p1 = bot.entity.position.clone();
+            _motion('ascend.runup.end', {
+                label, attempt, dir: [dx, dz],
+                start: { x: Number(p0.x.toFixed(3)), y: Number(p0.y.toFixed(3)), z: Number(p0.z.toFixed(3)) },
+                end: { x: Number(p1.x.toFixed(3)), y: Number(p1.y.toFixed(3)), z: Number(p1.z.toFixed(3)) },
+            });
+        };
+        const recoverRunupCenter = async (attempt, reason) => {
+            const p0 = bot.entity.position.clone();
+            _motion('ascend.recenter.begin', {
+                label, attempt, dir: [dx, dz], reason,
+                start: { x: Number(p0.x.toFixed(3)), y: Number(p0.y.toFixed(3)), z: Number(p0.z.toFixed(3)) },
+            });
             try { bot.clearControlStates(); } catch (e) {}
-            await _centerOnBlock();
+            try { await _centerOnBlock(); } catch (e) {}
+            const p1 = bot.entity.position.clone();
+            const c = p1.floored();
+            const ok = Math.hypot(p1.x - (c.x + 0.5), p1.z - (c.z + 0.5)) < 0.22;
+            _motion('ascend.recenter.end', {
+                label, attempt, dir: [dx, dz], reason, ok,
+                end: { x: Number(p1.x.toFixed(3)), y: Number(p1.y.toFixed(3)), z: Number(p1.z.toFixed(3)) },
+            });
+            return ok;
+        };
+        const blocked = (cell) => {
+            const targetCell = cell.offset(dx, 0, dz);
+            const step = bot.blockAt(targetCell);
+            const targetFoot = bot.blockAt(targetCell.offset(0, 1, 0));
+            const targetHead = bot.blockAt(targetCell.offset(0, 2, 0));
+            const ownOverhead = bot.blockAt(cell.offset(0, 2, 0));
+            if (!step || step.boundingBox !== 'block') {
+                return mustHaveSolidStep ? { reason: 'no-step', step, targetFoot, targetHead, ownOverhead, targetCell } : null;
+            }
+            if (!openForBody(targetFoot)) return { reason: 'target-foot-blocked', step, targetFoot, targetHead, ownOverhead, targetCell };
+            if (!openForBody(targetHead)) return { reason: 'target-head-blocked', step, targetFoot, targetHead, ownOverhead, targetCell };
+            if (!openForBody(ownOverhead)) return { reason: 'own-overhead-blocked', step, targetFoot, targetHead, ownOverhead, targetCell };
+            return null;
+        };
+        const failKey = () => {
+            const p = bot.entity.position.floored();
+            return `${label}:${dx},${dz}:${p.x},${p.y},${p.z}`;
+        };
+        const rememberFailure = () => {
+            const key = failKey();
+            const last = bot._chopAscendFail && bot._chopAscendFail.key === key ? bot._chopAscendFail.n : 0;
+            bot._chopAscendFail = { key, n: last + 1, ts: Date.now() };
+            return bot._chopAscendFail.n;
+        };
+        const clearFailure = () => { try { bot._chopAscendFail = null; } catch (e) {} };
+        const clearAscendBlocker = async (pre, stage) => {
+            if (!pre || _needsFoodYield()) return false;
+            const blocker = pre.reason === 'target-foot-blocked' ? pre.targetFoot
+                : (pre.reason === 'target-head-blocked' ? pre.targetHead
+                : (pre.reason === 'own-overhead-blocked' ? pre.ownOverhead : null));
+            if (!blocker || blocker.boundingBox !== 'block' || /water|lava/.test(blocker.name || '')) return false;
+            _motion('ascend.clear_blocker.begin', {
+                label, stage, dir: [dx, dz], reason: pre.reason,
+                blocker: describeBlock(blocker),
+                targetCell: { x: pre.targetCell.x, y: pre.targetCell.y, z: pre.targetCell.z },
+            });
+            const ok = await guardedDig(blocker, `${label}-${pre.reason}`);
+            _motion('ascend.clear_blocker.end', {
+                label, stage, dir: [dx, dz], reason: pre.reason, ok,
+                blocker: describeBlock(blocker),
+            });
+            if (ok) await new Promise(r => setTimeout(r, 80));
+            return ok;
+        };
+        {
+            const cell = bot.entity.position.floored();
+            const pre = blocked(cell);
+            if (pre) {
+                if (await clearAscendBlocker(pre, 'pre')) {
+                    _dbg(`${label} cleared blocker dir=${dx},${dz} reason=${pre.reason}`);
+                } else {
+                const n = rememberFailure();
+                _motion('ascend.blocked', {
+                    label, dir: [dx, dz], reason: pre.reason, repeats: n,
+                    targetCell: { x: pre.targetCell.x, y: pre.targetCell.y, z: pre.targetCell.z },
+                    step: describeBlock(pre.step),
+                    targetFoot: describeBlock(pre.targetFoot),
+                    targetHead: describeBlock(pre.targetHead),
+                    ownOverhead: describeBlock(pre.ownOverhead),
+                });
+                _dbg(`${label} blocked dir=${dx},${dz} reason=${pre.reason} repeat=${n}`);
+                return false;
+                }
+            }
         }
+        for (let attempt = 0; attempt < attempts; attempt++) {
+            if (!acquireMove()) return false;
+            try {
+                try { bot.clearControlStates(); } catch (e) {}
+                if (attempt === 0) await _centerOnBlock();
+                else await runupPrep(bot.entity.position.floored(), attempt);
+                const start = bot.entity.position.clone();
+                const cell = start.floored();
+                const targetCell = cell.offset(dx, 0, dz);
+                const pre = blocked(cell);
+                if (pre) {
+                    if (await clearAscendBlocker(pre, `attempt-${attempt}`)) {
+                        _dbg(`${label} cleared blocker dir=${dx},${dz} reason=${pre.reason} attempt=${attempt}`);
+                    } else {
+                    const n = rememberFailure();
+                    _motion('ascend.blocked', {
+                        label, attempt, dir: [dx, dz], reason: pre.reason, repeats: n,
+                        targetCell: { x: pre.targetCell.x, y: pre.targetCell.y, z: pre.targetCell.z },
+                        step: describeBlock(pre.step),
+                        targetFoot: describeBlock(pre.targetFoot),
+                        targetHead: describeBlock(pre.targetHead),
+                        ownOverhead: describeBlock(pre.ownOverhead),
+                    });
+                    _dbg(`${label} blocked dir=${dx},${dz} reason=${pre.reason} repeat=${n}`);
+                    return false;
+                    }
+                }
+                _motion('ascend.begin', { label, attempt, dir: [dx, dz], targetCell: { x: targetCell.x, y: targetCell.y, z: targetCell.z } });
+                try { await bot.lookAt(stepCenter(cell), true); } catch (e) {}
+                let maxY = start.y;
+                bot.setControlState('sprint', false);
+                bot.setControlState('forward', true);
+                bot.setControlState('jump', true);
+                const t0 = Date.now();
+                const pressMs = attempt === 0 ? 760 : 980;
+                while (Date.now() - t0 < pressMs) {
+                    if (bot.entity.position.y > maxY) maxY = bot.entity.position.y;
+                    const p = bot.entity.position;
+                    const near = Math.hypot(p.x - (targetCell.x + 0.5), p.z - (targetCell.z + 0.5)) < 1.0;
+                    if ((Math.floor(p.y) > cell.y || p.y > start.y + 0.72) && near) break;
+                    await new Promise(r => setTimeout(r, 40));
+                }
+                bot.setControlState('jump', false);
+                await new Promise(r => setTimeout(r, attempt === 0 ? 180 : 240));
+                try { bot.clearControlStates(); } catch (e) {}
+                const end = bot.entity.position.clone();
+                const rose = Math.floor(end.y) > cell.y || end.y > start.y + 0.72;
+                const targetDist = Math.hypot(end.x - (targetCell.x + 0.5), end.z - (targetCell.z + 0.5));
+                if (rose && targetDist > (attempt === 0 ? 0.85 : 1.05)) {
+                    try { await bot.lookAt(stepCenter(cell), true); } catch (e) {}
+                    bot.setControlState('sprint', false);
+                    bot.setControlState('forward', true);
+                    await new Promise(r => setTimeout(r, attempt === 0 ? 360 : 560));
+                    try { bot.clearControlStates(); } catch (e) {}
+                }
+                const end2 = bot.entity.position.clone();
+                const targetDist2 = Math.hypot(end2.x - (targetCell.x + 0.5), end2.z - (targetCell.z + 0.5));
+                const settledInTarget = Math.floor(end2.x) === targetCell.x && Math.floor(end2.z) === targetCell.z;
+                const climbOk = rose && settledInTarget && targetDist2 <= 0.88;
+                const slippedDown = Math.floor(end2.y) < cell.y || end2.y < start.y - 0.35;
+                _motion('ascend.end', {
+                    label, attempt, dir: [dx, dz], ok: climbOk,
+                    start: { x: Number(start.x.toFixed(3)), y: Number(start.y.toFixed(3)), z: Number(start.z.toFixed(3)) },
+                    end: { x: Number(end2.x.toFixed(3)), y: Number(end2.y.toFixed(3)), z: Number(end2.z.toFixed(3)) },
+                    maxRise: Number((maxY - start.y).toFixed(3)),
+                    targetDist: Number(targetDist2.toFixed(3)),
+                    settledInTarget,
+                });
+                if (climbOk) { clearFailure(); return true; }
+                if (slippedDown) {
+                    const repeats = rememberFailure();
+                    _motion('ascend.edge_slip', {
+                        label, attempt, dir: [dx, dz], repeats,
+                        start: { x: Number(start.x.toFixed(3)), y: Number(start.y.toFixed(3)), z: Number(start.z.toFixed(3)) },
+                        end: { x: Number(end2.x.toFixed(3)), y: Number(end2.y.toFixed(3)), z: Number(end2.z.toFixed(3)) },
+                        targetDist: Number(targetDist2.toFixed(3)),
+                    });
+                    _dbg(`${label} edge-slip dir=${dx},${dz} y=${start.y.toFixed(2)}→${end2.y.toFixed(2)} repeat=${repeats} — rotate/abort this heading`);
+                    try { await bot.lookAt(stepCenter(cell), true); } catch (e) {}
+                    bot.setControlState('sneak', true);
+                    bot.setControlState('back', true);
+                    await new Promise(r => setTimeout(r, 220));
+                    try { bot.clearControlStates(); } catch (e) {}
+                    return false;
+                }
+                if (rose && !climbOk) {
+                    const repeats = rememberFailure();
+                    _motion('ascend.edge_miss', {
+                        label, attempt, dir: [dx, dz], repeats, settledInTarget,
+                        start: { x: Number(start.x.toFixed(3)), y: Number(start.y.toFixed(3)), z: Number(start.z.toFixed(3)) },
+                        end: { x: Number(end2.x.toFixed(3)), y: Number(end2.y.toFixed(3)), z: Number(end2.z.toFixed(3)) },
+                        targetCell: { x: targetCell.x, y: targetCell.y, z: targetCell.z },
+                        targetDist: Number(targetDist2.toFixed(3)),
+                    });
+                    _dbg(`${label} edge-miss dir=${dx},${dz} dist=${targetDist2.toFixed(2)} settled=${settledInTarget} repeat=${repeats} — back out and retry/rotate`);
+                }
+                // Common failure: the hitbox rides the stair edge but never pops up. Back
+                // away from the target (look at the step, press BACK), then mechanically
+                // recenter on the current cell before the next run-up. A short timed back
+                // press alone can leave the bot at x/z ~= .70, so the next attempt starts
+                // from the same edge and repeats the miss.
+                try { await bot.lookAt(stepCenter(cell), true); } catch (e) {}
+                bot.setControlState('back', true);
+                bot.setControlState('sneak', true);
+                await new Promise(r => setTimeout(r, 300));
+                try { bot.clearControlStates(); } catch (e) {}
+                await recoverRunupCenter(attempt, rose ? 'edge-miss' : 'no-rise');
+            } finally {
+                releaseMove();
+            }
+        }
+        const repeats = rememberFailure();
+        _motion('ascend.failed', { label, dir: [dx, dz], repeats });
         _dbg(`${label} failed dir=${dx},${dz} y=${Math.floor(bot.entity.position.y)}`);
         return false;
     };
@@ -244,6 +531,14 @@ export default async function chopWood(bot, ctx, count = 8) {
             } catch (e) { sky = false; }
             return py >= 60 && sky && !(bot._mobility && bot._mobility.enclosed);
         };
+        {
+            const _noPick = !bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+            const _blockedUntil = bot._chopNoPickSurfaceBlockedUntil || 0;
+            if (_noPick && !_trueSurfaceNow() && Date.now() < _blockedUntil) {
+                _dbg(`digToSurface NOPICK boxed cooldown (${Math.ceil((_blockedUntil - Date.now()) / 1000)}s) — yield to mobility/surfaceUp`);
+                return false;
+            }
+        }
         // ★深层断镐陷阱 (#23实锤: 铁镐断在y-60+木头耗尽=做不了新镐,徒手啃深板岩7s+/块,
         // 120格=数小时): NOPICK且在深层时,先让寻路器试走天然洞穴通道上去(零挖掘),
         // 比硬啃快几个数量级。120s timebox,爬到y>40就算成功;失败再回硬啃路线。
@@ -281,6 +576,25 @@ export default async function chopWood(bot, ctx, count = 8) {
                 if (_trueSurfaceNow()) { _dbg(`digToSurface DONE via surfaceUp y=${Math.floor(bot.entity.position.y)}`); return true; }
             }
         }
+        {
+            const _noPick = !bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+            if (_noPick && !_trueSurfaceNow() && Date.now() > (bot._chopNoPickSurfaceUpCooldownUntil || 0)) {
+                const _targetY = Math.max(82, Math.floor(bot.entity.position.y) + 14);
+                bot._chopNoPickSurfaceUpCooldownUntil = Date.now() + 60000;
+                _dbg(`digToSurface NOPICK boxed → one surfaceUp/headroom attempt target=${_targetY}`);
+                try {
+                    await Promise.race([
+                        skills.customSkill ? skills.customSkill(bot, 'surfaceUp', _targetY) : skills.goToSurface(bot),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('surfaceUp boxed timeout')), 45000)),
+                    ]);
+                } catch (e) {
+                    try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
+                    try { bot.clearControlStates(); } catch (_) {}
+                    _dbg(`surfaceUp boxed result err=${e.message}`);
+                }
+                if (_trueSurfaceNow()) { _dbg(`digToSurface DONE via boxed surfaceUp y=${Math.floor(bot.entity.position.y)}`); return true; }
+            }
+        }
         let _lastY = -999, _stuck = 0;
         for (let i = 0; i < 100; i++) {
             // ★IMMORTAL-LOOP FIX: blanket-clearing interrupt_code every iteration made this
@@ -293,7 +607,21 @@ export default async function chopWood(bot, ctx, count = 8) {
             if (bot._chopGen !== _gen) { _dbg(`digToSurface YIELD (superseded gen${_gen}→${bot._chopGen}) at i=${i}`); return false; }
             // ★危殆让位 (hp0.6事件: 爬升穿过雷区芯被怪缠上,hp掉到0.6还在一步步往上凿 —
             // 残血时唯一正业是活下来): hp≤6 → 停止爬升,把控制还给编排层的生存路径。
-            if (bot.health <= 4) { _dbg(`digToSurface BAIL (critical hp ${bot.health.toFixed(1)}) at i=${i} — yield to survival`); return false; }   // 6→4 同 chopWood bail线(死水局解锁)
+            if (bot.health <= 4 && !_criticalForageAllowed()) { _dbg(`digToSurface BAIL (critical hp ${bot.health.toFixed(1)}) at i=${i} — yield to survival`); return false; }   // 6→4 同 chopWood bail线(死水局解锁)
+            if (_lowHpHostileYield()) {
+                _motion('chopWood.low_hp_hostile_yield', { where: 'digToSurface', iter: i, y: Math.floor(bot.entity.position.y), hp: Math.round(bot.health || 0), food: bot.food });
+                _dbg(`digToSurface BAIL (hp=${bot.health.toFixed(1)} + hostile near) at i=${i} — yield to survival`);
+                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+                try { bot.clearControlStates(); } catch (e) {}
+                return false;
+            }
+            if (_needsFoodYield()) {
+                _motion('chopWood.low_food_yield', { where: 'digToSurface', iter: i, y: Math.floor(bot.entity.position.y) });
+                _dbg(`digToSurface BAIL (food=${bot.food}, no edible) at i=${i} — yield to feedUp`);
+                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+                try { bot.clearControlStates(); } catch (e) {}
+                return false;
+            }
             try { bot.interrupt_code = false; } catch (e) {}
             const py = Math.floor(bot.entity.position.y);
             if (py > _lastY) { _stuck = 0; _lastY = py; } else _stuck++;
@@ -392,11 +720,8 @@ export default async function chopWood(bot, ctx, count = 8) {
                         if (!openD(bot.blockAt(scD.offset(dx, 2, dz)))) continue;
                         const bp = bot.entity.position;
                         if (Math.hypot(bp.x - (scD.x + dx + 0.5), bp.z - (scD.z + dz + 0.5)) < 0.85) continue;
-                        let refD = bot.blockAt(scD.offset(dx, -1, dz)), faceD = Vec3 ? new Vec3(0, 1, 0) : null;
-                        if (!(refD && refD.boundingBox === 'block')) { refD = bot.blockAt(scD.offset(0, -1, 0)); faceD = Vec3 ? new Vec3(dx, 0, dz) : null; }
-                        if (!(refD && refD.boundingBox === 'block') || !faceD) continue;
-                        try { await bot.equip(_fill, 'hand'); } catch (e) {}
-                        try { await bot.placeBlock(refD, faceD); } catch (e) { continue; }
+                        const targetD = scD.offset(dx, 0, dz);
+                        if (!(await _placeConfirmed(_fill.name, targetD, `surf-stair-place ${dx},${dz}`))) continue;
                         await _ascendStep(dx, dz, 'surf-stair-place');
                         if (bot.entity.position.floored().y > scD.y) _dbg(`surf stair-step +1 → y=${Math.floor(bot.entity.position.y)}`);
                         break;
@@ -416,18 +741,22 @@ export default async function chopWood(bot, ctx, count = 8) {
                 // ("blockUpdate did not fire"). The cell is vacated only while y > start+1.01
                 // (~200ms around apex): poll and place inside that window. This is why manual
                 // MLG pillaring "worked" only via the staircase fallback all along.
-                bot.setControlState('jump', true);
-                {
-                    const _tJ = Date.now();
-                    let _pl = false;
-                    while (Date.now() - _tJ < 700 && !_pl) {
-                        if (bot.entity.position.y > before + 1.01) {
-                            try { if (_ref && Vec3) { await bot.placeBlock(_ref, new Vec3(0, 1, 0)); _pl = true; } } catch (e) {}
+                try {
+                    if (skills.placeBlockUnderFeet) await skills.placeBlockUnderFeet(bot, _fill.name, { retries: 1, settleMs: 150 });
+                    else {
+                        bot.setControlState('jump', true);
+                        const _tJ = Date.now();
+                        let _pl = false;
+                        while (Date.now() - _tJ < 700 && !_pl) {
+                            if (bot.entity.position.y > before + 1.01) {
+                                try { if (_ref && Vec3) { await bot.placeBlock(_ref, new Vec3(0, 1, 0)); _pl = true; } } catch (e) {}
+                            }
+                            if (!_pl) await new Promise(r => setTimeout(r, 30));
                         }
-                        if (!_pl) await new Promise(r => setTimeout(r, 30));
                     }
+                } finally {
+                    bot.setControlState('jump', false);
                 }
-                bot.setControlState('jump', false);
                 await new Promise(r => setTimeout(r, 150));
                 // ANTI-SUFFOCATION: if a solid block ended up at head level (entombed), dig free at once.
                 try {
@@ -450,7 +779,7 @@ export default async function chopWood(bot, ctx, count = 8) {
                 let rose = false;
                 // two passes normally; low-resource no-pick famine must not relax into
                 // punching stone, because that burns minutes and drops nothing.
-                const _allowRelaxedStone = _pickIn() || (bot.health > 8 && bot.food > 8);
+                const _allowRelaxedStone = _pickIn() || plannedNoPickStone();
                 for (const relax of (_allowRelaxedStone ? [false, true] : [false])) {
                     for (const [dx, dz] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
                         const m = bot.entity.position.floored();
@@ -458,16 +787,40 @@ export default async function chopWood(bot, ctx, count = 8) {
                         if (!under || under.boundingBox !== 'block') continue;   // need a stair to climb onto
                         const cells = [m.offset(dx, 1, dz), m.offset(dx, 2, dz), m.offset(0, 2, 0)];
                         if (!relax && cells.some(c => { const b = bot.blockAt(c); return b && !UP_OPEN.has(b.name) && !_digOK(b); })) continue;
+                        let clear = true;
                         for (const c of cells) {
                             const b = bot.blockAt(c);
-                            if (b && !UP_OPEN.has(b.name) && !NO_DIG_UP.has(b.name) && (relax || _digOK(b))) await guardedDig(b, 'raw-stair');
+                            if (b && !UP_OPEN.has(b.name) && !NO_DIG_UP.has(b.name)) {
+                                if (!(relax || _digOK(b))) { clear = false; break; }
+                                if (!(await guardedDig(b, 'raw-stair'))) { clear = false; break; }
+                                await new Promise(r => setTimeout(r, 80));
+                                const after = bot.blockAt(c);
+                                if (after && !UP_OPEN.has(after.name)) { clear = false; break; }
+                            }
+                        }
+                        if (!clear) {
+                            _motion('raw-stair.blocked', { dir: [dx, dz], relax, y: Math.floor(bot.entity.position.y) });
+                            continue;
                         }
                         await _ascendStep(dx, dz, 'raw-stair');
                         if (Math.floor(bot.entity.position.y) > before) { rose = true; break; }
                     }
                     if (rose) break;
                 }
-                if (!rose) { bot.setControlState('jump', true); await new Promise(r => setTimeout(r, 300)); bot.setControlState('jump', false); }
+                if (!rose) {
+                    _dbg(`raw-stair no viable climb from y=${before} pick=${_pickIn()} food=${bot.food} hp=${bot.health.toFixed(1)} — yield`);
+                    if (!_pickIn()) {
+                        bot._chopNoPickSurfaceBlockedUntil = Date.now() + 30000;
+                        _motion('chopWood.no_pick_surface_blocked', {
+                            y: before,
+                            food: bot.food,
+                            hp: Math.round(bot.health || 0),
+                            mobility: bot._mobility ? bot._mobility.state : null,
+                            enclosed: !!(bot._mobility && bot._mobility.enclosed),
+                        });
+                    }
+                    return false;
+                }
             }
         }
         _dbg(`digToSurface END y=${Math.floor(bot.entity.position.y)}`);
@@ -506,7 +859,163 @@ export default async function chopWood(bot, ctx, count = 8) {
             return true;
         } catch (e) { return false; }
     };
-    const _highOpenSurface = () => Math.floor(bot.entity.position.y) >= 70 && _skyAboveHere();
+    const _highOpenSurface = () => {
+        try {
+            const y = Math.floor(bot.entity.position.y);
+            if (y < 70) return false;
+            if (bot._mobility && bot._mobility.enclosed) return false;
+            if (_skyAboveHere()) return true;
+            // Leaf canopies and steep hills often make the strict sky probe false even
+            // though the bot is already on open overworld terrain. In that case a hard
+            // leash raw-walks it back through cliffs/shafts and recreates the stair-edge
+            // stall. FREE + healthy + high means "local tree search", not mine escape.
+            if (bot._mobility && bot._mobility.state === 'FREE' && bot.food >= 8 && bot.health >= 10) return true;
+        } catch (e) {}
+        return false;
+    };
+    const _maroonedLocalHarvest = async (iter) => {
+        const freshHandoff = Date.now() < (bot._maroonedWoodHandoffUntil || 0);
+        const marooned = !!(bot._mobility && bot._mobility.state === 'MAROONED');
+        if (!freshHandoff && !marooned) return false;
+        if (bot.health <= 6 || bot.food <= 4 || _hostileNear(12)) {
+            _dbg(`MAROONED local harvest skip hp=${bot.health.toFixed(1)} food=${bot.food} hostile=${_hostileNear(12)}`);
+            return false;
+        }
+        try {
+            const t = bot.time.timeOfDay;
+            if (t >= 13000 && t <= 23000 && bot.entity.position.y >= 50 && !(bot._mobility && bot._mobility.enclosed)) {
+                _dbg(`MAROONED local harvest skip night exposed`);
+                return false;
+            }
+        } catch (e) {}
+        const eye = () => bot.entity.position.offset(0, 1.6, 0);
+        const keyOf = (p) => `${p.x},${p.y},${p.z}`;
+        const logCandidates = () => {
+            const out = [];
+            for (const n of LOGS) {
+                try {
+                    const id = bot.registry && bot.registry.blocksByName[n] ? bot.registry.blocksByName[n].id : null;
+                    if (id == null) continue;
+                    for (const p of (bot.findBlocks({ matching: id, maxDistance: 7, count: 16 }) || [])) {
+                        const b = bot.blockAt(p);
+                        if (!b || !/_log$|_wood$/.test(b.name || '')) continue;
+                        const d = eye().distanceTo(b.position.offset(0.5, 0.5, 0.5));
+                        if (d > 5.1 || Math.abs(b.position.y - bot.entity.position.y) > 5) continue;
+                        out.push({ b, d, key: keyOf(b.position) });
+                    }
+                } catch (e) {}
+            }
+            return out.sort((a, b) => a.d - b.d);
+        };
+        let cand = logCandidates()[0];
+        let leafDug = 0;
+        if (!cand) {
+            try {
+                const leafIds = Object.values(bot.registry.blocksByName)
+                    .filter(b => /_leaves$/.test(b.name)).map(b => b.id);
+                const leaves = bot.findBlocks({ matching: leafIds, maxDistance: 4, count: 10 }) || [];
+                for (const p of leaves) {
+                    if (leafDug >= 4) break;
+                    const b = bot.blockAt(p);
+                    if (!b || !/_leaves$/.test(b.name || '')) continue;
+                    if (eye().distanceTo(b.position.offset(0.5, 0.5, 0.5)) > 4.8) continue;
+                    _motion('chopWood.marooned_local.leaf.begin', {
+                        iter, block: `${b.name}@${b.position.x},${b.position.y},${b.position.z}`,
+                    });
+                    if (await guardedDig(b, 'marooned-local-leaf')) leafDug++;
+                    await new Promise(r => setTimeout(r, 90));
+                }
+            } catch (e) {}
+            cand = logCandidates()[0];
+        }
+        if (!cand) {
+            _dbg(`chopWood BAIL (MAROONED) at iter${iter} — no in-reach local log (leafDug=${leafDug})`);
+            return false;
+        }
+        try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+        try { bot.clearControlStates(); } catch (e) {}
+        const before = total();
+        const fillerForCatch = () => bot.inventory.items().find(it => /^(dirt|grass_block|cobblestone|cobbled_deepslate|granite|andesite|diorite|tuff|gravel)$/.test(it.name || ''));
+        const makeCatchLedge = async (lb) => {
+            if (!lb || !lb.position || !fillerForCatch()) return false;
+            const below = lb.position.offset(0, -1, 0);
+            const bBelow = bot.blockAt(below);
+            if (bBelow && bBelow.boundingBox === 'block') return true;
+            const candidates = [
+                lb.position.offset(0, -1, 0),
+                lb.position.offset(1, -1, 0),
+                lb.position.offset(-1, -1, 0),
+                lb.position.offset(0, -1, 1),
+                lb.position.offset(0, -1, -1),
+            ];
+            for (const target of candidates) {
+                const cur = bot.blockAt(target);
+                if (cur && cur.boundingBox === 'block') return true;
+                const fill = fillerForCatch();
+                if (!fill) return false;
+                try {
+                    if (target.distanceTo(bot.entity.position) > 5.2) continue;
+                    if (await _placeConfirmed(fill.name, target, 'marooned-catch-ledge')) return true;
+                } catch (e) {}
+            }
+            return false;
+        };
+        _motion('chopWood.marooned_local.begin', {
+            iter,
+            state: bot._mobility ? bot._mobility.state : null,
+            freshHandoff,
+            target: `${cand.b.name}@${cand.b.position.x},${cand.b.position.y},${cand.b.position.z}`,
+            dist: Number(cand.d.toFixed(2)),
+            ignoredBlacklist: _blk(cand.key),
+        });
+        let dug = 0;
+        try {
+            const bp = cand.b.position;
+            let lowDy = 0;
+            while (lowDy > -4) {
+                const b2 = bot.blockAt(bp.offset(0, lowDy - 1, 0));
+                if (b2 && /_log$|_wood$/.test(b2.name || '')) lowDy--;
+                else break;
+            }
+            for (let dy = lowDy; dy <= 8; dy++) {
+                if (bot.interrupt_code || bot.death_abort || bot._chopGen !== _gen) break;
+                const lb = bot.blockAt(bp.offset(0, dy, 0));
+                if (!lb || !/_log$|_wood$/.test(lb.name || '')) { if (dy > 0) break; else continue; }
+                const reach = eye().distanceTo(lb.position.offset(0.5, 0.5, 0.5));
+                if (reach > 5.1) break;
+                _motion('chopWood.marooned_local.log.begin', {
+                    iter, block: `${lb.name}@${lb.position.x},${lb.position.y},${lb.position.z}`,
+                    reach: Number(reach.toFixed(2)),
+                });
+                await makeCatchLedge(lb);
+                if (await guardedDig(lb, 'marooned-local-log')) {
+                    dug++;
+                    const k = keyOf(lb.position);
+                    _unreach.delete(k);
+                    _colBlock.delete(_colKey(k));
+                } else break;
+                await new Promise(r => setTimeout(r, 120));
+            }
+            await _sweepDrops(8, 6);
+            await new Promise(r => setTimeout(r, 300));
+            await _sweepDrops(5, 3);
+        } catch (e) { _dbg(`MAROONED local harvest fail: ${e.message}`); }
+        _motion('chopWood.marooned_local.end', {
+            iter, dug, before, after: total(), leafDug,
+            state: bot._mobility ? bot._mobility.state : null,
+        });
+        if (total() > before) {
+            _dbg(`MAROONED local canopy harvest: dug ${dug} logs leaf=${leafDug} total ${before}→${total()}`);
+            bot._maroonedWoodHandoffUntil = Date.now() + 45000;
+            return true;
+        }
+        if (dug > 0) {
+            _dbg(`MAROONED local canopy NO-PICKUP: dug ${dug} logs but total ${before}→${total()} — drops likely fell off ledge; treating as failure`);
+            return false;
+        }
+        _dbg(`chopWood BAIL (MAROONED) at iter${iter} — local log reachable but no dig progress`);
+        return false;
+    };
     const target = total() + count;
     let stale = 0, surfaced = 0;
     let _stairDir = null;   // LOCKED dig-out direction (set on first pinned stall, reused all call)
@@ -523,17 +1032,44 @@ export default async function chopWood(bot, ctx, count = 8) {
         // replacement instance (same class as the digToSurface dual-loop wedge)
         if (bot.death_abort || bot.health <= 0) { _dbg(`chopWood ABORT (death) at iter${i}`); return total(); }
         if (bot._chopGen !== _gen) { _dbg(`chopWood YIELD (superseded gen${_gen}→${bot._chopGen}) at iter${i}`); return total(); }
+        if (!_opts.needLogs && !_opts.allowCriticalForage && _planksEq() >= 8) {
+            _motion('chopWood.wood_eq_satisfied', { where: 'mainLoop', iter: i, logs: total(), planksEq: _planksEq(), target });
+            _dbg(`chopWood BAIL (woodEq=${_planksEq()} already enough, logs=${total()}/${target}) — no optional tree route`);
+            return total();
+        }
+        if (Date.now() < (bot._maroonedWoodHandoffUntil || 0)) {
+            if (await _maroonedLocalHarvest(i)) { stale = 0; continue; }
+        }
         // ★MAROONED 让位 (打转终极一环,act_trace实拍: mobility行军把bot从x112修路推进到
         // x123,20秒后vitals又回x112 — chopWood的LEASH远征/unstick/moveAway与行军拔河。
         // missionNether的STAND-DOWN只在它的iter开头查,而chopWood一进来就是分钟级控制流,
         // 检查形同虚设): 被困态=行军独占身体,砍树循环整体让位,状态机宣布FREE再回来。
-        if (bot._mobility && bot._mobility.state === 'MAROONED') { _dbg(`chopWood BAIL (MAROONED) at iter${i} — march owns movement`); return total(); }
+        if (bot._mobility && bot._mobility.state === 'MAROONED') {
+            if (await _maroonedLocalHarvest(i)) { stale = 0; continue; }
+            _dbg(`chopWood BAIL (MAROONED) at iter${i} — march owns movement`);
+            return total();
+        }
         // ★危殆让位 (hp0.6事件: bot 半血都不到还在雷区里推进爬升找树,overseer 的 evac 警报
         // 发了2分钟没有消费点 — 人类残血绝不继续作业): hp≤6 → 立即归还控制,编排层
         // (prepNether/missionNether) 持有生存路径(蹲坑/进食/evac/advisory消费)。
         // bail线 6→4 (hp6/food0 死水局: 保命线锁死回血路径——hp6 不作业就永远 hp6,
         // 每夜赌命。木头→工具→武器→猎食 才是回血链,hp5-6 的低险作业收益>风险)
-        if (bot.health <= 4) { _dbg(`chopWood BAIL (critical hp ${bot.health.toFixed(1)}) at iter${i} — yield to survival`); return total(); }
+        if (bot.health <= 4 && !_criticalForageAllowed()) { _dbg(`chopWood BAIL (critical hp ${bot.health.toFixed(1)}) at iter${i} — yield to survival`); return total(); }
+        if (bot.health <= 4) { _dbg(`chopWood CRITICAL-FORAGE allowed hp=${bot.health.toFixed(1)} food=${bot.food} hostiles=0 daylight — controlled forage instead of starvation deadlock`); }
+        if (_lowHpHostileYield()) {
+            _motion('chopWood.low_hp_hostile_yield', { where: 'mainLoop', iter: i, logs: total(), target, hp: Math.round(bot.health || 0), food: bot.food });
+            _dbg(`chopWood BAIL (hp=${bot.health.toFixed(1)} + hostile near) at iter${i} — yield to survival`);
+            try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+            try { bot.clearControlStates(); } catch (e) {}
+            return total();
+        }
+        if (_needsFoodYield()) {
+            _motion('chopWood.low_food_yield', { where: 'mainLoop', iter: i, logs: total(), target });
+            _dbg(`chopWood LOW-FOOD BAIL food=${bot.food}, no edible at iter${i} — feedUp owns the next move`);
+            try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+            try { bot.clearControlStates(); } catch (e) {}
+            return total();
+        }
         // ★夜不猎树 (219: 白天开始的砍树跑过黄昏继续夜猎,黄昏漫游路上被蜘蛛逮住 — chopWood
         // 自己没有夜晚意识,外层夜门只拦"新发起"的砍树): exposed surface + night → bail,
         // the orchestrator's hold owns the night; the hunt resumes at dawn.
@@ -560,8 +1096,12 @@ export default async function chopWood(bot, ctx, count = 8) {
             if (ndD >= 3) {
                 cxD /= ndD; czD /= ndD;
                 const dD = Math.hypot(meD.x - cxD, meD.z - czD) || 1;
-                _dbg(`★DEATH-ZONE (${ndD}死/16格内) — 背质心撤24格再找树`);
-                try { await skills.goToPosition(bot, Math.round(meD.x + (meD.x - cxD) / dD * 24), null, Math.round(meD.z + (meD.z - czD) / dD * 24), 3); } catch (e) {}
+                if (_opts.criticalForageLocalOnly) {
+                    _dbg(`★DEATH-ZONE (${ndD}死/16格内) — critical local forage: no relocation, only reachable drops/leaves`);
+                } else {
+                    _dbg(`★DEATH-ZONE (${ndD}死/16格内) — 背质心撤24格再找树`);
+                    try { await skills.goToPosition(bot, Math.round(meD.x + (meD.x - cxD) / dD * 24), null, Math.round(meD.z + (meD.z - czD) / dD * 24), 3); } catch (e) {}
+                }
             }
         } catch (e) {}
         try {
@@ -571,9 +1111,12 @@ export default async function chopWood(bot, ctx, count = 8) {
             // extension below, or the hard pull cancels the wider roam immediately)
             const _pullR = (bot._chopUnreach && bot._chopUnreach.size >= 8) ? 160 : 80;
             if (distHome > _pullR && !_pulledHome) {
-                if (_highOpenSurface()) {
+                if (_criticalForageAllowed()) {
                     _pulledHome = true;
-                    _dbg(`chopWood LEASH SKIP: high open surface y=${Math.floor(bot.entity.position.y)} dist=${Math.round(distHome)} — don't raw-walk back into mine/shaft`);
+                    _dbg(`chopWood LEASH SKIP: critical forage y=${Math.floor(bot.entity.position.y)} dist=${Math.round(distHome)} — food rescue must not raw-walk/coffin back to anchor`);
+                } else if (_highOpenSurface()) {
+                    _pulledHome = true;
+                    _dbg(`chopWood LEASH SKIP: high/free surface y=${Math.floor(bot.entity.position.y)} dist=${Math.round(distHome)} — don't raw-walk back into mine/shaft`);
                 } else {
                 // ★一次性硬回拉 (v2的40格软拉被各种中断打成了越拉越远115→168,20min零木头):
                 // 圈外直接全程走回锚点附近,90s timebox,本次调用只拉一次 — 拉完树自然可见。
@@ -664,11 +1207,8 @@ export default async function chopWood(bot, ctx, count = 8) {
                                                 const bp = bot.entity.position;
                                                 if (Math.hypot(bp.x - (sc0.x + dx + 0.5), bp.z - (sc0.z + dz + 0.5)) < 0.85) continue;
                                             }
-                                            let refS = bot.blockAt(sc0.offset(dx, -1, dz)), faceS = Vec3 ? new Vec3(0, 1, 0) : null;
-                                            if (!(refS && refS.boundingBox === 'block')) { refS = bot.blockAt(sc0.offset(0, -1, 0)); faceS = Vec3 ? new Vec3(dx, 0, dz) : null; }
-                                            if (!(refS && refS.boundingBox === 'block') || !faceS) continue;
-                                            try { await bot.equip(fillS, 'hand'); } catch (e) {}
-                                            try { await bot.placeBlock(refS, faceS); } catch (e) { _dbg(`LEASH stair-place ERR(${dx},${dz}): ${String(e.message).slice(0, 50)}`); continue; }
+                                            const targetS = sc0.offset(dx, 0, dz);
+                                            if (!(await _placeConfirmed(fillS.name, targetS, `leash-stair-place ${dx},${dz}`))) continue;
                                             await _ascendStep(dx, dz, 'leash-stair-place');
                                             const nowF = bot.entity.position.floored();
                                             _dbg(`LEASH stair-step (${dx},${dz}): y ${sc0.y}→${nowF.y}`);
@@ -740,23 +1280,28 @@ export default async function chopWood(bot, ctx, count = 8) {
                                         // fixed 380ms wait checked AFTER the apex, when the body had sunk
                                         // back into the cell. The cell is only fully vacated while
                                         // y > start+1.01 — a ~200ms window. Poll for it and place THEN.
-                                        bot.setControlState('jump', true);
                                         let placedL = false, hi = yb, perr = '';
                                         const tJ = Date.now();
                                         const standCell = bot.entity.position.floored();
-                                        while (Date.now() - tJ < 700 && !placedL) {
-                                            const cp = bot.entity.position, cy = cp.y;
-                                            if (cy > hi) hi = cy;
-                                            // ★HITBOX-CENTERED check (the FINAL piece: apex cleared +1.17
-                                            // yet the server still refused — at x=40.7 the 0.6-wide hitbox
-                                            // straddles cells 40 AND 41, so the target cell was never fully
-                                            // vacated. Only place when we're within 0.2 of the cell center
-                                            // at the moment of placement.)
-                                            const ctr = Math.abs(cp.x - (standCell.x + 0.5)) < 0.2 && Math.abs(cp.z - (standCell.z + 0.5)) < 0.2;
-                                            if (cy > yb + 1.01 && ctr) {
-                                                try { if (refL && Vec3) { await bot.placeBlock(refL, new Vec3(0, 1, 0)); placedL = true; } } catch (e) { perr = e.message; }
+                                        if (skills.placeBlockUnderFeet) {
+                                            placedL = await skills.placeBlockUnderFeet(bot, fillL.name, { retries: 1, settleMs: 160 }).catch(e => { perr = e.message; return false; });
+                                            hi = Math.max(hi, bot.entity.position.y);
+                                        } else {
+                                            bot.setControlState('jump', true);
+                                            while (Date.now() - tJ < 700 && !placedL) {
+                                                const cp = bot.entity.position, cy = cp.y;
+                                                if (cy > hi) hi = cy;
+                                                // ★HITBOX-CENTERED check (the FINAL piece: apex cleared +1.17
+                                                // yet the server still refused — at x=40.7 the 0.6-wide hitbox
+                                                // straddles cells 40 AND 41, so the target cell was never fully
+                                                // vacated. Only place when we're within 0.2 of the cell center
+                                                // at the moment of placement.)
+                                                const ctr = Math.abs(cp.x - (standCell.x + 0.5)) < 0.2 && Math.abs(cp.z - (standCell.z + 0.5)) < 0.2;
+                                                if (cy > yb + 1.01 && ctr) {
+                                                    try { if (refL && Vec3) { await bot.placeBlock(refL, new Vec3(0, 1, 0)); placedL = true; } } catch (e) { perr = e.message; }
+                                                }
+                                                if (!placedL) await new Promise(r => setTimeout(r, 30));
                                             }
-                                            if (!placedL) await new Promise(r => setTimeout(r, 30));
                                         }
                                         bot.setControlState('jump', false);
                                         await new Promise(r => setTimeout(r, 200));
@@ -785,6 +1330,23 @@ export default async function chopWood(bot, ctx, count = 8) {
         // widens the visible ring to 160; first successful chop shrinks it back (the
         // blacklist empties as TTLs expire after we leave the area).
         const _leashR = _unreach.size >= 8 ? 160 : 80;
+        let riskySkipped = 0;
+        const riskyTree = (p, d) => {
+            if (_criticalForageAllowed()) return '';
+            const dy = p.y - bot.entity.position.y;
+            if (d > 4.8 && dy > 5) return 'high-tree';
+            if (d > 4.8) {
+                for (let ox = -2; ox <= 2; ox++) {
+                    for (let oz = -2; oz <= 2; oz++) {
+                        for (let oy = -2; oy <= 1; oy++) {
+                            const b = bot.blockAt(new Vec3(Math.floor(p.x) + ox, Math.floor(p.y) + oy, Math.floor(p.z) + oz));
+                            if (b && /water|lava/.test(b.name || '')) return 'water-edge';
+                        }
+                    }
+                }
+            }
+            return '';
+        };
         for (const t of LOGS) {
             const id = bot.registry && bot.registry.blocksByName[t] ? bot.registry.blocksByName[t].id : null;
             let cands = [];
@@ -795,10 +1357,26 @@ export default async function chopWood(bot, ctx, count = 8) {
                 if (_blk(key)) continue;                       // skip blacklisted unreachable tree
                 if (Math.hypot(p.x - _ax, p.z - _az) > _leashR) continue;   // 缰绳源头过滤(树荒时放宽)
                 const d = bot.entity.position.distanceTo(p);
+                if (_opts.criticalForageLocalOnly && (d > 10.5 || (p.y - bot.entity.position.y) > 5)) continue;
+                const risk = riskyTree(p, d);
+                if (risk) { riskySkipped++; continue; }
                 if (d < ndist) { ndist = d; nearest = { b: bot.blockAt(p), t, key }; }
             }
         }
-        _dbg(`iter${i} y=${Math.floor(bot.entity.position.y)} nearest=${nearest ? nearest.t + '@' + ndist.toFixed(1) + 'b' : 'NONE'} total=${total()} stale=${stale} surfaced=${surfaced} blk=${_unreach.size}`);
+        _dbg(`iter${i} y=${Math.floor(bot.entity.position.y)} nearest=${nearest ? nearest.t + '@' + ndist.toFixed(1) + 'b' : 'NONE'} total=${total()} stale=${stale} surfaced=${surfaced} blk=${_unreach.size} riskySkip=${riskySkipped}`);
+        if (_opts.criticalForageLocalOnly && !nearest) {
+            _motion('chopWood.critical_local_no_tree', {
+                iter: i,
+                y: Math.floor(bot.entity.position.y),
+                hp: Math.round(bot.health || 0),
+                food: bot.food,
+                total: total(),
+            });
+            _dbg(`critical local forage: no reachable local tree; yield without surfacing/roam`);
+            try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
+            try { bot.clearControlStates(); } catch (_) {}
+            return total();
+        }
         // ★UNDERGROUND + no REACHABLE tree → SURFACE FIRST (fixes the y28 deadlock). The 40-block
         // scan picks up trees on the SURFACE (e.g. oak_log@38b while at y28), so `nearest` is
         // non-null and the OLD `if(!nearest)` surface-check never fired — the bot just kept failing
@@ -815,13 +1393,43 @@ export default async function chopWood(bot, ctx, count = 8) {
             }
         } catch (e) { _skyAboveNow = false; }
         const _enclosedNow = !!(bot._mobility && bot._mobility.enclosed);
-        const _notSurface = _yNow < 58 || _enclosedNow || !_skyAboveNow;
-        if (_notSurface && surfaced < 4 && (!nearest || ndist > 12 || stale >= 2)) {
-            _dbg(`not-surface y=${_yNow} enclosed=${_enclosedNow} sky=${_skyAboveNow} tree=${nearest ? ndist.toFixed(1) + 'b' : 'none'} unreachable → surfacing (try ${surfaced + 1})`);
-            log(bot, `Not on true surface (y=${_yNow}, enclosed=${_enclosedNow}, sky=${_skyAboveNow}), no reachable tree — digging up to the surface.`);
+        const _highSurfaceLike = _highOpenSurface();
+        const _notSurface = !_highSurfaceLike && (_yNow < 58 || _enclosedNow || !_skyAboveNow);
+        const _nearHighTree = nearest && nearest.b && nearest.b.position
+            && ndist <= 12 && (nearest.b.position.y - bot.entity.position.y) >= 4;
+        if (!_opts.criticalForageLocalOnly && _nearHighTree && surfaced < 4) {
+            const ty = Math.max(Math.floor(bot.entity.position.y) + 4, Math.floor(nearest.b.position.y) - 1);
+            _dbg(`near-high-tree y=${_yNow} enclosed=${_enclosedNow} sky=${_skyAboveNow} highSurface=${_highSurfaceLike} tree=${nearest.t}@+${Math.round(nearest.b.position.y - bot.entity.position.y)}y/${ndist.toFixed(1)}b — surface/climb before collectBlock (try ${surfaced + 1})`);
+            surfaced++;
+            try {
+                await Promise.race([
+                    skills.customSkill(bot, 'surfaceUp', ty),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('near-high-tree surfaceUp timeout')), 45000)),
+                ]);
+            }
+            catch (e) {
+                _dbg(`near-high-tree surfaceUp failed/timeout: ${e.message} — stop body and defer tree`);
+                try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
+                try { bot.clearControlStates(); } catch (_) {}
+                if (nearest && nearest.key) {
+                    const _ttl = _ttlFor(nearest.key);
+                    _unreach.set(nearest.key, Date.now() + Math.max(_ttl, 120000));
+                    _dbg(`blacklist ${nearest.t}@${nearest.key} (surfaceUp-timeout, ttl ${Math.max(_ttl, 120000) / 1000}s)`);
+                }
+                try { await digToSurface(); } catch (e2) {}
+                return total();
+            }
+            continue;
+        } else if (!_opts.criticalForageLocalOnly && _notSurface && surfaced < 4 && (!nearest || ndist > 12 || stale >= 2)) {
+            _dbg(`not-surface y=${_yNow} enclosed=${_enclosedNow} sky=${_skyAboveNow} highSurface=${_highSurfaceLike} tree=${nearest ? ndist.toFixed(1) + 'b' : 'none'} unreachable → surfacing (try ${surfaced + 1})`);
+            log(bot, `Not on true surface (y=${_yNow}, enclosed=${_enclosedNow}, sky=${_skyAboveNow}, highSurface=${_highSurfaceLike}), no reachable tree — digging up to the surface.`);
             surfaced++;
             let _surfOk = false;
             try { _surfOk = await digToSurface(); } catch (e) { try { await skills.goToSurface(bot); } catch (e2) {} }
+            if (!_surfOk && !bot.inventory.items().some(it => /_pickaxe$/.test(it.name)) && Date.now() < (bot._chopNoPickSurfaceBlockedUntil || 0)) {
+                _dbg(`surfacing hard-failed in no-pick stone box — return control to mobility`);
+                return false;
+            }
             if (!_surfOk && bot.food <= 2 && !bot.inventory.items().some(it => /_pickaxe$/.test(it.name))) {
                 _dbg(`surfacing hard-failed under famine (food=${bot.food}, no pick) — return control`);
                 return false;
@@ -840,6 +1448,10 @@ export default async function chopWood(bot, ctx, count = 8) {
                 surfaced++;
                 let _surfOk = false;
                 try { _surfOk = await digToSurface(); } catch (e) { log(bot, `digToSurface failed: ${e.message}`); try { await skills.goToSurface(bot); } catch (e2) {} }
+                if (!_surfOk && !bot.inventory.items().some(it => /_pickaxe$/.test(it.name)) && Date.now() < (bot._chopNoPickSurfaceBlockedUntil || 0)) {
+                    _dbg(`no-log surfacing hard-failed in no-pick stone box — return control to mobility`);
+                    return false;
+                }
                 if (!_surfOk && bot.food <= 2 && !bot.inventory.items().some(it => /_pickaxe$/.test(it.name))) {
                     _dbg(`no-log surfacing hard-failed under famine (food=${bot.food}, no pick) — return control`);
                     return false;
@@ -968,10 +1580,34 @@ export default async function chopWood(bot, ctx, count = 8) {
             // the attacker's line-of-sight/pursuit and reach a different, reachable
             // grove on open ground. Give up sooner so achieveLoop re-enters fresh.
             stale++;
+            if (_opts.criticalForageLocalOnly) {
+                _dbg(`critical local forage: nearest ${nearest ? nearest.t + '@' + ndist.toFixed(1) + 'b' : 'NONE'} made no progress; yield without relocation/stair`);
+                try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
+                try { bot.clearControlStates(); } catch (_) {}
+                return total();
+            }
             // Blacklist this exact tree: it didn't yield a log this pass (unreachable across
             // water / on a ledge, or a mob kept interrupting). Next iter skips it and picks the
             // next-nearest reachable tree instead of handing us back the same trap. Expires in 2min.
-            if (nearest && nearest.key) { const _ttl = _ttlFor(nearest.key); _unreach.set(nearest.key, Date.now() + _ttl); _dbg(`blacklist ${nearest.t}@${nearest.key} (unreachable, ttl ${_ttl / 1000}s, 树柱fails=${_colFails.get(_colKey(nearest.key))})`); }
+            const _deferHighTreeBlacklist = nearest && nearest.b && nearest.b.position
+                && (nearest.b.position.y - bot.entity.position.y) >= 6 && stale <= 6;
+            let _blacklistedThisPass = false;
+            if (nearest && nearest.key) {
+                if (_deferHighTreeBlacklist) {
+                    _dbg(`defer blacklist ${nearest.t}@${nearest.key} (high tree +${Math.round(nearest.b.position.y - bot.entity.position.y)}y; climb first)`);
+                } else {
+                    const _ttl = _ttlFor(nearest.key);
+                    _unreach.set(nearest.key, Date.now() + _ttl);
+                    _dbg(`blacklist ${nearest.t}@${nearest.key} (unreachable, ttl ${_ttl / 1000}s, 树柱fails=${_colFails.get(_colKey(nearest.key))})`);
+                    _blacklistedThisPass = true;
+                }
+            }
+            if (_blacklistedThisPass) {
+                _stairDir = null;
+                stale = 0;
+                try { await skills.wait(bot, 200); } catch (e) {}
+                continue;
+            }
             const dist = stale <= 1 ? 12 : (stale === 2 ? 22 : 32);
             log(bot, `chop stalled (x${stale}) — relocating ${dist} blocks to escape pin/terrain.`);
             const _p0 = bot.entity.position.clone();
@@ -1005,7 +1641,13 @@ export default async function chopWood(bot, ctx, count = 8) {
                 const tgt = (nearest && nearest.b) ? nearest.b.position : null;
                 let dx, dz;
                 if (_stairDir) { [dx, dz] = _stairDir; }
-                else if (tgt) { dx = Math.sign(Math.round(tgt.x) - Math.floor(bot.entity.position.x)) || 1; dz = Math.sign(Math.round(tgt.z) - Math.floor(bot.entity.position.z)) || 0; _stairDir = [dx, dz]; }
+                else if (tgt) {
+                    const rx = Math.round(tgt.x) - Math.floor(bot.entity.position.x);
+                    const rz = Math.round(tgt.z) - Math.floor(bot.entity.position.z);
+                    if (Math.abs(rx) >= Math.abs(rz)) { dx = Math.sign(rx) || 1; dz = 0; }
+                    else { dx = 0; dz = Math.sign(rz) || 1; }
+                    _stairDir = [dx, dz];
+                }
                 else { [dx, dz] = [[1, 0], [0, 1], [-1, 0], [0, -1]][stale % 4]; _stairDir = [dx, dz]; }
                 _dbg(`pinned → dig-staircase dir=${dx},${dz} (locked)${tgt ? ' tgt=' + Math.round(tgt.x) + ',' + Math.round(tgt.y) + ',' + Math.round(tgt.z) : ''}`);
                 bot._climbingAt = Date.now();   // 凿崖心跳: mobility 看到它就不判 MAROONED(爬山=有目的工程,不是被困;否则行军90s插队把凿崖斩在半路——FREE窗口2min<凿崖启动3-4min,结构性饿死)
@@ -1016,7 +1658,10 @@ export default async function chopWood(bot, ctx, count = 8) {
                     let _lastCY = Math.floor(bot.entity.position.y), _flatRounds = 0;
                     const _climbMax = tgt ? 40 : 3;
                     for (let _climb = 0; _climb < _climbMax; _climb++) {
-                    if (bot.death_abort || bot.health <= 4 || bot.interrupt_code) break;
+                    if (bot.death_abort || bot.health <= 4 || bot.interrupt_code || _needsFoodYield()) {
+                        if (_needsFoodYield()) _dbg(`pinned-stair LOW-FOOD BAIL food=${bot.food}, no edible — stop climb`);
+                        break;
+                    }
                     if (tgt && bot.entity.position.y >= tgt.y - 2) { _dbg(`climb DONE y=${Math.floor(bot.entity.position.y)} (tgt y${Math.round(tgt.y)})`); break; }
                     bot._climbingAt = Date.now();
                     const m = bot.entity.position.floored();
@@ -1084,7 +1729,13 @@ export default async function chopWood(bot, ctx, count = 8) {
                             throw new Error('hole-ahead');   // caught below; clearControlStates, next stall marches new dir
                         }
                     }
-                    await _ascendStep(dx, dz, 'pinned-stair-climb');
+                    const climbed = await _ascendStep(dx, dz, 'pinned-stair-climb');
+                    if (!climbed && bot._chopAscendFail && bot._chopAscendFail.n >= 2) {
+                        const [ndx, ndz] = [[1, 0], [0, 1], [-1, 0], [0, -1]][(stale + bot._chopAscendFail.n) % 4];
+                        _dbg(`pinned-stair rotate after ascend fail n=${bot._chopAscendFail.n}: ${dx},${dz} → ${ndx},${ndz}`);
+                        _stairDir = [ndx, ndz];
+                        break;
+                    }
                     const _yNow = Math.floor(bot.entity.position.y);
                     if (_yNow > _lastCY) { _flatRounds = 0; _lastCY = _yNow; }
                     else if (++_flatRounds >= 4) { _dbg(`climb STALL (4 flat rounds at y=${_yNow}) — exit loop`); break; }

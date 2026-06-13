@@ -10,6 +10,18 @@ import { pathToFileURL } from 'url';
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
 const useDelay = blockPlaceDelay > 0;
 
+const BOT_HALF_WIDTH = 0.31;
+const BOT_HEIGHT = 1.8;
+const botAabbIntersectsBlock = (bot, p) => {
+    const pos = bot.entity.position;
+    const minX = pos.x - BOT_HALF_WIDTH, maxX = pos.x + BOT_HALF_WIDTH;
+    const minY = pos.y, maxY = pos.y + (bot.entity.height || BOT_HEIGHT);
+    const minZ = pos.z - BOT_HALF_WIDTH, maxZ = pos.z + BOT_HALF_WIDTH;
+    return maxX > p.x + 0.02 && minX < p.x + 0.98
+        && maxY > p.y + 0.02 && minY < p.y + 0.98
+        && maxZ > p.z + 0.02 && minZ < p.z + 0.98;
+};
+
 // ★禁用寻路器自动脚手架 (用户实拍"想垫上台子→错位→诡异乱垫"): mineflayer-pathfinder
 // 的 Movements 默认带 scafoldingBlocks(泥土/圆石),目标在高台/对岸时自动垫块搭桥/搭塔。
 // 但其放块对时序/站位极敏感 — 偏一格就连锁错位(横向圆石脊/散乱土柱,社区著名顽疾)。
@@ -66,6 +78,87 @@ pf.Movements = _NoScaffoldMovements;
 
 export function log(bot, message) {
     bot.output += message + '\n';
+}
+
+function motionPos(bot) {
+    const p = bot && bot.entity && bot.entity.position;
+    return p ? { x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3) } : null;
+}
+
+function motionBlockObj(block) {
+    if (!block) return null;
+    return {
+        name: block.name || null,
+        position: block.position ? { x: block.position.x, y: block.position.y, z: block.position.z } : null,
+        boundingBox: block.boundingBox || null,
+    };
+}
+
+function motionVecObj(p) {
+    return p ? { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) } : null;
+}
+
+function motionEnvSnap(bot) {
+    try {
+        const c = bot && bot.entity && bot.entity.position && bot.entity.position.floored();
+        if (!c) return [];
+        const out = [];
+        for (const dy of [-1, 0, 1, 2]) {
+            for (const dz of [-1, 0, 1]) {
+                for (const dx of [-1, 0, 1]) {
+                    const b = bot.blockAt(c.offset(dx, dy, dz));
+                    out.push({ d: [dx, dy, dz], n: b ? b.name : null, bb: b ? b.boundingBox : null });
+                }
+            }
+        }
+        return out;
+    } catch (e) { return []; }
+}
+
+function motionGoal(goal, depth = 0) {
+    if (!goal || depth > 2) return null;
+    const out = { type: goal.constructor && goal.constructor.name ? goal.constructor.name : 'Goal' };
+    for (const k of ['x', 'y', 'z', 'range', 'distance']) {
+        if (typeof goal[k] === 'number') out[k] = goal[k];
+    }
+    if (goal.entity && goal.entity.position) {
+        out.entity = {
+            id: goal.entity.id,
+            name: goal.entity.name || goal.entity.displayName || null,
+            pos: {
+                x: +goal.entity.position.x.toFixed(3),
+                y: +goal.entity.position.y.toFixed(3),
+                z: +goal.entity.position.z.toFixed(3),
+            },
+        };
+    }
+    if (goal.goal) out.goal = motionGoal(goal.goal, depth + 1);
+    return out;
+}
+
+function motionPathLen(pathResult) {
+    try {
+        if (!pathResult) return null;
+        if (Array.isArray(pathResult.path)) return pathResult.path.length;
+        if (Array.isArray(pathResult)) return pathResult.length;
+    } catch (e) {}
+    return null;
+}
+
+function motionAudit(bot, event, data = {}) {
+    try {
+        fs_dz.appendFileSync('bots/_supervisor/mine_motion.jsonl', JSON.stringify({
+            ts: new Date().toISOString(),
+            event,
+            pos: motionPos(bot),
+            held: bot && bot.heldItem ? bot.heldItem.name : 'empty',
+            hp: bot ? Math.round(bot.health || 0) : null,
+            food: bot ? bot.food : null,
+            skill: bot ? (bot._currentSkill || null) : null,
+            mob: bot && bot._mobility ? bot._mobility.state : null,
+            data,
+        }) + '\n');
+    } catch (e) {}
 }
 
 async function autoLight(bot) {
@@ -203,6 +296,122 @@ export async function craftRecipe(bot, itemName, num=1) {
     bot.armorManager.equipAll(); 
 
     return true;
+}
+
+export async function craftRecipeLocal(bot, itemName, num=1) {
+    /**
+     * Craft from the bot's current pocket. For 3x3 recipes, prefer placing the carried
+     * crafting table within arm reach instead of walking to a "nearest" table that may be
+     * visible through stone. This is for emergency cave work such as remaking a pickaxe.
+     **/
+    const itemId = mc.getItemId(itemName);
+    if (itemId == null || mc.getItemCraftingRecipes(itemName).length === 0) {
+        log(bot, `${itemName} is either not an item, or it does not have a crafting recipe!`);
+        return false;
+    }
+
+    let recipes = bot.recipesFor(itemId, null, 1, null);
+    let craftingTable = null;
+    if (!recipes || recipes.length === 0) {
+        const hasCarriedTable = world.getInventoryCounts(bot)['crafting_table'] > 0;
+        if (hasCarriedTable) {
+            craftingTable = await placeCraftingTableWithinReach(bot);
+        } else {
+            const near = world.getNearestBlock(bot, 'crafting_table', 4);
+            if (near && bot.entity.position.distanceTo(near.position) <= 4.5) craftingTable = near;
+        }
+        if (!craftingTable) {
+            log(bot, `Crafting ${itemName} needs a reachable crafting table.`);
+            return false;
+        }
+        recipes = bot.recipesFor(itemId, null, 1, craftingTable);
+    }
+    if (!recipes || recipes.length === 0) {
+        log(bot, `You do not have the resources to craft a ${itemName} locally.`);
+        return false;
+    }
+
+    const recipe = recipes[0];
+    const inventory = world.getInventoryCounts(bot);
+    const requiredIngredients = mc.ingredientsFromPrismarineRecipe(recipe);
+    const craftLimit = mc.calculateLimitingResource(inventory, requiredIngredients);
+    if (!craftLimit.num) {
+        log(bot, `Not enough ${craftLimit.limitingResource} to craft ${itemName} locally.`);
+        return false;
+    }
+
+    const guardModes = ['item_collecting', 'auto_eat', 'self_defense', 'self_preservation', 'hunting', 'torch_placing', 'unstuck', 'cowardice', 'idle_staring', 'elbow_room'];
+    const prevModes = {};
+    try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
+    try { bot.clearControlStates(); } catch (e) {}
+    try { for (const m of guardModes) if (bot.modes && bot.modes.exists(m)) { prevModes[m] = bot.modes.isOn(m); bot.modes.setOn(m, false); } } catch (e) {}
+    try {
+        await bot.craft(recipe, Math.min(craftLimit.num, num), craftingTable);
+        log(bot, `Successfully crafted ${itemName} locally, now have ${world.getInventoryCounts(bot)[itemName] || 0}.`);
+        return true;
+    } catch (e) {
+        log(bot, `Local craft ${itemName} failed: ${e.message}.`);
+        return false;
+    } finally {
+        try { for (const m in prevModes) bot.modes.setOn(m, prevModes[m]); } catch (e) {}
+        try { bot.clearControlStates(); } catch (e) {}
+    }
+}
+
+async function placeCraftingTableWithinReach(bot) {
+    let existing = world.getNearestBlock(bot, 'crafting_table', 3);
+    if (existing && bot.entity.position.distanceTo(existing.position) <= 4.5) return existing;
+
+    const empty = new Set(['air', 'cave_air', 'void_air', 'grass', 'short_grass', 'tall_grass', 'snow', 'dead_bush', 'fern']);
+    const noBuild = new Set(['water', 'flowing_water', 'lava', 'flowing_lava', 'bedrock']);
+    const base = bot.entity.position.floored();
+    const offsets = [
+        [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1],
+        [1, 0, 1], [-1, 0, 1], [1, 0, -1], [-1, 0, -1],
+        [2, 0, 0], [-2, 0, 0], [0, 0, 2], [0, 0, -2],
+    ];
+    const dirs = [
+        new Vec3(0, -1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0),
+        new Vec3(0, 0, 1), new Vec3(0, 0, -1), new Vec3(0, 1, 0),
+    ];
+    const item = bot.inventory.findInventoryItem('crafting_table');
+    if (!item) return null;
+
+    for (const [dx, dy, dz] of offsets) {
+        const target = base.offset(dx, dy, dz);
+        if (botAabbIntersectsBlock(bot, target)) continue;
+        const targetBlock = bot.blockAt(target);
+        if (!targetBlock || !empty.has(targetBlock.name)) continue;
+        let buildOff = null;
+        let faceVec = null;
+        for (const d of dirs) {
+            const ref = bot.blockAt(target.plus(d));
+            if (ref && ref.boundingBox === 'block' && !empty.has(ref.name) && !noBuild.has(ref.name)) {
+                buildOff = ref;
+                faceVec = new Vec3(-d.x, -d.y, -d.z);
+                break;
+            }
+        }
+        if (!buildOff || !faceVec) continue;
+        try {
+            const equipRes = await tickConfirm.equipConfirmed(bot, item.name, 'hand');
+            if (!equipRes.ok) continue;
+            await bot.lookAt(buildOff.position.offset(0.5, 0.5, 0.5), true);
+            const res = await tickConfirm.placeBlockConfirmed(
+                bot, buildOff, faceVec, target, 'crafting_table',
+                { retries: 2, confirmTimeoutMs: 700, backoffMs: 150 }
+            );
+            if (!res.ok) continue;
+            await tickConfirm.sleepMs(160);
+            const placed = bot.blockAt(target);
+            if (placed && placed.name === 'crafting_table') {
+                log(bot, `Placed reachable crafting_table at ${target}.`);
+                return placed;
+            }
+        } catch (e) {}
+    }
+    log(bot, 'Could not place a reachable crafting_table for local craft.');
+    return null;
 }
 
 export async function wait(bot, milliseconds) {
@@ -858,10 +1067,74 @@ export async function pickupNearbyItems(bot) {
      * @returns {Promise<boolean>} true if the items were picked up, false otherwise.
      * @example
      * await skills.pickupNearbyItems(bot);
-     **/
+    **/
     const distance = 8;
     const maxAttempts = 10; // Prevent infinite loops
-    const getNearestItem = bot => bot.nearestEntity(entity => entity.name === 'item' && bot.entity.position.distanceTo(entity.position) < distance);
+    const FOOD_ITEM_RE = /rotten_flesh|beef|porkchop|chicken|mutton|rabbit|cod|salmon|bread|apple|carrot|potato|melon|berries|stew/i;
+    const droppedName = (entity) => {
+        try {
+            const it = entity && entity.getDroppedItem && entity.getDroppedItem();
+            return it && it.name ? it.name : '';
+        } catch (e) { return ''; }
+    };
+    const faminePickup = () => bot.food <= 2 || (bot.food <= 3 && bot.health <= 8);
+    const miningPickup = () => {
+        const skill = bot._currentSkill || '';
+        const mob = bot._mobility || {};
+        return /branchMine/.test(skill) || (mob.enclosed && bot.entity && bot.entity.position && bot.entity.position.y < 72);
+    };
+    const cheapMiningPickup = (entity) => {
+        if (!entity || !entity.position || !bot.entity || !bot.entity.position) return false;
+        const me = bot.entity.position;
+        const d = me.distanceTo(entity.position);
+        const dx = entity.position.x - me.x;
+        const dz = entity.position.z - me.z;
+        const dy = entity.position.y - me.y;
+        const horiz = Math.hypot(dx, dz);
+        return d <= 2.2 || (horiz <= 4.2 && dy <= 1.2 && dy >= -3.2);
+    };
+    const getNearestItem = bot => bot.nearestEntity(entity => {
+        if (!entity || entity.name !== 'item' || !entity.position) return false;
+        const d = bot.entity.position.distanceTo(entity.position);
+        if (d >= distance) return false;
+        if (miningPickup() && !cheapMiningPickup(entity) && !FOOD_ITEM_RE.test(droppedName(entity))) return false;
+        if (!faminePickup()) return true;
+        return d <= 2.1 || FOOD_ITEM_RE.test(droppedName(entity));
+    });
+    if (miningPickup()) {
+        const skipped = Object.values(bot.entities || {}).filter(entity => {
+            if (!entity || entity.name !== 'item' || !entity.position) return false;
+            const d = bot.entity.position.distanceTo(entity.position);
+            return d < distance && !cheapMiningPickup(entity) && !FOOD_ITEM_RE.test(droppedName(entity));
+        }).map(entity => {
+            const me = bot.entity.position;
+            return {
+                name: droppedName(entity) || 'item',
+                pos: {
+                    x: Math.floor(entity.position.x),
+                    y: Math.floor(entity.position.y),
+                    z: Math.floor(entity.position.z),
+                },
+                dy: +(entity.position.y - me.y).toFixed(2),
+                dist: +me.distanceTo(entity.position).toFixed(2),
+            };
+        });
+        if (skipped.length > 0) {
+            log(bot, `Mining pickup gate: skipped ${skipped.length} uphill/far item chases while mining.`);
+            motionAudit(bot, 'pickup.mining_gate', { skipped: skipped.slice(0, 5), skill: bot._currentSkill || null, mob: bot._mobility ? bot._mobility.state : null });
+        }
+    }
+    if (faminePickup()) {
+        const skipped = Object.values(bot.entities || {}).filter(entity => {
+            if (!entity || entity.name !== 'item' || !entity.position) return false;
+            const d = bot.entity.position.distanceTo(entity.position);
+            return d < distance && d > 2.1 && !FOOD_ITEM_RE.test(droppedName(entity));
+        }).length;
+        if (skipped > 0) {
+            log(bot, `Famine pickup gate: skipped ${skipped} non-food item chases at food=${bot.food}, hp=${Math.round(bot.health || 0)}.`);
+            motionAudit(bot, 'pickup.famine_gate', { skipped, food: bot.food, hp: Math.round(bot.health || 0) });
+        }
+    }
     let nearestItem = getNearestItem(bot);
     let pickedUp = 0;
     let attempts = 0;
@@ -999,12 +1272,24 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
      * let p = world.getPosition(bot);
      * await skills.placeBlock(bot, "oak_log", p.x + 2, p.y, p.x);
      * await skills.placeBlock(bot, "torch", p.x + 1, p.y, p.x, 'side');
-     **/
+    **/
     const target_dest = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
+    const placeCtx = (extra = {}) => ({
+        blockType,
+        item: extra.item || null,
+        target: motionVecObj(target_dest),
+        placeOn,
+        dontCheat,
+        env: motionEnvSnap(bot),
+        ...extra,
+    });
+    motionAudit(bot, 'place_skill.begin', placeCtx());
 
     if (blockType === 'air') {
         log(bot, `Placing air (removing block) at ${target_dest}.`);
-        return await breakBlockAt(bot, x, y, z);
+        const ok = await breakBlockAt(bot, x, y, z);
+        motionAudit(bot, 'place_skill.end', placeCtx({ ok, mode: 'remove-air' }));
+        return ok;
     }
 
     if (bot.modes.isOn('cheat') && !dontCheat) {
@@ -1012,6 +1297,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
             let block = bot.inventory.findInventoryItem(blockType);
             if (!block) {
                 log(bot, `Cannot place ${blockType}, you are restricted to your current inventory.`);
+                motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, mode: 'cheat', reason: 'missing-restricted-inventory' }));
                 return false;
             }
         }
@@ -1052,6 +1338,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
             if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
             bot.chat('/setblock ' + Math.floor(x) + ' ' + Math.floor(y) + ' ' + Math.floor(z-1) + ' ' + blockType + '[part=head]');
         log(bot, `Used /setblock to place ${blockType} at ${target_dest}.`);
+        motionAudit(bot, 'place_skill.end', placeCtx({ ok: true, mode: 'cheat', command: msg }));
         return true;
     }
 
@@ -1071,20 +1358,30 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
     }
     if (!block_item) {
         log(bot, `Don't have any ${item_name} to place.`);
+        motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, item: item_name, reason: 'missing-item' }));
         return false;
     }
 
     const targetBlock = bot.blockAt(target_dest);
+    motionAudit(bot, 'place_skill.target', placeCtx({
+        item: item_name,
+        targetBlock: motionBlockObj(targetBlock),
+        intersectsBody: botAabbIntersectsBlock(bot, target_dest),
+    }));
     if (targetBlock.name === blockType || (targetBlock.name === 'grass_block' && blockType === 'dirt')) {
         log(bot, `${blockType} already at ${targetBlock.position}.`);
+        motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, item: item_name, reason: 'already-present', targetBlock: motionBlockObj(targetBlock) }));
         return false;
     }
     const empty_blocks = ['air', 'water', 'lava', 'grass', 'short_grass', 'tall_grass', 'snow', 'dead_bush', 'fern'];
     if (!empty_blocks.includes(targetBlock.name)) {
         log(bot, `${targetBlock.name} in the way at ${targetBlock.position}.`);
+        motionAudit(bot, 'place_skill.clear.begin', placeCtx({ item: item_name, targetBlock: motionBlockObj(targetBlock) }));
         const removed = await breakBlockAt(bot, x, y, z);
+        motionAudit(bot, 'place_skill.clear.end', placeCtx({ item: item_name, removed, after: motionBlockObj(bot.blockAt(target_dest)) }));
         if (!removed) {
             log(bot, `Cannot place ${blockType} at ${targetBlock.position}: block in the way.`);
+            motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, item: item_name, reason: 'block-in-way', targetBlock: motionBlockObj(targetBlock) }));
             return false;
         }
         await new Promise(resolve => setTimeout(resolve, 200)); // wait for block to break
@@ -1123,12 +1420,19 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
     }
     if (!buildOffBlock) {
         log(bot, `Cannot place ${blockType} at ${targetBlock.position}: nothing to place on.`);
+        motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, item: item_name, reason: 'no-build-off', targetBlock: motionBlockObj(targetBlock) }));
         return false;
     }
+    motionAudit(bot, 'place_skill.reference', placeCtx({
+        item: item_name,
+        reference: motionBlockObj(buildOffBlock),
+        face: faceVec ? { x: faceVec.x, y: faceVec.y, z: faceVec.z } : null,
+    }));
 
     // Check for interrupt before potentially long operations
     if (bot.interrupt_code) {
         log(bot, `Interrupted before placing ${blockType}.`);
+        motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, item: item_name, reason: 'interrupt-before-place' }));
         return false;
     }
 
@@ -1136,15 +1440,23 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
     const pos_above = pos.plus(Vec3(0,1,0));
     const dont_move_for = ['torch', 'redstone_torch', 'redstone', 'lever', 'button', 'rail', 'detector_rail', 
         'powered_rail', 'activator_rail', 'tripwire_hook', 'tripwire', 'water_bucket', 'string'];
+    if (!dont_move_for.includes(item_name) && botAabbIntersectsBlock(bot, target_dest)) {
+        log(bot, `Refusing to place ${blockType} at ${target_dest}: target intersects bot body.`);
+        motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, item: item_name, reason: 'intersects-body' }));
+        return false;
+    }
     if (!dont_move_for.includes(item_name) && (pos.distanceTo(targetBlock.position) < 1.1 || pos_above.distanceTo(targetBlock.position) < 1.1)) {
         // too close
+        motionAudit(bot, 'place_skill.positioning.begin', placeCtx({ item: item_name, reason: 'too-close', distance: +pos.distanceTo(targetBlock.position).toFixed(3) }));
         let goal = new pf.goals.GoalNear(targetBlock.position.x, targetBlock.position.y, targetBlock.position.z, 2);
         let inverted_goal = new pf.goals.GoalInvert(goal);
         await goToGoal(bot, inverted_goal);
+        motionAudit(bot, 'place_skill.positioning.end', placeCtx({ item: item_name, reason: 'too-close', pos: motionPos(bot) }));
     }
     
     if (bot.interrupt_code) {
         log(bot, `Interrupted while positioning for ${blockType}.`);
+        motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, item: item_name, reason: 'interrupt-after-positioning' }));
         return false;
     }
     
@@ -1153,13 +1465,16 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         let pos = targetBlock.position;
         let movements = new pf.Movements(bot);
         bot.pathfinder.setMovements(movements);
+        motionAudit(bot, 'place_skill.positioning.begin', placeCtx({ item: item_name, reason: 'too-far', distance: +bot.entity.position.distanceTo(targetBlock.position).toFixed(3) }));
         await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
+        motionAudit(bot, 'place_skill.positioning.end', placeCtx({ item: item_name, reason: 'too-far', pos: motionPos(bot) }));
     }
 
     // will throw error if an entity is in the way, and sometimes even if the block was placed
     try {
         if (item_name.includes('bucket')) {
             await useToolOnBlock(bot, item_name, buildOffBlock);
+            motionAudit(bot, 'place_skill.end', placeCtx({ ok: true, item: item_name, mode: 'bucket', reference: motionBlockObj(buildOffBlock), face: faceVec ? { x: faceVec.x, y: faceVec.y, z: faceVec.z } : null }));
         }
         else {
             // Confirm the held slot lands on the server before we send block_place,
@@ -1168,6 +1483,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
             const equipRes = await tickConfirm.equipConfirmed(bot, block_item.name, 'hand');
             if (!equipRes.ok) {
                 log(bot, `Failed to equip ${block_item.name} to place: ${equipRes.reason}.`);
+                motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, item: item_name, reason: 'equip-failed', equip: equipRes }));
                 return false;
             }
             await bot.lookAt(buildOffBlock.position.offset(0.5, 0.5, 0.5));
@@ -1177,15 +1493,144 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
             );
             if (!res.ok) {
                 log(bot, `Failed to place ${blockType} at ${target_dest}: ${res.error_class} (${res.reason}).`);
+                motionAudit(bot, 'place_skill.end', placeCtx({
+                    ok: false,
+                    item: item_name,
+                    reason: 'confirm-failed',
+                    confirm: res,
+                    after: motionBlockObj(bot.blockAt(target_dest)),
+                }));
                 return false;
             }
             log(bot, `Placed ${blockType} at ${target_dest}.`);
+            motionAudit(bot, 'place_skill.end', placeCtx({
+                ok: true,
+                item: item_name,
+                confirm: res,
+                reference: motionBlockObj(buildOffBlock),
+                face: faceVec ? { x: faceVec.x, y: faceVec.y, z: faceVec.z } : null,
+                after: motionBlockObj(bot.blockAt(target_dest)),
+            }));
             return true;
         }
     } catch (err) {
         log(bot, `Failed to place ${blockType} at ${target_dest}.`);
+        motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, item: item_name, reason: 'exception', error: err && err.message ? err.message : String(err) }));
         return false;
     }
+}
+
+export async function placeBlockUnderFeet(bot, blockType, opts = {}) {
+    const {
+        minClearance = 0.92,
+        jumpMs = 900,
+        settleMs = 180,
+        retries = 2,
+    } = opts;
+    let itemName = blockType;
+    if (itemName === 'redstone_wire') itemName = 'redstone';
+    const empty = new Set(['air', 'cave_air', 'void_air', 'water', 'flowing_water', 'grass', 'short_grass', 'tall_grass', 'snow', 'dead_bush', 'fern']);
+    motionAudit(bot, 'place_underfoot.begin', {
+        blockType,
+        item: itemName,
+        opts: { minClearance, jumpMs, settleMs, retries },
+        env: motionEnvSnap(bot),
+    });
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        if (bot.interrupt_code) {
+            motionAudit(bot, 'place_underfoot.end', { ok: false, blockType, item: itemName, attempt, reason: 'interrupt', env: motionEnvSnap(bot) });
+            return false;
+        }
+        const target = bot.entity.position.floored();
+        const targetBlock = bot.blockAt(target);
+        const ref = bot.blockAt(target.offset(0, -1, 0));
+        motionAudit(bot, 'place_underfoot.attempt', {
+            attempt,
+            blockType,
+            item: itemName,
+            target: motionVecObj(target),
+            targetBlock: motionBlockObj(targetBlock),
+            reference: motionBlockObj(ref),
+            y: bot.entity && bot.entity.position ? +bot.entity.position.y.toFixed(3) : null,
+            env: motionEnvSnap(bot),
+        });
+        if (!targetBlock || !empty.has(targetBlock.name)) {
+            motionAudit(bot, 'place_underfoot.end', { ok: false, blockType, item: itemName, attempt, reason: 'target-not-empty', targetBlock: motionBlockObj(targetBlock), env: motionEnvSnap(bot) });
+            return false;
+        }
+        if (!ref || ref.boundingBox !== 'block') {
+            motionAudit(bot, 'place_underfoot.end', { ok: false, blockType, item: itemName, attempt, reason: 'no-reference-below', reference: motionBlockObj(ref), env: motionEnvSnap(bot) });
+            return false;
+        }
+        const blockItem = bot.inventory.findInventoryItem(itemName);
+        if (!blockItem) {
+            log(bot, `Don't have any ${itemName} to place under feet.`);
+            motionAudit(bot, 'place_underfoot.end', { ok: false, blockType, item: itemName, attempt, reason: 'missing-item', env: motionEnvSnap(bot) });
+            return false;
+        }
+        const equipRes = await tickConfirm.equipConfirmed(bot, blockItem.name, 'hand');
+        if (!equipRes.ok) {
+            log(bot, `Failed to equip ${blockItem.name} for under-foot pillar: ${equipRes.reason}.`);
+            motionAudit(bot, 'place_underfoot.end', { ok: false, blockType, item: itemName, attempt, reason: 'equip-failed', equip: equipRes, env: motionEnvSnap(bot) });
+            return false;
+        }
+        try { bot.clearControlStates(); } catch (e) {}
+        try {
+            bot.setControlState('jump', true);
+            const deadline = Date.now() + jumpMs;
+            while (Date.now() < deadline && bot.entity.position.y < target.y + minClearance) {
+                await tickConfirm.sleepMs(35);
+            }
+            if (bot.entity.position.y < target.y + minClearance) {
+                log(bot, `Under-foot place delayed: y=${bot.entity.position.y.toFixed(2)} target=${target.x},${target.y},${target.z}.`);
+                motionAudit(bot, 'place_underfoot.delay', {
+                    attempt,
+                    blockType,
+                    item: itemName,
+                    target: motionVecObj(target),
+                    y: +bot.entity.position.y.toFixed(3),
+                    neededY: +(target.y + minClearance).toFixed(3),
+                    env: motionEnvSnap(bot),
+                });
+                continue;
+            }
+            await bot.lookAt(ref.position.offset(0.5, 1.0, 0.5), true);
+            const res = await tickConfirm.placeBlockConfirmed(
+                bot, ref, new Vec3(0, 1, 0), target, blockType,
+                { retries: 1, confirmTimeoutMs: 650, backoffMs: 120 }
+            );
+            if (!res.ok) {
+                log(bot, `Failed under-foot place ${blockType} at ${target}: ${res.error_class} (${res.reason}).`);
+                motionAudit(bot, 'place_underfoot.confirm_failed', {
+                    attempt,
+                    blockType,
+                    item: itemName,
+                    target: motionVecObj(target),
+                    confirm: res,
+                    after: motionBlockObj(bot.blockAt(target)),
+                    env: motionEnvSnap(bot),
+                });
+                continue;
+            }
+            await tickConfirm.sleepMs(settleMs);
+            motionAudit(bot, 'place_underfoot.end', {
+                ok: true,
+                blockType,
+                item: itemName,
+                attempt,
+                target: motionVecObj(target),
+                after: motionBlockObj(bot.blockAt(target)),
+                pos: motionPos(bot),
+                env: motionEnvSnap(bot),
+            });
+            return true;
+        } finally {
+            try { bot.setControlState('jump', false); } catch (e) {}
+            try { bot.clearControlStates(); } catch (e) {}
+        }
+    }
+    motionAudit(bot, 'place_underfoot.end', { ok: false, blockType, item: itemName, reason: 'exhausted-retries', env: motionEnvSnap(bot) });
+    return false;
 }
 
 export async function placeBlockNearby(bot, blockName, maxTries=4) {
@@ -1233,7 +1678,7 @@ export async function placeBlockNearby(bot, blockName, maxTries=4) {
         const f = _fill2(); if (!f) break;
         const h = bot.blockAt(bot.entity.position.offset(0, 2, 0));
         if (h && h.boundingBox === 'block' && !noBuild.has(h.name)) { try { await breakBlockAt(bot, h.x, h.y, h.z); } catch (e) {} }
-        try { bot.setControlState('jump', true); await new Promise(r => setTimeout(r, 280)); const p = bot.entity.position.floored(); await placeBlock(bot, f, p.x, p.y - 1, p.z, 'top', true); bot.setControlState('jump', false); await new Promise(r => setTimeout(r, 150)); }
+        try { await placeBlockUnderFeet(bot, f, { retries: 1, settleMs: 150 }); }
         catch (e) { try { bot.setControlState('jump', false); } catch (e2) {} }
     }
     for (let t = 0; t < maxTries; t++) {
@@ -1268,11 +1713,7 @@ export async function placeBlockNearby(bot, blockName, maxTries=4) {
         if (!headOpen()) { const h = bot.blockAt(bot.entity.position.offset(0, 2, 0)); try { if (h) await breakBlockAt(bot, h.x, h.y, h.z); } catch (e) {} }
         const f = filler2(); if (!f) break;
         try {
-            bot.setControlState('jump', true);
-            await new Promise(r => setTimeout(r, 280));
-            const p = bot.entity.position.floored();
-            await placeBlock(bot, f, p.x, p.y - 1, p.z, 'top', true);
-            bot.setControlState('jump', false);
+            await placeBlockUnderFeet(bot, f, { retries: 1, settleMs: 160 });
             await new Promise(r => setTimeout(r, 160));
         } catch (e) { try { bot.setControlState('jump', false); } catch (e2) {} }
         if (Math.floor(bot.entity.position.y) >= 63) break;   // surfaced
@@ -1569,6 +2010,304 @@ export async function giveToPlayer(bot, itemType, username, num=1) {
  * @param {MinecraftBot} bot - reference to the minecraft bot.
  * @returns {Promise<boolean>} true if movement was attempted.
  */
+export async function stepEdgeAssist(bot, opts = {}) {
+    const {
+        why = 'path-stuck',
+        goal = null,
+        moveMs = 980,
+        runupMs = 260,
+        owner = 'step-edge-assist',
+    } = opts;
+    if (!bot || !bot.entity || bot.targetDigBlock || bot._mineMotionActiveDig) return false;
+    if (bot._bodyMoveLockUntil && Date.now() < bot._bodyMoveLockUntil && bot._bodyMoveLockOwner !== owner) return false;
+
+    bot._stepEdgeAssistCooldowns = bot._stepEdgeAssistCooldowns || {};
+    const now = Date.now();
+    const solid = (b) => b && b.boundingBox === 'block';
+    const PASSABLE = new Set(['air', 'cave_air', 'void_air', 'short_grass', 'tall_grass', 'fern', 'large_fern', 'dead_bush', 'snow']);
+    const open = (b) => !b || b.boundingBox === 'empty' || PASSABLE.has(b.name || '');
+    const bad = (b) => b && /water|lava|fire|cactus|magma|campfire|berry_bush/.test(b.name || '');
+    const stationStep = (b) => b && /crafting_table|furnace|blast_furnace|smoker|chest|barrel|bed|anvil|enchanting_table|grindstone|stonecutter|loom|cartography_table|smithing_table|fletching_table|lectern|composter/i.test(b.name || '');
+    const hasPick = () => bot.inventory && bot.inventory.items().some(it => /_pickaxe$/.test(it.name || ''));
+    const clearableStepRoof = (b) => {
+        if (!b || b.boundingBox !== 'block') return false;
+        if (bad(b) || stationStep(b) || /bedrock|obsidian|end_portal|nether_portal/.test(b.name || '')) return false;
+        const stony = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|cobble/.test(b.name || '');
+        return !stony || hasPick();
+    };
+    const blockObj = (b) => b ? { name: b.name, x: b.position.x, y: b.position.y, z: b.position.z, bb: b.boundingBox } : null;
+    const envSnap = () => {
+        const c = bot.entity.position.floored();
+        const out = [];
+        for (const dy of [-1, 0, 1, 2]) {
+            for (const dz of [-1, 0, 1]) {
+                for (const dx of [-1, 0, 1]) {
+                    const b = bot.blockAt(c.offset(dx, dy, dz));
+                    out.push({ d: [dx, dy, dz], n: b ? b.name : null, bb: b ? b.boundingBox : null });
+                }
+            }
+        }
+        return out;
+    };
+    const dirFromGoal = () => {
+        if (!goal) return null;
+        const gp = goal.entity && goal.entity.pos ? goal.entity.pos : goal;
+        if (typeof gp.x !== 'number' || typeof gp.z !== 'number') return null;
+        const p = bot.entity.position;
+        const dx0 = gp.x - p.x, dz0 = gp.z - p.z;
+        if (Math.hypot(dx0, dz0) < 0.3) return null;
+        return Math.abs(dx0) >= Math.abs(dz0) ? [Math.sign(dx0) || 1, 0] : [0, Math.sign(dz0) || 1];
+    };
+    const dirFromYaw = () => {
+        const yaw = bot.entity.yaw || 0;
+        const dx = Math.abs(Math.sin(yaw)) >= Math.abs(Math.cos(yaw)) ? (Math.sign(-Math.sin(yaw)) || 1) : 0;
+        const dz = dx ? 0 : (Math.sign(Math.cos(yaw)) || 1);
+        return [dx, dz];
+    };
+    const p0 = bot.entity.position.clone();
+    const cell = p0.floored();
+    const ownHead0 = bot.blockAt(cell.offset(0, 1, 0));
+    let ownAbove0 = bot.blockAt(cell.offset(0, 2, 0));
+    if (!open(ownHead0)) {
+        motionAudit(bot, 'step_edge.blocked', {
+            why,
+            goal,
+            reason: 'own-head-blocked',
+            from: { x: cell.x, y: cell.y, z: cell.z },
+            ownHead: blockObj(ownHead0),
+            ownAbove: blockObj(ownAbove0),
+            env: envSnap(),
+        });
+        return false;
+    }
+    if (!open(ownAbove0)) {
+        const clearable = clearableStepRoof(ownAbove0);
+        motionAudit(bot, 'step_edge.own_above_notch.begin', {
+            why,
+            goal,
+            clearable,
+            block: blockObj(ownAbove0),
+            from: { x: cell.x, y: cell.y, z: cell.z },
+            env: envSnap(),
+        });
+        let ok = false;
+        let error = null;
+        if (clearable) {
+            try {
+                try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
+                try { bot.clearControlStates(); } catch (e) {}
+                bot._bodyDigLockOwner = `${owner}:own-above-notch`;
+                bot._bodyDigLockUntil = Date.now() + 5200;
+                try { if (bot.tool && bot.tool.equipForBlock) await bot.tool.equipForBlock(ownAbove0); } catch (e) {}
+                try { await bot.lookAt(ownAbove0.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
+                await Promise.race([
+                    bot.dig(ownAbove0, true),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('own-above-notch-timeout')), 4800)),
+                ]);
+                await new Promise(r => setTimeout(r, 120));
+                ownAbove0 = bot.blockAt(cell.offset(0, 2, 0));
+                ok = open(ownAbove0);
+            } catch (e) {
+                error = e && e.message ? e.message : String(e);
+            } finally {
+                try { bot.clearControlStates(); } catch (e) {}
+                if (bot._bodyDigLockOwner === `${owner}:own-above-notch`) {
+                    bot._bodyDigLockOwner = null;
+                    bot._bodyDigLockUntil = 0;
+                }
+            }
+        }
+        motionAudit(bot, 'step_edge.own_above_notch.end', {
+            why,
+            goal,
+            ok,
+            error,
+            after: blockObj(ownAbove0),
+            from: { x: cell.x, y: cell.y, z: cell.z },
+        });
+        if (!ok) {
+            motionAudit(bot, 'step_edge.blocked', {
+                why,
+                goal,
+                reason: clearable ? 'own-above-notch-failed' : 'own-above-unclearable',
+                from: { x: cell.x, y: cell.y, z: cell.z },
+                ownHead: blockObj(ownHead0),
+                ownAbove: blockObj(ownAbove0),
+                env: envSnap(),
+            });
+            return false;
+        }
+    }
+
+    const dirs = [];
+    for (const d of [dirFromGoal(), dirFromYaw(), [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        if (!d || (!d[0] && !d[1])) continue;
+        if (!dirs.some(x => x[0] === d[0] && x[1] === d[1])) dirs.push(d);
+    }
+    const candidates = [];
+    const rejected = [];
+    for (const [dx, dz] of dirs) {
+        const foot = bot.blockAt(cell.offset(dx, 0, dz));
+        const head = bot.blockAt(cell.offset(dx, 1, dz));
+        const above = bot.blockAt(cell.offset(dx, 2, dz));
+        const below = bot.blockAt(cell.offset(dx, -1, dz));
+        const target = cell.offset(dx, 0, dz);
+        const dist = Math.hypot(p0.x - (target.x + 0.5), p0.z - (target.z + 0.5));
+        const reason = (() => {
+            if (dist > 1.85) return 'too-far';
+            if (!solid(foot)) return 'front-not-step';
+            if (stationStep(foot)) return 'functional-station';
+            if (!open(head)) return 'target-foot-blocked';
+            if (!open(above)) return 'target-head-blocked';
+            if (bad(foot) || bad(head) || bad(above) || bad(below)) return 'hazard';
+            return null;
+        })();
+        const key = `${cell.x},${cell.y},${cell.z}->${target.x},${target.y},${target.z}:${reason || 'step'}:${foot ? foot.name : 'null'}:${head ? head.name : 'null'}:${above ? above.name : 'null'}`;
+        if (reason) {
+            rejected.push({
+                dir: [dx, dz],
+                reason,
+                target: { x: target.x, y: target.y, z: target.z },
+                foot: blockObj(foot),
+                head: blockObj(head),
+                above: blockObj(above),
+                below: blockObj(below),
+            });
+            continue;
+        }
+        const cooledUntil = bot._stepEdgeAssistCooldowns[key] || 0;
+        if (cooledUntil > now) {
+            rejected.push({
+                dir: [dx, dz],
+                reason: 'cooldown',
+                cooldownMs: cooledUntil - now,
+                target: { x: target.x, y: target.y, z: target.z },
+                foot: blockObj(foot),
+                head: blockObj(head),
+                above: blockObj(above),
+                below: blockObj(below),
+            });
+            continue;
+        }
+        candidates.push({ dx, dz, target, foot, head, above, below, dist });
+    }
+    candidates.sort((a, b) => a.dist - b.dist);
+    const c = candidates[0];
+    if (!c) {
+        motionAudit(bot, 'step_edge.none', {
+            why,
+            goal,
+            from: { x: cell.x, y: cell.y, z: cell.z },
+            rejected: rejected.slice(0, 6),
+            env: envSnap(),
+        });
+        return false;
+    }
+    const targetKey = `${cell.x},${cell.y},${cell.z}->${c.target.x},${c.target.y},${c.target.z}:step:${c.foot ? c.foot.name : 'null'}:${c.head ? c.head.name : 'null'}:${c.above ? c.above.name : 'null'}`;
+    const targetDist = (p) => Math.hypot(p.x - (c.target.x + 0.5), p.z - (c.target.z + 0.5));
+    const roseEnough = (p) => Math.floor(p.y) > cell.y || p.y > p0.y + 0.72;
+    const settledInTarget = (p) => Math.floor(p.x) === c.target.x && Math.floor(p.z) === c.target.z && targetDist(p) <= 0.9;
+    const stepSucceeded = (p) => roseEnough(p) && settledInTarget(p);
+
+    motionAudit(bot, 'step_edge.begin', {
+        why,
+        goal,
+        dir: [c.dx, c.dz],
+        from: { x: cell.x, y: cell.y, z: cell.z },
+        target: { x: c.target.x, y: c.target.y, z: c.target.z },
+        foot: blockObj(c.foot),
+        head: blockObj(c.head),
+        above: blockObj(c.above),
+        below: blockObj(c.below),
+        env: envSnap(),
+    });
+    let ok = false;
+    let maxY = p0.y;
+    let p1 = p0;
+    try {
+        bot._bodyMoveLockOwner = owner;
+        bot._bodyMoveLockUntil = Date.now() + moveMs + runupMs + 1200;
+        try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
+        try { bot.clearControlStates(); } catch (e) {}
+        try { await bot.lookAt(c.target.offset(0.5, 1.05, 0.5), true); } catch (e) {}
+        if (runupMs > 0) {
+            bot.setControlState('sneak', true);
+            bot.setControlState('back', true);
+            await new Promise(r => setTimeout(r, runupMs));
+            try { bot.clearControlStates(); } catch (e) {}
+            await new Promise(r => setTimeout(r, 80));
+        }
+        await bot.lookAt(c.target.offset(0.5, 1.15, 0.5), true);
+        bot.setControlState('sprint', false);
+        bot.setControlState('forward', true);
+        bot.setControlState('jump', true);
+        const start = Date.now();
+        while (Date.now() - start < moveMs) {
+            const p = bot.entity.position;
+            if (p.y > maxY) maxY = p.y;
+            if (stepSucceeded(p)) break;
+            await new Promise(r => setTimeout(r, 45));
+        }
+        try { bot.clearControlStates(); } catch (e) {}
+        await new Promise(r => setTimeout(r, 160));
+        p1 = bot.entity.position.clone();
+        if (roseEnough(p1) && !settledInTarget(p1)) {
+            motionAudit(bot, 'step_edge.edge_miss', {
+                why,
+                goal,
+                target: { x: c.target.x, y: c.target.y, z: c.target.z },
+                at: { x: +p1.x.toFixed(3), y: +p1.y.toFixed(3), z: +p1.z.toFixed(3) },
+                dist: +targetDist(p1).toFixed(3),
+                floor: { x: Math.floor(p1.x), y: Math.floor(p1.y), z: Math.floor(p1.z) },
+                recovery: 'center-press',
+                env: envSnap(),
+            });
+            try {
+                await bot.lookAt(c.target.offset(0.5, 1.15, 0.5), true);
+                bot.setControlState('sprint', false);
+                bot.setControlState('jump', false);
+                bot.setControlState('forward', true);
+                await new Promise(r => setTimeout(r, 420));
+            } finally {
+                try { bot.clearControlStates(); } catch (e) {}
+            }
+            await new Promise(r => setTimeout(r, 120));
+            p1 = bot.entity.position.clone();
+        }
+        ok = stepSucceeded(p1);
+        if (!ok) bot._stepEdgeAssistCooldowns[targetKey] = Date.now() + 8000;
+        return ok;
+    } catch (e) {
+        bot._stepEdgeAssistCooldowns[targetKey] = Date.now() + 8000;
+        motionAudit(bot, 'step_edge.err', { why, goal, error: e && e.message ? e.message : String(e), env: envSnap() });
+        return false;
+    } finally {
+        try { bot.clearControlStates(); } catch (e) {}
+        if (bot._bodyMoveLockOwner === owner) {
+            bot._bodyMoveLockOwner = null;
+            bot._bodyMoveLockUntil = 0;
+        }
+        motionAudit(bot, 'step_edge.end', {
+            why,
+            goal,
+            ok,
+            target: { x: c.target.x, y: c.target.y, z: c.target.z },
+            targetBlocks: {
+                foot: blockObj(bot.blockAt(c.target)),
+                head: blockObj(bot.blockAt(c.target.offset(0, 1, 0))),
+                above: blockObj(bot.blockAt(c.target.offset(0, 2, 0))),
+                below: blockObj(bot.blockAt(c.target.offset(0, -1, 0))),
+            },
+            from: { x: +p0.x.toFixed(3), y: +p0.y.toFixed(3), z: +p0.z.toFixed(3) },
+            to: { x: +p1.x.toFixed(3), y: +p1.y.toFixed(3), z: +p1.z.toFixed(3) },
+            maxRise: +(maxY - p0.y).toFixed(3),
+            dist: +targetDist(p1).toFixed(3),
+            settledInTarget: settledInTarget(p1),
+            env: envSnap(),
+        });
+    }
+}
+
 async function attemptUnstick(bot) {
     const pos = bot.entity.position;
     
@@ -1612,18 +2351,49 @@ async function attemptUnstick(bot) {
     return true;
 }
 
+function randomUnstickSkipMode(bot, goalInfo = null) {
+    try {
+        const skill = bot && (bot._currentSkill || '');
+        const mob = bot && bot._mobility ? bot._mobility.state || '' : '';
+        const p = bot && bot.entity && bot.entity.position;
+        if (/branchMine|surfaceUp|mineDiamonds|prepNether|missionNether/.test(skill) && p && p.y < 72) return 'enclosed-mining';
+        if (/MAROONED|POCKET|ENTOMBED/.test(mob)) return 'mobility-contained';
+        if (bot && bot._mobility && bot._mobility.enclosed) return 'enclosed-mining';
+        const isItemGoal = !!(goalInfo && goalInfo.entity && goalInfo.entity.name === 'item');
+        const normalFood = bot && bot.inventory && bot.inventory.items().some(i =>
+            i && i.name &&
+            /beef|porkchop|chicken|mutton|rabbit|cod|salmon|bread|apple|berries|potato|carrot|melon|cookie|pumpkin_pie|beetroot|mushroom_stew|rabbit_stew|suspicious_stew/i.test(i.name) &&
+            i.name !== 'rotten_flesh');
+        if (isItemGoal && bot && bot.health <= 8 && bot.food < 18 && !normalFood) return 'lowhp-item-pickup';
+    } catch (e) {}
+    return null;
+}
+
+function shouldAvoidRandomUnstick(bot, goalInfo = null) {
+    return !!randomUnstickSkipMode(bot, goalInfo);
+}
+
 /**
  * Execute pathfinding with a specific movement set and stuck timeout.
  * @returns {Promise<{success: boolean, stuckDetected: boolean}>}
  */
-async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doorCheckInterval) {
+async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doorCheckInterval, audit = {}) {
     let stuckCheckInterval;
     let lastPosition = bot.entity.position.clone();
     let stuckTime = 0;
     let lastCheckTime = Date.now();
     const stuckRadius = 1.5; // Tighter radius for faster stuck detection
+    const phaseStartedAt = Date.now();
     
     bot.pathfinder.setMovements(movements);
+    motionAudit(bot, 'path.phase.begin', {
+        seq: audit.seq,
+        phase: audit.phase,
+        goal: audit.goal,
+        canDig: movements.canDig,
+        allowParkour: movements.allowParkour,
+        maxDropDown: movements.maxDropDown,
+    });
     
     const stuckCheckPromise = new Promise((_, reject) => {
         stuckCheckInterval = setInterval(() => {
@@ -1641,6 +2411,18 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
             if (distance < stuckRadius) {
                 stuckTime += elapsed;
                 if (stuckTime >= stuckTimeoutMs) {
+                    motionAudit(bot, 'path.phase.stuck', {
+                        seq: audit.seq,
+                        phase: audit.phase,
+                        stuckMs: Math.round(stuckTime),
+                        moved: +distance.toFixed(3),
+                        from: {
+                            x: +lastPosition.x.toFixed(3),
+                            y: +lastPosition.y.toFixed(3),
+                            z: +lastPosition.z.toFixed(3),
+                        },
+                        goal: audit.goal,
+                    });
                     clearInterval(stuckCheckInterval);
                     reject(new Error('PhaseStuck'));
                 }
@@ -1658,6 +2440,13 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
             stuckCheckPromise
         ]);
         clearInterval(stuckCheckInterval);
+        motionAudit(bot, 'path.phase.end', {
+            seq: audit.seq,
+            phase: audit.phase,
+            ok: true,
+            ms: Date.now() - phaseStartedAt,
+            goal: audit.goal,
+        });
         return { success: true, stuckDetected: false };
     } catch (err) {
         clearInterval(stuckCheckInterval);
@@ -1668,12 +2457,38 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
             throw new Error('Navigation interrupted');
         }
         if (errorMsg.includes('PhaseStuck')) {
+            motionAudit(bot, 'path.phase.end', {
+                seq: audit.seq,
+                phase: audit.phase,
+                ok: false,
+                stuckDetected: true,
+                ms: Date.now() - phaseStartedAt,
+                error: errorMsg,
+                goal: audit.goal,
+            });
             return { success: false, stuckDetected: true };
         }
         // Goal reached or path completed normally despite "error"
         if (errorMsg.includes('Goal') || errorMsg.includes('arrived')) {
+            motionAudit(bot, 'path.phase.end', {
+                seq: audit.seq,
+                phase: audit.phase,
+                ok: true,
+                ms: Date.now() - phaseStartedAt,
+                error: errorMsg,
+                goal: audit.goal,
+            });
             return { success: true, stuckDetected: false };
         }
+        motionAudit(bot, 'path.phase.end', {
+            seq: audit.seq,
+            phase: audit.phase,
+            ok: false,
+            stuckDetected: false,
+            ms: Date.now() - phaseStartedAt,
+            error: errorMsg,
+            goal: audit.goal,
+        });
         return { success: false, stuckDetected: false };
     }
 }
@@ -1689,6 +2504,13 @@ export async function goToGoal(bot, goal) {
      * @param {pf.goals.Goal} goal, the goal to navigate to.
      **/
 
+    const navSeq = (bot._navMotionSeq || 0) + 1;
+    bot._navMotionSeq = navSeq;
+    const goalInfo = motionGoal(goal);
+    bot._lastPathGoalInfo = goalInfo;
+    bot._lastPathGoalAt = Date.now();
+    motionAudit(bot, 'path.begin', { seq: navSeq, goal: goalInfo });
+
     // ★MAROONED gate at the COMMON pathfinding entry (打转终极机理: 只给 goToPosition
     // 加门漏掉了 moveAway/moveAwayFromEntity/avoidEnemies — 它们直接走 goToGoal。
     // act_trace 实拍: 行军把 bot 修路推进 x112→x123,任务层 unstick 的 moveAway 20 秒
@@ -1703,16 +2525,24 @@ export async function goToGoal(bot, goal) {
         } catch (e) {}
         if (!closeThreat) {
             log(bot, `goToGoal suppressed: MAROONED (march owns movement)`);
+            motionAudit(bot, 'path.suppressed', { seq: navSeq, reason: 'MAROONED', goal: goalInfo });
             return;
         }
     }
 
-    // Setup movements
+    // Setup movements. Keep ordinary travel conservative: mineflayer-pathfinder's
+    // parkour/scaffold shortcuts are brittle in caves and on one-block lips. Dedicated
+    // skills may still place/pillar explicitly, but generic navigation should walk or
+    // dig a known route, not improvise block placement while moving.
     const nonDestructiveMovements = new pf.Movements(bot);
     const dontBreakBlocks = ['glass', 'glass_pane'];
     for (let block of dontBreakBlocks) {
         nonDestructiveMovements.blocksCantBreak.add(mc.getBlockId(block));
     }
+    nonDestructiveMovements.canDig = false;
+    nonDestructiveMovements.allowParkour = false;
+    nonDestructiveMovements.maxDropDown = 2;
+    nonDestructiveMovements.scafoldingBlocks = [];
     nonDestructiveMovements.placeCost = 2;
     nonDestructiveMovements.digCost = 10;
     
@@ -1721,26 +2551,15 @@ export async function goToGoal(bot, goal) {
     nonDestructiveMovements.liquids.add(mc.getBlockId('lava'));
     nonDestructiveMovements.liquids.add(mc.getBlockId('flowing_lava'));
     
-    const scaffoldBlocks = ['dirt', 'cobblestone', 'stone', 'netherrack'];
-    scaffoldBlocks.forEach(blockName => {
-        const blockId = mc.getBlockId(blockName);
-        if (blockId) {
-            nonDestructiveMovements.scafoldingBlocks.push(blockId);
-        }
-    });
-
     const destructiveMovements = new pf.Movements(bot);
+    destructiveMovements.canDig = true;
+    destructiveMovements.allowParkour = false;
+    destructiveMovements.maxDropDown = 2;
+    destructiveMovements.scafoldingBlocks = [];
     destructiveMovements.liquids.add(mc.getBlockId('water'));
     destructiveMovements.liquids.add(mc.getBlockId('flowing_water'));
     destructiveMovements.liquids.add(mc.getBlockId('lava'));
     destructiveMovements.liquids.add(mc.getBlockId('flowing_lava'));
-    
-    scaffoldBlocks.forEach(blockName => {
-        const blockId = mc.getBlockId(blockName);
-        if (blockId) {
-            destructiveMovements.scafoldingBlocks.push(blockId);
-        }
-    });
 
     // ★JUNGLE VINE FIX (user: 寻路特别容易卡在藤蔓面前动不了). Vines are CLIMBABLE in
     // mineflayer-pathfinder by default → the planner invents bogus "climb the vine" paths up
@@ -1772,16 +2591,51 @@ export async function goToGoal(bot, goal) {
         currentMovements = nonDestructiveMovements;
         isDestructive = false;
         log(bot, `Found non-destructive path.`);
+        motionAudit(bot, 'path.plan', {
+            seq: navSeq,
+            selected: 'non-destructive',
+            nonDestructive: { status: nonDestructivePath.status, len: motionPathLen(nonDestructivePath) },
+            goal: goalInfo,
+        });
     } else {
         const destructivePath = await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout);
         if (destructivePath.status === 'success') {
             currentMovements = destructiveMovements;
             isDestructive = true;
             log(bot, `Found destructive path.`);
+            motionAudit(bot, 'path.plan', {
+                seq: navSeq,
+                selected: 'destructive',
+                nonDestructive: { status: nonDestructivePath.status, len: motionPathLen(nonDestructivePath) },
+                destructive: { status: destructivePath.status, len: motionPathLen(destructivePath) },
+                goal: goalInfo,
+            });
         } else {
-            currentMovements = destructiveMovements;
-            isDestructive = true;
-            log(bot, `Path not found, attempting navigation with destructive movements.`);
+            const betterError = new Error(
+                `No complete path to destination. Non-destructive=${nonDestructivePath.status}, ` +
+                `destructive=${destructivePath.status}; refusing blind destructive navigation.`
+            );
+            betterError.name = 'PathfindingNoPlan';
+            log(bot, `Path not found: ${betterError.message}`);
+            motionAudit(bot, 'path.plan', {
+                seq: navSeq,
+                selected: 'none',
+                nonDestructive: { status: nonDestructivePath.status, len: motionPathLen(nonDestructivePath) },
+                destructive: { status: destructivePath.status, len: motionPathLen(destructivePath) },
+                refused: 'blind-destructive-navigation',
+                goal: goalInfo,
+            });
+            clearInterval(doorCheckInterval);
+            try { bot.pathfinder.setGoal(null); } catch (e) {}
+            motionAudit(bot, 'path.end', {
+                seq: navSeq,
+                ok: false,
+                unstickAttempts,
+                ms: Date.now() - totalStartTime,
+                error: betterError.message,
+                goal: goalInfo,
+            });
+            throw betterError;
         }
     }
 
@@ -1792,11 +2646,19 @@ export async function goToGoal(bot, goal) {
             }
 
             const result = await executePathfindingPhase(
-                bot, goal, currentMovements, phaseStuckTimeout, doorCheckInterval
+                bot, goal, currentMovements, phaseStuckTimeout, doorCheckInterval,
+                { seq: navSeq, phase: isDestructive ? 'destructive' : 'non-destructive', goal: goalInfo }
             );
 
             if (result.success) {
                 clearInterval(doorCheckInterval);
+                motionAudit(bot, 'path.end', {
+                    seq: navSeq,
+                    ok: true,
+                    unstickAttempts,
+                    ms: Date.now() - totalStartTime,
+                    goal: goalInfo,
+                });
                 return true;
             }
 
@@ -1804,6 +2666,7 @@ export async function goToGoal(bot, goal) {
                 // Phase 1: Non-destructive stuck → switch to destructive
                 if (!isDestructive) {
                     log(bot, `⚠️ Stuck with non-destructive path, switching to destructive...`);
+                    motionAudit(bot, 'path.switch', { seq: navSeq, from: 'non-destructive', to: 'destructive', reason: 'stuck', goal: goalInfo });
                     currentMovements = destructiveMovements;
                     isDestructive = true;
                     continue;
@@ -1812,8 +2675,23 @@ export async function goToGoal(bot, goal) {
                 // Phase 2: Destructive also stuck → manual unstick
                 if (unstickAttempts < maxUnstickAttempts) {
                     unstickAttempts++;
-                    log(bot, `⚠️ Stuck! Attempting manual unstick (${unstickAttempts}/${maxUnstickAttempts})...`);
-                    await attemptUnstick(bot);
+                    const stepped = await stepEdgeAssist(bot, {
+                        why: `path-${isDestructive ? 'destructive' : 'non-destructive'}-stuck-${unstickAttempts}`,
+                        goal: goalInfo,
+                        owner: `path:${navSeq}:step-edge`,
+                    });
+                    motionAudit(bot, 'path.step_edge', { seq: navSeq, attempt: unstickAttempts, ok: stepped, reason: 'stuck', goal: goalInfo });
+                    if (!stepped) {
+                        const skipMode = randomUnstickSkipMode(bot, goalInfo);
+                        if (skipMode) {
+                            log(bot, `⚠️ Stuck in ${skipMode}; skipping random unstick (${unstickAttempts}/${maxUnstickAttempts}).`);
+                            motionAudit(bot, 'path.unstick.skipped', { seq: navSeq, attempt: unstickAttempts, reason: 'stuck', mode: skipMode, goal: goalInfo });
+                        } else {
+                            log(bot, `⚠️ Stuck! Attempting manual unstick (${unstickAttempts}/${maxUnstickAttempts})...`);
+                            motionAudit(bot, 'path.unstick', { seq: navSeq, attempt: unstickAttempts, reason: 'stuck', goal: goalInfo });
+                            await attemptUnstick(bot);
+                        }
+                    }
                     
                     // Brief pause then retry
                     await new Promise(r => setTimeout(r, 500));
@@ -1827,8 +2705,23 @@ export async function goToGoal(bot, goal) {
             // Non-stuck failure (path blocked, etc.) - try unstick anyway
             if (unstickAttempts < maxUnstickAttempts) {
                 unstickAttempts++;
-                log(bot, `Path failed, attempting unstick (${unstickAttempts}/${maxUnstickAttempts})...`);
-                await attemptUnstick(bot);
+                const stepped = await stepEdgeAssist(bot, {
+                    why: `path-failed-${unstickAttempts}`,
+                    goal: goalInfo,
+                    owner: `path:${navSeq}:step-edge`,
+                });
+                motionAudit(bot, 'path.step_edge', { seq: navSeq, attempt: unstickAttempts, ok: stepped, reason: 'path-failed', goal: goalInfo });
+                if (!stepped) {
+                    const skipMode = randomUnstickSkipMode(bot, goalInfo);
+                    if (skipMode) {
+                        log(bot, `Path failed in ${skipMode}; skipping random unstick (${unstickAttempts}/${maxUnstickAttempts}).`);
+                        motionAudit(bot, 'path.unstick.skipped', { seq: navSeq, attempt: unstickAttempts, reason: 'path-failed', mode: skipMode, goal: goalInfo });
+                    } else {
+                        log(bot, `Path failed, attempting unstick (${unstickAttempts}/${maxUnstickAttempts})...`);
+                        motionAudit(bot, 'path.unstick', { seq: navSeq, attempt: unstickAttempts, reason: 'path-failed', goal: goalInfo });
+                        await attemptUnstick(bot);
+                    }
+                }
                 await new Promise(r => setTimeout(r, 500));
                 continue;
             }
@@ -1844,6 +2737,14 @@ export async function goToGoal(bot, goal) {
         );
         betterError.name = 'PathfindingFailed';
         log(bot, `⚠️ Pathfinding failed: ${betterError.message}`);
+        motionAudit(bot, 'path.end', {
+            seq: navSeq,
+            ok: false,
+            unstickAttempts,
+            ms: Date.now() - totalStartTime,
+            error: betterError.message,
+            goal: goalInfo,
+        });
         throw betterError;
         
     } catch (err) {
@@ -1852,8 +2753,25 @@ export async function goToGoal(bot, goal) {
         
         const errorMsg = err.message || err.toString();
         if (errorMsg.includes('Interrupted') || bot.interrupt_code) {
+            motionAudit(bot, 'path.end', {
+                seq: navSeq,
+                ok: false,
+                interrupted: true,
+                unstickAttempts,
+                ms: Date.now() - totalStartTime,
+                error: errorMsg,
+                goal: goalInfo,
+            });
             throw new Error('Navigation interrupted');
         }
+        motionAudit(bot, 'path.end', {
+            seq: navSeq,
+            ok: false,
+            unstickAttempts,
+            ms: Date.now() - totalStartTime,
+            error: errorMsg,
+            goal: goalInfo,
+        });
         throw err;
     }
 }
@@ -1944,10 +2862,10 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
      * let position = world.world.getNearestBlock(bot, "oak_log", 64).position;
      * await skills.goToPosition(bot, position.x, position.y, position.x + 20);
      **/
-    if (x == null || y == null || z == null) {
-        log(bot, `Missing coordinates, given x:${x} y:${y} z:${z}`);
-        return false;
-    }
+    const cur = bot.entity.position;
+    if (x == null) x = cur.x;
+    if (y == null) y = cur.y;
+    if (z == null) z = cur.z;
     if (bot.modes.isOn('cheat')) {
         bot.chat('/tp @s ' + x + ' ' + y + ' ' + z);
         log(bot, `Teleported to ${x}, ${y}, ${z}.`);
@@ -2698,6 +3616,16 @@ export async function digDown(bot, distance = 10) {
      * await skills.digDown(bot, 10);
      **/
 
+    const startY = Math.floor(bot.entity.position.y);
+    if (distance > 2 && startY <= 16) {
+        log(bot, `Refusing blind multi-block digDown at y=${startY}; use a staircase or branch mine instead.`);
+        return false;
+    }
+    if (distance > 2 && startY <= 32) {
+        log(bot, `Clamping blind digDown from ${distance} to 2 at y=${startY}.`);
+        distance = 2;
+    }
+
     let start_block_pos = bot.blockAt(bot.entity.position).position;
     for (let i = 1; i <= distance; i++) {
         const targetBlock = bot.blockAt(start_block_pos.offset(0, -i, 0));
@@ -3086,5 +4014,11 @@ export async function customSkill(bot, skillName, ...args) {
         return false;
     }
     const ctx = { skills: await import('./skills.js'), world, mc, Vec3, log };
-    return await fn(bot, ctx, ...args);
+    const prevSkill = bot._currentSkill;
+    try {
+        bot._currentSkill = skillName;
+        return await fn(bot, ctx, ...args);
+    } finally {
+        bot._currentSkill = prevSkill;
+    }
 }

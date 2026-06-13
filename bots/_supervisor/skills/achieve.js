@@ -10,6 +10,7 @@ const PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
 const prog = (s) => { try { fs.appendFileSync(PROG, `[${new Date().toISOString()}] ${s}\n`); } catch (e) {} };
 
 const TOOL_TIER = ['wooden', 'stone', 'iron', 'diamond', 'netherite'];
+const FOOD_RE = /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|^cod$|^salmon$|melon_slice|sweet_berries|_stew|^rabbit$|baked_/;
 
 // ── STATION REGISTRY (用户实拍怒斥: 满地没收的工作台 — "找不到台子→铺新的→旧的扔原地"
 // 的状态管理缺失). stations.json 状态池: 每次放置必登记,造新前必查池(32格内有登记台子
@@ -68,6 +69,86 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
     const tag = '  '.repeat(depth);
     prog(`${tag}NEED ${need}x ${item} (have ${have()})`);
     if (have() >= need) return true;
+    const edibleHeld = () => bot.inventory.items().some(i => i && i.name && FOOD_RE.test(i.name) && i.name !== 'rotten_flesh');
+    const foodGoal = FOOD_RE.test(item);
+    const lowFoodNoSnack = () => bot.food <= 8 && !edibleHeld();
+    const hostileNear = (r = 12) => {
+        try {
+            return Object.values(bot.entities || {}).some(e => e && e.position && mc && mc.isHostile && mc.isHostile(e) && e.position.distanceTo(bot.entity.position) < r);
+        } catch (e) { return false; }
+    };
+    const lowHpWorkRisk = () => bot.health <= 14 && hostileNear(12);
+    const woodEq = () => sumRe(/_planks$/) + sumRe(/_log$/) * 4;
+    const openSurfaceNow = () => {
+        try {
+            if (Math.floor(bot.entity.position.y) < 55) return false;
+            const p = bot.entity.position.floored();
+            for (let dy = 1; dy <= 8; dy++) {
+                const b = bot.blockAt(p.offset(0, dy, 0));
+                if (b && /water|lava/.test(b.name || '')) return false;
+                if (b && b.boundingBox === 'block') return false;
+            }
+            return true;
+        } catch (e) { return false; }
+    };
+    const cheapWoodTarget = () => {
+        const logTypes = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
+        let blocks = [];
+        try { blocks = world.getNearestBlocks(bot, logTypes, 18, 16) || []; } catch (e) {}
+        const me = bot.entity.position;
+        let nearest = null, best = Infinity, high = null;
+        for (const b of blocks) {
+            if (!b || !b.position) continue;
+            const dist = b.position.distanceTo(me);
+            const dy = b.position.y - me.y;
+            if (!high || dist < high.dist) high = { block: b, dist, dy };
+            if (dist <= 12 && Math.abs(dy) <= 3 && dist < best) { nearest = { block: b, dist, dy }; best = dist; }
+        }
+        if (nearest) return { ok: true, target: `${nearest.block.name}@${nearest.dist.toFixed(1)}b dy=${nearest.dy.toFixed(1)}` };
+        if (high) return { ok: false, reason: `nearest tree ${high.block.name}@${high.dist.toFixed(1)}b dy=${high.dy.toFixed(1)} would require climb/stair` };
+        return { ok: false, reason: 'no cheap tree within 18b' };
+    };
+    const optionalWoodSafe = () => {
+        if (!openSurfaceNow()) return { ok: false, reason: `not true surface y=${Math.floor(bot.entity.position.y)} mob=${bot._mobility ? bot._mobility.state : '-'}` };
+        if (hostileNear(24)) return { ok: false, reason: 'hostile near 24b' };
+        if (bot.food <= 14 && !edibleHeld()) return { ok: false, reason: `food=${bot.food}, no edible held` };
+        if (lowHpWorkRisk()) return { ok: false, reason: `hp=${Math.round(bot.health)} hostile near` };
+        return cheapWoodTarget();
+    };
+    const moderateUndergroundWorkOk = () => {
+        try {
+            if (openSurfaceNow()) return false;
+            if (bot.food < 8 || bot.health < 14 || edibleHeld()) return false;
+            if (!bot.inventory.items().some(i => /_pickaxe$/.test(i.name || ''))) return false;
+            if (hostileNear(12)) return false;
+            const p = bot.entity.position.floored();
+            let covered = false;
+            for (let dy = 2; dy <= 6; dy++) {
+                const b = bot.blockAt(p.offset(0, dy, 0));
+                if (b && b.boundingBox === 'block') { covered = true; break; }
+            }
+            const enclosed = !!(bot._mobility && (bot._mobility.enclosed || /POCKET|ENTOMBED|ENC/.test(bot._mobility.state || '')));
+            return covered || enclosed;
+        } catch (e) {
+            return false;
+        }
+    };
+    const essentialUndergroundKitGoal = /^(iron_pickaxe|iron_ingot|raw_iron|iron_ore|stone_pickaxe|cobblestone)$/.test(item);
+    const survivalGearGoal = /^(wooden|stone|iron)_(sword|axe)$/.test(item);
+    if (!foodGoal && !survivalGearGoal && lowFoodNoSnack() && !(essentialUndergroundKitGoal && moderateUndergroundWorkOk())) {
+        prog(`${tag}LOW-FOOD resource gate ${item}: food=${bot.food}, hp=${Math.round(bot.health)} no edible — return control to feedUp`);
+        try { bot.clearControlStates(); } catch (e) {}
+        try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+        return false;
+    } else if (!foodGoal && lowFoodNoSnack() && essentialUndergroundKitGoal && moderateUndergroundWorkOk()) {
+        prog(`${tag}LOW-FOOD resource gate ${item}: food=${bot.food}, hp=${Math.round(bot.health)} calm/enclosed with pick — allow essential local underground kit work`);
+    }
+    if (!foodGoal && bot.food <= 2 && !edibleHeld()) {
+        prog(`${tag}FAMINE-FUSE ${item}: food=${bot.food}, hp=${Math.round(bot.health)} no edible — refuse resource subgoal`);
+        try { bot.clearControlStates(); } catch (e) {}
+        try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+        return false;
+    }
     if (depth > 14 || _active.has(item)) { prog(`${tag}GIVEUP ${item} (loop/too deep)`); return false; }
     _active = new Set(_active); _active.add(item);
     // unstuck mode misreads "standing still while mining/digDown" as being stuck
@@ -129,7 +210,10 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
         const _nightExposed = (() => { try { const t = bot.time.timeOfDay; return t >= 13000 && t <= 23000 && bot.entity.position.y >= 50 && !(bot._mobility && bot._mobility.enclosed); } catch (e) { return false; } })();   // enclosed(封闭地穴)豁免——C32 同款
         try {
             const hasSword = Object.keys(inv()).some(n => /_sword$/.test(n) && inv()[n] > 0);
-            if (!hasSword && !_nightExposed) await achieve(bot, ctx, 'wooden_sword', depth + 1, _active).catch(() => {});
+            // Do not ask for a sword while bootstrapping the crafting table itself:
+            // wooden_sword needs a table, so "crafting_table -> wooden_sword ->
+            // placeTable -> crafting_table" immediately hits the active-loop guard.
+            if (item !== 'crafting_table' && !hasSword && !_nightExposed) await achieve(bot, ctx, 'wooden_sword', depth + 1, _active).catch(() => {});
         } catch (e) {}
         // PLAN AHEAD — stock a WOOD BUFFER up front. Every tool/table/furnace craft
         // needs a few planks; gathered just-in-time, each shortfall sends the bot on a
@@ -144,8 +228,16 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
             // an unreachable y79 hillside → blacklist/staircase thrash forever while sticks
             // were one 2x2 craft away). TIMEBOX the chop for the same reason: a tree-hunt
             // that can't succeed must not hold the whole achieve hostage.
-            if (sumRe(/_log$/) < 6 && sumRe(/_planks$/) < 8 && !_nightExposed) {
-                await step('stock wood buffer', () => Promise.race([
+            const undergroundPocket = bot.entity.position.y < 62 || (bot._mobility && (bot._mobility.enclosed || bot._mobility.state === 'POCKET'));
+            const woodGate = optionalWoodSafe();
+            if (!woodGate.ok) {
+                prog(`> skip stock wood buffer — ${woodGate.reason}; optional tree route yields`);
+            } else if (undergroundPocket) {
+                prog(`> skip stock wood buffer — underground/enclosed y=${Math.floor(bot.entity.position.y)} mob=${bot._mobility ? bot._mobility.state : '-'}; don't staircase for optional wood`);
+            } else if (woodEq() >= 8) {
+                prog(`> skip stock wood buffer — woodEq=${woodEq()} enough; don't chase logs for a craftable plank buffer`);
+            } else if (sumRe(/_log$/) < 6 && sumRe(/_planks$/) < 8 && !_nightExposed) {
+                await step(`stock wood buffer (${woodGate.target})`, () => Promise.race([
                     skills.customSkill(bot, 'chopWood', logBuf - sumRe(/_log$/)),
                     new Promise((_, rej) => setTimeout(() => rej(new Error('woodbuf-timeout')), 90000)),
                 ]).catch(e => { try { bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} }));
@@ -155,6 +247,30 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
 
     // ---- helpers ----
     const findTable = () => world.getNearestBlock(bot, 'crafting_table', 5);
+    const isWaterBlock = (b) => b && /water/.test(b.name || '');
+    const wetWorksite = () => {
+        try {
+            const p = bot.entity.position.floored();
+            return isWaterBlock(bot.blockAt(p)) || isWaterBlock(bot.blockAt(p.offset(0, 1, 0)));
+        } catch (e) { return false; }
+    };
+    const escapeWetWorksite = async (why) => {
+        const p0 = bot.entity.position.floored();
+        prog(`${tag}★WET-WORKSITE ${why}: body in water @${p0.x},${p0.y},${p0.z} — surface/escape before mining or placing`);
+        try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+        try { bot.clearControlStates(); } catch (e) {}
+        try {
+            await Promise.race([
+                skills.customSkill(bot, 'surfaceUp', Math.max(63, p0.y + 8)),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('wet-surface-timeout')), 45000)),
+            ]);
+        } catch (e) {
+            try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
+            try { bot.clearControlStates(); } catch (_) {}
+            prog(`${tag}★WET-WORKSITE escape incomplete: ${e.message}`);
+        }
+        return !wetWorksite();
+    };
     const affordableRecipe = (recipes) => {
         const h = {}; for (const it of bot.inventory.items()) h[it.type] = (h[it.type] || 0) + it.count;
         for (const r of recipes) { const nd = {}; for (const d of (r.delta || [])) if (d.count < 0) nd[d.id] = (nd[d.id] || 0) - d.count; if (Object.entries(nd).every(([t, c]) => (h[t] || 0) >= c)) return r; }
@@ -171,8 +287,11 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
             // the whole pick-recraft chain into a tree-hunt deadlock). mindcraft's
             // craftRecipe has independent recipe resolution — try it before giving up.
             const before0 = have();
-            prog(`${tag}recipesFor empty for ${item} — trying craftRecipe fallback`);
-            try { await skills.craftRecipe(bot, item, count); } catch (e) { prog(`${tag}craftRecipe fallback fail: ${e.message}`); }
+            prog(`${tag}recipesFor empty for ${item} — trying local craftRecipe fallback`);
+            try {
+                if (skills.craftRecipeLocal) await skills.craftRecipeLocal(bot, item, count);
+                else await skills.craftRecipe(bot, item, count);
+            } catch (e) { prog(`${tag}craftRecipe fallback fail: ${e.message}`); }
             return have() > before0;
         }
         const r = affordableRecipe(rs) || rs[0];
@@ -200,19 +319,46 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
         return have() > before;
     };
     const placeTable = async () => {
+        if (wetWorksite() && !(await escapeWetWorksite('place table'))) return false;
         if (findTable()) { try { stRegister('crafting_table', findTable().position); } catch (e) {} return true; }
         // 状态池优先: 32格内有登记过的台子 → 走过去用,绝不铺新的 (满地工作台的根治)
         try {
             const reg = stNearest(bot, 'crafting_table', 32);
             if (reg) {
-                prog(`${tag}registered table @${reg.x},${reg.y},${reg.z} — walking to reuse`);
-                try { await skills.goToPosition(bot, reg.x, reg.y, reg.z, 2); } catch (e) {}
-                const ft = findTable();
-                if (ft) { stRegister('crafting_table', ft.position); return true; }
-                stDeregister('crafting_table', reg);
-                prog(`${tag}registered table vanished — deregistered, will craft fresh`);
+                const d = Math.hypot(bot.entity.position.x - reg.x, bot.entity.position.y - reg.y, bot.entity.position.z - reg.z);
+                const pocket = bot._mobility && (bot._mobility.enclosed || bot._mobility.state === 'POCKET');
+                const canMakeLocalTable = have('crafting_table') > 0 || maxRe(/_planks$/) >= 4 || sumRe(/_log$/) > 0;
+                const mustReuseTable = !canMakeLocalTable && d <= 32 && !hostileNear(8);
+                if ((!pocket && d <= 12) || mustReuseTable) {
+                    prog(`${tag}registered table @${reg.x},${reg.y},${reg.z} — walking to reuse${mustReuseTable ? ' (no local wood/table; prefer station over cave wood climb)' : ''}`);
+                    try {
+                        await Promise.race([
+                            skills.goToPosition(bot, reg.x, reg.y, reg.z, 2),
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('table-reuse-timeout')), 30000)),
+                        ]);
+                    } catch (e) { prog(`${tag}registered table reuse failed: ${e.message}`); }
+                    const ft = findTable();
+                    if (ft) { stRegister('crafting_table', ft.position); return true; }
+                    if (d <= 12) {
+                        stDeregister('crafting_table', reg);
+                        prog(`${tag}registered table vanished — deregistered, will craft fresh`);
+                    } else {
+                        prog(`${tag}registered table not reached/loaded — keep registration, will craft local if possible`);
+                    }
+                } else {
+                    prog(`${tag}registered table @${reg.x},${reg.y},${reg.z} too far/cramped (${d.toFixed(1)}b, pocket=${!!pocket}) — craft/place local`);
+                }
             }
         } catch (e) {}
+        const undergroundPocket = bot.entity.position.y < 62 || (bot._mobility && (bot._mobility.enclosed || bot._mobility.state === 'POCKET'));
+        if (!have('crafting_table') && maxRe(/_planks$/) < 4 && sumRe(/_log$/) < 1 && undergroundPocket && !openSurfaceNow()) {
+            try {
+                bot._prepTableRecoveryBlockedUntil = Date.now() + 60000;
+                bot._prepTableRecoveryBlockedReason = `no local wood/table at y=${Math.floor(bot.entity.position.y)} mob=${bot._mobility ? bot._mobility.state : '-'}`;
+            } catch (e) {}
+            prog(`${tag}underground table gate — ${bot._prepTableRecoveryBlockedReason}; refuse cave wood climb for crafting_table`);
+            return false;
+        }
         if (!have('crafting_table')) await achieve(bot, ctx, 'crafting_table', depth + 1, _active);
         // Robust, cheat-free placement (core placeBlockNearby digs a niche on solid
         // footing, retries, relocates). No more /setblock fallback — if it genuinely
@@ -235,7 +381,13 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
     };
 
     // ---- special collectors ----
-    if (item.endsWith('_log')) { await step(`chop ${item}`, () => skills.customSkill(bot, 'chopWood', need)); return have() >= need; }
+    if (item.endsWith('_log')) {
+        if (lowFoodNoSnack()) {
+            prog(`${tag}LOW-FOOD wood gate — food=${bot.food}, hp=${Math.round(bot.health)}, no edible; refuse ${item} until feedUp`);
+            return false;
+        }
+        await step(`chop ${item}`, () => skills.customSkill(bot, 'chopWood', need)); return have() >= need;
+    }
     if (/_planks$/.test(item)) {
         if (have() >= need) return true; // any *_planks already counts
         let log = Object.keys(inv()).find(k => /_log$/.test(k) && inv()[k] > 0);
@@ -245,7 +397,17 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
             // Fail fast — the orchestrator's hole-up owns the night; planks resume at dawn.
             const _ne = (() => { try { const t = bot.time.timeOfDay; return t >= 13000 && t <= 23000 && bot.entity.position.y >= 50 && !(bot._mobility && bot._mobility.enclosed); } catch (e) { return false; } })();   // enclosed(封闭地穴)豁免夜门——与 chopWood NIGHT-BAIL/prepNether 夜hold 同款(C32)
             if (_ne) { prog(`${tag}night-exposed — skip chopping for planks (hole up owns the night)`); return false; }
-            await step('chop for planks', () => skills.customSkill(bot, 'chopWood', Math.ceil(need / 4) + 1));
+            if (lowFoodNoSnack()) {
+                prog(`${tag}LOW-FOOD planks gate — food=${bot.food}, hp=${Math.round(bot.health)}, no edible; refuse chop for planks until feedUp`);
+                return false;
+            }
+            const undergroundPocket = bot.entity.position.y < 62 || (bot._mobility && (bot._mobility.enclosed || bot._mobility.state === 'POCKET'));
+            if (undergroundPocket && !openSurfaceNow()) {
+                prog(`${tag}underground planks gate — need ${need}, have ${have()}, no logs at y=${Math.floor(bot.entity.position.y)} mob=${bot._mobility ? bot._mobility.state : '-'}; refuse chopWood/surface climb`);
+                return false;
+            }
+            const missingPlanks = Math.max(1, need - have());
+            await step('chop for planks', () => skills.customSkill(bot, 'chopWood', Math.ceil(missingPlanks / 4)));
             log = Object.keys(inv()).find(k => /_log$/.test(k) && inv()[k] > 0);
         }
         if (log) { const pk = log.replace('_log', '_planks'); await step(`craft ${pk} x${need}`, () => skills.craftRecipe(bot, pk, need)); }
@@ -334,7 +496,17 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
     const smeltRaw = mc.getItemSmeltingIngredient(item);
     if (smeltRaw) {
         const okRaw = await achieve(bot, ctx, { item: smeltRaw, count: need }, depth + 1, _active);
-        await achieve(bot, ctx, { item: 'coal', count: Math.max(1, Math.ceil(need / 8)) }, depth + 1, _active).catch(() => {});
+        const fuelNow = () => { try { return mc.getSmeltingFuel(bot); } catch (e) { return null; } };
+        const f0 = fuelNow();
+        if (f0) {
+            prog(`${tag}fuel ready: ${f0.name} x${f0.count} — skip coal preflight`);
+        } else {
+            await achieve(bot, ctx, { item: 'coal', count: Math.max(1, Math.ceil(need / 8)) }, depth + 1, _active).catch(() => {});
+            // smeltItem can burn logs/planks directly. If coal is not nearby, do not
+            // keep blind-mining at y=15 just to satisfy a "coal" subgoal; a human burns
+            // spare wood or chops one log.
+            if (!fuelNow()) await achieve(bot, ctx, { item: 'oak_log', count: Math.max(1, Math.ceil(need / 2)) }, depth + 1, _active).catch(() => {});
+        }
         // Ensure a FURNACE exists before smelting. smeltSafe's own craftRecipe
         // ('furnace') silently fails when no crafting table is nearby (furnace is
         // a 3x3 recipe needing a table) -> no furnace -> smeltItem returns 0
@@ -373,11 +545,22 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
         // "NO KNOWN WAY"). Doing the table first means it chops its own wood, then the
         // ingredient pass chops fresh wood for the actual item. (Once a table exists
         // nearby, placeTable just reuses it for free.)
-        if (needsTable) await step('place table', () => placeTable());
+        if (needsTable) {
+            await step('place table', () => placeTable());
+            if (!findTable()) return false;
+        }
         // Satisfy ingredients best-effort (don't bail on one — craftNow picks
         // whatever variant we actually have, so jungle_planks covers oak_planks).
         for (const [name, cnt] of Object.entries(ing)) {
             await achieve(bot, ctx, { item: name, count: cnt * times }, depth + 1, _active);
+        }
+        // Ingredient collection can move us away from the table we prepared above
+        // (stone/ore probing does this constantly). Re-anchor the craft station right
+        // before opening the 3x3 recipe so table-required tools don't fail with
+        // recipesFor=[] after successfully collecting all ingredients.
+        if (needsTable) {
+            await step('place table (post-ingredients)', () => placeTable());
+            if (!findTable()) return false;
         }
         await step(`craft ${item} x${times}`, () => craftNow(times));
         if (have() >= need) return true;
@@ -398,12 +581,64 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
         if (block === item && mc.getItemCraftingRecipes(item) && !item.endsWith('_ore')) { prog(`${tag}${item} is craftable, not naturally minable — give up collect`); return false; }
         const tool = mc.getBlockTool(block);
         if (tool) await ensureTool(tool);
+        const probeKey = `${item}:${block}`;
+        const probeCooldownLeft = () => {
+            try {
+                const st = bot._achieveProbeState && bot._achieveProbeState[probeKey];
+                return st && st.blockedUntil && st.blockedUntil > Date.now() ? st.blockedUntil - Date.now() : 0;
+            } catch (e) { return 0; }
+        };
         // Loop: x-ray collect within 64, then dig deeper to expose more, until we
         // have enough. One pass rarely yields enough ore (the #1 cause of "NO KNOWN
         // iron_ingot" -> iron_pickaxe fail).
         let g2 = 0;
         while (have() < need && g2++ < 8) {
             if (bot.interrupt_code) break;
+            const probeCd = probeCooldownLeft();
+            if (probeCd > 0) {
+                const st = bot._achieveProbeState && bot._achieveProbeState[probeKey];
+                if (!st.cooldownLogAt || Date.now() - st.cooldownLogAt > 10000) {
+                    st.cooldownLogAt = Date.now();
+                    prog(`${tag}mine probe cooldown for ${block}: yield ${Math.ceil(probeCd / 1000)}s after ${st.cooldownReason || 'budget-exhausted'}`);
+                    motion('achieve.probe.cooldown_yield', { item, block, leftMs: probeCd, reason: st.cooldownReason || null });
+                }
+                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+                try { bot.clearControlStates(); } catch (e) {}
+                return false;
+            }
+            if (wetWorksite() && !(await escapeWetWorksite(`collect ${block}`))) return false;
+            const miningBlock = /stone|deepslate|andesite|diorite|granite|tuff|ore$|obsidian|cobble/.test(block);
+            try {
+                const t = bot.time.timeOfDay;
+                const nightish = t >= 12500 && t <= 23000;
+                const exposed = bot.entity.position.y >= 50 && !(bot._mobility && bot._mobility.enclosed);
+                if (nightish && exposed && miningBlock) {
+                    prog(`${tag}night-exposed mining gate — stop ${block} work at y=${Math.floor(bot.entity.position.y)} tod=${Math.floor(t)} before surface/feed routing`);
+                    try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+                    try { bot.clearControlStates(); } catch (e) {}
+                    return false;
+                }
+            } catch (e) {}
+            if (bot.health <= 8 && bot.food < 18) {
+                const yy = Math.floor(bot.entity.position.y);
+                prog(`${tag}LOW-HP mining gate — hp=${Math.round(bot.health)} food=${bot.food} at y=${yy}; surface/feed before more ${block}`);
+                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+                try { bot.clearControlStates(); } catch (e) {}
+                try { await skills.customSkill(bot, 'surfaceUp', Math.max(48, yy + 12)); } catch (e) { prog(`${tag}LOW-HP surfaceUp err ${e.message}`); }
+                return false;
+            }
+            if (bot.food <= 12 && !edibleHeld() && miningBlock) {
+                const yy = Math.floor(bot.entity.position.y);
+                if (moderateUndergroundWorkOk()) {
+                    prog(`${tag}LOW-FOOD mining gate — food=${bot.food} hp=${Math.round(bot.health)} at y=${yy}; calm/enclosed with pick, allow essential local ${block} work instead of surface/feed`);
+                } else {
+                prog(`${tag}LOW-FOOD mining gate — food=${bot.food} hp=${Math.round(bot.health)} at y=${yy}; no edible held, surface/feed before more ${block}`);
+                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+                try { bot.clearControlStates(); } catch (e) {}
+                try { await skills.customSkill(bot, 'surfaceUp', Math.max(63, yy + 12)); } catch (e) { prog(`${tag}LOW-FOOD surfaceUp err ${e.message}`); }
+                return false;
+                }
+            }
             // ★徒手采石=零掉落死循环 (BARE-HAND alarm 实拍: collect stone [0/3] 永远 0/3,
             // 对着脚下石头白刨几分钟): pick-requiring block + no pickaxe → 这条采集路线
             // 是死的,立即放弃让上层换路径(找木→造镐)。
@@ -440,7 +675,26 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                 if (dh2 > 80) {
                     prog(`${tag}mining LEASH: ${Math.round(dh2)}格离锚 — 收40格再采`);
                     const ux2 = (ax2 - me2.x) / dh2, uz2 = (az2 - me2.z) / dh2;
-                    try { await skills.goToPosition(bot, Math.round(me2.x + ux2 * 40), null, Math.round(me2.z + uz2 * 40), 3); } catch (e) {}
+                    const tx2 = Math.round(me2.x + ux2 * 40), tz2 = Math.round(me2.z + uz2 * 40);
+                    let okLeash = false;
+                    try {
+                        okLeash = await Promise.race([
+                            skills.goToPosition(bot, tx2, null, tz2, 3),
+                            new Promise(resolve => setTimeout(() => resolve(false), 8000)),
+                        ]);
+                    } catch (e) {}
+                    try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+                    try { bot.clearControlStates(); } catch (e) {}
+                    const meAfter = bot.entity.position;
+                    const dhAfter = Math.hypot(meAfter.x - ax2, meAfter.z - az2);
+                    if (!okLeash || dhAfter > dh2 - 8 || dhAfter > 80) {
+                        const k = `leash:${block}`;
+                        const last = bot._achieveLeashAbort && bot._achieveLeashAbort.key === k ? bot._achieveLeashAbort : null;
+                        const repeats = last && Date.now() - last.ts < 45000 ? last.repeats + 1 : 1;
+                        bot._achieveLeashAbort = { key: k, ts: Date.now(), repeats };
+                        prog(`${tag}mining LEASH failed ${Math.round(dh2)}→${Math.round(dhAfter)} ok=${!!okLeash}; yield mining body (repeat=${repeats})`);
+                        return false;
+                    }
                 }
             } catch (e) {}
             // collectBlock now exhausts the connected ore vein itself (veinFollow
@@ -455,6 +709,13 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                 new Promise((_, rej) => setTimeout(() => rej(new Error('collect-timeout')), 25000)),
             ]).catch(e => { try { bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} throw e; }));
             if (have() >= need) break;
+            if (!foodGoal && (lowHpWorkRisk() || (bot.health <= 12 && bot.food <= 10 && !edibleHeld()))) {
+                prog(`${tag}mine probe safety yield — hp=${Math.round(bot.health)} food=${bot.food} hostile=${hostileNear(12)}; stop optional ore route`);
+                motion('achieve.probe.safety_yield', { item, block, hp: Math.round(bot.health || 0), food: bot.food, hostileNear: hostileNear(12) });
+                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+                try { bot.clearControlStates(); } catch (e) {}
+                return false;
+            }
             // ★雷区禁挖 (242-246五连死的真磁铁: 雷区过滤让x-ray找不到目标后,回落"原地往
             // 下挖"——而出生点就在蜂窝雷区屋顶上,digDown直接凿进死亡洞穴): 身处雷区时
             // digDown 跳过,改为撤离后下轮再挖。
@@ -466,8 +727,38 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                 for (const ln of dlZ) { try { const r = JSON.parse(ln); if (typeof r.x === 'number' && Math.hypot(r.x - meZ.x, r.z - meZ.z) < 16) ndZ++; } catch (e) {} }
                 _inDZ = ndZ >= 3;
             } catch (e) {}
-            if (_inDZ) { prog(`${tag}★雷区禁挖 — 跳过digDown,先撤离`); continue; }
-            await step(`dig down to expose more ${block}`, () => skills.digDown(bot, 8));
+            if (_inDZ) {
+                const nowDZ = Date.now();
+                const key = `dz:${block}`;
+                const last = bot._achieveDZAbort && bot._achieveDZAbort.key === key ? bot._achieveDZAbort : null;
+                const repeats = last && nowDZ - last.ts < 45000 ? last.repeats + 1 : 1;
+                bot._achieveDZAbort = { key, ts: nowDZ, repeats };
+                prog(`${tag}★雷区禁挖 — 跳过digDown并让出身体 (repeat=${repeats})`);
+                try { bot.pathfinder.stop(); } catch (_) {}
+                try { bot.clearControlStates(); } catch (_) {}
+                if (repeats >= 3) {
+                    bot._achieveDZMiningBlockedUntil = nowDZ + Math.min(120000, 30000 + repeats * 5000);
+                    bot._achieveDZMiningBlocked = { item, block, repeats, at: nowDZ, until: bot._achieveDZMiningBlockedUntil };
+                    if (!bot._achieveDZSurfaceTryAt || nowDZ - bot._achieveDZSurfaceTryAt > 30000) {
+                        bot._achieveDZSurfaceTryAt = nowDZ;
+                        const yy = Math.floor(bot.entity.position.y);
+                        prog(`${tag}★雷区禁挖 repeat=${repeats} — bounded surfaceUp before more mining/crafting retries`);
+                        try { await skills.customSkill(bot, 'surfaceUp', Math.max(84, yy + 8)); }
+                        catch (e) { prog(`${tag}★雷区 surfaceUp recovery err ${e.message}`); }
+                    }
+                }
+                if (repeats <= 2) {
+                    try {
+                        const meA = bot.entity.position;
+                        await Promise.race([
+                            skills.goToPosition(bot, Math.round(meA.x), Math.round(meA.y), Math.round(meA.z), 2),
+                            new Promise(resolve => setTimeout(resolve, 1200)),
+                        ]);
+                    } catch (e) {}
+                }
+                return false;
+            }
+            await step(`probe to expose more ${block}`, () => exposeMore(block));
         }
         return have() >= need;
     }
@@ -477,6 +768,118 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
 
     // ---- nested helpers needing closures ----
     async function step(label, fn) { prog(`${tag}> ${label}`); try { await fn(); } catch (e) { prog(`${tag}! ${label}: ${e.message}`); } }
+    function motion(event, data = {}) {
+        try {
+            const p = bot.entity.position;
+            const c = p.floored();
+            const env = [];
+            for (let dy = -1; dy <= 2; dy++) {
+                for (let dz = -1; dz <= 1; dz++) {
+                    for (let dx = -1; dx <= 1; dx++) {
+                        const b = bot.blockAt(c.offset(dx, dy, dz));
+                        env.push({ d: [dx, dy, dz], n: b ? b.name : null, bb: b ? b.boundingBox : null });
+                    }
+                }
+            }
+            fs.appendFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'mine_motion.jsonl'), JSON.stringify({
+                ts: new Date().toISOString(),
+                event,
+                pos: { x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3) },
+                cell: { x: c.x, y: c.y, z: c.z },
+                held: bot.heldItem ? bot.heldItem.name : 'empty',
+                hp: Math.round(bot.health || 0),
+                food: bot.food,
+                skill: bot._currentSkill || 'achieve',
+                mob: bot._mobility ? bot._mobility.state : null,
+                env,
+                data,
+            }) + '\n');
+        } catch (e) {}
+    }
+    async function exposeMore(blockName) {
+        const y = Math.floor(bot.entity.position.y);
+        const shallowOre = /(^|_)iron_ore$|raw_iron|coal_ore|copper_ore/.test(blockName || '');
+        if (shallowOre) {
+            const now = Date.now();
+            const key = `${item}:${blockName}`;
+            bot._achieveProbeState = bot._achieveProbeState || {};
+            let st = bot._achieveProbeState[key];
+            const p0 = bot.entity.position;
+            if (!st || now - st.ts > 90000 || Math.hypot((st.x || p0.x) - p0.x, (st.z || p0.z) - p0.z) > 18 || y > (st.startY || y) + 2) {
+                st = bot._achieveProbeState[key] = { startY: y, minY: y, vertical: 0, lateral: 0, x: p0.x, z: p0.z, ts: now };
+            }
+            if (st.blockedUntil && now < st.blockedUntil) {
+                if (!st.cooldownLogAt || now - st.cooldownLogAt > 10000) {
+                    st.cooldownLogAt = now;
+                    prog(`${tag}mine probe: ${blockName} cooldown ${Math.ceil((st.blockedUntil - now) / 1000)}s (${st.cooldownReason || 'budget-exhausted'}) — yield body`);
+                    motion('achieve.probe.cooldown_yield', { item, blockName, reason: st.cooldownReason || null, leftMs: st.blockedUntil - now });
+                }
+                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+                try { bot.clearControlStates(); } catch (e) {}
+                return false;
+            }
+            if (st.blockedUntil && now >= st.blockedUntil) {
+                prog(`${tag}mine probe: ${blockName} clears probe cooldown (${st.cooldownReason || 'budget-exhausted'}); retry from y=${y}`);
+                st.startY = y; st.minY = y; st.vertical = 0; st.lateral = 0; st.x = p0.x; st.z = p0.z;
+                st.blockedUntil = 0; st.cooldownReason = null; st.cooldownLogAt = 0;
+                motion('achieve.probe.cooldown_clear', { item, blockName, y });
+            }
+            st.ts = now;
+            st.minY = Math.min(st.minY, y);
+            const lateralInstead = async (reason, len = 12, targetY = null) => {
+                st.lateral = (st.lateral || 0) + 1;
+                motion('achieve.probe.lateral.begin', { item, blockName, reason, startY: st.startY, minY: st.minY, vertical: st.vertical, lateral: st.lateral, length: len, targetY });
+                if (st.lateral > 2) {
+                    const coolMs = reason === 'high-mountain-descend' ? 45000 : 30000;
+                    st.blockedUntil = Date.now() + coolMs;
+                    st.cooldownReason = reason;
+                    st.cooldownLogAt = Date.now();
+                    prog(`${tag}mine probe: ${blockName} budget exhausted (${reason}) — cooldown ${Math.ceil(coolMs / 1000)}s; yield body`);
+                    motion('achieve.probe.yield', { item, blockName, reason, startY: st.startY, minY: st.minY, vertical: st.vertical, lateral: st.lateral, cooldownMs: coolMs });
+                    try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+                    try { bot.clearControlStates(); } catch (e) {}
+                    return false;
+                }
+                const ok = await skills.customSkill(bot, 'branchMine', len, targetY).catch(e => {
+                    prog(`${tag}mine probe branchMine fail: ${e.message}`);
+                    return false;
+                });
+                motion('achieve.probe.lateral.end', { item, blockName, reason, ok: !!ok, y: Math.floor(bot.entity.position.y), targetY });
+                return ok;
+            };
+            if (y < 32) {
+                prog(`${tag}mine probe: ${blockName} at y=${y} is too deep for shallow ore — surfaceUp to y48 instead of digging lower`);
+                motion('achieve.probe.surface.begin', { item, blockName, y });
+                return await skills.customSkill(bot, 'surfaceUp', 48);
+            }
+            if (y <= 56) {
+                prog(`${tag}mine probe: ${blockName} y=${y} — shallow lateral branchMine, no blind digDown`);
+                return await lateralInstead('at-shallow-band', 10);
+            }
+            if (y > 72) {
+                prog(`${tag}mine probe: ${blockName} y=${y} — high mountain miss; staircase to y48 then branchMine`);
+                return await lateralInstead('high-mountain-descend', 20, 48);
+            }
+            if (y <= 68 || st.vertical >= 5 || (st.startY - y) >= 6) {
+                prog(`${tag}mine probe: ${blockName} y=${y} — vertical budget done (${st.vertical} probes, drop=${st.startY - y}); lateral branchMine, no deeper shaft`);
+                return await lateralInstead('vertical-budget');
+            }
+            st.vertical++;
+            prog(`${tag}mine probe: ${blockName} y=${y} — bounded one-block descent ${st.vertical}/5 (startY=${st.startY})`);
+            motion('achieve.probe.down.begin', { item, blockName, y, startY: st.startY, minY: st.minY, vertical: st.vertical });
+            const ok = await skills.digDown(bot, 1);
+            motion('achieve.probe.down.end', { item, blockName, ok: !!ok, fromY: y, toY: Math.floor(bot.entity.position.y), vertical: st.vertical });
+            return ok;
+        }
+        if (y <= 16) {
+            prog(`${tag}mine probe: y=${y}, skip blind digDown; lateral branchMine instead`);
+            motion('achieve.probe.lateral.begin', { item, blockName, reason: 'deep-generic', y, length: 12 });
+            return await skills.customSkill(bot, 'branchMine', 12, null);
+        }
+        const dist = y <= 32 ? 2 : 6;
+        motion('achieve.probe.down.begin', { item, blockName, y, dist });
+        return await skills.digDown(bot, dist);
+    }
     async function ensureTool(toolName) {
         // already have this tool or a better one in same family?
         const fam = toolName.replace(/^(wooden|stone|iron|diamond|netherite)_/, '');
