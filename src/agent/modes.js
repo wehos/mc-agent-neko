@@ -20,7 +20,12 @@ function famineBodyFreeze(agent, owner) {
     if (!bot || !bot.entity) return false;
     if (bot.food > 0 && !(bot.food <= 2 && bot.health <= 8)) return false;
     const skill = bot._currentSkill || '';
-    if (/feedUp|surfaceUp|consume|auto_eat/i.test(skill)) return false;
+    // Food-acquisition / escape skills MUST be allowed to move the body even at food=0 — else
+    // the freeze has no exit and the bot soft-locks forever (C210). forage carries its own
+    // travel-budget safety gate (won't march into deep water / far targets at low food), so
+    // whitelisting it here is the freeze's proper exit, not a hole. escapePlan likewise owns
+    // movement authority when breaking a trap.
+    if (/feedUp|surfaceUp|consume|auto_eat|forage|escapePlan/i.test(skill)) return false;
     const edible = bot.inventory && bot.inventory.items().some(i => i && i.name && FAMINE_FOOD_RE.test(i.name));
     if (edible) return false;
     const p = bot.entity.position;
