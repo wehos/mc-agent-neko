@@ -1,0 +1,31 @@
+{
+  "_note": "Captured live livelock fixture, 2026-06-13. Bot held at pos=9,52,-11 food=4 hp=15 for 2h+, sealed in its own death-zone with zero edible, directive=eat_now but nothing to eat, all hostiles W/SW and nonactionable. The patch-route endpoint: locally-correct 'hold' from every layer -> emergent absorbing livelock. This is the first validation case for the EscapePlanner refactor: planEscape(state) must return a relocate vector AWAY from both the death-zone center and the hostile centroid (i.e. east-northeast / +x+z), surface in daylight, then forage.",
+  "vitals": {
+    "x": 9, "y": 52, "z": -11, "dim": "overworld",
+    "hp": 15, "food": 4, "tod": 2413,
+    "held": "iron_pickaxe", "mob": "FREE/ENC",
+    "inv": {"stick":7,"oak_planks":4,"coal":88,"flint":1,"cobblestone":305,"raw_copper":95,"gravel":2,"dirt":63,"stone_pickaxe":2,"andesite":23,"torch":4,"iron_pickaxe":1,"wooden_sword":1}
+  },
+  "advisory": {
+    "risk": 65, "directive": "eat_now",
+    "hostiles": 11, "actionableHostiles": 0, "layeredHostiles": 5,
+    "nearest": 16.1, "actionableNearest": null, "armed": true,
+    "deathsNear16": 13, "engaged": true,
+    "dzone": {"cx": -1, "cz": -32, "r": 28, "n": 32}
+  },
+  "mobs": [
+    {"name":"enderman","d":22.8,"x":23,"y":61,"z":4,"actionable":false,"layered":true},
+    {"name":"skeleton","d":17.3,"x":-6,"y":51,"z":-20,"actionable":false},
+    {"name":"skeleton","d":16.9,"x":-6,"y":49,"z":-20,"actionable":false},
+    {"name":"skeleton","d":17.7,"x":-6,"y":51,"z":-21,"actionable":false},
+    {"name":"creeper","d":17.1,"x":-6,"y":50,"z":-20,"actionable":false},
+    {"name":"skeleton","d":17.5,"x":-4,"y":46,"z":-22,"actionable":false,"layered":true},
+    {"name":"spider","d":19.7,"x":0,"y":57,"z":6,"actionable":false,"layered":true},
+    {"name":"spider","d":16.1,"x":-6,"y":57,"z":-9,"actionable":false,"layered":true}
+  ],
+  "expect": {
+    "action": "relocate_surface",
+    "heading_sign": {"x": "+", "z": "+"},
+    "rationale": "away from death-zone center (-1,-32) AND hostile centroid (~-6,-19); both point east-northeast (+x,+z). Surface (daytime tod=2413) and forage."
+  }
+}
