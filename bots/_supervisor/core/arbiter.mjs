@@ -32,13 +32,20 @@ function decide(wm) {
     const t = wm.threat || {};
     const par = wm.paralysis || {};
 
-    // 6) DEFEND — a real, close, actionable threat owns the body. Never relocate/work through it.
-    if (t.actionableClose) {
-        return { mode: 'DEFEND', reason: `actionable hostile nearest=${t.actionableNearest} <=8` };
-    }
-    // 5) FLEE — multiple actionable threats closing in; standing to fight loses.
-    if (t.overwhelmed) {
-        return { mode: 'FLEE', reason: `overwhelmed: ${t.actionableCount} actionable, nearest=${t.actionableNearest}` };
+    // 6/5) Close actionable threat. WHO owns the body depends on whether we can survive the
+    // trade. The #1 death cause is fighting zombies UNARMORED — so a naked bot (no armor, no
+    // shield) must DISENGAGE (FLEE), not stand and trade hits. Only fight when we have some
+    // protection, or when fleeing is hopeless (overwhelmed AND already low — last-stand).
+    const def = wm.defense || {};
+    if (t.actionableClose || t.overwhelmed) {
+        const lastStand = t.overwhelmed && wm.hp <= 6;          // cornered + dying: fighting back is the only chance
+        if (def.weakDefense && !lastStand) {
+            return { mode: 'FLEE', reason: `close threat nearest=${t.actionableNearest} but UNARMORED (armor=0,shield=${!!def.hasShield}) — disengage, don't trade hits` };
+        }
+        if (t.overwhelmed) {
+            return { mode: 'FLEE', reason: `overwhelmed: ${t.actionableCount} actionable, nearest=${t.actionableNearest}` };
+        }
+        return { mode: 'DEFEND', reason: `actionable hostile nearest=${t.actionableNearest} <=8 (armor=${def.armorItems},shield=${!!def.hasShield})` };
     }
     // 4) EAT — if hungry AND we actually have food, eating dominates everything below combat.
     if (wm.food <= (wm.constants?.LOW_FOOD ?? 6) && wm.hasEdible) {

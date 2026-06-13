@@ -70,6 +70,14 @@ export function buildWorldModel(t) {
     const hasPickaxe = !!(v.inv && Object.keys(v.inv).some(n => /pickaxe/.test(n) && v.inv[n] > 0))
         || /pickaxe/.test(v.held || '');
 
+    // Defense posture — the #1 death cause is fighting unarmored (zombies). Count armor pieces
+    // and good weapons so the Arbiter can refuse melee when it has no protection.
+    const armorRe = /(helmet|chestplate|leggings|boots)$/;
+    const armorItems = v.inv ? Object.keys(v.inv).filter(n => armorRe.test(n) && v.inv[n] > 0).length : 0;
+    const hasShield = !!(v.inv && v.inv.shield > 0) || /shield/.test(v.held || '');
+    const hasGoodWeapon = !!(v.inv && Object.keys(v.inv).some(n => /(iron|diamond|netherite)_sword/.test(n) && v.inv[n] > 0)) || /(iron|diamond|netherite)_sword/.test(v.held || '');
+    const weakDefense = armorItems === 0 && !hasShield;   // naked: no armor, no shield
+
     // Threat model: prefer fresh advisory (it already classifies actionable vs layered/far);
     // fall back to raw radar distances when advisory is missing/stale.
     const advFresh = adv && typeof adv.ts === 'number' && now && (now - adv.ts) <= FRESH_ADVISORY_MS;
@@ -95,6 +103,7 @@ export function buildWorldModel(t) {
         pos, hp, food, tod, isNight: isNight(tod),
         hasEdible, hasPickaxe,
         held: v.held || null,
+        defense: { armorItems, hasShield, hasGoodWeapon, weakDefense },
         mobility: { state: mobState, enclosed },
         threat: {
             count: hostiles.length,

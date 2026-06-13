@@ -51,8 +51,13 @@ function wmOf(over) {
 }
 {
     console.log('\nCase 2 — priority ordering:');
-    const defend = arbitrate(wmOf({ advisory: { actionableHostiles: 1, actionableNearest: 3.5, mobs: [{ name: 'zombie', d: 3.5, actionable: true }] }, vitals: { food: 4 } }), null);
-    check('close actionable -> DEFEND (beats starving)', defend.mode === 'DEFEND', `got ${defend.mode}`);
+    // Armored close threat -> DEFEND (can survive the trade). Beats starving.
+    const defend = arbitrate(wmOf({ advisory: { actionableHostiles: 1, actionableNearest: 3.5, mobs: [{ name: 'zombie', d: 3.5, actionable: true }] }, vitals: { food: 4, inv: { iron_chestplate: 1, iron_helmet: 1 } } }), null);
+    check('ARMORED close actionable -> DEFEND (beats starving)', defend.mode === 'DEFEND', `got ${defend.mode}`);
+
+    // UNARMORED close threat -> FLEE (the #1 death cause: don't trade hits naked).
+    const naked = arbitrate(wmOf({ advisory: { actionableHostiles: 1, actionableNearest: 3.5, mobs: [{ name: 'zombie', d: 3.5, actionable: true }] }, vitals: { food: 18, inv: {} } }), null);
+    check('UNARMORED close actionable -> FLEE (no naked zombie-trading)', naked.mode === 'FLEE', `got ${naked.mode}`);
 
     const flee = arbitrate(wmOf({ advisory: { actionableHostiles: 4, actionableNearest: 9, mobs: [] } }), null);
     check('many actionable closing -> FLEE', flee.mode === 'FLEE', `got ${flee.mode}`);
@@ -75,20 +80,21 @@ function wmOf(over) {
     console.log('\nCase 3 — hysteresis:');
     // We just entered DEFEND 5s ago; the threat momentarily reads as gone (raw=WORK), but
     // DEFEND is still valid (actionableClose) -> hold DEFEND, don't flap to WORK.
+    const ARMORED = { iron_chestplate: 1, iron_helmet: 1, iron_sword: 1 };
     const prev = { mode: 'DEFEND', sinceTs: NOW - 5000 };
-    const wmStillThreat = wmOf({ advisory: { actionableHostiles: 1, actionableNearest: 5, mobs: [{ name: 'zombie', d: 5, actionable: true }] } });
+    const wmStillThreat = wmOf({ advisory: { actionableHostiles: 1, actionableNearest: 5, mobs: [{ name: 'zombie', d: 5, actionable: true }] }, vitals: { inv: ARMORED } });
     const held = arbitrate(wmStillThreat, prev);
     check('recently-entered DEFEND holds (no chatter)', held.mode === 'DEFEND', `got ${held.mode}`);
 
     // After the threat truly evaporates AND dwell elapsed, it releases to WORK.
     const prevOld = { mode: 'DEFEND', sinceTs: NOW - 30000 };
-    const wmClear = wmOf({});
+    const wmClear = wmOf({ vitals: { inv: ARMORED } });
     const released = arbitrate(wmClear, prevOld);
     check('stale DEFEND with no threat releases to WORK', released.mode === 'WORK', `got ${released.mode}`);
 
-    // Higher-priority always preempts immediately, even within dwell.
+    // Higher-priority always preempts immediately, even within dwell (armored -> DEFEND).
     const prevWork = { mode: 'WORK', sinceTs: NOW - 1000 };
-    const wmDanger = wmOf({ advisory: { actionableHostiles: 1, actionableNearest: 3, mobs: [{ name: 'creeper', d: 3, actionable: true }] } });
+    const wmDanger = wmOf({ advisory: { actionableHostiles: 1, actionableNearest: 3, mobs: [{ name: 'creeper', d: 3, actionable: true }] }, vitals: { inv: ARMORED } });
     const preempt = arbitrate(wmDanger, prevWork);
     check('higher-priority DEFEND preempts fresh WORK immediately', preempt.mode === 'DEFEND', `got ${preempt.mode}`);
 }
