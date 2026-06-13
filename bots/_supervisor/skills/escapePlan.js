@@ -161,21 +161,21 @@ function planEscape(state) {
 // ---------------------------------------------------------------------------
 
 // The feet-level cell sequence of a 1-wide tunnel from `start` along unit heading, n steps.
-// DDA / Bresenham-style: advance the dominant axis every step, the secondary when its
-// accumulated error crosses 1. Pure: deterministic from (start, heading, n).
+// CARDINAL-ONLY: each step moves exactly one block on a single axis (a staircase that
+// approximates the heading), never diagonal — a diagonal step would need the corner block
+// cleared too or the pathfinder/walker can't cut the corner. The accumulator picks the axis
+// with the larger outstanding share each step, so the x:z ratio tracks the heading.
+// Pure: deterministic from (start, heading, n).
 function tunnelPath(start, heading, n) {
     const cells = [];
     let x = start.x, z = start.z;
     const ax = Math.abs(heading.x), az = Math.abs(heading.z);
     const sx = Math.sign(heading.x) || 0, sz = Math.sign(heading.z) || 0;
-    let ex = 0, ez = 0;
+    let cx = 0, cz = 0;
     for (let i = 0; i < n; i++) {
-        ex += ax; ez += az;
-        let dx = 0, dz = 0;
-        if (ex >= ez) { if (sx !== 0 && ex >= 0.5) { dx = sx; ex -= 1; } }
-        if (ez >= ex || dx === 0) { if (sz !== 0 && ez >= 0.5) { dz = sz; ez -= 1; } }
-        if (dx === 0 && dz === 0) { dx = sx || 0; dz = sx === 0 ? sz : 0; } // never stall
-        x += dx; z += dz;
+        cx += ax; cz += az;
+        if (sz === 0 || (sx !== 0 && cx >= cz)) { x += sx; cx -= 1; }   // step x
+        else { z += sz; cz -= 1; }                                       // step z
         cells.push({ x, y: start.y, z });
     }
     return cells;
@@ -256,9 +256,13 @@ export default async function escapePlan(bot, ctx, opts = {}) {
             await ctx.skills.breakBlockAt(bot, next.x, cy + 1, next.z);   // head
         } catch (e) { abortReason = `dig threw: ${e && e.message || e}`; break; }
 
-        // Take movement authority: clear a stale MAROONED veto, then step into the cleared cell.
-        try { if (bot._mobility && bot._mobility.state === 'MAROONED') { bot._mobility.state = 'FREE'; log_('cleared stale MAROONED — planner owns movement'); } } catch (e) {}
-        try { await ctx.skills.goToPosition(bot, next.x, cy, next.z, 1); } catch (e) {}
+        // Step into the cleared cardinal cell by LOW-LEVEL walk, not pathfinder: GoalNear(...,1)
+        // counts an adjacent block as already-reached and won't move, and the MAROONED gate can
+        // veto goToGoal entirely. Manual lookAt+forward is the planner taking direct body control
+        // (the one-owner principle) and reliably advances one cardinal block over cleared floor.
+        try {
+            await stepToCardinal(bot, next.x, next.z, cy, Vec3);
+        } catch (e) { /* fall through to advance check */ }
 
         const np = bot.entity.position;
         const adv = Math.hypot(np.x - cur.x, np.z - cur.z);
@@ -272,6 +276,31 @@ export default async function escapePlan(bot, ctx, opts = {}) {
     const clearedDZ = dz && end ? Math.hypot(end.x - dz.cx, end.z - dz.cz) > dz.r : null;
     log_(`tunnel done reached=${reached} steps=${stepped} movedTotal=${movedTotal.toFixed(1)}b clearedDeathZone=${clearedDZ} abort=${abortReason || 'none'} end=${end ? `${Math.round(end.x)},${Math.round(end.y)},${Math.round(end.z)}` : '?'}`);
     return { dryRun: false, plan, reached, steps: stepped, movedTotal: +movedTotal.toFixed(1), clearedDeathZone: clearedDZ, abort: abortReason };
+}
+
+// Walk one cardinal block onto (tx,tz) at feet-level ty using DIRECT controls (not pathfinder).
+// Used by digTunnel because GoalNear(...,1) treats an adjacent block as already-reached and the
+// MAROONED gate can veto goToGoal. Looks at the cell center, holds forward up to ~2.5s, with a
+// late jump-assist for a 1-block lip. Always releases controls in finally.
+async function stepToCardinal(bot, tx, tz, ty, Vec3) {
+    const cx = tx + 0.5, cz = tz + 0.5;
+    try { await bot.lookAt(new Vec3(cx, ty + 1.6, cz), true); } catch (e) {}
+    bot.setControlState('forward', true);
+    const t0 = Date.now();
+    let jumped = false;
+    try {
+        while (Date.now() - t0 < 2500) {
+            const p = bot.entity.position;
+            if (Math.hypot(p.x - cx, p.z - cz) < 0.35) break;
+            if (!jumped && Date.now() - t0 > 800) {
+                jumped = true; bot.setControlState('jump', true);
+                setTimeout(() => { try { bot.setControlState('jump', false); } catch (e) {} }, 250);
+            }
+            await new Promise(r => setTimeout(r, 100));
+        }
+    } finally {
+        try { bot.setControlState('forward', false); bot.setControlState('jump', false); } catch (e) {}
+    }
 }
 
 // Build the planEscape input snapshot from the live bot + supervisor telemetry.

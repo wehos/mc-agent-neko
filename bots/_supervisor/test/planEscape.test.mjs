@@ -87,12 +87,16 @@ function check(name, cond, detail = '') {
     console.log('  last cell:', JSON.stringify(cells[cells.length - 1]));
     check('produces 20 cells', cells.length === 20, `${cells.length}`);
     check('every cell stays at feet y=52', cells.every(c => c.y === 52));
-    check('each step moves exactly 1 block (no teleport/no stall)', cells.every((c, i) => {
+    check('each step is CARDINAL: exactly 1 block on one axis (no diagonal corner-cut)', cells.every((c, i) => {
         const prev = i === 0 ? { x: 9, z: -11 } : cells[i - 1];
         const d = Math.abs(c.x - prev.x) + Math.abs(c.z - prev.z);
-        return d === 1 || d === 2; // 1 (axis) or 2 (diagonal step)
+        return d === 1;
     }));
     check('net heading is +x+z (ENE)', cells[cells.length - 1].x > 9 && cells[cells.length - 1].z > -11);
+
+    // pure-z heading must not emit any x step (guards the sx===0 branch)
+    const zonly = tunnelPath({ x: 0, y: 64, z: 0 }, { x: 0, z: 1 }, 5);
+    check('pure-z heading -> only z steps', zonly.every(c => c.x === 0) && zonly[4].z === 5, JSON.stringify(zonly));
 }
 
 // ---- Case 6: cellSafety lava/floor gating ---------------------------------
