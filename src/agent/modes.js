@@ -362,6 +362,16 @@ const modes_list = [
             const hasWeapon = bot.inventory.items().some(i => /_sword$|_axe$/.test(i.name));
             const hasShield = bot.inventory.items().some(i => i.name === 'shield') || (bot.inventory.slots[45] && bot.inventory.slots[45].name === 'shield');
             const recentlyHurt = Date.now() - bot.lastDamageTime < 3000;
+            // ★HEALTHY-UNARMED BOOTSTRAP EXIT (fix: respawn-unarmed perpetual dig-in livelock).
+            // A fresh respawn carries no weapon. Fleeing / "digging in" forever vs a single melee
+            // mob at full hp means the bot can NEVER chop wood and craft a sword — it just spams
+            // "Outmatched — digging in!" ~3x/second, gets anchored→MAROONED, and stays locked until
+            // it dies, respawns unarmed, and repeats (the whole multi-hour stall). At hp>=16 facing
+            // exactly ONE non-ranged, non-creeper mob, do NOT flee: let the bot move and bootstrap
+            // (or punch it). One melee mob can't kill a full-hp bot before it acts. Ranged/creeper/
+            // swarm/low-hp/recently-hurt-by-skeleton are all handled above and still flee.
+            if (!hasWeapon && bot.health >= 16 && hostiles.length === 1
+                && !/skeleton|stray|creeper|witch|ghast|blaze|pillager/i.test(hostiles[0].name || '')) return false;
             // With a sword AND shield we can actually WIN (block arrows/hits, close,
             // strike) — don't flee, let self_defense's shieldFight take it. Only flee
             // when truly outmatched: critically low, or genuinely swarmed (3+).
