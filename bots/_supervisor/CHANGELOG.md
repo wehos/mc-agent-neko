@@ -10,6 +10,14 @@
 
 ---
 
+## C211. ★★★总根因：core self_preservation 赤手满血也永久 dig-in，压倒一切（①层 modes.js，已安全重启验证）
+- **触发**: 一整夜 bot 反复卡死(hp10/hp3/各种状态),我误判过"食物荒漠/agent崩溃/永久软锁/我的skill坏"等多个红鲱鱼。最终读 live `events.log` 抓到真相:刷屏 `Outmatched (1 mob, hp 20) — digging in!` 每 0.3s 一条——bot **满血 hp20** 也在永久"挖洞躲"。
+- **机理(真根因)**: `shouldFlee()`(modes.js:329) 判据含 `!hasWeapon → cantWin`。bot 死亡掉了剑→赤手→即使 hp20 对 **1 只**近战怪、`closest<5` 也返回 true→self_preservation 永久 dig-in。重生必然赤手→永远 bootstrap 不出武器(挖洞不会造剑)→锚定→MAROONED→锁死→死→再赤手重生→**死亡循环的总发动机**。**前面所有现象(食物荒漠困死/低血stand-down/我的mineDown/digReset/forage全空转)都是下游**:它们在跟这个每0.3s的tick行为对抗,必然被碾压。我花一整夜堆 skill,真正该改的是 core 这一个判断。
+- **改动**: `shouldFlee` 加"健康-赤手 bootstrap 出口":`hp>=16 && hostiles.length===1 && !/skeleton|stray|creeper|witch|ghast|blaze|pillager/` → return false(放行,让 bot 去砍树造剑或反击)。远程/creeper/成群/低血/近期受击仍在上面照常逃。
+- **预测**: 安全重启后,赤手满血 bot 不再永久 dig-in;会移动、砍树、造剑、推进。
+- **观测**: ✅✅✅ **端到端验证成功**。安全重启(bot hp20、MC java全程未碰、新进程CreationDate 10:38、ports live)。bot 从卡死数小时的 `3,80,4` → 移动到 `10,76,-3` → 长途 `91,66,-36`(走~85格出 spawn 区) → `92,63,-32`,mob=FREE,`Outmatched`刷屏归零。**库存从仅 dirt+saplings → wooden_sword=1/stone_pickaxe=2/cobblestone=42/coal=36/furnace=1/oak_planks** = bot 自主 bootstrap 出武器+工具+采矿。死亡数稳定 318。
+- **★教训(整夜苦战换来,最高级)**: ①**tick 级 core 行为压倒一切 supervisor skill**——skill 在 live 空转时,先查是不是 core tick 模式(self_preservation/mobility)在每帧覆盖,而不是怪 skill 本身。②**先读 live events.log 的高频刷屏行**:它直接暴露 tick 模式在干什么,是最快的根因取证。③我误判了一长串红鲱鱼(食物荒漠/agent崩溃/永久软锁),教训:**"够不到/无解"的结论下得太早,真相往往在没读过的那个高频日志里**。④一行 core 修复 > 整夜 skill 堆砌:对准压倒性的那一层。
+
 ## C210. ⚠️监工事故复盘：反射式 live 干预把稳定 bot 推进 food=0 软锁（操作纪律失败，非技术）
 - **触发**: escapePlan 把 bot 从死亡区凿出(C209)后，bot 在 `25,76,3 food=2` 又进 FAMINE backoff hold。scanFood 诊断显示最近食物=24 只鲑鱼在 ~40 格外 y57 水里(无陆地牲口/作物)。我部署 forage 让 bot 远行去猎——结果走/下降耗光最后 2 点食物(2→0)，到 food=0 时 tick 层 `self_preservation FAMINE body freeze` 冻住身体，forage 走不到鱼，hp 从 15 掉到 floor=2(Hard 饥饿伤害)。bot 现 `40,63,-17 hp=2 food=0` 永久软锁。
 - **机理(双重)**: ①**操作错误**：bot 本来 food=4/hp=15 是"稳定卡住但饿不死"，我连下两个 live 动作(escapePlan 挪动 4→2、forage 远行 2→0)把稳定态推成濒死软锁——在脆弱 bot 上凭"想让它进展"反射式干预、未做耗食预算。②**结构 bug**：`food=0 FAMINE 冻结反射没有出口**——库存无食物时冻住=永远拿不到食物=永久卡死(与 kill-box hold 同类：保命 hold 无退出条件)。forage 与冻结抢身体=无 BodyGate 仲裁的老病。
