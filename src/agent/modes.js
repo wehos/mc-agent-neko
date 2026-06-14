@@ -52,6 +52,13 @@ function famineBodyFreeze(agent, owner) {
 
 function lowHpNoRegenContainedHold(bot) {
     if (!bot || !bot.entity) return null;
+    // ★RECOVERY-SKILL EXIT: a deliberately-dispatched escape/relocate/forage skill MUST be able
+    // to move even at low hp — otherwise this hold vetoes ALL supervisor-skill movement (incl.
+    // the very food-seeking that would save the bot), and a food-starved bot FAMINE-holds to a
+    // permanent stall (the multi-hour hp7/food4 lock). These skills carry their own per-step
+    // hp-abort / safety gates, so this is the hold's proper exit, not a hole. (feedUp/prep keep
+    // their existing low-hp conservatism — only the explicitly-dispatched recovery skills exit.)
+    if (/forageExplore|escapePlan|digReset/i.test(bot._currentSkill || '')) return null;
     if (!(bot.health <= 8 && bot.food < 18)) return null;
     const hasNormalFood = bot.inventory && bot.inventory.items().some(i => i && i.name && NORMAL_FOOD_RE.test(i.name));
     if (hasNormalFood) return null;
