@@ -719,13 +719,22 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
             // ★雷区禁挖 (242-246五连死的真磁铁: 雷区过滤让x-ray找不到目标后,回落"原地往
             // 下挖"——而出生点就在蜂窝雷区屋顶上,digDown直接凿进死亡洞穴): 身处雷区时
             // digDown 跳过,改为撤离后下轮再挖。
+            // ★CAUSE-AWARE death-zone no-dig: the gate exists to avoid digging back INTO a
+            // dig-related death (lava/fall/suffocation under the spawn). But it only counted
+            // deaths, ignoring cause — so a death-zone built from SURFACE/RANGED deaths
+            // (pillager/skeleton/zombie) wrongly blocked digDown, pinning the bot on the surface
+            // to be shot AND starving it of the iron it needs (for a shield) underground. Digging
+            // DOWN escapes surface ranged threats, so only gate when the zone's deaths were
+            // actually dig-danger. If a relaxed digDown then hits lava, that death's cause makes
+            // _inDZ fire next time (self-correcting).
             let _inDZ = false;
             try {
                 const dlZ = fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'death_log.jsonl'), 'utf8').trim().split('\n').slice(-50);
                 const meZ = bot.entity.position;
-                let ndZ = 0;
-                for (const ln of dlZ) { try { const r = JSON.parse(ln); if (typeof r.x === 'number' && Math.hypot(r.x - meZ.x, r.z - meZ.z) < 16) ndZ++; } catch (e) {} }
-                _inDZ = ndZ >= 3;
+                let ndZ = 0, digDanger = 0;
+                const DIG_DANGER = /lava|fall|suffocat|magma|cramming|wall|in_wall/i;
+                for (const ln of dlZ) { try { const r = JSON.parse(ln); if (typeof r.x === 'number' && Math.hypot(r.x - meZ.x, r.z - meZ.z) < 16) { ndZ++; if (DIG_DANGER.test(r.cause || '')) digDanger++; } } catch (e) {} }
+                _inDZ = ndZ >= 3 && digDanger >= 1;   // only block digDown if deaths here were dig-related
             } catch (e) {}
             if (_inDZ) {
                 const nowDZ = Date.now();
