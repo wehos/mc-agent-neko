@@ -10,6 +10,14 @@
 
 ---
 
+## C255. ★★铁瓶颈根因——iron 被错当浅层矿硬封 y48-68(铜带)永远挖不到铁（③achieve 热加载，🟡待验证）
+- **触发(新世界值守,铜152零铁,取证)**: bot 健康挖矿 ~1.5 MC日,raw_copper 堆到 152 但 **raw_iron=0**,mission 反复 `collect iron_ore [0/8]` → `NO KNOWN WAY to obtain iron_ingot` → `craft iron_chestplate NO KNOWN WAY`。progress 铁证: `mine probe: iron_ore y=69 — vertical budget done (5 probes, drop=1); lateral branchMine, no deeper shaft`——iron probe 在 **y69 地表层**探,5次探针只降1格就转 lateral branchMine 不挖深竖井。
+- **★根因(achieve.js:877 exposeMore 读码)**: `shallowOre` regex 把 `iron_ore` 和 coal/copper **一起当浅层矿**,深度带逻辑: `y<32→surfaceUp回y48`(嫌太深)、`y≤56→原地branchMine不下探`、`y57-72→5探针降~6格就branchMine`。净效果=bot 永远在 **y56-68 branch mine**=copper 峰值层(copper 峰 y48)→刷出 copper152;但 **1.21 iron 富集 y8-16**(三角峰y16,主带y-24~56),y56-68 是铁分布稀薄尾巴→几乎零铁→mission 死卡。更糟: `y<32→surfaceUp` 让 bot **主动逃离铁富集区**。机理=**矿物深度分布错配:把铁当铜挖**。
+- **改动(③achieve,机理修复,热加载)**: exposeMore 浅层带前加 iron 专属路由(豁免 copper-shallow 带): `ironOre && y>22 → lateralInstead('iron-deep-descend',24,targetY=14)` 用 branchMine 受控楼梯(player-style 1×2,自带 lava/夜/食物停,非盲digDown)下探到 y~14;`y≤22 已在铁带 → lateralInstead('iron-band',16)` 原地横向。coal/copper 保持原浅层逻辑。前置 C229 护镐门仍生效(深挖不破最后一把镐)。bot 当前 stone_pickaxe(能挖铁)+torch40。
+- **预测(可证伪)**: 下次 mission 追 iron_ore 且 y>22 时,progress 应出 `mine probe: iron_ore y=N — descend to iron-rich band y~14 (staircase)` 与 `achieve.probe.lateral reason=iron-deep-descend targetY=14`,bot 实际下到 y8-16 branch mine,**raw_iron 开始累积**(不再0),mission 突破 iron_ingot→iron_pickaxe→iron 甲。**不再出现 `iron_ore y=69 vertical budget` 浅层封顶 或 `iron y<32 surfaceUp to y48` 逃离深度**。若仍零铁: ①branchMine targetY 楼梯被夜/食物停频繁打断(查 descent.stop) ②这片 deepslate 铁真稀(换坐标)。
+- **观测**: ✅ `node --check achieve.js` 通过。🟡 部署时 bot 正转"mine diamonds(deep)"将穿铁带,待 achieve cache-bust 调用现场验证 raw_iron 是否开始涨。
+- **关联待修**: feedUp hunt 上限 32 格,`pig@52` 可见却被忽略→food 缓降空转("no food source"但 scan 有 animal64);food 非危急时可不动,但若 food 滑向危急且只因 33-64 格猪被弃,候选放宽 hunt 范围或低食物时提高上限。
+
 ## C253. ★★新世界首夜 4连死螺旋——夜间地表横穿去远程工作台（③achieve 热加载，🟡待夜验证）
 - **触发(新世界自主值守,实时取证,决定性)**: 2026-06-19 新世界 fresh-spawn→25min 零死亡推进到石器+furnace+shield+建家(bed@0,67,0)。入夜后 60s 内 **deaths 0→4 螺旋**,gear 全损(inv 一度只剩 dirt:3/spruce_sapling:1)。death_log 死亡1: `Zombie dist=0.9, y67 surface coveredAbove=2, gear{wooden_sword,shield:true,armor:0}, action:self_preservation`。progress 铁证序列: `19:00:25 prepNether ★HUNGRY/LOWHP food=11 hp=18 night — HOLD all work until dawn`(正确) → `19:00:37 need iron_pickaxe → place table → registered table @5,68,8 — walking to reuse`(下一轮没HOLD,夜间地表横穿) → 撞0.9格zombie死。
 - **★根因(双层)**: ①**机理层**: `prepNether.holeUpAtNight` 的 break 条件 `canFightNight()`(剑+盾+hp≥10)在死亡1时为真→破夜hold→上层目标循环追 iron_pickaxe→经 `achieve.placeTable`(achieve.js:331)发起 `goToPosition` 去 @5,68,8 远程注册台→**夜间地表横穿穿过怪区**(起步时8格无怪所以 `mustReuseTable` 放行,行走途中 zombie 逼近/刷出贴脸)。`canFightNight` 破hold意图是"齐装夜间边干边砍"对原地作业合理,对**远程travel致命**。②**结构层**: bed(重生锚)在 0,67,0 **裸露地表**→夜间重生即死亡陷阱,贴脸怪 self_preservation 用 dirt:3 封不住→死2/3/4 连环(near-unavoidable,dawn 解)。

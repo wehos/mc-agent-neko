@@ -923,6 +923,24 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                 motion('achieve.probe.lateral.end', { item, blockName, reason, ok: !!ok, y: Math.floor(bot.entity.position.y), targetY });
                 return ok;
             };
+            // ★IRON-DEPTH FIX (C255, 2026-06-19): iron was lumped into shallowOre and HARD-CAPPED
+            // at y48-68 by the bands below — but that is the COPPER band (copper peaks y48). This
+            // is why the bot piled up 150+ raw_copper but ZERO iron and stalled forever at
+            // "NO KNOWN WAY to obtain iron_ingot". In 1.21 iron peaks at y16 (main band y-24..56);
+            // the rich zone is y0-32, and the `y<32 → surfaceUp to y48` band below literally FLED
+            // the iron-rich depth. Route iron to a CONTROLLED staircase down to the iron band
+            // (branchMine targetY — player-style 1x2 stair with its own lava/night/food stops,
+            // never blind digDown), exempt from the copper-shallow bands. Coal/copper keep theirs.
+            const ironOre = /(^|_)iron_ore$|raw_iron/.test(blockName || '');
+            if (ironOre) {
+                const IRON_BAND = 14;   // y8-16 sweet spot; 14 leaves headroom above the lava-prone deep
+                if (y > IRON_BAND + 8) {
+                    prog(`${tag}mine probe: iron_ore y=${y} — descend to iron-rich band y~${IRON_BAND} (staircase; copper-shallow cap was the zero-iron bug)`);
+                    return await lateralInstead('iron-deep-descend', 24, IRON_BAND);
+                }
+                prog(`${tag}mine probe: iron_ore y=${y} — in iron band, lateral branchMine`);
+                return await lateralInstead('iron-band', 16);
+            }
             if (y < 32) {
                 prog(`${tag}mine probe: ${blockName} at y=${y} is too deep for shallow ore — surfaceUp to y48 instead of digging lower`);
                 motion('achieve.probe.surface.begin', { item, blockName, y });
