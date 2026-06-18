@@ -52,7 +52,18 @@ export default async function prepNether(bot, ctx) {
         const c = world.getInventoryCounts(bot);
         const sword = Object.keys(c).some(n => /_sword$/.test(n) && c[n] > 0);
         const shield = (c.shield || 0) > 0;
-        return sword && shield && bot.health >= 10;
+        // ★C256: must also be ARMORED. An UNARMORED bot (armorCount=0) takes unmitigated
+        // damage and CANNOT survive a multi-mob night swarm even with sword+shield — it can't
+        // block 5 directions and out-DPS them while eating full hits. Deaths 1 & 5 this world
+        // (and ~86% of all historical deaths per death_log) were unarmored bots that read
+        // "sword+shield = safe enough", skipped sealing/holding, and got swarmed exposed. With
+        // no armor → canFightNight is false → the bot ALWAYS holes up+seals at night instead of
+        // working the surface. Underground/enclosed night mining is still allowed (separate
+        // breaks at the undergroundSafe / _mobility.enclosed checks), so this only forbids
+        // EXPOSED-SURFACE night work for a squishy bot. Once it has armor (leather counts; pairs
+        // with the C255 iron fix → iron armor), it may fight/work at night again.
+        const armor = Object.keys(c).filter(n => /_(helmet|chestplate|leggings|boots)$/.test(n) && c[n] > 0).length;
+        return sword && shield && armor >= 1 && bot.health >= 10;
     };
     const hasEdible = () => bot.inventory.items().some(i =>
         i && i.name &&

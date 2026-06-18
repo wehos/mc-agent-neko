@@ -10,6 +10,14 @@
 
 ---
 
+## C256. ★★★canFightNight 不看盔甲——裸甲bot自信不躲被夜swarm刷死(86%裸死总根因)（③prepNether 热加载，🟡待夜验证）
+- **触发(死亡5实时取证,决定性)**: 新世界 deaths 5次,死亡1/5 同模式。死亡5 death_log: `Zombie dist=1.2, y70 surface, coveredAbove=0(全暴露), hostileCount=5(5僵尸), gear{stone_sword, shield:true, armorCount=0}, action:self_preservation`。死亡1 同样有 shield、裸甲。两次都是**有剑有盾但裸甲**,夜间地表被群僵尸刷死。
+- **★总根因(prepNether.js:51 canFightNight)**: `canFightNight = sword && shield && hp≥10` **不检查盔甲**。它的 break(line238)意图"齐装夜间边干边砍对齐modes"。但裸甲(armorCount=0)身板: ①无减伤,挨满伤 ②挡不住5个方向 ③出不了那么高DPS秒5僵尸。结果 canFightNight=true→holeUpAtNight 在238 break **跳过封顶**→bot 地表夜战裸扛→必死。这串起死亡1(有盾破门→横穿死)、死亡5(有盾→不封顶→swarm死)、death_log **86%裸甲死**——共同机理=**把"有剑盾"误当"能夜战",忽略无甲=必败**。
+- **改动(③prepNether,机理修复,热加载)**: canFightNight 加 `armor≥1`(同754行 helmet/chestplate/leggings/boots 计数,leather甲也算): `sword && shield && armor≥1 && hp≥10`。裸甲→canFightNight=false→holeUpAtNight **不再238 break**→走完整 dig-in+seal hold 到天亮(有cobble真封顶;keepFed裸hold到不了因holeUpAtNight先在工作循环顶部block)。**只禁地表夜战**:地下/enclosed 夜间挖矿仍由 236(undergroundSafe)/237(enclosed) break 放行不受影响。拿到甲(leather→C255铁甲)后恢复夜战。
+- **预测(可证伪)**: 下次夜间地表、裸甲(armorCount=0)、有剑+盾时,canFightNight=false → progress 应出 `★NIGHT 入夜→优先生存...hole up` + dig-in seal,**不再 `canFightNight break` 后地表夜战**;有 cobble/dirt 时应真封顶(coveredAbove>0)。死亡应从"裸甲夜swarm"消失。若仍裸甲夜死: ①holeUpAtNight 封顶料不足(→囤cobble buffer) ②keepFed 裸hold 仍捕获(→需给 keepFed hungry-hold 也加 seal) ③modes self_preservation 互绞。拿到甲后 canFightNight 应恢复 true 允许夜战。
+- **观测**: ✅ `node --check prepNether.js` 通过。🟡 部署时 bot 死亡5后坑里 hold(host=0 hp20 但 inv 又只剩dirt2,第2次gear全损),待下一夜 prepNether cache-bust 验证裸甲是否一致封顶过夜。
+- **关联**: 与 C253(夜table横穿)、C255(挖到铁→铁甲)三者构成"夜间生存+装备进度"闭环。C254(地表床重生陷阱)仍待修。
+
 ## C255. ★★铁瓶颈根因——iron 被错当浅层矿硬封 y48-68(铜带)永远挖不到铁（③achieve 热加载，🟡待验证）
 - **触发(新世界值守,铜152零铁,取证)**: bot 健康挖矿 ~1.5 MC日,raw_copper 堆到 152 但 **raw_iron=0**,mission 反复 `collect iron_ore [0/8]` → `NO KNOWN WAY to obtain iron_ingot` → `craft iron_chestplate NO KNOWN WAY`。progress 铁证: `mine probe: iron_ore y=69 — vertical budget done (5 probes, drop=1); lateral branchMine, no deeper shaft`——iron probe 在 **y69 地表层**探,5次探针只降1格就转 lateral branchMine 不挖深竖井。
 - **★根因(achieve.js:877 exposeMore 读码)**: `shallowOre` regex 把 `iron_ore` 和 coal/copper **一起当浅层矿**,深度带逻辑: `y<32→surfaceUp回y48`(嫌太深)、`y≤56→原地branchMine不下探`、`y57-72→5探针降~6格就branchMine`。净效果=bot 永远在 **y56-68 branch mine**=copper 峰值层(copper 峰 y48)→刷出 copper152;但 **1.21 iron 富集 y8-16**(三角峰y16,主带y-24~56),y56-68 是铁分布稀薄尾巴→几乎零铁→mission 死卡。更糟: `y<32→surfaceUp` 让 bot **主动逃离铁富集区**。机理=**矿物深度分布错配:把铁当铜挖**。
