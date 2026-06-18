@@ -402,6 +402,22 @@ export default async function prepNether(bot, ctx) {
                         if (dugOk && seal) {
                             const top = bot.entity.position.floored().offset(0, 2, 0);
                             try { await skills.placeBlock(bot, seal.name, top.x, top.y, top.z, 'bottom', true); } catch (e) {}
+                            // ★C260: digDown assumes the pit's 4 sides are solid ground, but on a
+                            // hilltop/slope the hillside drops away and leaves sides OPEN — death 8
+                            // (@y85, coveredAbove=1, zombie reached through an open side at 1.2b despite
+                            // 340 cobble). Wall any open foot+head-level side so the bunker is truly
+                            // enclosed, not just roofed. Same head-ring idea as surfaceDirtShelter.
+                            const base2 = bot.entity.position.floored();
+                            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                                for (const dy of [0, 1]) {
+                                    const s = sealBlock();
+                                    if (!s) break;
+                                    const t = base2.offset(dx, dy, dz);
+                                    const b = bot.blockAt(t);
+                                    if (b && b.boundingBox === 'block') continue;
+                                    try { await skills.placeBlock(bot, s.name, t.x, t.y, t.z, 'bottom', true); } catch (e) {}
+                                }
+                            }
                         } else if (!dugOk) {
                             await surfaceDirtShelter();
                         }
