@@ -10,6 +10,14 @@
 
 ---
 
+## C257. ★★夜间 no-regen 冻结 livelock——所有 handoff 都是白天门,夜间暴露冻死（顶层missionNether,需重启,✅重启验证封顶）
+- **触发(botwatch ★STALL 6min 取证,决定性)**: 死亡5后重建,bot @14,68,-11 hp12 food15 **冻结 6min+**(botwatch ★STALL fire, act_trace `act/ctrl/path/dig 全="-"` idle)。progress 死循环刷 `prepNether stand-down: low-hp/no-food cooldown Ns; body stays free for survival modes` + `no-regen no-food → forageExplore(ACTIVE hunt)`(决定了却没执行)。期间入夜(tod>13000)。
+- **★根因(missionNether.js:1086-1135 读码)**: no-regen-no-food cooldown 块里所有逃逸 handoff **都是白天/有怪门**: `daylightFamineHostileShelter()`(1093,白天+怪)、`!isNightNow()` forageExplore deadlock-breaker(1100/1112,白天门)。**夜间 + host=0 时**: forageExplore 正确自gate(夜不外出)瞬返,但上述 handoff 全不触发 → 落到块尾 `wait+continue` → **暴露冻结**。"body stays free for survival modes" 但没 survival mode 来封顶 → 冻 6min → 等怪游过来 swarm 裸甲bot(死亡5模式重演)。机理=**夜间 no-regen 无逃逸:觅食被夜gate(对)、封顶handoff被白天gate(漏)、留空冻**。
+- **改动(顶层missionNether,需重启re-arm)**: 1092 stand-down 后加**夜间分支**: `if (isNightNow()) → customSkill(prepNether) hole-up+seal → wait+continue`。夜间 no-regen 直接主动 handoff prepNether 封顶 hold 到天亮(配 C256 裸甲真封顶),不再冻结等怪。天亮后 isNightNow=false,原 forageExplore deadlock-breaker(1112)恢复觅食。
+- **预测(可证伪)**: 下次夜间 no-regen-no-food(hp<14 food<18 无食)且 host=0 时,progress 应出 `★C257 night no-regen stand-down → prepNether hole-up+seal` 接 `prepNether ★NIGHT...hole up` + `night bunker dwell: covered=true`,**不再 6min `act="-"` 暴露冻结**;STALL 应消失。天亮后恢复 forageExplore。若仍冻: prepNether 封顶料不足(cobble buffer)或 self_preservation 互绞。
+- **观测**: ✅ `node --check missionNether.js` 通过。✅**重启 re-arm 即时验证**(20:00): bot @14,68,-11 从冻结→`★NIGHT hole up`→`bunker already covered hold y=68`→`night bunker dwell: covered=true hostiles=0`,**已封顶过夜,livelock 破除**。待整夜+下个 no-regen 夜复发检验。
+- **关联**: C253/C255/C256/C257 共同闭环"夜间生存(封顶不暴露)+装备进度(挖铁→甲→可夜战)+食物死锁(夜hold/昼觅食)"。重启同时清掉旧 missionNether 进程的活 livelock。
+
 ## C256. ★★★canFightNight 不看盔甲——裸甲bot自信不躲被夜swarm刷死(86%裸死总根因)（③prepNether 热加载，🟡待夜验证）
 - **触发(死亡5实时取证,决定性)**: 新世界 deaths 5次,死亡1/5 同模式。死亡5 death_log: `Zombie dist=1.2, y70 surface, coveredAbove=0(全暴露), hostileCount=5(5僵尸), gear{stone_sword, shield:true, armorCount=0}, action:self_preservation`。死亡1 同样有 shield、裸甲。两次都是**有剑有盾但裸甲**,夜间地表被群僵尸刷死。
 - **★总根因(prepNether.js:51 canFightNight)**: `canFightNight = sword && shield && hp≥10` **不检查盔甲**。它的 break(line238)意图"齐装夜间边干边砍对齐modes"。但裸甲(armorCount=0)身板: ①无减伤,挨满伤 ②挡不住5个方向 ③出不了那么高DPS秒5僵尸。结果 canFightNight=true→holeUpAtNight 在238 break **跳过封顶**→bot 地表夜战裸扛→必死。这串起死亡1(有盾破门→横穿死)、死亡5(有盾→不封顶→swarm死)、death_log **86%裸甲死**——共同机理=**把"有剑盾"误当"能夜战",忽略无甲=必败**。

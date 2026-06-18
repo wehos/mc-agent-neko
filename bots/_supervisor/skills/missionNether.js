@@ -1090,6 +1090,20 @@ export default async function missionNether(bot, ctx) {
                 prog(`prepNether stand-down override: bounded oak/apple ready ${oakReady}; clear surface backoff and let prepNether retry`);
             } else {
             prog(`prepNether stand-down: low-hp/no-food cooldown ${noRegenRemain.any}s lowHp=${noRegenRemain.lowHp}s surface=${noRegenRemain.surface}s (hp=${Math.round(bot.health)} food=${bot.food}); body stays free for survival modes`);
+            // ★C257 NIGHT no-regen freeze fix: at night forageExplore correctly self-gates (no
+            // wandering in the dark) and every handoff below is DAY/hostile-gated
+            // (daylightFamineHostileShelter, !isNightNow). So at night with hostiles16=0 the bot
+            // fell THROUGH them all to wait+continue and FROZE exposed — a confirmed 6-min stall
+            // @14,68,-11, hp12/food15 — "body stays free for survival modes" but nothing sealed it,
+            // and a wandering mob would then swarm the unarmored bot (the death-5 pattern). At night
+            // hand off to prepNether to hole up + SEAL until dawn PROACTIVELY (pairs with C256 so the
+            // unarmored bot actually seals), instead of freezing in the open until a mob arrives.
+            if (isNightNow()) {
+                prog(`★C257 night no-regen stand-down → prepNether hole-up+seal (don't freeze exposed) hp=${Math.round(bot.health)} food=${bot.food}`);
+                try { await skills.customSkill(bot, 'prepNether'); } catch (e) { prog(`night stand-down prepNether threw: ${e.message}`); }
+                await wait(1000);
+                continue;
+            }
             if (daylightFamineHostileShelter() && (!bot._lastFamineHostileShelterAt || Date.now() - bot._lastFamineHostileShelterAt > 30000)) {
                 bot._lastFamineHostileShelterAt = Date.now();
                 prog(`cooldown shelter handoff: no-regen/low-food exposed with hostiles16=${hostilesNear(16)} actionable16=${actionableHostilesNear(16)}; prepNether digs in instead of freezing`);
