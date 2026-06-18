@@ -114,8 +114,9 @@ function handle(msg) {
     // run_skill re-entry guard rejects the re-arm if something is already running.
     // MUST skip the busy-rejection results themselves: a rejection is also a
     // skill_result, so re-arming on it loops reject→re-arm→reject every 8s forever.
-    if (data.type === 'skill_result' && !String(data.error || '').startsWith('busy')) {
-        setTimeout(sendStickySkill, 8000);
+    if (data.type === 'skill_result') {
+        skillActive = false; lastSkillEndAt = Date.now();
+        if (!String(data.error || '').startsWith('busy')) setTimeout(sendStickySkill, 8000);
     }
 }
 
@@ -149,6 +150,7 @@ function relayInbox() {
         if (o && typeof o === 'object' && o.skill) {
             if (online) {
                 ws.send(JSON.stringify({ type: 'run_skill', skill: o.skill, args: o.args || [] }));
+                skillActive = true;
                 logEvent({ type: 'sent_skill', skill: o.skill, args: o.args || [] });
                 writeStatus();
             } else { logEvent({ type: 'send_failed_offline', skill: o.skill }); }
@@ -168,31 +170,124 @@ function relayInbox() {
     }
 }
 
+// ★BOM-SAFE JSON read (root-cause of the 2026-06-18 dead-sticky livelock): PowerShell's
+// Out-File/Set-Content writes UTF-8 *with* a BOM (ef bb bf). Node's JSON.parse chokes on
+// the leading BOM char ("Unexpected token '﻿'"), so when sticky_skill.json was last rewritten
+// from a PS session, sendStickySkill threw at the parse and SILENTLY returned every tick —
+// the bot got zero supervised-skill dispatches for 90+min after a respawn (dead-idle at
+// the death-zone spawn, watchdog restart-looping to no effect). Strip a leading BOM before
+// parsing, and LOG a real parse failure instead of swallowing it, so this can never go
+// silent again. Used by every disk-JSON read that a PS command might have written.
+function readJsonFile(file) {
+    let raw;
+    try { raw = fs.readFileSync(file, 'utf8'); } catch { return null; }
+    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1); // strip UTF-8/UTF-16 BOM
+    try { return JSON.parse(raw); }
+    catch (e) { logEvent({ type: 'json_parse_error', file: path.basename(file), error: String(e && e.message || e) }); return null; }
+}
+
 function sendStickySkill() {
-    let o; try { o = JSON.parse(fs.readFileSync(STICKY, 'utf8')); } catch { return; }
+    const o = readJsonFile(STICKY);
     if (!o || !o.skill) return;
     if (!(connected && ws && ws.readyState === ws.OPEN)) return;
     ws.send(JSON.stringify({ type: 'run_skill', skill: o.skill, args: o.args || [] }));
+    skillActive = true;
     logEvent({ type: 'sent_sticky_skill', skill: o.skill, args: o.args || [] });
     writeStatus();
+}
+
+// ── RECONNECT: bounded exponential backoff + de-duplicated logging ────────────────
+// WHY: the agent process (the 48909 WS server) is cycled by the watchdog on a ~25min
+// STUCK-ZONE timer whenever the bot livelocks in place. Each cycle drops this client's
+// socket; the OLD code retried on a FIXED 3s and logged BOTH bridge_error AND
+// bridge_disconnected per failed attempt, so one restart gap wrote ~6 disconnect/error
+// pairs — and a prolonged outage (e.g. watchdog itself down) spammed events.log forever
+// at 20 lines/min with no diagnostic value. Now: backoff caps the retry rate, the cause
+// is unpacked from the AggregateError, and only a REAL disconnect (a live socket that
+// dropped) logs bridge_disconnected — failed reconnect attempts no longer masquerade as
+// disconnects, so the disconnect count finally means "agent went down" 1:1.
+const RECONNECT_MIN_MS = 2000;
+const RECONNECT_MAX_MS = 8000;   // tight cap: common case is a ~15-25s restart gap, so
+                                 // stay snappy — reconnect within 8s of the port returning.
+let reconnectDelay = RECONNECT_MIN_MS;
+let reconnectTimer = null;
+let wasConnected = false;        // true only after a live OPEN — gates the disconnect log
+let outageErrLogged = false;     // log the first error of each outage, then throttle
+let lastErrLog = 0;
+// ★ sticky idle tracking (idle-watchdog below): skillActive=true between a run_skill send
+// and its skill_result. A busy-rejection clears it (the skill never actually started).
+let skillActive = false;
+let lastSkillEndAt = 0;
+
+function scheduleReconnect() {
+    if (reconnectTimer) return;  // one retry per attempt even if error+close both fire
+    reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+}
+
+// Node's happy-eyeballs resolves localhost to BOTH ::1 and 127.0.0.1, tries both, and
+// when both are refused (the normal agent-restart gap) wraps them in an AggregateError
+// whose .message is the bare word "AggregateError" — hiding ECONNREFUSED. Unpack the
+// nested .errors / .cause / .code so the log distinguishes an expected restart gap
+// (ECONNREFUSED) from a genuine fault (anything else).
+function describeErr(e) {
+    if (!e) return 'unknown';
+    const parts = [];
+    if (e.code) parts.push(e.code);
+    if (Array.isArray(e.errors)) {
+        for (const sub of e.errors) parts.push((sub && (sub.code || sub.message)) || String(sub));
+    } else if (e.cause) {
+        parts.push(e.cause.code || e.cause.message || String(e.cause));
+    }
+    const base = String(e.message || e);
+    return parts.length ? `${base} [${[...new Set(parts)].join(',')}]` : base;
 }
 
 function connect() {
     ws = new WebSocket(URL);
     ws.on('open', () => {
-        connected = true; logEvent({ type: 'bridge_connected' }); writeStatus();
+        connected = true; wasConnected = true;
+        reconnectDelay = RECONNECT_MIN_MS;   // reset backoff on every success
+        outageErrLogged = false;
+        logEvent({ type: 'bridge_connected' }); writeStatus();
         // Re-arm the supervised skill a few seconds after connect (give the freshly
         // (re)started agent time to finish spawning) so a death-restart can't leave the
         // LLM brain driving the bot back into the mobs that killed it.
         setTimeout(sendStickySkill, 3500);
     });
     ws.on('message', handle);
-    ws.on('close', () => { connected = false; logEvent({ type: 'bridge_disconnected' }); writeStatus(); setTimeout(connect, 3000); });
-    ws.on('error', (e) => { logEvent({ type: 'bridge_error', error: String(e.message || e) }); });
+    ws.on('close', () => {
+        // A failed reconnect ATTEMPT also emits 'close' (right after 'error'). Only a
+        // socket that was actually live counts as a disconnect — otherwise every retry
+        // would log a phantom bridge_disconnected (the old storm).
+        if (wasConnected) { logEvent({ type: 'bridge_disconnected' }); }
+        connected = false; wasConnected = false; writeStatus();
+        scheduleReconnect();
+    });
+    ws.on('error', (e) => {
+        const now = Date.now();
+        if (!outageErrLogged || now - lastErrLog >= 30000) {
+            outageErrLogged = true; lastErrLog = now;
+            logEvent({ type: 'bridge_error', error: describeErr(e), nextRetryMs: reconnectDelay });
+        }
+    });
 }
 
 connect();
 setInterval(relayInbox, 1000);
 setInterval(writeStatus, 5000);
+// ★ STICKY IDLE-WATCHDOG: the 8s re-arm after a skill_result is one-shot and is SKIPPED on a
+// busy-rejection — so when that re-arm raced a momentary autonomous-mode action (e.g. dusk
+// bunkerDown) and got busy-rejected, the bot sat with NO supervised skill until the next WS
+// blip (live 2026-06-18: missionNether idle ~1h after a STUCK-ZONE cancel, "running":null).
+// Re-arm whenever idle (no skill active) for >40s; a lost re-arm now self-heals within ~30s.
+// Busy-rejections during this are harmless — they just clear skillActive and we retry later.
+setInterval(() => {
+    if (!(connected && ws && ws.readyState === ws.OPEN)) return;
+    if (skillActive) return;
+    if (Date.now() - lastSkillEndAt < 40000) return;
+    logEvent({ type: 'sticky_idle_rearm', idleMs: Date.now() - lastSkillEndAt });
+    sendStickySkill();
+}, 30000);
 logEvent({ type: 'bridge_started', url: URL });
 console.log(`[bridge] started, connecting to ${URL}; frame=${FRAME}`);

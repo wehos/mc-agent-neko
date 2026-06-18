@@ -18,6 +18,14 @@ async function say(agent, message) {
 function famineBodyFreeze(agent, owner) {
     const bot = agent && agent.bot;
     if (!bot || !bot.entity) return false;
+    // ★C228: yield to an explicitly-dispatched recovery VENTURE (③ missionNether's FAMINE
+    // backoff dispatches forageExplore to walk OUT of a food desert). The skill-name allowlist
+    // below CANNOT see it — a nested customSkill leaves bot._currentSkill = the sticky
+    // ('missionNether'), so the freeze pinned the body and the dispatched forage couldn't move
+    // → permanent absorbing-state freeze at food0/hp10 (the multi-hour lock). While the venture
+    // flag is fresh the mover owns the body (forageExplore carries its own night/hostile/hp-abort
+    // gates — proper exit, not a hole). Same flag-yield mechanism as C225's noRegenSafeAirHold.
+    if (Date.now() < (bot._recoveryVentureUntil || 0)) return false;
     if (bot.food > 0 && !(bot.food <= 2 && bot.health <= 8)) return false;
     const skill = bot._currentSkill || '';
     // Food-acquisition / escape skills MUST be allowed to move the body even at food=0 — else
@@ -25,7 +33,7 @@ function famineBodyFreeze(agent, owner) {
     // travel-budget safety gate (won't march into deep water / far targets at low food), so
     // whitelisting it here is the freeze's proper exit, not a hole. escapePlan likewise owns
     // movement authority when breaking a trap.
-    if (/feedUp|surfaceUp|consume|auto_eat|forage|escapePlan/i.test(skill)) return false;
+    if (/feedUp|surfaceUp|consume|auto_eat|forage|forageExplore|migrate|escapePlan|digReset/i.test(skill)) return false;
     const edible = bot.inventory && bot.inventory.items().some(i => i && i.name && FAMINE_FOOD_RE.test(i.name));
     if (edible) return false;
     const p = bot.entity.position;
@@ -2172,8 +2180,23 @@ const modes_list = [
                 // could never fire while a child loop held the stack — same trap as the
                 // chopWood deep-dig; an always-mode is the only layer that sees it all.)
                 if (!this.pinAnchor || bot.entity.position.distanceTo(this.pinAnchor) > 10) {
-                    this.pinAnchor = bot.entity.position.clone(); this.pinAt = now; this.pinKick = 0;
-                } else if (now - this.pinAt > 5 * 60 * 1000 && now - (this.pinKick || 0) > 60000) {
+                    // Moved out of the pin zone — the wedge/livelock broke. Clear the kick
+                    // counter and persistent-pin escalation flags so the next pin gets a fresh
+                    // window (and a fresh, un-backed-off cadence).
+                    this.pinAnchor = bot.entity.position.clone(); this.pinAt = now; this.pinKick = 0; this.pinKickCount = 0;
+                    try { bot._persistentPinKicks = 0; bot._persistentPinSince = 0; } catch (e) {}
+                } else if (now - this.pinAt > 5 * 60 * 1000
+                           // ★BACKOFF (livelock fix, C2xx): the kick used to fire every 60s
+                           // forever. When the underlying pin can't be broken by a forced
+                           // interrupt (food desert / no wood — C229/C233), re-kicking every
+                           // minute is pure churn: cancel→bridge re-arms the SAME sticky in 8s→
+                           // re-deadlock→kick again, stacking with reconnect storms. Grow the
+                           // interval with each ineffective kick (1m→2m→4m→8m cap) so the reflex
+                           // CONVERGES instead of spinning; once kicks prove useless we escalate
+                           // to a signal (see the kick block below). The counter resets the
+                           // instant the bot leaves the pin zone, so a kick that DOES work pays
+                           // no backoff penalty next time.
+                           && now - (this.pinKick || 0) > Math.min(60000 * Math.pow(2, this.pinKickCount || 0), 8 * 60 * 1000)) {
                     // ★BUNKER EXEMPTION (idle-wedge 同款,pin-breaker 漏了这层 — 实拍: 夜间
                     // 蹲坑驻留>5min 被判 pinned,每60s强拆一次,bot被踢到夜间地表乱跑,撞上
                     // enderman 拉响 risk83。正当夜蹲(夜间+头顶有盖)的"钉住"是庇护不是死锁。)
@@ -2285,10 +2308,38 @@ const modes_list = [
                         this.pinAnchor = bot.entity.position.clone();
                         this.pinAt = now;
                         this.pinKick = 0;
+                        this.pinKickCount = 0;
+                        try { bot._persistentPinKicks = 0; bot._persistentPinSince = 0; } catch (e) {}
                     }
                     if (!nightBunker && !lowFoodShelter && !famineHold && !noRegenLowHpHold && !bodyBudgetContainedHold && !tableRecoveryHold && !killBoxLowFoodHold && !activeBodyWork && !activeEscapeWork) {
                         this.pinKick = now;
-                        say(agent, 'Pinned 15min+ — kicking the stack (forced interrupt).');
+                        this.pinKickCount = (this.pinKickCount || 0) + 1;
+                        const kicks = this.pinKickCount;
+                        if (kicks <= 3) {
+                            // Early kicks: a forced interrupt often DOES break a merely-stuck
+                            // loop (a hung await returns to missionNether's top-of-loop BREAKOUT).
+                            // Give it a few tries — but already at the backed-off cadence above.
+                            say(agent, `Pinned 15min+ — kicking the stack (forced interrupt, kick #${kicks}).`);
+                        } else {
+                            // ★ESCALATE (livelock fix): the kick has fired 4+ times and the bot is
+                            // STILL pinned in the same 10-block box — the interrupt is NOT breaking
+                            // this. Repeating it forever is exactly the per-minute livelock the user
+                            // reported. Stop the chatty per-kick narration; raise ONE loud
+                            // persistent-pin signal a higher layer (overseer / supervisor) can act on
+                            // — the real fix for an unbreakable pin is a RELOCATING recovery venture
+                            // (forageExplore / escapePlan) that walks the bot out of the box, which
+                            // the reflex layer doesn't dispatch itself. Meanwhile the interrupt keeps
+                            // firing only at the 8-min backed-off cadence, so the reflex stops
+                            // churning cancel→re-arm against the bridge's sticky loop.
+                            bot._persistentPinKicks = kicks;
+                            if (!bot._persistentPinSince) bot._persistentPinSince = this.pinAt;
+                            const pinMin = Math.round((now - this.pinAt) / 60000);
+                            say(agent, `PERSISTENT PIN — ${kicks} kicks ineffective over ${pinMin}min; the forced interrupt can't break this (needs a relocating recovery venture).`);
+                            try {
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [reflex_watchdog] ★PERSISTENT PIN — ${kicks} kicks ineffective, pinned ${pinMin}min hp=${Math.round(bot.health || 0)} food=${bot.food} skill=${bot._currentSkill || '-'} mob=${bot._mobility ? bot._mobility.state : '-'} — kick alone won't break it; escalate: dispatch a relocating recovery (forageExplore/escapePlan)\n`);
+                            } catch (e) {}
+                        }
                         try { bot.interrupt_code = true; } catch (e) {}
                         try { bot._chopGen = (bot._chopGen || 0) + 1; } catch (e) {}
                         try { bot._supervisorCancelAt = Date.now(); } catch (e) {}
@@ -2412,7 +2463,28 @@ const modes_list = [
                 }
                 const upOpen = !solid(bot.blockAt(m.offset(0, 2, 0)));
                 const inWater = /water/.test((bot.blockAt(m) || {}).name || '') || /water/.test((bot.blockAt(m.offset(0, 1, 0)) || {}).name || '');
-                st = inWater ? 'SWIM' : (exits.length ? 'FREE' : (upOpen ? 'POCKET' : 'ENTOMBED'));
+                // ★C231: sky-visibility probe (3x3 cols up 36) — authoritative "truly covered above"
+                // signal. Computed BEFORE state so an OPEN-SKY ledge/pillar (no walkable exits because
+                // neighbors are drops, but sky visible) is NOT mislabeled POCKET. Live bug: bot at open
+                // y94 surface → exits=0 + upOpen → POCKET → bogus pillar/dig-up reflex + enclosed→surfaceUp
+                // competing with the famine VENTURE → stuck. POCKET now requires upOpen AND enc(covered);
+                // upOpen but sky-visible ⇒ FREE (exposed ledge, can travel). !upOpen ⇒ ENTOMBED (unchanged).
+                let enc = true;
+                try {
+                    const mP = bot.entity.position.floored();
+                    outer:
+                    for (const ddx of [-4, 0, 4]) {
+                        for (const ddz of [-4, 0, 4]) {
+                            let covered = false;
+                            for (let dy = 2; dy <= 36; dy++) {
+                                const cb = bot.blockAt(mP.offset(ddx, dy, ddz));
+                                if (cb && cb.boundingBox === 'block') { covered = true; break; }
+                            }
+                            if (!covered) { enc = false; break outer; }
+                        }
+                    }
+                } catch (e) { enc = false; }
+                st = inWater ? 'SWIM' : (exits.length ? 'FREE' : ((upOpen && enc) ? 'POCKET' : (upOpen ? 'FREE' : 'ENTOMBED')));
                 // regional entrapment check (only escalates FREE — the others have own reflexes)
                 const p = bot.entity.position;
                 if (!this.regAnchor || p.distanceTo(this.regAnchor) > 20) { this.regAnchor = p.clone(); this.regAt = now; }
@@ -2452,21 +2524,7 @@ const modes_list = [
                 // = 与开放天空隔离(开口至少在远处/高处)。进入需连续2次评定(防单格屋檐误
                 // 判),退出即时(怀疑暴露就按暴露处理,保守方向不对称)。每2s一评,~315次
                 // blockAt,毫秒级。消费方: sp蹲坑/prepNether夜hold/chopWood NIGHT-BAIL。)
-                let enc = true;
-                try {
-                    const mP = bot.entity.position.floored();
-                    outer:
-                    for (const ddx of [-4, 0, 4]) {
-                        for (const ddz of [-4, 0, 4]) {
-                            let covered = false;
-                            for (let dy = 2; dy <= 36; dy++) {
-                                const cb = bot.blockAt(mP.offset(ddx, dy, ddz));
-                                if (cb && cb.boundingBox === 'block') { covered = true; break; }
-                            }
-                            if (!covered) { enc = false; break outer; }
-                        }
-                    }
-                } catch (e) { enc = false; }
+                // enc computed above (moved before state determination for the C231 POCKET sky-check)
                 this._encStreak = enc ? (this._encStreak || 0) + 1 : 0;
                 const enclosed = this._encStreak >= 2;
                 if (enclosed !== this._lastEnc) {
@@ -2485,6 +2543,14 @@ const modes_list = [
             const noRegenSafeAirHold = () => {
                 const nowHold = Date.now();
                 if (!(bot.health < 14 && bot.food < 18) || normalEdibleHeld()) return null;
+                // ★C225: yield to an explicitly-dispatched recovery VENTURE (forageExplore/escapePlan
+                // travelling to food). The skill-name allowlist (survivalSkill below) can't see it —
+                // nested customSkill leaves bot._currentSkill = the sticky ('missionNether'), so the
+                // hold froze the body and the dispatched forage couldn't move (live: hp9 food17 POCKET,
+                // deadlock-breaker fired forageExplore but this hold pinned it → permanent no-regen
+                // freeze). The dispatcher sets _recoveryVentureUntil; while fresh, the venture owns
+                // movement (it carries its own night/hostile/hp-abort gates — proper exit, not a hole).
+                if (nowHold < (bot._recoveryVentureUntil || 0)) return null;
                 const prepLow = Math.max(0, (bot._prepLowHpNoFoodUntil || 0) - nowHold);
                 const prepSurface = Math.max(0, (bot._prepNoFoodSurfaceBackoffUntil || 0) - nowHold);
                 const isNight = (() => { try { const t = bot.time && bot.time.timeOfDay; return t >= 12000 && t <= 23500; } catch (e) { return false; } })();
@@ -2582,7 +2648,12 @@ const modes_list = [
             const ensurePickForStone = async (block, why = '') => {
                 if (!block || !STONY_MOBILITY.test(block.name || '')) return true;
                 if (!hasPick()) await ensureEmergencyPick(why);
-                if (!hasPick()) return plannedNoPickStone();
+                // Sealed inside an enclosed cavity with no pick = trapped: allow bare-hand stone
+                // breakout (slow, no drop, but the block disappears and the bot escapes). Without
+                // this the reflex gates every direction (all stone) and the bot rots sealed-in
+                // (observed: 1.5h frozen at y79, POCKET no-pick stone gate looping). breakBlockAt/
+                // bot.dig now permit bounded bare-hand stone; only obsidian/bedrock stay refused.
+                if (!hasPick()) return plannedNoPickStone() || !!(bot._mobility && bot._mobility.enclosed);
                 if (heldIsPick()) return true;
                 const pick = bot.inventory.items().find(it => /_pickaxe$/.test(it.name));
                 try { if (pick) await skills.equip(bot, pick.name); } catch (e) {}
@@ -2626,10 +2697,25 @@ const modes_list = [
                         if (!STONY_MOBILITY.test(fresh.name || '')) { try { await bot.tool.equipForBlock(fresh); } catch (e) {} }
                         try { bot.clearControlStates(); } catch (e) {}
                         try { await bot.lookAt(fresh.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
+                        // ★DIG TIMEOUT must scale with ACTUAL dig time (C223). A fixed 5000ms aborts
+                        // any dig slower than 5s — but bare-hand stone is ~7.5s (deepslate ~16.5s).
+                        // Since C221 opened bare-hand stone digging to escape entombment, this fixed
+                        // timeout SILENTLY DEFEATED it: every bare-hand stone dig hit 5s → stopDigging
+                        // → "Digging aborted" → 0 progress → re-fire → PERMANENT entombment (act_trace:
+                        // bot dug seq 126→129 on the SAME stone block, ok:false ms:5005 each, never
+                        // broke free). Scale the cutoff to the block's real digTime×1.4 + 1.5s (cap 20s)
+                        // and extend the body-dig lock to match so no other owner steals the slot mid-dig.
+                        let digMs = 5000;
+                        try {
+                            const ht = bot.heldItem ? bot.heldItem.type : null;
+                            const dt = fresh.digTime(ht);
+                            if (Number.isFinite(dt) && dt > 0) digMs = Math.min(20000, Math.round(dt * 1.4) + 1500);
+                        } catch (e) {}
+                        bot._bodyDigLockUntil = Date.now() + digMs + 2000;
                         try {
                             await Promise.race([
                                 bot.dig(fresh, true),
-                                new Promise((_, rej) => setTimeout(() => rej(new Error('dig-timeout')), 5000)),
+                                new Promise((_, rej) => setTimeout(() => rej(new Error('dig-timeout')), digMs)),
                             ]);
                             return true;
                         } catch (e) {
@@ -2978,7 +3064,12 @@ const modes_list = [
                     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
                         const b1 = bot.blockAt(m2.offset(dx, 1, dz));
                         if (b1 && b1.boundingBox === 'block' && !/bedrock|water|lava/.test(b1.name)) {
-                            if (!hasPick() && STONY_MOBILITY.test(b1.name)) {
+                            // Skip no-pick stone ONLY when NOT enclosed (bare-hand stone is slow/no-drop,
+                            // not worth it for a normal step-out). When ENCLOSED (sealed in a cavity), the
+                            // bot MUST dig out even bare-handed — fall through to guardedDig (ensurePickForStone
+                            // now permits enclosed no-pick stone). Without this the bot rots sealed-in forever.
+                            const enclosedTrapped = !!(bot._mobility && bot._mobility.enclosed);
+                            if (!hasPick() && STONY_MOBILITY.test(b1.name) && !enclosedTrapped) {
                                 try { bot._pocketNoPickBlockedAt = Date.now(); } catch (e) {}
                                 try {
                                     fs.appendFileSync('bots/_supervisor/progress.txt',
@@ -3093,7 +3184,13 @@ const modes_list = [
             };
             const ensurePickForDig = async (block, seq) => {
                 if (!block || !stony.test(block.name || '')) return true;
-                if (!pickItem()) return Date.now() < (bot._plannedNoPickStoneUntil || 0);
+                // ★MASTER dig gate (wraps bot.dig — ALL digging passes here). No-pick stone is
+                // normally refused unless a planned breach window is open. EXCEPTION: when sealed
+                // inside an enclosed cavity (bot._mobility.enclosed), allow bare-hand stone — the
+                // bot MUST be able to dig out of its own cobble bunker even pickless, or it rots
+                // sealed forever (observed 1.5h). This is the lowest gate; without it the higher
+                // breakBlockAt/surfaceUp/POCKET-reflex fixes are all still blocked here.
+                if (!pickItem()) return (Date.now() < (bot._plannedNoPickStoneUntil || 0)) || !!(bot._mobility && bot._mobility.enclosed);
                 if (heldIsPick()) return true;
                 try { await bot.equip(pickItem(), 'hand'); } catch (e) {}
                 await new Promise(r => setTimeout(r, 80));
@@ -3219,6 +3316,85 @@ const modes_list = [
                 if (this.sz > 10 * 1024 * 1024) { try { fs.renameSync('bots/_supervisor/act_trace.jsonl', 'bots/_supervisor/act_trace.jsonl.1'); } catch (e) {} this.sz = 1; }
                 fs.appendFileSync('bots/_supervisor/act_trace.jsonl', line);
                 this.sz += line.length;
+            } catch (e) {}
+        }
+    },
+    {
+        name: 'motion_quality',
+        description: 'Telemetry: movement+action QUALITY — air-swing rate, edge-stall ms, cross-efficiency. Lets us verify locomotion fixes with numbers, not eyeballs.',
+        interrupts: [],
+        on: true,
+        active: false,
+        always: true,   // pure observer
+        installed: false,
+        lastW: 0, sz: 0,
+        swings: [], hits: [],
+        lastPos: null, stallStart: 0, edgeStallMs: 0,
+        winStart: 0, _disp: 0, _elapsed: 0,
+        update: async function (agent) {
+            // ★走位质量心电图 (用户第三视角实拍: bot 卡台阶边、对空挥、跨地形难). act_trace
+            // 记"按了什么键"但看不出"挥了却没打中(空挥)"或"想走却没位移(卡边)"。这里一次性
+            // 包裹 bot.attack 计挥击、监听 entityHurt 计命中,5s 汇总: 空挥率 / 台阶卡死 ms /
+            // 平均移动速度(跨地形效率)。修完 locomotion 用数字验证,而非肉眼"感觉好点了"。
+            const bot = agent.bot;
+            const now = Date.now();
+            if (!this.installed && bot && bot.entity) {
+                this.installed = true;
+                try {
+                    const self = this;
+                    const origAttack = bot.attack.bind(bot);
+                    bot.attack = function (entity, ...rest) {
+                        try { self.swings.push({ t: Date.now(), id: entity && entity.id }); } catch (e) {}
+                        return origAttack(entity, ...rest);
+                    };
+                    bot.on('entityHurt', (e) => {
+                        try { if (e && e !== bot.entity) self.hits.push({ t: Date.now(), id: e.id }); } catch (er) {}
+                    });
+                } catch (e) {}
+                this.winStart = now;
+            }
+            if (now - this.lastW < 1000) return;
+            this.lastW = now;
+            try {
+                const cs = bot.controlState || {};
+                const p = bot.entity.position;
+                const moving = (bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()) || !!cs.forward;
+                if (this.lastPos) {
+                    const d = Math.hypot(p.x - this.lastPos.x, p.z - this.lastPos.z);
+                    if (moving && d < 0.1) { if (!this.stallStart) this.stallStart = now; this.edgeStallMs = now - this.stallStart; }
+                    else { this.stallStart = 0; this.edgeStallMs = 0; }
+                    this._disp += d; this._elapsed += 1;
+                }
+                this.lastPos = { x: p.x, z: p.z };
+
+                if (now - this.winStart >= 5000) {
+                    const since = this.winStart;
+                    const swings = this.swings.filter(s => s.t >= since);
+                    let air = 0;
+                    for (const s of swings) {
+                        const hit = this.hits.some(h => h.id === s.id && h.t >= s.t - 50 && h.t <= s.t + 700);
+                        if (!hit) air++;
+                    }
+                    const crossEff = this._elapsed ? +(this._disp / this._elapsed).toFixed(2) : 0; // avg blocks/sec
+                    const line = JSON.stringify({
+                        t: new Date().toISOString().slice(11, 19),
+                        swings: swings.length,
+                        airSwings: air,
+                        airRate: swings.length ? +(air / swings.length).toFixed(2) : 0,
+                        edgeStallMs: this.edgeStallMs,
+                        crossEff,
+                        path: moving ? 1 : 0,
+                        act: (agent.actions && agent.actions.currentActionLabel) || '-',
+                        mob: (bot._mobility && bot._mobility.state) || '-',
+                    }) + '\n';
+                    this.swings = this.swings.filter(s => s.t >= now - 10000);
+                    this.hits = this.hits.filter(h => h.t >= now - 10000);
+                    this._disp = 0; this._elapsed = 0; this.winStart = now;
+                    if (this.sz === 0) { try { this.sz = fs.statSync('bots/_supervisor/motion_quality.jsonl').size; } catch (e) { this.sz = 1; } }
+                    if (this.sz > 10 * 1024 * 1024) { try { fs.renameSync('bots/_supervisor/motion_quality.jsonl', 'bots/_supervisor/motion_quality.jsonl.1'); } catch (e) {} this.sz = 1; }
+                    fs.appendFileSync('bots/_supervisor/motion_quality.jsonl', line);
+                    this.sz += line.length;
+                }
             } catch (e) {}
         }
     },

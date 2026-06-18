@@ -645,15 +645,23 @@ export async function attackEntity(bot, entity, kill=true) {
     await equipHighestAttack(bot)
 
     if (!kill) {
-        if (bot.entity.position.distanceTo(pos) > 5) {
+        // ★够不到/目标已失效不出手 (与 kill 分支同款臂展守卫 — 用户实拍"对空气挥舞"的根治).
+        // 旧逻辑逼近到 5 格就裸 bot.attack,不复检 reach/存活 → 目标移开或已死仍挥一记空拳.
+        // 收到近战射程 3.5 格内再挥,挥前复检目标仍有效.
+        if (bot.entity.position.distanceTo(pos) > 3.5) {
             console.log('moving to mob...')
-            await goToPosition(bot, pos.x, pos.y, pos.z);
+            await goToPosition(bot, pos.x, pos.y, pos.z, 2);
+        }
+        if (!entity.isValid || bot.entity.position.distanceTo(entity.position) > 3.5) {
+            log(bot, `⚠️ ${entity?.name || 'target'} 够不到/已消失 — 不对空气挥.`);
+            return false;
         }
         console.log('attacking mob...')
         await bot.attack(entity);
         // bot.attack sends use_entity fire-and-forget; settle one tick so the
         // damage tick lands before caller queries entity state.
         await tickConfirm.sleepMs(100);
+        return true;
     }
     else {
         // ★够不到不出手 (用户实拍"对空气挥舞"的机理根治,与 safeDig 臂展守卫同款):
@@ -783,14 +791,21 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
         // use canSeeBlock to pre-skip — x-ray ore is buried (6 faces hidden) and would all be skipped.
         const _hard = /obsidian|ancient_debris|reinforced/.test(cur.name || '');
         const _digMs = _hard ? maxMs : Math.min(maxMs, 8000);
-        await Promise.race([
-            bot.dig(cur),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('dig-timeout')), _digMs)),
-        ]);
+        // ★Interrupt-aware (same fix as breakBlockAt): abort within ~200ms on cancel/preempt
+        // instead of flailing out the full backstop — collectBlock's vein digs go through here.
+        let _sdIv = null;
+        try {
+            await Promise.race([
+                bot.dig(cur),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('dig-timeout')), _digMs)),
+                new Promise((_, rej) => { _sdIv = setInterval(() => { try { if (bot.interrupt_code) rej(new Error('interrupted')); } catch (e) {} }, 200); }),
+            ]);
+        } finally { if (_sdIv) clearInterval(_sdIv); }
         if (pickup) { try { await pickupNearbyItems(bot); } catch (e) {} }
         return 'ok';
     } catch (e) {
         try { bot.stopDigging(); } catch (_) {}
+        if (e && e.message === 'interrupted') return 'error';
         return (e && e.message === 'dig-timeout') ? 'timeout' : 'error';
     }
 }
@@ -1224,29 +1239,56 @@ export async function breakBlockAt(bot, x, y, z) {
         if (bot.game.gameMode !== 'creative') {
             await bot.tool.equipForBlock(block);
             const itemId = bot.heldItem ? bot.heldItem.type : null
+            // canHarvest() answers "will this DROP an item", NOT "can I break it". A bare-handed
+            // bot CAN break cobblestone/stone/netherrack (slow, no drop, but the block disappears)
+            // — and that is exactly what un-traps a pickaxe-less bot sealed inside its own cobble
+            // bunker. Gating on canHarvest left such a bot to rot (observed: 1.5h frozen, enclosed,
+            // no pick). Gate on REAL diggability instead: allow if digTime is finite and bounded
+            // (<9s/block); only truly un-diggable-by-hand blocks (obsidian/bedrock, digTime huge or
+            // Infinity) are refused. Drop loss is irrelevant for escape digging. NOTE: resource
+            // mining keeps its own canHarvest gate in collectBlock — this only frees breakBlockAt
+            // (navigation/escape digging).
             if (!block.canHarvest(itemId)) {
-                log(bot, `Don't have right tools to break ${block.name}.`);
-                return false;
+                let digMs = Infinity;
+                try { digMs = block.digTime(itemId, false, false, false); } catch (e) { digMs = 0; }
+                if (!Number.isFinite(digMs) || digMs > 9000) {
+                    log(bot, `Can't break ${block.name} with ${bot.heldItem ? bot.heldItem.name : 'hand'} (digTime ${digMs}ms) — skipping.`);
+                    return false;
+                }
+                log(bot, `Breaking ${block.name} bare-handed/wrong-tool (no drop, ~${Math.round(digMs)}ms).`);
             }
         }
         
         // Add timeout to prevent infinite hanging
         const digTimeout = 60000; // 60 seconds max
         const digPromise = bot.dig(block, true);
-        const timeoutPromise = new Promise((_, reject) => 
+        const timeoutPromise = new Promise((_, reject) =>
             setTimeout(() => reject(new Error('Dig timeout')), digTimeout)
         );
-        
+        // ★Interrupt-aware: poll bot.interrupt_code so a supervisor cancel / mode preempt aborts
+        // the dig within ~200ms instead of waiting out the 60s timeout. Without this, an in-flight
+        // bot.dig() ignored cancel for up to 60s, and a chained mining loop compounded that to the
+        // observed 4-minute "won't yield" hang. (cancelSkill now also calls stopDigging directly.)
+        let _digIv = null;
+        const interruptPromise = new Promise((_, reject) => {
+            _digIv = setInterval(() => { try { if (bot.interrupt_code) reject(new Error('Interrupted')); } catch (e) {} }, 200);
+        });
         try {
-            await Promise.race([digPromise, timeoutPromise]);
+            await Promise.race([digPromise, timeoutPromise, interruptPromise]);
             log(bot, `Broke ${block.name} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
         } catch (error) {
             if (error.message === 'Dig timeout') {
                 log(bot, `⚠️ Digging ${block.name} timed out after ${digTimeout/1000}s, stopping dig.`);
-                bot.stopDigging();
+                try { bot.stopDigging(); } catch (e) {}
+                return false;
+            }
+            if (error.message === 'Interrupted') {
+                try { bot.stopDigging(); } catch (e) {}
                 return false;
             }
             throw error;  // Re-throw other errors
+        } finally {
+            if (_digIv) clearInterval(_digIv);
         }
     }
     else {
@@ -2194,6 +2236,84 @@ export async function stepEdgeAssist(bot, opts = {}) {
     candidates.sort((a, b) => a.dist - b.dist);
     const c = candidates[0];
     if (!c) {
+        // C227: no walkable step-up candidate. If a clearable wall blocks the
+        // travel direction (2-block wall: front foot+head both solid, floor
+        // below), dig a doorway through it instead of giving up and letting the
+        // body jump-flail (pathfinder parkour kept jumping at the wall). Only
+        // the goal/yaw direction — never dig sideways/backward walls.
+        const wallDirs = [];
+        for (const d of [dirFromGoal(), dirFromYaw()]) {
+            if (!d || (!d[0] && !d[1])) continue;
+            if (!wallDirs.some(x => x[0] === d[0] && x[1] === d[1])) wallDirs.push(d);
+        }
+        for (const [dx, dz] of wallDirs) {
+            const wFoot = bot.blockAt(cell.offset(dx, 0, dz));
+            const wHead = bot.blockAt(cell.offset(dx, 1, dz));
+            const wBelow = bot.blockAt(cell.offset(dx, -1, dz));
+            // a real 2-block wall ahead, both blocks clearable (pick-gated, no
+            // hazard/bedrock/station), and a solid non-hazard floor to land on.
+            if (!solid(wFoot) || !solid(wHead)) continue;
+            if (!clearableStepRoof(wFoot) || !clearableStepRoof(wHead)) continue;
+            if (!solid(wBelow) || bad(wBelow)) continue;
+            const wallKey = `wall:${cell.x},${cell.y},${cell.z}->${dx},${dz}`;
+            if ((bot._stepEdgeAssistCooldowns[wallKey] || 0) > now) continue;
+            const target = cell.offset(dx, 0, dz);
+            motionAudit(bot, 'step_edge.wall_dig.begin', {
+                why, goal, dir: [dx, dz],
+                foot: blockObj(wFoot), head: blockObj(wHead), below: blockObj(wBelow),
+                from: { x: cell.x, y: cell.y, z: cell.z }, env: envSnap(),
+            });
+            let dugOk = false;
+            let derr = null;
+            try {
+                bot._bodyDigLockOwner = `${owner}:wall-dig`;
+                bot._bodyDigLockUntil = Date.now() + 12000;
+                try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
+                try { bot.clearControlStates(); } catch (e) {}
+                // dig head first (avoid the head-block dropping onto us), then foot
+                for (const wp of [cell.offset(dx, 1, dz), cell.offset(dx, 0, dz)]) {
+                    const fresh = bot.blockAt(wp);
+                    if (!fresh || fresh.boundingBox !== 'block') continue;
+                    if (!clearableStepRoof(fresh)) continue;
+                    try { if (bot.tool && bot.tool.equipForBlock) await bot.tool.equipForBlock(fresh); } catch (e) {}
+                    try { await bot.lookAt(fresh.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
+                    await Promise.race([
+                        bot.dig(fresh, true),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('wall-dig-timeout')), 5200)),
+                    ]);
+                    await new Promise(r => setTimeout(r, 120));
+                }
+                const aFoot = bot.blockAt(cell.offset(dx, 0, dz));
+                const aHead = bot.blockAt(cell.offset(dx, 1, dz));
+                dugOk = open(aFoot) && open(aHead);
+                if (dugOk) {
+                    // walk into the cleared doorway so the next plan starts past it
+                    try { await bot.lookAt(target.offset(0.5, 1.0, 0.5), true); } catch (e) {}
+                    bot.setControlState('forward', true);
+                    const ws = Date.now();
+                    while (Date.now() - ws < 750) {
+                        const q = bot.entity.position;
+                        if (Math.floor(q.x) === target.x && Math.floor(q.z) === target.z) break;
+                        await new Promise(r => setTimeout(r, 45));
+                    }
+                    try { bot.clearControlStates(); } catch (e) {}
+                }
+            } catch (e) {
+                derr = e && e.message ? e.message : String(e);
+            } finally {
+                try { bot.clearControlStates(); } catch (e) {}
+                if (bot._bodyDigLockOwner === `${owner}:wall-dig`) {
+                    bot._bodyDigLockOwner = null;
+                    bot._bodyDigLockUntil = 0;
+                }
+            }
+            if (!dugOk) bot._stepEdgeAssistCooldowns[wallKey] = Date.now() + 12000;
+            motionAudit(bot, 'step_edge.wall_dig.end', {
+                why, goal, ok: dugOk, error: derr, dir: [dx, dz],
+                from: { x: cell.x, y: cell.y, z: cell.z }, env: envSnap(),
+            });
+            if (dugOk) return true;
+        }
         motionAudit(bot, 'step_edge.none', {
             why,
             goal,
@@ -2540,7 +2660,10 @@ export async function goToGoal(bot, goal) {
         nonDestructiveMovements.blocksCantBreak.add(mc.getBlockId(block));
     }
     nonDestructiveMovements.canDig = false;
-    nonDestructiveMovements.allowParkour = false;
+    // ★走位质量: parkour 开 (上游默认) — 让规划器能跨 1 格缺口/小跳越,破碎地形不再
+    // 只能绕路/挖路 (用户实拍"跨越地形困难"的主因之一). scaffold 仍关(不乱搭),maxDropDown
+    // 仍 2(不跳致命落差),lava 仍在 blocksToAvoid — parkour 只走规划器判定安全的落点.
+    nonDestructiveMovements.allowParkour = true;
     nonDestructiveMovements.maxDropDown = 2;
     nonDestructiveMovements.scafoldingBlocks = [];
     nonDestructiveMovements.placeCost = 2;
@@ -2553,7 +2676,7 @@ export async function goToGoal(bot, goal) {
     
     const destructiveMovements = new pf.Movements(bot);
     destructiveMovements.canDig = true;
-    destructiveMovements.allowParkour = false;
+    destructiveMovements.allowParkour = true; // ★同上: 破坏式导航也允许 parkour 跨缺口
     destructiveMovements.maxDropDown = 2;
     destructiveMovements.scafoldingBlocks = [];
     destructiveMovements.liquids.add(mc.getBlockId('water'));

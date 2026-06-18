@@ -27,6 +27,16 @@ const FOOT_REPLACEABLE = new Set(['torch', 'wall_torch', 'redstone_torch', 'reds
 
 export default async function surfaceUp(bot, ctx, targetY = 63) {
     const { skills, world, mc, Vec3, log } = ctx;
+    // C226-D: callers pass RELATIVE targets (pos.y + N). When the bot is already
+    // high (on a peak/mountainside the caller mislabels "enclosed"), pos.y+18 from
+    // y118 = 136 → surfaceReady never satisfied → runaway pillar to y127-136 where
+    // night skeletons/exposure kill it (death@y127 shot:Skeleton confirmed). Cap the
+    // target at a sane surface ceiling: this both bounds the climb AND lets the
+    // entry surfaceReady() early-exit fire (yNow>=cap-2 && openAbove ⇒ already out).
+    // 90 keeps the MAROONED-rescue floor (max 84) intact while killing the runaway.
+    // Fix lives in the primitive so all 5 call sites are covered at once.
+    const SURFACE_CEILING = 90;
+    if (Number.isFinite(targetY)) targetY = Math.min(targetY, SURFACE_CEILING);
     const yNow = () => Math.floor(bot.entity.position.y);
     const scafCount = () => SCAFFOLD.reduce((s, n) => s + (world.getInventoryCounts(bot)[n] || 0), 0);
     const hasPick = () => bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
@@ -182,6 +192,41 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
         return out;
     };
     const blockName = (b) => b ? `${b.name}@${b.position.x},${b.position.y},${b.position.z}` : 'null';
+    // C247 GROUND-TRUTH probe: when vertically sealed with no pillar material, the only
+    // real escapes are (a) a lateral opening into a connected cave (path-up), or (b) a
+    // nearby DROP-bearing block (dirt/gravel) to harvest for pillaring. Probe the 4
+    // cardinals at head level + straight up, reporting blocks-to-first-air and the
+    // material run, so the escape can aim instead of tunnelling blind.
+    const DROP_BAREHAND = /dirt|gravel|sand|coarse_dirt|rooted_dirt|mud|clay|grass_block|podzol|moss_block/;
+    const wideScan = (reach = 16) => {
+        const c = bot.entity.position.floored();
+        const out = {};
+        const dirs = { px: [1, 0], nx: [-1, 0], pz: [0, 1], nz: [0, -1] };
+        for (const [key, [dx, dz]] of Object.entries(dirs)) {
+            let toAir = null, firstDrop = null, run = [];
+            for (let d = 1; d <= reach; d++) {
+                // head-level cell (feet+1) — the cell the bot would walk into
+                const b = bot.blockAt(c.offset(dx * d, 1, dz * d));
+                const nm = b ? (b.name || '') : 'air';
+                const open = !b || b.boundingBox === 'empty' || OPEN.has(nm);
+                if (open && toAir == null) toAir = d;
+                if (DROP_BAREHAND.test(nm) && firstDrop == null) firstDrop = d;
+                if (d <= 4) run.push(nm);
+                if (open) break;
+            }
+            out[key] = { toAir, firstDrop, run };
+        }
+        let upToAir = null, upRun = [];
+        for (let d = 1; d <= 24; d++) {
+            const b = bot.blockAt(c.offset(0, d, 0));
+            const nm = b ? (b.name || '') : 'air';
+            const open = !b || b.boundingBox === 'empty' || OPEN.has(nm);
+            if (d <= 6) upRun.push(nm);
+            if (open) { upToAir = d; break; }
+        }
+        out.up = { toAir: upToAir, run: upRun };
+        return out;
+    };
     const guardedDig = async (block, why = '') => {
         if (!block) return false;
         const owner = `surfaceUp:${why || 'dig'}`;
@@ -215,7 +260,16 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
                 try { bot.clearControlStates(); } catch (e) {}
                 try { await bot.lookAt(fresh.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
                 try {
-                    const timeoutMs = (!hasPick() && plannedNoPickStone() && STONY.test(fresh.name || '')) ? 12000 : 5000;
+                    // ★C223b: the dig cutoff must be the block's REAL bare-hand dig time, not a fixed
+                    // 12s — coal_ore bare-hand is ~15s (hardness 3 ×5), deepslate ~16.5s; a too-short
+                    // cutoff aborts at 0 progress and the bot can never breach an ore/deepslate ceiling
+                    // to surface (the y67-under-meadow tomb). Scale to digTime×1.4 + 1.5s (5s floor, 26s cap).
+                    let timeoutMs = 5000;
+                    try {
+                        const ht = bot.heldItem ? bot.heldItem.type : null;
+                        const dt = fresh.digTime(ht);
+                        if (Number.isFinite(dt) && dt > 0) timeoutMs = Math.max(5000, Math.min(26000, Math.round(dt * 1.4) + 1500));
+                    } catch (e) {}
                     await Promise.race([
                         bot.dig(fresh, true),
                         new Promise((_, rej) => setTimeout(() => rej(new Error('dig-timeout')), timeoutMs)),
@@ -454,6 +508,15 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
       try { for (const m in prevModes) bot.modes.setOn(m, prevModes[m]); } catch (e) {}
     }
     dbg(`EXIT y=${yNow()} (target ${targetY})`);
+    // C247: when the climb failed and we're still enclosed, dump a ground-truth scan so
+    // the lateral-escape design can see whether a cave / drop-block is within reach.
+    if (!surfaceReady()) {
+        try {
+            const sc = wideScan();
+            dbg(`EXIT-SCAN ${JSON.stringify(sc)}`);
+            motion('surfaceUp.exit_sealed_scan', { y: yNow(), hasPick: hasPick(), scaffold: scafCount(), scan: sc, env: envSnap() });
+        } catch (e) { dbg(`exit-scan err ${e.message}`); }
+    }
     log(bot, `surfaceUp done: y=${yNow()} (target ${targetY}).`);
     return surfaceReady();
 
@@ -471,7 +534,12 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
         // No-pick pathfinding must be route-finding, not a hidden bare-hand stone miner.
         // Dirt/gravel cleanup is left to the manual fallback below; stone without a pick
         // is too slow and drops nothing, which caused the live famine surfacing deadlock.
-        moves.canDig = hasPick();
+        // No-pick pathfinding is normally route-finding only (stone bare-hand is slow/no-drop).
+        // EXCEPTION: when sealed inside an enclosed cavity with no pick, route-finding alone can't
+        // escape (no open path exists) — allow digging so it can break out (breakBlockAt now permits
+        // bounded bare-hand stone; pathfinder still prefers dirt/gravel, cobble is high-cost fallback).
+        const enclosedNoPick = !hasPick() && !!(bot._mobility && bot._mobility.enclosed);
+        moves.canDig = hasPick() || enclosedNoPick;
         moves.allow1by1towers = true;
         moves.allowParkour = false;
         const scaf = SCAFFOLD.map(n => mc.getBlockId(n)).filter(id => id != null);
@@ -584,13 +652,40 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
         dbg(`headroom seek succeeded, retrying vertical climb from y=${yNow()}`);
     }
     let plannedStoneBreaches = 0;
-    const plannedStoneLimit = famineEmergency() ? 200 : 2;
+    // Sealed inside an enclosed cavity with no pick = trapped; breaking out (even slow bare-hand
+    // stone) beats rotting. Treat it like the famine emergency for breach budget/food gates.
+    const trappedEnclosed = !hasPick() && !!(bot._mobility && bot._mobility.enclosed);
+    const plannedStoneLimit = (famineEmergency() || trappedEnclosed) ? 200 : 2;
     const canPlanNoPickStoneBreach = (block, h) => {
-        if (!block || !NO_PICK_BREACHABLE.has(block.name || '')) return false;
+        // ★C223b: ENTOMBED escape — *_ore blocks (coal_ore etc.) are bare-hand BREAKABLE (they just
+        // don't DROP without a pick). A coal_ore ceiling was sealing the bot in a tomb at y67 under a
+        // meadow ("fallback no-pick stone blocked at h=2 name=coal_ore"). Losing one ore drop beats a
+        // permanent tomb — accept the plain stone family OR any *_ore (generic, covers deepslate ores).
+        const nm = block && (block.name || '');
+        if (!nm || (!NO_PICK_BREACHABLE.has(nm) && !/_ore$/.test(nm))) return false;
         if (plannedStoneBreaches >= plannedStoneLimit) return false;
-        if (h > 3 && !famineEmergency()) return false;
+        // C247: a trapped-enclosed bot in a TALL air pocket has its stone ceiling at h=4
+        // (feet+4 = ~2.4 blocks above eye height, well within the ~4.5 reach). The old
+        // `h>3` cap wrongly forbade breaching it unless famine (food<=2) — so a sealed
+        // bot with food>2 could never break out of a 4-tall pocket (live: y66 pocket,
+        // air y67-69, stone y70, frozen 2h). Allow trapped-enclosed up to the loop's h=4.
+        if (h > 3 && !famineEmergency() && !trappedEnclosed) return false;
         const famineBreach = famineNoPickStoneBreachOk();
-        if (!famineBreach && ((bot.health || 0) < 16 || bot.food < 14)) return false;
+        // food8-13 dead-zone trap: the bot is sealed in, hp19, but food<14 blocked the breach and
+        // food>2 missed the famine bypass → frozen forever. When trappedEnclosed, hp>=8 is enough
+        // to break out (escaping the seal beats starving in it).
+        if (!famineBreach && !trappedEnclosed && ((bot.health || 0) < 16 || bot.food < 14)) return false;
+        // ★C237: hp<8 + trappedEnclosed was the no-pick TERMINAL FREEZE (live: hp6 food17 sealed
+        // at y66, 0 pick / 0 wood / 209 cobble, spun `TABLE gate no wood` for hours; digReset
+        // exists but nothing dispatched it, and THIS hp<8 floor blocked the only UPWARD escape).
+        // Breaking UP is ZERO fall-risk (stableFloorBelow checked below) + ZERO hazard (water/
+        // lava/fire/cactus/magma guarded below) + enclosed = no mob reaches during the breach, and
+        // surfaceUp freezes the survival modes for the whole climb. The SOLE residual risk is
+        // surfacing INTO darkness, so keep the hp<8 breach DAYTIME-only (day mobs burn). "Find
+        // beats frozen" — escape the seal in daylight rather than rot in it. Night/dusk still HOLD.
+        const breachTod = (() => { try { return bot.time.timeOfDay; } catch (e) { return 6000; } })();
+        const breachIsNight = breachTod >= 13000 && breachTod <= 23000;
+        if (trappedEnclosed && (bot.health || 0) < 8 && breachIsNight) return false;
         if (!stableFloorBelow()) return false;
         const cell = bot.entity.position.floored();
         for (const off of [[0, 0, 0], [0, 1, 0], [0, -1, 0]]) {
@@ -750,6 +845,125 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
         motion('surfaceUp.footing.blocked', { why, y: yNow(), env: envSnap() });
         return false;
     };
+    // C247 LATERAL ESCAPE: vertical surfacing is hopeless when sealed with no pick and
+    // too few pillar blocks (live: 2 planks can't tower the ~21 blocks from a y66 tomb to
+    // the surface; pillarUp historically only worked because it had 209 cobble). A self-dug
+    // stone micro-tomb almost always sits beside a connected cave — so when the vertical
+    // climb stalls, tunnel HORIZONTALLY toward the nearest opening: zero fall-risk, and once
+    // open space is reached the normal pathfinder/vertical phases take over next cycle.
+    // canDig=true lets A* carve the corridor (safeToBreak ignores the pickaxe — bare-hand
+    // stone breaks, just slowly); dontCreateFlow + hazard scan keep it off water/lava.
+    let lateralTried = false;
+    const cellOpen = (p) => { const b = bot.blockAt(p); return !b || b.boundingBox === 'empty' || OPEN.has(b.name || ''); };
+    const cellHazard = (p) => { const b = bot.blockAt(p); return b && /water|lava|fire|magma/.test(b.name || ''); };
+    // Find an adjacent (incl. diagonal) cell the bot can step into that DROPS into a lower
+    // cavity: foot+head open AND the block below open (a hole). Returns {dx,dz,depth} of the
+    // deepest such drop. A self-dug micro-pocket usually opens downward into the cave it was
+    // dug from — descending reconnects to the cave system (a real up-route elsewhere), and for
+    // a naked hp-low bot even a fatal drop is a clean spawn-reset, both beat an eternal freeze.
+    const findDescent = (c0) => {
+        let best = null;
+        for (const [dx, dz] of [[0, 1], [1, 0], [0, -1], [-1, 0], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+            const foot = c0.offset(dx, 0, dz), head = c0.offset(dx, 1, dz), below = c0.offset(dx, -1, dz);
+            if (!cellOpen(foot) || !cellOpen(head) || !cellOpen(below)) continue;
+            if (cellHazard(foot) || cellHazard(head) || cellHazard(below)) continue;
+            let depth = 0;
+            for (let dy = -1; dy >= -16; dy--) {
+                const p = c0.offset(dx, dy, dz);
+                if (cellHazard(p)) { depth = -1; break; }   // lava/water column — skip this dir
+                if (cellOpen(p)) depth++; else break;
+            }
+            if (depth >= 1 && (!best || depth > best.depth)) best = { dx, dz, depth };
+        }
+        return best;
+    };
+    const lateralEscape = async () => {
+        const start = bot.entity.position.clone();
+        const c0 = start.floored();
+        const scan = wideScan(14);
+        // A REAL lateral opening lies BEYOND a wall (toAir>=2). toAir==1 is just the bot's own
+        // pocket edge — pathing to it is a no-op (live: pz toAir=1 → moved=0, looped forever).
+        const cand = [['px', 1, 0], ['nx', -1, 0], ['pz', 0, 1], ['nz', 0, -1]]
+            .map(([k, dx, dz]) => ({ k, dx, dz, toAir: scan[k] && scan[k].toAir }))
+            .filter(o => Number.isFinite(o.toAir) && o.toAir >= 2 && o.toAir <= 14)
+            .sort((a, b) => a.toAir - b.toAir);
+        const descent = findDescent(c0);
+        dbg(`lateral: scan ${JSON.stringify(scan)} cand=${cand.map(c => c.k + ':' + c.toAir).join(',') || 'none'} descent=${descent ? `${descent.dx},${descent.dz} depth=${descent.depth}` : 'none'}`);
+        motion('surfaceUp.lateral.begin', { y: yNow(), scan, cand: cand.map(c => ({ k: c.k, toAir: c.toAir })), descent, env: envSnap() });
+
+        // A DEEP descent (>=4) is a real cavity worth dropping into; a shallow one (live
+        // depth=1) is just an adjacent micro-pocket — descending it only to have the same
+        // fallback's step-edge-assist climb back up = y65↔y66 oscillation. So shallow
+        // descents are ignored; the committed escape is a HOMEWARD horizontal carve.
+        if (descent && descent.depth >= 4) {
+            // Manual step+fall into the connected lower cavity (pathfinder refuses big drops).
+            const tx = c0.x + descent.dx, tz = c0.z + descent.dz;
+            dbg(`lateral: DEEP-DESCEND ${descent.dx},${descent.dz} depth=${descent.depth} → step into ${tx},${c0.y},${tz}`);
+            try {
+                try { bot.pathfinder.setGoal(null); } catch (e) {}
+                try { bot.clearControlStates(); } catch (e) {}
+                await bot.lookAt(new Vec3(tx + 0.5, c0.y + 0.3, tz + 0.5), true);
+                bot.setControlState('forward', true);
+                bot.setControlState('sprint', false);
+                const t0 = Date.now();
+                while (Date.now() - t0 < 4000) {
+                    await skills.wait(bot, 120);
+                    if (yNow() < c0.y - 0.5 || bot.entity.position.distanceTo(start) > 1.4) break;
+                }
+            } catch (e) { dbg(`lateral descend err ${e.message}`); }
+            finally { try { bot.clearControlStates(); } catch (e) {} }
+            await skills.wait(bot, 400);
+        } else {
+            // MANUAL HOMEWARD TUNNEL. The pathfinder will NOT carve stone here (proven live:
+            // GoalY 66->66, GoalNear horizontal 63ms moved=0 — A* refuses the dig-corridor);
+            // but guardedDig breaks bare-hand stone fine (it broke the y70 ceiling in 8s). So
+            // dig the 2-tall corridor toward spawn ONE block at a time and step in — the
+            // mineDown idiom, horizontal. Toward spawn = trees + open surface, and the hill
+            // thins that way. ~8 blocks/call, cumulative across cycles → out of the stone core.
+            // Aim at a real cave-mouth if wideScan found one; else the dominant home axis.
+            const sp = (bot.spawnPoint && Number.isFinite(bot.spawnPoint.x)) ? bot.spawnPoint : { x: 0, y: 87, z: 0 };
+            let stepDx, stepDz;
+            if (cand.length) { stepDx = cand[0].dx; stepDz = cand[0].dz; }
+            else {
+                const ddx = sp.x - c0.x, ddz = sp.z - c0.z;
+                if (Math.abs(ddx) >= Math.abs(ddz)) { stepDx = Math.sign(ddx) || 1; stepDz = 0; }
+                else { stepDx = 0; stepDz = Math.sign(ddz) || 1; }
+            }
+            const why = cand.length ? `cave-mouth ${cand[0].k}` : `homeward ${stepDx},${stepDz}`;
+            dbg(`lateral: MANUAL-TUNNEL ${why} from ${c0.x},${c0.y},${c0.z}`);
+            const budget = 8;
+            let carved = 0;
+            try { bot.pathfinder.setGoal(null); } catch (e) {}
+            for (let s = 0; s < budget; s++) {
+                const cur = bot.entity.position.floored();
+                const aheadFoot = cur.offset(stepDx, 0, stepDz);
+                const aheadHead = cur.offset(stepDx, 1, stepDz);
+                if (cellHazard(aheadFoot) || cellHazard(aheadHead) || cellHazard(aheadFoot.offset(0, -1, 0))) { dbg(`tunnel: hazard ahead at step ${s}, stop`); break; }
+                for (const p of [aheadHead, aheadFoot]) {
+                    const b = bot.blockAt(p);
+                    if (b && b.boundingBox === 'block' && !OPEN.has(b.name)) {
+                        try { bot._plannedNoPickStoneUntil = Date.now() + 15000; } catch (e) {}   // enable bare-hand stone in guardedDig
+                        await guardedDig(b, 'tunnel');
+                    }
+                }
+                try {
+                    await bot.lookAt(new Vec3(aheadFoot.x + 0.5, aheadFoot.y + 0.5, aheadFoot.z + 0.5), true);
+                    bot.setControlState('forward', true);
+                    const t0 = Date.now();
+                    while (Date.now() - t0 < 1600) { await skills.wait(bot, 100); if (bot.entity.position.floored().distanceTo(cur) >= 1) break; }
+                } finally { try { bot.clearControlStates(); } catch (e) {} }
+                const after = bot.entity.position.floored();
+                if (after.x === cur.x && after.z === cur.z && after.y >= cur.y) { dbg(`tunnel: no advance after dig at step ${s} (block left?) stop`); break; }
+                carved++;
+            }
+            dbg(`lateral: MANUAL-TUNNEL carved=${carved}/${budget}`);
+        }
+        const moved = bot.entity.position.distanceTo(start);
+        const fp = bot.entity.position.floored();
+        dbg(`lateral: end moved=${moved.toFixed(1)} y=${yNow()} pos=${fp.x},${fp.y},${fp.z}`);
+        motion('surfaceUp.lateral.end', { y: yNow(), moved: +moved.toFixed(2), mode: (descent && descent.depth >= 4) ? 'deep-descend' : 'carve', env: envSnap() });
+        return moved > 1.2 || yNow() < c0.y - 0.5;
+    };
     let stuckFloor = 0;
     for (let i = 0; i < 100 && !surfaceReady(); i++) {
         try { bot.interrupt_code = false; } catch (e) {}
@@ -792,6 +1006,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
                                 hp: Math.round(bot.health || 0),
                                 plannedStoneBreaches,
                                 plannedStoneLimit,
+                                scan: wideScan(),   // C247: ground-truth for lateral-escape aiming
                             });
                             break;
                         }
@@ -838,7 +1053,23 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
             if (!progressed) {
                 if (await stepEdgeAssist(`fallback-stuck-${stuckFloor}`)) continue;
                 if (await scaffoldStep()) continue;
-                if (!rose || stuckFloor >= 3) break;
+                // C247: vertical is sealed and we have no pick / no pillar stock — the only
+                // real exit is sideways into the adjacent cave. Try ONCE per surfaceUp call,
+                // then let the loop re-evaluate (surfaceReady / vertical) from the new spot.
+                if (stuckFloor >= 2 && trappedEnclosed && !hasPick() && !lateralTried) {
+                    lateralTried = true;
+                    dbg(`fallback: vertical sealed (stuckFloor=${stuckFloor}) + trappedEnclosed + no pick → lateral escape`);
+                    // On success BREAK (not continue): the lateral move relocated the bot;
+                    // re-entering this climb loop would let step-edge-assist climb straight
+                    // back up and undo it (live: descend y66→65 then assist climbed 65→66).
+                    if (await lateralEscape()) { dbg(`lateral moved bot → EXIT surfaceUp, re-eval next cycle`); break; }
+                }
+                // ★C223c: exit ONLY after 3 CONSECUTIVE stuck iters — not on the first manualPillar
+                // miss (`!rose`). The old `!rose ||` aborted the climb after ONE transient pillar
+                // failure, stranding the bot mid-shaft (observed: rose 67→68→69 then EXIT at iter 2
+                // stuckFloor=1 because manualPillar momentarily returned false). stuckFloor>=3 with the
+                // inner manualPillar×3 retries gives real persistence while staying bounded.
+                if (stuckFloor >= 3) break;
             }
         } else {
             stuckFloor = 0;

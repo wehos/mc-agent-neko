@@ -134,6 +134,7 @@ class WSMessageServer {
                     held: (bot.heldItem && bot.heldItem.name) || 'empty',   // exposes digging-with-wrong-tool
                     pickFx,                                                  // effective (non-worn-out) pickaxes
                     mob: ((bot._mobility && bot._mobility.state) || '?') + (bot._mobility && bot._mobility.enclosed ? '/ENC' : ''),   // mobility state machine (FREE/POCKET/ENTOMBED/SWIM[/ENC=封闭地穴])
+                    pinKicks: bot._persistentPinKicks || 0,   // ★reflex_watchdog escalation: N (>3) = bot is in a PERSISTENT pin the forced-interrupt kick can't break — supervisor should dispatch a relocating recovery (forageExplore/escapePlan). 0 = not pinned / kick still working.
                     inv,
                 });
             } catch (e) { /* telemetry must never hurt the agent */ }
@@ -260,6 +261,14 @@ class WSMessageServer {
         try { bot._supervisorCancelAt = Date.now(); } catch (e) {}
         try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
         try { bot.clearControlStates(); } catch (e) {}
+        // ★ROOT-CAUSE of the 4-min cancel-ignored hang: the in-flight bot.dig() promise was
+        // never rejected, so breakBlockAt/safeDig sat in their 60s/15s Promise.race waiting out
+        // the timeout while a long mining loop chained more digs. requestInterrupt() (agent.js)
+        // already does this; the supervisor cancel path was missing it. stopDigging() rejects the
+        // pending dig immediately so the skill unwinds in milliseconds.
+        try { bot.stopDigging(); } catch (e) {}
+        try { bot.collectBlock && bot.collectBlock.cancelTask && bot.collectBlock.cancelTask(); } catch (e) {}
+        try { bot.pvp && bot.pvp.stop && bot.pvp.stop(); } catch (e) {}
         console.log(`🧯 cancel_skill: ${reason}`);
         this.broadcast({
             type: 'cancel_result',

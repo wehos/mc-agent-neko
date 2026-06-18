@@ -51,7 +51,32 @@ export default async function mineDown(bot, ctx, opts = {}) {
     } catch (e) {}
 
     log_(`START pos=${Math.round(bot.entity.position.x)},${Math.round(bot.entity.position.y)},${Math.round(bot.entity.position.z)} hp=${Math.round(bot.health)} food=${bot.food} heading=${sx},${sz} targetY=${targetY}`);
-    let dug = 0, ore = 0, abort = null;
+    let dug = 0, ore = 0, abort = null, noProg = 0;
+
+    // ★C248b mid-dive pickaxe-survival guard (root-harden — see memory resource-floor-bootstrap-kit).
+    // C248 gates the DISPATCH (don't start a dive on a dying lone pick), but a pick that starts
+    // healthy can still snap mid-dive (a 14-step staircase digs ~42 blocks > a worn wooden pick's
+    // ~30 uses). Digging on past the snap strands a no-pick bot deeper in stone = the y66 tomb.
+    // So each step: if the lone pick is about to break AND we can't craft a replacement, ABORT
+    // now (still has a few uses to climb back; higher layer then surfaces for wood).
+    const invCount = (re) => bot.inventory.items().filter(it => re.test(it.name || '')).reduce((s, it) => s + it.count, 0);
+    const pickAboutToBreak = () => {
+        const picks = bot.inventory.items().filter(it => /_pickaxe$/.test(it.name || ''));
+        if (!picks.length) return true;          // already pickless → stop digging
+        if (picks.length >= 2) return false;     // spare exists
+        const p = picks[0];
+        const max = p.maxDurability || 0;
+        const used = (typeof p.durabilityUsed === 'number') ? p.durabilityUsed : 0;
+        return max > 0 && (max - used) <= 6;     // ≤6 uses ≈ 2 more steps (3 blocks/step)
+    };
+    const canCraftPick = () => {
+        const planks = invCount(/_planks$/), logs = invCount(/_log$/);
+        const cobble = invCount(/^(cobblestone|cobbled_deepslate)$/), sticks = invCount(/^stick$/);
+        const haveTable = invCount(/^crafting_table$/) > 0 || planks >= 4 || logs >= 1;
+        const haveHead = cobble >= 3 || planks >= 3 || logs >= 1;
+        const haveSticks = sticks >= 2 || planks >= 2 || logs >= 1;
+        return haveTable && haveHead && haveSticks;
+    };
 
     for (let i = 0; i < steps; i++) {
         const cur = bot.entity.position;
@@ -62,8 +87,17 @@ export default async function mineDown(bot, ctx, opts = {}) {
             const close = Object.values(bot.entities || {}).some(e => e && e !== bot.entity && e.position && ctx.mc.isHostile(e) && e.position.distanceTo(cur) < 4);
             if (close) { abort = 'hostile within 4 — yield to survival'; break; }
         } catch (e) {}
+        // ★C248b: stop before the only pick snaps with no replacement → don't strand deeper.
+        if (pickAboutToBreak() && !canCraftPick()) { abort = `pick about to break + no replacement (planks=${invCount(/_planks$/)} logs=${invCount(/_log$/)} cobble=${invCount(/^(cobblestone|cobbled_deepslate)$/)} stick=${invCount(/^stick$/)}) — stop before stranding`; break; }
 
-        const cx = Math.round(cur.x), cz = Math.round(cur.z);
+        // ★ROOT-CAUSE FIX (-22,82,10 live pin): block cells use floor(), NOT round(). At
+        // x=-22.30 the bot is physically in cell floor=-23, but round=-22 → mineDown dug the
+        // forward staircase one cell off from where the bot actually stood, so the bot wedged
+        // against the undug side wall and never advanced (live evidence: 40 steps, dug=93, pos
+        // pinned -22,82,10, walk "moved dx=0", and agent.log spamming "Skipping block ...because
+        // it is air" — it kept re-digging an already-empty column 1 cell away from the body).
+        // round≠floor whenever frac>0.5 or coord<0 — exactly this negative-coord food-desert pocket.
+        const cx = Math.floor(cur.x), cz = Math.floor(cur.z);
         const fx = cx + sx, fz = cz + sz;                  // forward column
         // DESCEND-forward: the new standing cell is ONE block down-and-forward. New feet at
         // (fx,cy-1,fz), new head at (fx,cy,fz), plus (fx,cy+1,fz) headroom. The support under
@@ -79,10 +113,12 @@ export default async function mineDown(bot, ctx, opts = {}) {
         // No solid support under the new feet (cliff/cave) => don't blind-drop; stop.
         if (/^(air|cave_air|void_air|water|flowing_water)$/.test(nm(support))) { abort = `no floor support under ${fx},${cy - 2},${fz} (${nm(support)}) — stop, don't free-fall`; break; }
 
+        if (i < 3) log_(`DIAG step${i} cur=${cur.x.toFixed(2)},${cur.y.toFixed(2)},${cur.z.toFixed(2)} cx,cy,cz=${cx},${cy},${cz} fwd=${fx},${fz} sx,sz=${sx},${sz} blocks: newFeet(${fx},${cy - 1},${fz})=${nm(newFeet)} newHead(${fx},${cy},${fz})=${nm(newHead)} clear(${fx},${cy + 1},${fz})=${nm(clear)} support(${fx},${cy - 2},${fz})=${nm(support)}`);
         try {
-            await skills.breakBlockAt(bot, fx, cy + 1, fz);   // headroom (old head level)
-            await skills.breakBlockAt(bot, fx, cy, fz);       // new head
-            await skills.breakBlockAt(bot, fx, cy - 1, fz);   // new feet (one down-forward)
+            const r1 = await skills.breakBlockAt(bot, fx, cy + 1, fz);   // headroom (old head level)
+            const r2 = await skills.breakBlockAt(bot, fx, cy, fz);       // new head
+            const r3 = await skills.breakBlockAt(bot, fx, cy - 1, fz);   // new feet (one down-forward)
+            if (i < 3) log_(`DIAG step${i} breakResults head+1=${r1} head=${r2} feet=${r3}`);
             dug += 3;
             // opportunistic ore around the dug column (one ring)
             for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, 1, 0]]) {
@@ -100,8 +136,18 @@ export default async function mineDown(bot, ctx, opts = {}) {
         } finally { try { bot.setControlState('forward', false); } catch (e) {} }
 
         const np = bot.entity.position;
+        if (i < 3) log_(`DIAG step${i} afterWalk pos=${np.x.toFixed(2)},${np.y.toFixed(2)},${np.z.toFixed(2)} (moved dx=${(np.x - cur.x).toFixed(2)} dy=${(np.y - cur.y).toFixed(2)} dz=${(np.z - cur.z).toFixed(2)})`);
         if (i % 5 === 0) log_(`step ${i + 1} pos=${Math.round(np.x)},${Math.round(np.y)},${Math.round(np.z)} dug=${dug} ore=${ore} hp=${Math.round(bot.health)} food=${bot.food}`);
-        if (Math.abs(np.x - cx) < 0.3 && Math.abs(np.z - cz) < 0.3) { abort = `no advance at step ${i + 1} (pos ${Math.round(np.x)},${Math.round(np.y)},${Math.round(np.z)})`; break; }
+        // ★FIX no-advance guard: the OLD test compared np.x to the cell INDEX with a <0.3 band,
+        // which a stable .30 fractional offset slips through forever (live: 40 steps, 0 descent,
+        // guard never fired). Judge ACTUAL per-step progress instead: a real step drops y by ~1
+        // OR moves >0.5 horizontally. Neither = wedged this step. Abort after 2 wedged steps so a
+        // genuinely-stuck mineDown returns an honest "no descent" fast (→ higher layer can relocate)
+        // instead of grinding 120 no-op digs in place.
+        const stepDescended = (cur.y - np.y) > 0.5;
+        const stepMovedHoriz = Math.hypot(np.x - cur.x, np.z - cur.z) > 0.5;
+        if (!stepDescended && !stepMovedHoriz) noProg++; else noProg = 0;
+        if (noProg >= 2) { abort = `no descent — wedged ${noProg} steps at ${Math.round(np.x)},${Math.round(np.y)},${Math.round(np.z)} (off-axis/blocked); yield`; break; }
     }
 
     let inv = {}; try { for (const it of bot.inventory.items()) inv[it.name] = (inv[it.name] || 0) + it.count; } catch (e) {}

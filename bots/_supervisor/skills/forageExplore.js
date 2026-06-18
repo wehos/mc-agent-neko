@@ -10,7 +10,10 @@
 // with a refusal (do NOT explore-and-die — that was the whole lesson). Bounded distance; aborts
 // on a close actionable hostile or an hp drop.
 //
-// opts: { maxBlocks=160, legBlocks=16, gateHp=14, gateFood=10 }
+// opts: { maxBlocks=160, legBlocks=16, gateHp=14, gateFood=10, abortHp=6 }
+//   abortHp: per-leg hard abort threshold. Default 6 (don't explore-and-die). A last-resort
+//   caller stuck in a no-recovery permanent-freeze may pass abortHp:1 to force a venture out
+//   (frozen-forever is worse than walk-to-find-or-respawn).
 
 // PURE readiness gate — offline-testable. Exploring is only safe when healthy in daylight.
 function exploreReady(state) {
@@ -63,17 +66,21 @@ export default async function forageExplore(bot, ctx, opts = {}) {
         // Re-check safety each leg — abort to survival if night falls / threat / hp drop.
         if (isNight()) { log_(`abort: night fell at leg ${i}`); return { explored: true, found: false, reason: 'night fell — return to shelter' }; }
         if (closeActionable()) { log_(`abort: actionable hostile at leg ${i}`); return { explored: true, found: false, reason: 'hostile close' }; }
-        if (bot.health <= 6) { log_(`abort: hp=${Math.round(bot.health)} dropped at leg ${i}`); return { explored: true, found: false, reason: 'hp dropped' }; }
+        if (bot.health <= (opts.abortHp ?? 6)) { log_(`abort: hp=${Math.round(bot.health)} <= ${opts.abortHp ?? 6} dropped at leg ${i}`); return { explored: true, found: false, reason: 'hp dropped' }; }
 
         // Found land food in range? Hand off to the proven forage skill to hunt+eat.
         const a = landAnimal();
         if (a && a.d <= 40) {
             log_(`land animal ${a.e.name} at d=${a.d.toFixed(1)} (leg ${i}) — handoff to forage`);
-            const r = await skills.customSkill(bot, 'forage', { targetFood: 16 });
+            const r = await skills.customSkill(bot, 'forage', { targetFood: opts.targetFood ?? 16 });
             return { explored: true, found: true, forageResult: r, endY: Math.round(bot.entity.position.y) };
         }
 
         const tx = Math.round(start.x + b.x * legBlocks * i), tz = Math.round(start.z + b.z * legBlocks * i);
+        // Take movement authority: a stale MAROONED flag suppresses ALL pathfinder movement
+        // (goToGoal's MAROONED gate), which silently no-ops every leg. The explorer IS the
+        // deliberate mover here, so clear it (same as escapePlan does) before navigating.
+        try { if (bot._mobility && bot._mobility.state === 'MAROONED') { bot._mobility.state = 'FREE'; log_('cleared MAROONED — taking movement authority'); } } catch (e) {}
         log_(`leg ${i}/${legs} -> ${tx},~,${tz} (hp=${Math.round(bot.health)} food=${bot.food})`);
         try { await skills.goToPosition(bot, tx, Math.round(bot.entity.position.y), tz, 2); } catch (e) { log_(`leg ${i} nav: ${e && e.message || e}`); }
 

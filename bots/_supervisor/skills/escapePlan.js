@@ -202,6 +202,13 @@ function cellSafety(reads) {
 
 export default async function escapePlan(bot, ctx, opts = {}) {
     const { log } = ctx;
+    // navTo mode: dig-navigate to an arbitrary target (descend + horizontal) when the generic
+    // pathfinder fast-fails (sealed pocket / vertical shaft). This is the general dig-navigation
+    // primitive the bot lacked (Phase B exposed: goToPosition 0s-NoPath from a pocket, and the
+    // destructive planner won't carve a shaft down). Reuses the proven cellSafety/stepToCardinal.
+    if (opts && opts.navTo) {
+        return await runNavTo(bot, ctx, opts);
+    }
     const execute = opts && opts.execute === true;
     const state = readState(bot, ctx);
     const plan = planEscape(state);
@@ -361,4 +368,112 @@ function readAdvisory() {
     } catch (e) { return null; }
 }
 
-export { planEscape, tunnelPath, cellSafety };
+// ---------------------------------------------------------------------------
+// GENERAL DIG-NAVIGATION (the EscapePlanner's real primitive: reach a target by carving
+// when the stock pathfinder can't). Test-harness wrapper handles cheat setup + self-restore.
+// ---------------------------------------------------------------------------
+
+async function runNavTo(bot, ctx, opts) {
+    const { log } = ctx;
+    const VLOG = 'bots/_supervisor/verify.log';
+    const L = (m) => { const line = `[${new Date().toISOString().slice(11, 19)}] [digNav] ${m}`; try { log(bot, line); } catch (e) {} try { fs.appendFileSync(VLOG, line + '\n'); } catch (e) {} };
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const origDiff = (bot.game && bot.game.difficulty) || 'normal';
+    const p0 = bot.entity.position;
+    try {
+        L(`navTo START target=${opts.navTo.x},${opts.navTo.y},${opts.navTo.z} from=${Math.round(p0.x)},${Math.round(p0.y)},${Math.round(p0.z)} diff=${origDiff}`);
+        if (opts.peaceful) { bot.chat('/difficulty peaceful'); await sleep(1200); }
+        for (const c of (opts.cmds || [])) { L(`cmd ${c}`); try { bot.chat(c); } catch (e) {} await sleep(700); }
+        try { const pick = bot.inventory.items().find(i => /(diamond|iron|stone|golden|wooden)_pickaxe/.test(i.name)); if (pick) { await bot.equip(pick, 'hand'); L(`equipped ${pick.name}`); } else L('no pickaxe!'); } catch (e) { L(`equip err ${e && e.message}`); }
+        try { if (bot._mobility && bot._mobility.state === 'MAROONED') bot._mobility.state = 'FREE'; } catch (e) {}
+        const res = await digNavTo(bot, ctx, opts.navTo, L);
+        L(`navTo DONE ${JSON.stringify(res)}`);
+        return res;
+    } catch (e) {
+        L(`navTo THREW ${e && e.message || e}`);
+        return { reached: false, error: String(e && e.message || e) };
+    } finally {
+        if (opts.peaceful) { try { bot.chat('/difficulty ' + origDiff); } catch (e) {} }
+        try { fs.writeFileSync('bots/_supervisor/sticky_skill.json', JSON.stringify({ skill: 'missionNether', args: [] })); } catch (e) {}
+    }
+}
+
+// Carve a route to `target` {x,y,z}. Two phases, re-evaluated each step:
+//   DESCEND  (cy > target.y+1): dig the block under the feet and drop 1, with a 3-deep lava
+//            look-ahead. Hitting an air gap = a cave was reached (success for "get underground").
+//   HORIZONTAL: cardinal 1-wide tunnel toward (target.x,target.z), gated by cellSafety, stepped
+//            by the manual stepToCardinal (the proven walker). Places a cobble floor over gaps.
+// Returns {reached, steps, abort?, cave?, end}. Pure-ish executor; all danger gated.
+async function digNavTo(bot, ctx, target, L) {
+    const { Vec3 } = ctx;
+    const bn = (x, y, z) => { try { return bot.blockAt(new Vec3(x, y, z)); } catch (e) { return null; } };
+    const nm = (b) => (b && b.name) || 'air';
+    const UNBREAKABLE = /(bedrock|barrier|obsidian|reinforced_deepslate|end_portal|end_gateway)/;
+    const LAVA = /lava/;
+    const isAir = (b) => /^(air|cave_air|void_air)$/.test(nm(b));
+    const MAX = 160;
+    let steps = 0, abort = null, cave = false, stallN = 0;
+
+    for (let i = 0; i < MAX; i++) {
+        // ★Suppress the mobility reflex's tick-veto: chopWood sets this heartbeat so the mobility
+        // state machine doesn't classify a deliberate vertical dig as MAROONED/POCKET and grab the
+        // body (clearControlStates/guardedDig) every tick, which carpet-bombs our stepToCardinal.
+        try { bot._climbingAt = Date.now(); } catch (e) {}
+        const p = bot.entity.position;
+        // ★Block coords are FLOOR of the entity position, NOT round: the bot stands at block
+        // CENTER (x.5, z.5), so Math.round(151.5)=152 / Math.round(-9.5)=-9 point one block OFF —
+        // we were digging the block NEXT TO the feet, not under them, so the bot never dropped.
+        const cx = Math.floor(p.x), cy = Math.floor(p.y), cz = Math.floor(p.z);
+        const dy = cy - target.y;
+        const dxz = Math.hypot(target.x - cx, target.z - cz);
+        if (Math.abs(dy) <= 1 && dxz <= 2) { return { reached: true, steps, end: { x: cx, y: cy, z: cz } }; }
+
+        if (dy > 1) {
+            // DESCEND by DELEGATING to branchMine(length, targetY) — the PROVEN descent (achieve uses
+            // it). It digs a 1x2 DIAGONAL staircase (down+forward, so there's always a forward cell to
+            // walk into) and handles gravity/step/tool/lava/stepEdgeAssist. Hand-rolling a straight-down
+            // dig was a dead end: digging the block under the feet does NOT reliably drop the bot
+            // (mineflayer support/position edge cases — mineDown.js hit the same no-op). Don't reinvent.
+            const yBefore = cy;
+            L(`descend: delegate to branchMine(targetY=${target.y}) from y${cy}`);
+            try { await ctx.skills.customSkill(bot, 'branchMine', Math.max(10, Math.min(40, dy + 6)), target.y); }
+            catch (e) { abort = `branchMine threw: ${e && e.message}`; break; }
+            const ny = Math.floor(bot.entity.position.y);
+            steps++;
+            L(`descend via branchMine: y${yBefore}->${ny} (target y${target.y})`);
+            if (ny >= yBefore - 1) { if (++stallN >= 2) { abort = `branchMine didn't descend (y${ny}) ×2`; break; } }
+            else stallN = 0;
+            continue; // re-eval: if still above target.y, branchMine again (it may stop early on ore/cave)
+        }
+
+        // HORIZONTAL: one cardinal step toward target on the dominant axis.
+        const ddx = target.x - cx, ddz = target.z - cz;
+        let stepX = 0, stepZ = 0;
+        if (Math.abs(ddx) >= Math.abs(ddz) && ddx !== 0) stepX = Math.sign(ddx);
+        else if (ddz !== 0) stepZ = Math.sign(ddz);
+        else if (ddx !== 0) stepX = Math.sign(ddx);
+        const nx = cx + stepX, nz = cz + stepZ;
+        const feet = bn(nx, cy, nz), head = bn(nx, cy + 1, nz), floor = bn(nx, cy - 1, nz);
+        let lavaAdjacent = false;
+        for (const [ax, ay, az] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
+            if (LAVA.test(nm(bn(nx + ax, cy + ay, nz + az))) || LAVA.test(nm(bn(nx + ax, cy + 1 + ay, nz + az)))) { lavaAdjacent = true; break; }
+        }
+        const safety = cellSafety({ feet: nm(feet), head: nm(head), floor: nm(floor), lavaAdjacent, headUnbreakable: UNBREAKABLE.test(nm(head)) || UNBREAKABLE.test(nm(feet)) });
+        if (!safety.safe) { abort = `unsafe ${nx},${cy},${nz}: ${safety.reason}`; break; }
+        try {
+            if (safety.needFloor) await ctx.skills.placeBlock(bot, 'cobblestone', nx, cy - 1, nz, 'bottom', true);
+            await ctx.skills.breakBlockAt(bot, nx, cy, nz);
+            await ctx.skills.breakBlockAt(bot, nx, cy + 1, nz);
+        } catch (e) { abort = `horiz dig threw: ${e && e.message}`; break; }
+        try { await stepToCardinal(bot, nx, nz, cy, Vec3); } catch (e) {}
+        const np = bot.entity.position;
+        const adv = Math.hypot(np.x - cx, np.z - cz);
+        steps++;
+        if (i % 5 === 0 || adv < 0.5) L(`horiz ${i}: dug ${nx},${cy},${nz} adv=${adv.toFixed(1)} pos=${Math.round(np.x)},${Math.round(np.y)},${Math.round(np.z)} dxz=${dxz.toFixed(0)}`);
+        if (adv < 0.3) { abort = `no advance at step ${i} (${Math.round(np.x)},${Math.round(np.y)},${Math.round(np.z)})`; break; }
+    }
+    const e = bot.entity.position;
+    return { reached: false, steps, cave, abort, end: { x: Math.round(e.x), y: Math.round(e.y), z: Math.round(e.z) } };
+}
+
+export { planEscape, tunnelPath, cellSafety, digNavTo };

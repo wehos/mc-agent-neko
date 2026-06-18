@@ -120,14 +120,24 @@ export default async function setBed(bot, ctx) {
         // 木剑期夜晚靠地堡扛(挖二封一已验证),床不急于一时。
         const _huntFit = _huntSword && !/wooden_sword/.test(_huntSword)
             && bot.health >= 16 && bot.food >= 8;
-        if (countMatch(/_wool$/) < 3 && !isNight() && hostilesNear(6) <= 2 && _huntFit) {
+        // ★C226-B1: a naked respawn only ever holds a wooden_sword → the stone-sword gate
+        // above is unreachable → it can NEVER hunt → no string/wool → no bed → it respawns
+        // FOREVER at the bad spawn (C226 mechanism ④, the death-loop root). The 218/222
+        // lesson behind the strict gate was about FAR low-hp ventures, not adjacent kills:
+        // a CLOSE passive target (daylight spider / sheep ≤12b) in a calm area is safe to
+        // take with a wooden sword. Allow a SHORT-RANGE opportunistic hunt at a lower bar;
+        // the strict gate still governs the 48/64b venture. _huntRange: 48 (strong-fit
+        // venture) / 12 (wooden-sword opportunistic) / 0 (no sword → barehanded, skip).
+        const _huntFitClose = _huntSword && bot.health >= 10 && bot.food >= 6;
+        const _huntRange = _huntFit ? 48 : (_huntFitClose ? 12 : 0);
+        if (countMatch(/_wool$/) < 3 && !isNight() && hostilesNear(6) <= 2 && _huntRange > 0) {
             const startS = Date.now();
             for (let h = 0; h < 12 && countMatch(/_wool$/) < 3 && (Date.now() - startS) < 90000; h++) {
                 if (bot.interrupt_code) { prog('setBed: interrupted during spider hunt'); break; }
                 if (isNight() || hostilesNear(6) > 4) { prog('setBed: dusk/swarm mid spider-hunt — stop'); break; }
-                const spider = world.getNearbyEntities(bot, 48).filter(e => e && /spider/i.test(e.name) && !/cave/i.test(e.name))
+                const spider = world.getNearbyEntities(bot, _huntRange).filter(e => e && /spider/i.test(e.name) && !/cave/i.test(e.name))
                     .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
-                if (!spider) { prog(`setBed: no spider within 48 (string=${countMatch(/^string$/)}, wool=${countMatch(/_wool$/)})`); break; }
+                if (!spider) { prog(`setBed: no spider within ${_huntRange} (string=${countMatch(/^string$/)}, wool=${countMatch(/_wool$/)}, ${_huntFit ? 'venture' : 'close-only/wooden'})`); break; }
                 try { await skills.equip(bot, _huntSword); } catch (e) {}
                 try { await skills.attackEntity(bot, spider, true); } catch (e) { prog(`setBed: spider err ${e.message}`); }
                 try { await skills.pickupNearbyItems(bot); } catch (e) {}
@@ -140,13 +150,14 @@ export default async function setBed(bot, ctx) {
         // (B) SHEEP HUNT — only if still short. Defers on ANY hostile (don't chase sheep
         //     through a swarm — that just feeds the death loop). Bounded tries / 60s cap.
         //     远征装备门同 (A): 羊在远西猎场(spawn西南150格),木剑低血跑那么远=送(218/222)。
-        if (countMatch(/_wool$/) < 3 && _huntFit) {
+        if (countMatch(/_wool$/) < 3 && _huntRange > 0) {
             if (hostilesNear(10) > 0) { prog(`setBed: short wool + mobs=${hostilesNear(10)} — defer (have string=${countMatch(/^string$/)})`); return false; }
             const start = Date.now();
+            const _sheepRange = _huntFit ? 64 : _huntRange;   // C226-B1: wooden sword → only adjacent sheep
             for (let h = 0; h < 6 && countMatch(/_wool$/) < 3 && (Date.now() - start) < 60000; h++) {
                 if (bot.interrupt_code) { prog('setBed: interrupted during wool hunt'); break; }
                 if (hostilesNear(10) > 0) { prog('setBed: mob appeared mid wool-hunt — abort, defer'); return false; }
-                const sheep = world.getNearbyEntities(bot, 64).filter(e => e && e.name === 'sheep')
+                const sheep = world.getNearbyEntities(bot, _sheepRange).filter(e => e && e.name === 'sheep')
                     .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
                 if (!sheep) { prog('setBed: no sheep within 64 — relying on string path, defer'); break; }
                 const shears = firstMatch(/^shears$/);

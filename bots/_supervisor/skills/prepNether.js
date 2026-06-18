@@ -348,6 +348,28 @@ export default async function prepNether(bot, ctx) {
                         prog(`prepNether: bunker roof seal exhausted (${why}) block=${seal.name} covered=${finallyCovered}`);
                         return finallyCovered;
                     };
+                    // ★C252: naked + no pick → digDown throws on stone → the old code aborted
+                    // and LOOPED EXPOSED on the surface all night (user-reported 2026-06-18:
+                    // bot idling in the open at hp10/food0, "bunker err stone dig blocked
+                    // without held pick" spamming). We can't dig a hole, but we usually carry a
+                    // few dirt — box ourselves in instead: place seal blocks at the 4 head-level
+                    // sides + the roof. A head ring + roof blocks mob LoS/pathing far better than
+                    // standing in the open. Best-effort, errors swallowed; partial walls still help.
+                    const surfaceDirtShelter = async () => {
+                        const base = bot.entity.position.floored();
+                        let placed = 0;
+                        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                            const seal = sealBlock();
+                            if (!seal) break;
+                            const t = base.offset(dx, 1, dz);   // head level
+                            const b = bot.blockAt(t);
+                            if (b && b.boundingBox === 'block') continue;
+                            try { await skills.placeBlock(bot, seal.name, t.x, t.y, t.z, 'bottom', true); placed++; } catch (e) {}
+                        }
+                        const roofed = await sealCurrentRoof('surface dirt-shelter');
+                        prog(`prepNether: ★surface dirt-shelter walls=${placed} roof=${roofed} y=${Math.floor(bot.entity.position.y)} (no-pick, can't dig — box in vs expose)`);
+                        return roofed;
+                    };
                     const lowResourceNoDigHold = bodyBudgetBunkerHold();
                     if (coveredAbove()) {
                         prog(`prepNether: bunker already covered — hold position y=${Math.floor(bot.entity.position.y)}, no extra digDown`);
@@ -359,11 +381,18 @@ export default async function prepNether(bot, ctx) {
                         prog(`prepNether: body-budget bunker ${sealedNow ? 'SEALED' : 'held-unsealed'} contained=${contained} seal=${seal ? seal.name : 'none'} y=${Math.floor(bot.entity.position.y)} — no digDown`);
                         await nightBunkerStaticWeapon();
                     } else {
-                        await skills.digDown(bot, 2);
+                        // ★C252: catch digDown's no-pick/stone throw HERE (was bubbling to the
+                        // outer catch → dugIn=false → re-loop exposed). On dig failure, box in
+                        // with dirt on the surface instead of standing in the open.
+                        let dugOk = true;
+                        try { await skills.digDown(bot, 2); }
+                        catch (e) { dugOk = false; prog(`prepNether: digDown blocked (${e.message}) — surface dirt-shelter fallback`); }
                         const seal = sealBlock();
-                        if (seal) {
+                        if (dugOk && seal) {
                             const top = bot.entity.position.floored().offset(0, 2, 0);
                             try { await skills.placeBlock(bot, seal.name, top.x, top.y, top.z, 'bottom', true); } catch (e) {}
+                        } else if (!dugOk) {
+                            await surfaceDirtShelter();
                         }
                         const sealedNow = coveredAbove();
                         prog(`prepNether: ★dug-in bunker ${sealedNow ? 'SEALED' : 'unsealed(无封顶料,坑里也比地表强)'} y=${Math.floor(bot.entity.position.y)}`);
@@ -593,13 +622,32 @@ export default async function prepNether(bot, ctx) {
             ? threat.nearest
             : (threat.nearest && typeof threat.nearest.d === 'number' ? threat.nearest.d : Infinity);
         const daytime = !isNightNow() && !isDuskNow();
-        const normalSafeDay = undergroundWorksite && daytime && threat.actionable === 0 && bot.health >= 14 && bot.food >= 14;
+        // C219: food 门槛 14→(8 || hasEdible)。一个健康(hp≥14)、白天、无威胁的 bot 上地表砍几下木
+        // 救活当前 craft(iron_pickaxe 等)是轻量就近收益,不该用"开苦工"的 food≥14 余量卡死。food
+        // 落在 >2 && <14 死区时(normalSafeDay 卡 food≥14、famineVerticalEmergency 卡 food≤2),有铁无木
+        // 无台的健康 bot 会在 TABLE gate 空转 3min+(live 实测 food13)。保留 hp≥14(地表战斗安全)/白天/
+        // threat=0;手里有吃的就放行(keepFed 同轮先吃,food 会回升),没吃的也要 food≥8 才上,避免饿着爬。
+        const normalSafeDay = undergroundWorksite && daytime && threat.actionable === 0 && bot.health >= 14 && (bot.food >= 8 || hasEdible());
         const famineVerticalEmergency = daytime
             && !hasEdible()
             && bot.food <= 2
             && bot.health >= 8
             && verticalPocket
             && (threat.actionable === 0 || (threat.actionable <= 1 && threatNearest > 5.5));
+        // ★C224: no-regen DEADLOCK breaker (hp 8-13 dead-zone, between C217's hp<8 last-resort and
+        // normalSafeDay's hp≥14). When hurt AND unable to regen (food<18 + no edible in inv), the bot
+        // is in an ABSORBING underground deadlock: hp won't rise without regen, regen won't start
+        // without food≥18, food can't be gained without surfacing to hunt — but normalSafeDay's hp≥14
+        // gate blocks that surface. Sitting tight = frozen forever (live 05:37: hp9 food17 spun the
+        // TABLE gate indefinitely past dawn). At a daytime surface with NO actionable threat (forest
+        // home, mobs burn by day, shield in kit), going up to hunt+chop is the ONLY escape and a
+        // calculated risk worth taking — same "find beats frozen" logic as C217.
+        const noRegenDeadlock = daytime
+            && !hasEdible()
+            && bot.food < 18
+            && bot.health >= 8 && bot.health < 14
+            && verticalPocket
+            && threat.actionable === 0;
         const staleReason = Date.now() < (bot._prepTableRecoveryBlockedUntil || 0)
             ? (bot._prepTableRecoveryBlockedReason || 'achieve table gate')
             : 'no local wood/table/logs';
@@ -607,8 +655,9 @@ export default async function prepNether(bot, ctx) {
             goal: goalName,
             reason: staleReason,
             night: isNightNow() || isDuskNow(),
-            safeDay: normalSafeDay || famineVerticalEmergency,
-            famineVerticalEmergency,
+            safeDay: normalSafeDay || famineVerticalEmergency || noRegenDeadlock,
+            famineVerticalEmergency: famineVerticalEmergency || noRegenDeadlock,
+            noRegenDeadlock,
             threat,
         };
     };
@@ -655,6 +704,27 @@ export default async function prepNether(bot, ctx) {
                 bot._prepTableRecoverySurfaceTryUntil = Date.now() + 12000;
                 prog(`prepNether: TABLE recovery famine surfaceUp gained ${gainedY.toFixed(1)}y — short cooldown, continue emergency vertical recovery`);
             }
+            // ★C229 兜底: surfaceUp above only CLIMBS — it never actually CHOPS. The softlock was
+            // exactly this: bot surfaces but stays wood-blocked (no wood → no plank → no stick →
+            // can't recraft pick/table → TABLE gate forever). This is the FORWARD half of the
+            // reverse wood path (achieve.js C229 gate refuses to deep-mine the last pick; this
+            // restocks wood once surfaced). Gated by optionalWoodSafe (surface+day+no hostile+
+            // hp>14+food ok+reachable tree) — at low hp / night / hostiles it skips silently and
+            // yields to survival (never the dangerous-surface-expedition the risk note warns of).
+            try {
+                if (heldLogs() < 2 && maxHeldPlankStack() < 8) {
+                    const woodGate = optionalWoodSafe();
+                    if (woodGate.ok) {
+                        prog(`prepNether: ★C229 TABLE recovery — surfaced, still wood-blocked (logs=${heldLogs()} planksMax=${maxHeldPlankStack()}); chopWood ${woodGate.target}`);
+                        try {
+                            await Promise.race([
+                                skills.customSkill(bot, 'chopWood', 4),
+                                new Promise((_, rej) => setTimeout(() => rej(new Error('table-recovery-chop-timeout')), 90000)),
+                            ]);
+                        } catch (e) { try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} prog(`prepNether: TABLE recovery chopWood incomplete: ${e.message}`); }
+                    }
+                }
+            } catch (e) {}
             return true;
         }
         if (!bot._lastPrepTableGateLogAt || now - bot._lastPrepTableGateLogAt > 30000) {

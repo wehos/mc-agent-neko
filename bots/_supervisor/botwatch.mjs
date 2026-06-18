@@ -23,7 +23,7 @@ import { fileURLToPath } from 'url';
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const POLL_MS = 20000;
 const STALL_SEC = 360;        // 6 min unmoved / progress-frozen => livelock alert
-const HEARTBEAT_SEC = 600;    // 10 min forced "still here" line
+const HEARTBEAT_SEC = parseInt(process.argv[2] || '1800', 10);  // 0/huge disables; pass arg to override
 const LOW_HP = 8, LOW_FOOD = 5, STALE_SEC = 90;
 
 const rd = (n) => { try { return fs.readFileSync(path.join(DIR, n), 'utf8'); } catch { return null; } };

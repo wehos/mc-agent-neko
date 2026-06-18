@@ -664,18 +664,31 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                     try { await skills.goToPosition(bot, Math.round(me3.x + ux3 * 24), null, Math.round(me3.z + uz3 * 24), 3); } catch (e) {}
                 }
             } catch (e) {}
-            // ★采矿缰绳 (deaths 214/216/217/221 全部坠亡在同一片 ±20,-40 雷区 — bot 自己旧矿井
-            // 凿出来的蜂窝地形,而采矿路径无缰绳,digDown 链一路漂出家圈 100+ 格): 锚=bed.json
-            // (家规划地)否则世界出生点;超 80 格先收 40 格再继续采。和 chopWood 的树缰绳同款。
+            // ★采矿缰绳 v2 (C218): 约束的是"采矿过程中的位移漂移",不是"当前离 bed 多远"。
+            // 旧版用 bed 当基准 → bot 一 respawn 就离规划家(bed)150+格、健康、站在矿上时,缰绳把
+            // "离 bed 远"误判成"采矿漂移",在 collectBlock 之前就 return false,连脚下的石头/铁都采
+            // 不到 → NO KNOWN WAY to obtain iron_ingot 死循环(live 实证:bot@7,35 距 bed@151,-14
+            // =152格>80,每条支路触发缰绳召回失败)。deaths 214/221 的雷区坠亡本是 digDown 累积漂移
+            // 导致,基准本就该是"采矿起点"。改为 _achieveMineOrigin:漂出 64 格才召回到起点(近、走得
+            // 到),回圈内即重置起点继续采;bed 仅作 256 格绝对兜底(防真·跨区乱挖)。
             try {
-                let ax2 = 0, az2 = 0;
-                try { const bj2 = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'bed.json'), 'utf8')); if (typeof bj2.x === 'number') { ax2 = bj2.x; az2 = bj2.z; } } catch (e) {}
                 const me2 = bot.entity.position;
-                const dh2 = Math.hypot(me2.x - ax2, me2.z - az2);
-                if (dh2 > 80) {
-                    prog(`${tag}mining LEASH: ${Math.round(dh2)}格离锚 — 收40格再采`);
-                    const ux2 = (ax2 - me2.x) / dh2, uz2 = (az2 - me2.z) / dh2;
-                    const tx2 = Math.round(me2.x + ux2 * 40), tz2 = Math.round(me2.z + uz2 * 40);
+                const now2 = Date.now();
+                let org = bot._achieveMineOrigin;
+                if (!org || now2 - org.ts > 90000) org = bot._achieveMineOrigin = { x: me2.x, z: me2.z, ts: now2 };
+                org.ts = now2;
+                const drift = Math.hypot(me2.x - org.x, me2.z - org.z);
+                let ax2 = null, az2 = null;
+                try { const bj2 = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'bed.json'), 'utf8')); if (typeof bj2.x === 'number') { ax2 = bj2.x; az2 = bj2.z; } } catch (e) {}
+                const bedD = (ax2 != null) ? Math.hypot(me2.x - ax2, me2.z - az2) : 0;
+                const DRIFT_CAP = 64, BED_CAP = 256;
+                if (drift > DRIFT_CAP || bedD > BED_CAP) {
+                    const useBed = bedD > BED_CAP && ax2 != null;
+                    const baseX = useBed ? ax2 : org.x, baseZ = useBed ? az2 : org.z;
+                    const refD = (useBed ? bedD : drift) || 1;
+                    prog(`${tag}mining LEASH: drift=${Math.round(drift)} bedD=${Math.round(bedD)} — 收回${useBed ? 'bed' : '采矿起点'}`);
+                    const ux2 = (baseX - me2.x) / refD, uz2 = (baseZ - me2.z) / refD;
+                    const tx2 = Math.round(me2.x + ux2 * Math.min(40, refD)), tz2 = Math.round(me2.z + uz2 * Math.min(40, refD));
                     let okLeash = false;
                     try {
                         okLeash = await Promise.race([
@@ -686,13 +699,15 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                     try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
                     try { bot.clearControlStates(); } catch (e) {}
                     const meAfter = bot.entity.position;
-                    const dhAfter = Math.hypot(meAfter.x - ax2, meAfter.z - az2);
-                    if (!okLeash || dhAfter > dh2 - 8 || dhAfter > 80) {
+                    const driftAfter = Math.hypot(meAfter.x - org.x, meAfter.z - org.z);
+                    if (driftAfter <= DRIFT_CAP) {
+                        bot._achieveMineOrigin = { x: meAfter.x, z: meAfter.z, ts: Date.now() };
+                    } else {
                         const k = `leash:${block}`;
                         const last = bot._achieveLeashAbort && bot._achieveLeashAbort.key === k ? bot._achieveLeashAbort : null;
                         const repeats = last && Date.now() - last.ts < 45000 ? last.repeats + 1 : 1;
                         bot._achieveLeashAbort = { key: k, ts: Date.now(), repeats };
-                        prog(`${tag}mining LEASH failed ${Math.round(dh2)}→${Math.round(dhAfter)} ok=${!!okLeash}; yield mining body (repeat=${repeats})`);
+                        prog(`${tag}mining LEASH failed drift ${Math.round(drift)}→${Math.round(driftAfter)} ok=${!!okLeash}; yield (repeat=${repeats})`);
                         return false;
                     }
                 }
@@ -807,6 +822,42 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
     }
     async function exposeMore(blockName) {
         const y = Math.floor(bot.entity.position.y);
+        // ★C229 RECRAFT-CAPABILITY gate — never grind the LAST pickaxe away on deep ore
+        // probing when there's NO way to make another. The softlock (06-16 02:50): pick wore
+        // out at y-60 with 0 wood / 0 stick → couldn't craft sticks → couldn't recraft pick or
+        // table → prepNether spun `TABLE gate ... no wood` forever. The whole system stocks a
+        // wood buffer only at the SURFACE before descending; it had no REVERSE path "wood ran
+        // out mid-dig → climb back for wood". This is the preventive half of that reverse path:
+        // down to <=1 pick AND can't immediately recraft one (need 3 cobble + 2 sticks) AND <8
+        // wood-equiv to even make the sticks/handle → do NOT dig deeper. In a safe SURFACE window
+        // (optionalWoodSafe: surface+day+no hostile+hp/food ok) restock wood; otherwise HOLD
+        // (refuse the descent) rather than break the last pick into a softlock. The forward half
+        // (actively surface from depth + chop) lives in prepNether handleTableRecoveryBlocked.
+        try {
+            const picks = bot.inventory.items().filter(i => /_pickaxe$/.test(i.name || '')).length;
+            const sticks = sumRe(/^stick$/);
+            const canRecraftNow = have('cobblestone') >= 3 && sticks >= 2;
+            if (picks <= 1 && !canRecraftNow && woodEq() < 8) {
+                const woodGate = optionalWoodSafe();
+                if (woodGate.ok) {
+                    prog(`${tag}★C229 RECRAFT-GATE: ${picks} pick / cobble=${have('cobblestone')} sticks=${sticks} woodEq=${woodEq()} — restock wood before deep-mine (${woodGate.target})`);
+                    motion('achieve.recraft_gate.restock', { picks, cobble: have('cobblestone'), sticks, woodEq: woodEq(), y });
+                    try { await skills.customSkill(bot, 'surfaceUp', Math.max(63, Math.floor(bot.entity.position.y) + 8)); } catch (e) {}
+                    try {
+                        await Promise.race([
+                            skills.customSkill(bot, 'chopWood', 4),
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('recraft-chop-timeout')), 90000)),
+                        ]);
+                    } catch (e) { try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} }
+                    return woodEq() >= 8;
+                }
+                prog(`${tag}★C229 RECRAFT-GATE: ${picks} pick / cobble=${have('cobblestone')} sticks=${sticks} woodEq=${woodEq()} — no safe wood window (${woodGate.reason}); HOLD, refuse deep-mine (don't break last pick into softlock)`);
+                motion('achieve.recraft_gate.hold', { picks, cobble: have('cobblestone'), sticks, woodEq: woodEq(), y, reason: woodGate.reason });
+                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+                try { bot.clearControlStates(); } catch (e) {}
+                return false;
+            }
+        } catch (e) {}
         const shallowOre = /(^|_)iron_ore$|raw_iron|coal_ore|copper_ore/.test(blockName || '');
         if (shallowOre) {
             const now = Date.now();
