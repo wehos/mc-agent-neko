@@ -10,6 +10,14 @@
 
 ---
 
+## C253. ★★新世界首夜 4连死螺旋——夜间地表横穿去远程工作台（③achieve 热加载，🟡待夜验证）
+- **触发(新世界自主值守,实时取证,决定性)**: 2026-06-19 新世界 fresh-spawn→25min 零死亡推进到石器+furnace+shield+建家(bed@0,67,0)。入夜后 60s 内 **deaths 0→4 螺旋**,gear 全损(inv 一度只剩 dirt:3/spruce_sapling:1)。death_log 死亡1: `Zombie dist=0.9, y67 surface coveredAbove=2, gear{wooden_sword,shield:true,armor:0}, action:self_preservation`。progress 铁证序列: `19:00:25 prepNether ★HUNGRY/LOWHP food=11 hp=18 night — HOLD all work until dawn`(正确) → `19:00:37 need iron_pickaxe → place table → registered table @5,68,8 — walking to reuse`(下一轮没HOLD,夜间地表横穿) → 撞0.9格zombie死。
+- **★根因(双层)**: ①**机理层**: `prepNether.holeUpAtNight` 的 break 条件 `canFightNight()`(剑+盾+hp≥10)在死亡1时为真→破夜hold→上层目标循环追 iron_pickaxe→经 `achieve.placeTable`(achieve.js:331)发起 `goToPosition` 去 @5,68,8 远程注册台→**夜间地表横穿穿过怪区**(起步时8格无怪所以 `mustReuseTable` 放行,行走途中 zombie 逼近/刷出贴脸)。`canFightNight` 破hold意图是"齐装夜间边干边砍"对原地作业合理,对**远程travel致命**。②**结构层**: bed(重生锚)在 0,67,0 **裸露地表**→夜间重生即死亡陷阱,贴脸怪 self_preservation 用 dirt:3 封不住→死2/3/4 连环(near-unavoidable,dawn 解)。
+- **改动(③achieve,机理点修复,热加载)**: `placeTable` 的 table-walk(achieve.js:331)前加 `_nightExposed`(t∈13000-23000 && y≥50 && !enclosed,与本文件 line210/398 同款谓词)门: `_nightExposed && d>2.5 → 拒绝横穿、set _prepTableRecoveryBlockedUntil(30s)、return false defer 到白天`。相邻台(d≤2.5,无实质travel)仍放行;enclosed/地下豁免。纯加法,只在"夜间地表为工具目标横穿远程台"这一致命路径触发。
+- **预测(可证伪)**: 下次夜间(13000-23000)、y≥50 地表、非enclosed、追 iron_pickaxe/工具目标且注册台在 d>2.5 处时,progress 应出 `★NIGHT-EXPOSED table-walk refused — defer table-craft to day`,**不再出现夜间 `registered table ... walking to reuse` 横穿**;白天/相邻台/地下 enclosed 仍正常 walk-to-reuse。若仍夜间横穿死,则路径不经 placeTable(查别的 surface-travel 向量: feedUp 动物追/chopWood 找树)。
+- **观测**: ✅ `node --check achieve.js` 通过。🟡 修复时已 dawn,bot 白天重建中(cobble64/镐2/planks16),待下一夜 achieve cache-bust 调用现场验证。
+- **★待办 C254(结构层,更大鱼)**: 地表 bed=重生死亡陷阱是死2/3/4 根因。修向: setBed 选址应在**封闭庇护内**(床+箱子+顶盖一体),或夜间重生被围时**立即 digDown 入地封顶**而非地表筑墙(贴脸怪时挖下比横向封墙快且避光)。待 bot 下次放 bed 时介入。参见 memory "家一体化"。
+
 ## C252. ★裸装无镐夜间地表暴露——prepNether bunker 加"挖洞失败→泥土筑墙 shelter"回退（③prepNether 热加载，🟡待夜间验证）
 - **触发(用户实时截图 + 取证,决定性)**: 用户发来 bot 站在地表草坡的截图:"他正在一个并不安全的地方挂机等待夜晚结束"。取证: bot 42,80,-3 **hp10 food0 夜间 裸装(pick=0/cobble=0/stick=0/planks=0,仅5泥)死亡区(7死<16b)**,progress 死循环刷 `prepNether: bunker err stone dig blocked without held pick: stone`。v2 监控纯位移检测确认同位卡死 5min+。
 - **★根因(prepNether.js:362 读码)**: 夜间 bunker 的常规 dig-in 分支直接 `await skills.digDown(bot, 2)` 挖洞——**裸装无镐遇石头 digDown 抛异常**,冒泡到外层 catch(372)→ `dugIn=false` → 6s 后重试 → 同样抛 → **死循环暴露在地表**;且 throw 发生在用 `seal`(sealBlock 含 dirt)封顶那步**之前**,所以哪怕有 5 泥也永远走不到"用泥土封"。机理 = **能挖洞才避难的隐含假设,在裸装无镐时崩塌**,且无地表筑墙回退。

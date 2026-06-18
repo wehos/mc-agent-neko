@@ -329,6 +329,22 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                 const pocket = bot._mobility && (bot._mobility.enclosed || bot._mobility.state === 'POCKET');
                 const canMakeLocalTable = have('crafting_table') > 0 || maxRe(/_planks$/) >= 4 || sumRe(/_log$/) > 0;
                 const mustReuseTable = !canMakeLocalTable && d <= 32 && !hostileNear(8);
+                // ★DEATH-SPIRAL ROOT CAUSE (deaths 1-4, 2026-06-19 night): canFightNight()
+                // broke prepNether's night-hold (had shield+sword), the goal loop then chased
+                // iron_pickaxe, and THIS walk crossed the exposed surface to a remote table at
+                // night — a zombie reached the bot mid-transit (none within 8b at start, one
+                // arrived during the walk) → death → gear dropped → naked surface respawns
+                // spiralled 3 more times. Night surface travel for a daytime tool goal is never
+                // worth it: refuse the cross-surface walk and defer the table-craft to daylight.
+                // (Adjacent table, d<=2.5, is still fine — no real transit.) enclosed/underground
+                // exempt via the same _nightExposed predicate used elsewhere in this file.
+                const _nightExposed = (() => { try { const t = bot.time.timeOfDay; return t >= 13000 && t <= 23000 && bot.entity.position.y >= 50 && !(bot._mobility && bot._mobility.enclosed); } catch (e) { return false; } })();
+                if (_nightExposed && d > 2.5) {
+                    bot._prepTableRecoveryBlockedUntil = Date.now() + 30000;
+                    bot._prepTableRecoveryBlockedReason = `night-exposed: won't cross surface ${d.toFixed(1)}b to table @${reg.x},${reg.y},${reg.z}`;
+                    prog(`${tag}★NIGHT-EXPOSED table-walk refused — defer table-craft to day (${bot._prepTableRecoveryBlockedReason})`);
+                    return false;
+                }
                 if ((!pocket && d <= 12) || mustReuseTable) {
                     prog(`${tag}registered table @${reg.x},${reg.y},${reg.z} — walking to reuse${mustReuseTable ? ' (no local wood/table; prefer station over cave wood climb)' : ''}`);
                     try {
