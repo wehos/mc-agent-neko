@@ -391,6 +391,34 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
             ]).catch(() => { try { bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} });
             if (!findTable()) await skills.wait(bot, 200);
         }
+        // ★C258 cramped-pocket table livelock: in a 1-wide shaft placeBlockNearby finds no open
+        // footing cell, returns fast, the caller retries forever — a confirmed 6-min STALL
+        // @117,41,-47 (hp20/food16, act="-", looping "place table → too far/cramped → craft local").
+        // Carve a short 1x2 branchMine tunnel to create the open cells a table needs, then retry.
+        if (!findTable() && bot._mobility && (bot._mobility.enclosed || bot._mobility.state === 'POCKET')) {
+            // ★C258 cramped-pocket table livelock (confirmed 6-min STALL @117,41,-47, hp20/food16):
+            // a 1-wide dug shaft has NO open footing cell for a table, placeBlockNearby returns
+            // fast, the caller retries placeTable every ~0.6s forever. iron_pickaxe/furnace are
+            // surface-tier crafts that don't belong in a shaft. Climb to open space (surfaceUp —
+            // well-tested, always moves the bot OUT of the pocket = breaks the freeze) and place
+            // there. (A branchMine niche-carve was tried first and no-op'd in the cramped spot.)
+            const climbTo = Math.min(72, Math.floor(bot.entity.position.y) + 20);
+            prog(`${tag}★C258 table unplaceable in pocket y=${Math.floor(bot.entity.position.y)} — surfaceUp(${climbTo}) to open space, then place`);
+            try { await skills.customSkill(bot, 'surfaceUp', climbTo); } catch (e) {}
+            for (let a = 0; a < 2 && !findTable(); a++) {
+                await Promise.race([
+                    skills.placeBlockNearby(bot, 'crafting_table'),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('place-timeout')), 20000)),
+                ]).catch(() => { try { bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} });
+                if (!findTable()) await skills.wait(bot, 200);
+            }
+            if (!findTable()) {
+                // still stuck after surfacing — cooldown so the mission stops tight-looping and
+                // moves on (mine/relocate) instead of re-entering placeTable every ~0.6s.
+                try { bot._prepTableRecoveryBlockedUntil = Date.now() + 30000; bot._prepTableRecoveryBlockedReason = `table unplaceable, surfaced to y=${Math.floor(bot.entity.position.y)}`; } catch (e) {}
+                prog(`${tag}★C258 table still unplaceable after surfaceUp — 30s cooldown, yield to mining/relocate`);
+            }
+        }
         const placed = findTable();
         if (placed) { try { stRegister('crafting_table', placed.position); } catch (e) {} }   // 放置必登记
         return !!placed;
