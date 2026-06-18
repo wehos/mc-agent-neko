@@ -443,15 +443,29 @@ export default async function prepNether(bot, ctx) {
                 const threat = noRegenActionableThreats(r);
                 return threat.actionable;
             };
-            for (let w = 0; w < 10; w++) {
-                const lingering = dawnLingeringHostiles(10);
-                if (lingering === 0) break;
-                if (w === 0) {
-                    const threat10 = noRegenActionableThreats(10);
-                    prog(`prepNether: ★dawn-exit hold — ${lingering} actionable mob(s) at the door (raw=${threat10.raw} layered=${threat10.layered}), waiting them out`);
+            // ★C261: CAP the cumulative dawn-exit hold. The inner loop waits 60s, but the caller
+            // re-enters it every cycle, so a zombie sitting in shade that never burns off froze the
+            // bot for 6 MIN (confirmed STALL @5,69,8, hp20/food20, "dawn-exit hold 1 mob, waiting
+            // them out" re-logged every 60s). After ~72s total, stop cowering and proceed — let
+            // self_defense fight the lingering mob while work resumes. Freezing the whole run is far
+            // worse than trading hits with one zombie at full hp.
+            if (dawnLingeringHostiles(10) === 0) {
+                bot._dawnHoldSince = 0;
+            } else if (bot._dawnHoldSince && Date.now() - bot._dawnHoldSince > 72000) {
+                prog(`prepNether: dawn-exit hold timed out (>72s, lingering=${dawnLingeringHostiles(10)}) — proceed, let self_defense fight; no perpetual cower`);
+                bot._dawnHoldSince = 0;
+            } else {
+                if (!bot._dawnHoldSince) bot._dawnHoldSince = Date.now();
+                for (let w = 0; w < 10; w++) {
+                    const lingering = dawnLingeringHostiles(10);
+                    if (lingering === 0) { bot._dawnHoldSince = 0; break; }
+                    if (w === 0) {
+                        const threat10 = noRegenActionableThreats(10);
+                        prog(`prepNether: ★dawn-exit hold — ${lingering} actionable mob(s) at the door (raw=${threat10.raw} layered=${threat10.layered}), waiting them out`);
+                    }
+                    if (w === 0) await nightBunkerStaticWeapon({ allowDaySingleSpider: true, reason: 'DAWN lingering-mob' });
+                    await skills.wait(bot, 6000);
                 }
-                if (w === 0) await nightBunkerStaticWeapon({ allowDaySingleSpider: true, reason: 'DAWN lingering-mob' });
-                await skills.wait(bot, 6000);
             }
         }
     };
