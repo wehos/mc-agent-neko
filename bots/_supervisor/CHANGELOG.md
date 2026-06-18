@@ -2140,6 +2140,7 @@
 - **回滚**: 恢复 PlanD 先 `skills.customSkill(bot,'chopWood',...)`,再 `appleLeafSweep(32)` 的旧顺序。
 
 ## 待修队列
+- **★★死6/7 根因=无甲+no-regen 脆弱(新世界值守,2026-06-19,下个聚焦项)**: C253/256/257 修好夜暴露后,死6(dawn骷髅射,无盾无甲)、死7(y45洞穴6怪swarm,hp20→13→8→5,无甲no-regen)接连发生。**总绑定约束=食物**: bot 反复卡 hp<14/food<18 no-regen→碰怪即崩,且拿到铁(12)先做 iron_pickaxe+盾、**不做甲**→撑不过 dawn/洞穴遭遇→死前丢光12铁。诊断到的具体机理: ①**feedUp 觅食窗口太窄**(desperationRoam line211): `food≥12 && !noRegenHurt → 不roam`,故 food13-16/hp满 时忽略 52格可见猪(maxAnimalClose food>10 达96但门先挡);food 跌破12 才触发,那时常已夜/有怪/地下→`hostileNear(8)`/`isNight` 又gate掉→**四条件(food<12+白天+8格无怪+动物近)难同时满足**。②**无食物缓冲**: 自认 food12=够,从不主动囤满→deep-mine 时 no-regen。③疑似**生肉直接吃**(porkchop 在手 food 没大涨)未 cook(生3熟8)。④**铁分配优先级**: 应甲优先于 pickaxe(survival>diamond),partial甲(chestplate/helmet)就能扛 dawn/洞穴。候选修(需干净设计+测试,勿rush): feedUp 安全时主动囤食到≥17建buffer / 低食物no-regen 时禁止 deep-mine 先上浮觅食 / 铁优先做甲 / 生肉入furnace cook。
 - **enderman 视线豁免**(死276根因,已二次): 行军/凿崖 lookAt 扫过 enderman 脸=激怒。修: lookAt 前查路径上 enderman,目标点压低绕开头部。①层,下个重启窗
 - **tool_keeper 备镐失灵**(16:40): 木镐磨尽无备——根因=木材buffer没囤够就开挖矿(#21 资源节奏)
   - **★强复现(06-16 02:50,run-killer)**: bot @y92 hp4/food17 软锁 15min+,inv 富矿(coal186/copper273/cobble346/leather3)但 **0 pickaxe + 0 sword + 0 log/plank + stick仅1**=镐磨断后无木重造(造镐需2棍/棍需plank/plank需log,全无)。prepNether 死循环 `TABLE gate for shield — no wood` 每9s重启;watchdog `Pinned 15min+ kicking stack` 强中断也治不了(资源死锁非软件pin)。叠加 hp4 食物荒漠 no-regen(food17<18不回血、无可食、venture全在hp<5 abort)=**多因绞死的吸收态**。**这是当前 run 的真正杀手:不是单一bug,是"挖矿前不囤木buffer→镐断→无木重造→连工作台都做不了"的资源节奏崩溃 + 食物荒漠**。指向 #21(挖矿前强制木材/备镐buffer)+ 食物荒漠 migrate 两大结构项,均非 hp4 可安全速修。
