@@ -216,9 +216,17 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         if (farAnimal && farAnimal.position) {
             const animalDist = farAnimal.position.distanceTo(bot.entity.position);
             const animalDy = Math.abs(farAnimal.position.y - bot.entity.position.y);
-            const maxAnimalClose = bot.food <= 2 ? 32 : (bot.food <= 4 ? 48 : (bot.food <= 6 ? 64 : (bot.food <= 10 ? 72 : 96)));
+            // ★C259 starvation-floor reach trap: maxAnimalClose SHRANK as food fell (food<=2 -> 32),
+            // so at food2 a CONCRETE visible cow@48 became "too costly" and the bot gave up
+            // (calorie-floor) and froze at food2 forever — a confirmed 6-min STALL @106,88,-9 with
+            // cow@48 AND sweet_berry_bush@47 both in scan, both ignored. The shrink is meant to avoid
+            // wasting the last pips on a SPECULATIVE roam, but for a KNOWN target stranding is far
+            // worse than spending pips. Keep the low-food reach GENEROUS (>=56) so a seen animal at
+            // the critical floor is actually pursued. crawlDyMax likewise relaxed: surfaceUp can strand
+            // the bot on a hilltop (y88) above a ground cow (dy~18>12), so allow a bigger downhill crawl.
+            const maxAnimalClose = bot.food <= 4 ? 56 : (bot.food <= 6 ? 64 : (bot.food <= 10 ? 72 : 96));
             if (animalDist > maxAnimalClose || animalDy > 10) {
-                const crawlDyMax = bot.food <= 1 ? 24 : 12;
+                const crawlDyMax = bot.food <= 4 ? 24 : 12;
                 if (bot.food <= 6 && bot.health >= 8 && animalDist <= 96 && animalDy <= crawlDyMax && !edibleHeld()) {
                     const p = bot.entity.position;
                     const dx = farAnimal.position.x - p.x;
