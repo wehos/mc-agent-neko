@@ -177,8 +177,9 @@ Kernel = {
 
 沿用 world-model.md §6 的影子模式纪律：
 
-- **S1（骨架，本次）**：建 `framework/` 五模块 + 契约 + 文档；flag 默认关；`node --check` 全过；接进 agent.update() 但 tick 内若 flag 关则 no-op。**零行为变更。**
-- **S2（工具泳道先行）**：把现有 MLG/垫方块/封顶等最易出错的脚本搬进 `tool_lanes.runExclusive`，本能/skill 调用方改走它。先在影子模式记日志验证不误抢占，再生效。
+- **S1（骨架）✅C274**：建 `framework/` 五模块 + 契约 + 文档；flag 默认关；`node --check` 全过；接进 agent.update() 但 tick 内若 flag 关则 no-op。**零行为变更。**
+- **S2（工具泳道实现）✅C275**：建 `framework/tools/`（lava_guard / survival_mlg[clutchWater 含永远收水+防岩浆] / bridging[generous] / bunker / index[TOOL_CATALOG]），各自获取泳道、不可中断、只被更高优先互斥泳道抢占。`node --check` + 10 项 mock 单测全过（防岩浆拒挖/拒水、落地水永远收水、岩浆上空不放水）。**未接 live 调用方，零行为变更。**
+- **S2b（接线，影子先行）待做**：把坠落本能（→clutchWater）、挖矿守卫（→safeToDigDown）、夜间封顶（→sealBunker）、垫方块调用方接上 tools；先影子记日志验不误抢占，再生效。in-game 放水时机对真服调。
 - **S3（proposeTasks 拆解）**：把 missionNether 的开局决策逐块抽进 `proposeTasks`，先**只记录"我会提议什么"对照 missionNether 实际行为**，验证一致再切。
 - **S4（LLM 拍板回归）**：kernel 决策循环接 LLM judge；survival 下 idle 才问 LLM；改 prompter 占位符。
 - **S5（模式切换 + companion）**：玩家消息切 companion；退役 self_prompter（确认 supervised 路径无回归后删）。

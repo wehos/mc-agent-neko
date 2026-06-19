@@ -10,6 +10,16 @@
 
 ---
 
+## C275. ★★工具独占泳道层落地(S2)——MLG落地水/垫方块/封顶堡垒搬进不可中断互斥泳道 + 防岩浆判定器（新建 src/agent/framework/tools/*,✅node--check+10项mock单测全过,未接live调用零行为变更）
+- **触发(框架 v2 迁移 S2,蓝图 §E/§F)**: 蓝图点名"很多固定动作(落地水/垫方块/瞬搭堡垒/翻地形)用脚本实现本应万无一失,现在却经常出问题"——根因=裸 async 被 reflex/interrupt_code 半路截断。§E.2 要 MLG 落地水写进"最高级 DNA"(脚本级触发+永远收水+防岩浆例外),§F 要独占线程+留余量。
+- **改动(新建 framework/tools/ 五文件,各自获取泳道,调用方不管泳道)**: `lava_guard.js`(纯读谓词:safeToDigDown[DIG前置]/canClutchWater[MLG前置]/landingBelow,岩浆即拒,fail-safe)+ `survival_mlg.js`(clutchWater 在 **SURVIVAL_MLG lane prio100 抢占一切**:坠落检测→**防岩浆FIRST**→放水→落地settle→**永远收水**[equip water→activate,再 equip bucket→activate],generous 早arm/看下/宽settle)+ `bridging.js`(placeUnderFeet/pillarUp 在 LOCOMOTION lane,**generous 参数** jumpMs1100/settleMs280 vs 原900/180,容错优先)+ `bunker.js`(sealBunker 在 PLACEMENT lane,4向头环+顶,复用 skills.placeBlock 同 prepNether 块集)+ `index.js`(TOOL_CATALOG 自描述目录+triggers)。**不可中断**(lane 内不查 interrupt_code)+ 只被更高优先互斥泳道抢占(ctx.preempted() 协作 bail)。
+- **预测(可证伪)**: ①工具层导入不改任何行为(未接 live 调用方,flag 关)。②S2b/S5 把坠落本能接上 clutchWater 后,live 中 bot 高空坠落应**脚本级放水救命且事后水被收回**(不再淹没工地),**岩浆上空不放水**(progress 出 `[mlg] no clutch: lava below`)。③挖矿前查 safeToDigDown,**不再挖穿进岩浆**。④垫方块 generous 后台阶/搭桥放置成功率升(更长 jump/settle)。若 live 落地水时机不对(放早/放晚没救到)→ARM/PLACE_WINDOW 阈值需对真服调(本条只验证控制流,时机待 live)。
+- **观测**: ✅ `node --check` 5 文件全过。✅**mock-bot 10项单测全过**: 防岩浆(stone可挖/lava拒挖)、canClutchWater(stone可/lava拒)、clutchWater 岩浆上空**不放水且 activateItem 从不调用**、实地**放水且永远收水**(equip 序列 water→bucket)、无水桶优雅拒绝。🟡 in-game 放水时机待 live 调(诚实记录:mock 验控制流,真服验时机)。
+- **★工程要点(写进规格书 §1 红线)**: "线程池"=单线程协作式互斥泳道,非 OS 线程;碰 bot 代码串行主循环。落地水 prio100 抢占 DIG/LOCOMOTION = 保命第一(冒烟已验 MLG 抢占运行中 DIG)。
+- **关联**: docs/framework-v2-scaffold.md §5 互斥表 + §6 迁移 S2。复用 skills.placeBlockUnderFeet/placeBlock/pillarUp/activateItem 桶机理。下一步 S2b(把坠落本能/挖矿守卫接上这些工具,影子先行)或 S3(proposeTasks 拆解对照 missionNether)。[[agent-framework-v2]]。
+
+---
+
 ## C274. ★★★框架 v2 骨架落地——四部分线程模型契约层 + survival proposer + 工具独占泳道（新建 src/agent/framework/*,✅node--check+冒烟全过,feature flag 默认关零行为变更）
 - **触发(用户 2026-06-19 框架级重设计,亲定方向)**: 用户和 MC 老玩家商量后定的框架 v2(详 docs/agent-framework-v2.md):四部分线程模型(世界模型池/本能反射/工具独占线程/agent LLM 拍板)+ survival/companion 双模式。用户拍板:"**先重构框架,大框架搭好再完善各部分;后续子模块迭代可能和其他开发者协作**"——要清晰层间契约支持并行协作。
 - **★关键工程判断(诚实映射,比蓝图设想微妙)**: ①**当前决策驱动根本不是 self-prompt 而是 missionNether 硬编码巨型状态机**——supervised 流程下 `ws_server.js:307` 已停掉 self-prompt,LLM 在生存里几乎不参与。所以"退役 self-prompt"几乎已发生,框架真正工作=**把 missionNether 单体硬决策拆成 world-model proposer + LLM judge**。②**"线程池"在 Node/mineflayer 不能是真 OS 线程**(bot 非线程安全,全走单 event loop)→落成**协作式互斥泳道**;只有纯计算(x-ray 扫矿/路径预规划,吃快照不碰 bot)才下放真 worker。这是骨架根本约定。
