@@ -80,3 +80,9 @@ printf '%s\n' '{"type":"cancel_skill","reason":"..."}' >> bots/_supervisor/inbox
 
 ## 7. 交接时刻快照(~07:54)
 bot:hp9/food7(no-regen偏低但host=0白天),iron_pickaxe在手,copper216/raw_iron熔用中,y70,deaths=15稳一阵(较长survive stretch)。栈健康。**等它攒铁做armor-first是下一最高杠杆动作。**
+
+---
+## 8. 会话末追加(08:18) — 新 livelock: 无动物山顶食物strand
+确认 ★STALL 13min @69,84,-13(food5/hp9白天→夜): bot 被 surfaceUp 弄到**无动物雪山顶**(`animal64=none`),但 `berry48=sweet_berry_bush@44` 有浆果丛。feedUp 只刷 `no huntable animal within 32`——**只32-cap找动物(没有)、不去够44格浆果丛、无动物时也不relocate**→卡死。我用 cancel_skill 破了(bot下移脱离)。
+**待修(③feedUp,接班做)**: ①浆果丛 pursuit 也随低食物放宽range(类C259,sweet_berry_bush@≤56该去);②**无动物且本地无食时触发 forageExplore relocate**(别在死山顶干刷"no animal within 32")。这是 C259 没覆盖的食物strand变体。
+**⚠️给接班的我**: 上个我本会话多次工具调用格式错误(漏`antml:`前缀导致 Write/Edit/Bash 没执行)——务必用正确的 `antml:invoke`/`antml:parameter` 格式,每次调用后确认 result 真返回(别假设成功)。
