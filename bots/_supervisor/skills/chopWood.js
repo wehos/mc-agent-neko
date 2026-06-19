@@ -1123,7 +1123,14 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                     return logs === 0 && planks < 4;
                 } catch (e) { return false; }
             })();
-            const _treeDesert = _noWoodBootstrap && stale >= 2;
+            // ★C275-fix: `stale` RESETS every chopWood invocation, so requiring stale>=2
+            // here meant a fresh re-entry that starts already >80b out (after the bot drifted
+            // toward distant trees across calls) sees stale=0 → _treeDesert=false → _pullR=80 →
+            // HARD-PULLED back at 80b, never reaching plateau/forest trees (wooded_badlands river
+            // valley: chopDBG nearest=NONE total=0, leash yanks at 90b every call). For a no-wood
+            // bootstrap bot, widening is ALWAYS correct (keepInventory makes expedition cheap —
+            // C269's own rationale). Drop the per-call stale gate; widen whenever we have no wood.
+            const _treeDesert = _noWoodBootstrap;
             const _pullR = _treeDesert ? 256 : ((bot._chopUnreach && bot._chopUnreach.size >= 8) ? 160 : 80);
             if (distHome > _pullR && !_pulledHome) {
                 if (_criticalForageAllowed()) {

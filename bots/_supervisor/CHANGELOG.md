@@ -10,6 +10,16 @@
 
 ---
 
+## C276. ★★新世界 live 测试(shadow)——chopWood leash stale-reset 根因修复 + commit 病根精确定位（③chopWood 热加载✅live验证远征自救; missionNether commit seam 已定位待 S4 接管）
+- **触发(用户开新世界 wooded_badlands 实地测框架 v2 shadow)**: 框架 flag=shadow(零行为变更,跑 live missionNether 老路 + kernel 旁路记决策)。新世界出生点 wooded_badlands 河谷,chopDBG `nearest=NONE total=0`(树在台地顶,谷里无可达树)。
+- **★发现1(C275-fix leash 根因,✅live验证)**: `_treeDesert = _noWoodBootstrap && stale>=2` 中 `stale` 是**每次 chopWood 调用重置**的计数器。bot 跨调用漂到 90 格外时是新一轮调用(stale=0)→_treeDesert=false→_pullR=80→`LEASH 90格离锚硬回拉`,**永远够不到树荒外森林**。改:`_treeDesert = _noWoodBootstrap`(无木即放宽到 256,不依赖会重置的 stale;keepInventory 远征廉价=C269 原意)。**✅live 验证**: 部署后 bot 一路远征 300+ 格(spawn→badlands→desert→**forest**),在橡树林敲叶得苹果(food0→9)、猎羊(food→16),**自己走出了荒漠区**——leash 不再 80 格硬拉。
+- **★发现2(commit 病根精确定位,#1 真根活体证据)**: bot 到了有树有羊的森林,却被 feedUp(猎羊/敲叶)/漫游拉走、**从不 commit 砍树**,森林↔沙漠↔海滩来回飘,~20min picks=0,最终沙漠夜死×2(keepInventory)。**seam 定位**: `★C273 BOOTSTRAP COMMIT`(missionNether.js:746)埋在 `if(lowFoodHold)`(:738)块内→bot **有食物时(food 10-16)lowFoodHold=null→整块跳过→commit 永不触发**(C273 台账自己预言的"scope局限待扩")。且 feedUp 在多处食物 gate(achieve LOW-FOOD gate/prepNether 内部让步)被抢占。**老路=层叠食物 gate 互锁泥潭,surgical 提取会牵出下一层(whack-a-mole)**。
+- **预测(可证伪)**: ①(已验证)leash 修复后无木 bot 远征 >80 格不被硬拉,能到远处森林。②commit 病根的治本=框架 kernel 接管 sticky(S4):`proposeTasks→decide(commit BOOTSTRAP_KIT)→suppress feedUp/forage/roam 直到拿镐`,取代 missionNether 食物 gate 泥潭。若只在 missionNether 提取 C273 commit 而不接管,预测仍会被 prepNether 内部 feedUp 让步抢占(下一层 gate)。
+- **观测**: ✅ shadow kernel 全程正确提议 BOOTSTRAP_KIT(proposer 验证)。✅ C275-fix leash 热加载 live 验证远征自救。✅ commit 病根 + seam 定位(missionNether:738/746)。⚠️ wooded_badlands 河谷 spawn 不理想(树不可达+河陷阱),未来 driven 测试建议 re-roll 到平坦可见树 spawn。🟡 S4 接管待建。
+- **关联**: 这次 live 测试同时验证了"框架 shadow 能旁路诊断而不改行为"的价值。下一步 S4 = kernel 真驱动 + 承诺计划(取代 missionNether 决策泥潭,非再打补丁)。[[decision-speed-keepinventory]](commit 病根)[[agent-framework-v2]]。
+
+---
+
 ## C275. ★★工具独占泳道层落地(S2)——MLG落地水/垫方块/封顶堡垒搬进不可中断互斥泳道 + 防岩浆判定器（新建 src/agent/framework/tools/*,✅node--check+10项mock单测全过,未接live调用零行为变更）
 - **触发(框架 v2 迁移 S2,蓝图 §E/§F)**: 蓝图点名"很多固定动作(落地水/垫方块/瞬搭堡垒/翻地形)用脚本实现本应万无一失,现在却经常出问题"——根因=裸 async 被 reflex/interrupt_code 半路截断。§E.2 要 MLG 落地水写进"最高级 DNA"(脚本级触发+永远收水+防岩浆例外),§F 要独占线程+留余量。
 - **改动(新建 framework/tools/ 五文件,各自获取泳道,调用方不管泳道)**: `lava_guard.js`(纯读谓词:safeToDigDown[DIG前置]/canClutchWater[MLG前置]/landingBelow,岩浆即拒,fail-safe)+ `survival_mlg.js`(clutchWater 在 **SURVIVAL_MLG lane prio100 抢占一切**:坠落检测→**防岩浆FIRST**→放水→落地settle→**永远收水**[equip water→activate,再 equip bucket→activate],generous 早arm/看下/宽settle)+ `bridging.js`(placeUnderFeet/pillarUp 在 LOCOMOTION lane,**generous 参数** jumpMs1100/settleMs280 vs 原900/180,容错优先)+ `bunker.js`(sealBunker 在 PLACEMENT lane,4向头环+顶,复用 skills.placeBlock 同 prepNether 块集)+ `index.js`(TOOL_CATALOG 自描述目录+triggers)。**不可中断**(lane 内不查 interrupt_code)+ 只被更高优先互斥泳道抢占(ctx.preempted() 协作 bail)。
