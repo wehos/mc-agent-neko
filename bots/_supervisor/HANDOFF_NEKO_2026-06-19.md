@@ -89,3 +89,18 @@ bot:hp9/food7(no-regen偏低但host=0白天),iron_pickaxe在手,copper216/raw_ir
 
 ## 9. 会话末追加(08:46) — 新 livelock: chopWood 卡 riskySkip 树
 确认 ★STALL 6min @76,76,33(白天hp20/food18): bot `> chop for planks` 卡在 `nearest=spruce_log@3.5b riskySkip=1 total=0`,act_trace `dig=spruce_log` 冻结但 total 不增——**chopWood 把某根树判 riskySkip 跳过但不换树/不放弃,反复刷同一根冻死**。cancel_skill 破了(重派后砍到planks14/stick11/food回满)。**待修(③chopWood)**: riskySkip 命中后应黑名单该树+找下一棵 或 N次后放弃返回,别死刷同一根。
+
+## 10. 续(12:50, 用户在线纠偏后的深度诊断 — 接手优先读这段)
+**用户三条决定性纠正**：①难度是 **Easy**(不是Hard)→反复死亡是 **bot逻辑/环境** 问题不是难度;②**别再赖spawn**(第13次了),用 **migration** 方案(记录里早有);③根本问题在 **世界模型 + 遇敌应对**(①层 modes.js)。
+
+**migration 现状(查证)**: `migrate.js` 在 fire(C226-A fresh-respawn triage),但**每次只走25-254b就abort**,abort原因几乎全是 `actionable hostile at leg N`(migrate.js:275 `closeActionable()`=任何怪在8b内即break)。整片是 **snowy_taiga**(biomeScore -7~-12,无land animals,无羊→bedOk恒false→respawn永远回死亡区)。要逃出去需~800b。**我改了C263**(migrate.js:275 改成只creeper贴脸才abort,否则边走边self_defense处理)——但**这次edit可能被用户消息打断没应用,接手者先 `grep -n C263 skills/migrate.js` 确认,没有就重做**。
+
+**当前活体 livelock(50min, bot@65,48,-19 idle)根因链**: y48无木→想做非必需water_bucket→需table→无木→`handleTableRecoveryBlocked('bucket')`(prepNether.js:716)该 surfaceUp(63)取木但**没有效执行**(act_trace全程`act=- dig=-`,被 safeDay/`_prepTableRecoverySurfaceTryUntil`冷却 gate 挡或瞬返)→2min冷却内只yield→missionNether重派→重头→冻死循环。cancel/inject-surfaceUp 都被 sticky 重派抢回(竞态),破不了。
+
+**★★接手者的真正任务(①层地基,按机理,勿再③层whack-a-mole)**:
+1. **自我脱困(世界模型命门)**: bot 困y48取不到木却**不会强挖垂直出地表**。查 surfaceUp 为何从y48 idle不动(读 surfaceUp.js 主体 + 它的入口gate/hp gate);加"长时间同位+craft全blocked → 强制 iron_pickaxe 垂直挖到地表"的可靠自救。这能灭一大批 livelock。
+2. **卡住退一步(规划)**: 非必需目标(water_bucket等)table-blocked时应**跳过**不yield-loop(prepNether.js:1108 加 `&& !tableRecoveryBlocked('bucket')`);通用:同一子目标N秒无进展→升级解前置或跳过。
+3. **遇敌(需先抓逐帧证据)**: Easy下弱怪打崩(hp20→0=挨8下没逃没挡)。抓一次战斗的act_trace逐帧(挥/挡/逃/还是execute锁住没动作,memory死264根因=execute挂起锁)→定机理→修 modes.js self_defense(block/kite/fight-vs-flee)。①层需重启,bot常空背包=重启零成本。
+4. **migrate能用后**: C263让它穿过mob到非雪taiga biome→有羊→设床→破死亡区respawn循环。这是用户指的"THE解锁"。
+
+**⚠️工具格式警告**: 我(上个实例)本轮后半段~80%工具调用漏`antml:`前缀失败,严重拖累。接手者务必每次用完整 `antml:invoke`/`antml:parameter`,调用后确认有真result返回。
