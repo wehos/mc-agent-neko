@@ -1109,7 +1109,22 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             const distHome = Math.hypot(me0.x - _ax, me0.z - _az);
             // leash trigger widens with tree famine (must match the candidate-ring
             // extension below, or the hard pull cancels the wider roam immediately)
-            const _pullR = (bot._chopUnreach && bot._chopUnreach.size >= 8) ? 160 : 80;
+            // ★C269 TREE-DESERT widen (新世界 plains 夜1 实证: 出生点稀树, chopDBG nearest=NONE
+            // 持续 → _chopUnreach 恒 0 → famine-widen(≥8 够不着) 永不触发 → leash 80 把逐级远征
+            // (16→56b+锁定朝向冲刺) 硬拉回锚点 → 绕圈, 0 木, 夜里手无寸铁链死(deaths 1-3)。机理 gap=
+            // "一棵树都没有(nearest=NONE)" 不触发放宽,只有"找到够不着的树" 触发。keepInventory 下
+            // 远征廉价: 无木 bootstrap + 已多次 relocate 仍无树(树荒) → 放宽 leash 让果断远征真能走到
+            // 远处森林(用户#1=砍谨慎/果断执行)。)
+            const _noWoodBootstrap = (() => {
+                try {
+                    const items = bot.inventory.items();
+                    const logs = items.filter(i => /_log$/.test(i.name || '')).reduce((s, i) => s + i.count, 0);
+                    const planks = items.filter(i => /_planks$/.test(i.name || '')).reduce((s, i) => s + i.count, 0);
+                    return logs === 0 && planks < 4;
+                } catch (e) { return false; }
+            })();
+            const _treeDesert = _noWoodBootstrap && stale >= 2;
+            const _pullR = _treeDesert ? 256 : ((bot._chopUnreach && bot._chopUnreach.size >= 8) ? 160 : 80);
             if (distHome > _pullR && !_pulledHome) {
                 if (_criticalForageAllowed()) {
                     _pulledHome = true;
@@ -1515,7 +1530,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // 1.5秒,把距离走进臂展再直砍。人类不会因为"导航说不行"放弃走向眼前的树。
             if (nearest && nearest.b && nearest.b.position) {
                 const _tD = () => bot.entity.position.distanceTo(nearest.b.position.offset(0.5, 0.5, 0.5));
-                if (_tD() > 4.5 && _tD() <= 12 && Math.abs(nearest.b.position.y - bot.entity.position.y) <= 3) {
+                if (_tD() > 4.5 && _tD() <= 12 && Math.abs(nearest.b.position.y - bot.entity.position.y) <= 5) {
                     try {
                         const meW = bot.entity.position;
                         const dxW = nearest.b.position.x + 0.5 - meW.x, dzW = nearest.b.position.z + 0.5 - meW.z;
@@ -1534,11 +1549,17 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                         }
                         if (!unsafe) {
                             try { await bot.lookAt(nearest.b.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
+                            // ★C270: tree on higher ground (plains/hills, +Ny) → jump while walking so we
+                            // CLIMB the slope/step up to it. The flat sprint stalled at ~6.8b on a small hill
+                            // (oak@y82, bot@y78) → blacklist → 0 wood, naked night death (new-world dawn1).
+                            // A human walks AND jumps up to a tree on a rise; don't abandon a tree in sight.
+                            const _climb = (nearest.b.position.y - meW.y) > 0.5;
                             bot.setControlState('forward', true); bot.setControlState('sprint', true);
+                            if (_climb) bot.setControlState('jump', true);
                             const tW = Date.now();
                             while (Date.now() - tW < 2500 && _tD() > 4.2) await new Promise(r => setTimeout(r, 150));
                             bot.clearControlStates();
-                            _dbg(`raw-approach: ${_tD().toFixed(1)}b after walk (was >4.5)`);
+                            _dbg(`raw-approach: ${_tD().toFixed(1)}b after walk${_climb ? ' (jump-climb)' : ''} (was >4.5)`);
                         }
                     } catch (e) { try { bot.clearControlStates(); } catch (_) {} }
                 }

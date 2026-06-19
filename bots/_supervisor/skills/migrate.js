@@ -160,6 +160,22 @@ export default async function migrate(bot, ctx, opts = {}) {
                 && e.position.distanceTo(bot.entity.position) < 8);
         } catch { return false; }
     };
+    // ★C263: a migration through snowy_taiga must punch through the mob gauntlet to reach the
+    // ~800b needed to escape the bad biome. The old per-leg abort on closeActionable() (ANY
+    // hostile within 8b) quit the whole journey at 25-254b every time — a single wandering
+    // skeleton ended the migration. The reflex layer (interrupt_code, checked at the top of the
+    // leg loop) already yields the march to self_defense when a mob actually engages, so a
+    // preemptive abort is redundant for fightable mobs. The ONE threat we genuinely cannot march
+    // past is a point-blank creeper: it explodes regardless of combat and self_defense can't save
+    // a body that walked into the blast. So only a creeper within ~4.5b aborts the leg; everything
+    // else is left to the reflex (yield) or simply walked past.
+    const closeCreeper = () => {
+        try {
+            return Object.values(bot.entities || {}).some(e =>
+                e && e !== bot.entity && e.position && /creeper/.test((e.name || '').toLowerCase())
+                && e.position.distanceTo(bot.entity.position) < 4.5);
+        } catch { return false; }
+    };
     const edibleHeld = () => {
         try { return bot.inventory.items().some(i => /cooked_|_bread|^bread$|^apple$|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|^cod$|^salmon$|melon_slice|sweet_berries|_stew|^rabbit$|baked_/.test(i.name) && i.name !== 'rotten_flesh'); }
         catch { return false; }
@@ -272,7 +288,7 @@ export default async function migrate(bot, ctx, opts = {}) {
             leg--;                      // don't consume a travel leg on a night spent bunkering
             continue;
         }
-        if (closeActionable()) { abort = `actionable hostile at leg ${leg} — yield to defense/EVAC`; break; }
+        if (closeCreeper()) { abort = `creeper point-blank at leg ${leg} — yield to defense/EVAC`; break; }   // C263: only an unavoidable creeper aborts; other mobs handled by reflex (interrupt_code) or walked past
         if (Math.round(bot.health) <= abortHp) { abort = `hp=${Math.round(bot.health)} <= ${abortHp} at leg ${leg}`; break; }
         if (bot.food < legFoodFloor && !edibleHeld()) {
             // Top up before marching the last food away (forage budget lesson). One bounded try.
@@ -308,7 +324,7 @@ export default async function migrate(bot, ctx, opts = {}) {
         let legAdv = 0;
         for (let h = 0; h * HOP < legBlocks; h++) {
             if (bot.interrupt_code || Date.now() - t0 > maxMs) break;
-            if (isNight() || closeActionable() || Math.round(bot.health) <= abortHp) break;   // bail to outer gates
+            if (isNight() || closeCreeper() || Math.round(bot.health) <= abortHp) break;   // C263: bail to outer gates (creeper-only, not every nearby mob)
             const hx = Math.round(bot.entity.position.x + cur.x * HOP);
             const hz = Math.round(bot.entity.position.z + cur.z * HOP);
             const hb = bot.entity.position.clone();

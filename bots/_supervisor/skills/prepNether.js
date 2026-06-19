@@ -694,11 +694,19 @@ export default async function prepNether(bot, ctx) {
         // TABLE gate indefinitely past dawn). At a daytime surface with NO actionable threat (forest
         // home, mobs burn by day, shield in kit), going up to hunt+chop is the ONLY escape and a
         // calculated risk worth taking — same "find beats frozen" logic as C217.
+        // ★C264: was gated to verticalPocket ONLY (copy-pasted from famineVerticalEmergency). A bot
+        // in a HORIZONTAL undergroundWorksite at hp 12 with a pick, daytime, zero actionable threat,
+        // no wood/table → safeDay was FALSE for all three branches (normalSafeDay needs hp≥14;
+        // famine/noRegen needed verticalPocket) → surfaceUp NEVER fired → frozen forever (live 06:05:
+        // hp12 food15 y48 horizontal worksite spun the TABLE gate every 9s, process crashed on kicks).
+        // The vertical-shaft restriction is wrong: digging up out of a horizontal worksite is as safe
+        // as out of a 1x1 pocket when it's daytime + no threat + we hold a pick. Allow either site
+        // (tableRecoveryBlocked already guarantees ≥1 is true, so this is the self-extraction crux).
         const noRegenDeadlock = daytime
             && !hasEdible()
             && bot.food < 18
             && bot.health >= 8 && bot.health < 14
-            && verticalPocket
+            && (verticalPocket || undergroundWorksite)
             && threat.actionable === 0;
         const staleReason = Date.now() < (bot._prepTableRecoveryBlockedUntil || 0)
             ? (bot._prepTableRecoveryBlockedReason || 'achieve table gate')
@@ -1105,7 +1113,7 @@ export default async function prepNether(bot, ctx) {
     const PWF = path.resolve(process.cwd(), 'bots', '_supervisor', 'prep_water.json');
     let wantWater = false; try { wantWater = !!JSON.parse(fs.readFileSync(PWF, 'utf8')).t; } catch (e) {}
     const canSpareIron = has('iron_pickaxe') > 0 || has('iron_ingot') >= 3 || has('bucket') > 0;
-    if (wantWater && has('water_bucket') < 1 && canSpareIron && !bot.interrupt_code) {
+    if (wantWater && has('water_bucket') < 1 && canSpareIron && !bot.interrupt_code && !tableRecoveryBlocked('bucket')) {
         prog('prepNether: fall-death prep — securing a water bucket for MLG clutch');
         if (await handleTableRecoveryBlocked('bucket')) return false;
         try { if (has('bucket') < 1) await skills.customSkill(bot, 'achieve', { item: 'bucket', count: 1 }); } catch (e) {}
@@ -1474,6 +1482,21 @@ export default async function prepNether(bot, ctx) {
             const oakPulseBackoff = Math.max(0, runtimeOakBackoff, persistedOakBackoff);
             if (oakSignal.ok && oakPulseBackoff <= 0) {
                 const foodBeforeOak = bot.food;
+                // ★C271 WOOD-FIRST (新世界 churn 取证: 饿身 hp1 next to oak_log@2 却锁死在 feedUp——徒手追
+                // 逃跑的鸡/扫叶找苹果全失败——而旁边的树干木(=剑→有效狩猎→食物的钥匙)没人砍。优先级倒置:
+                // 食物危机劫持决策,但没武器赢不了食物,武器要的木就在臂展内。无木时先把近处树干砍了(白天+安全
+                // +~5s,几乎免费),解锁工具链。体现用户#1:别被危机锁死,果断拿下能解一切的前置。)
+                const _noWoodHeld = heldLogs() === 0 && maxHeldPlankStack() < 4 && has('crafting_table') < 1;
+                if (_noWoodHeld && oakSignal.dist <= 8 && !isNightNow() && !isDuskNow()) {
+                    prog(`prepNether: ★C271 WOOD-FIRST — wood-less + ${oakSignal.target} in reach; chop trunk before food pulse (unlocks tools→hunt→food) food=${bot.food} hp=${Math.round(bot.health)}`);
+                    try {
+                        await Promise.race([
+                            skills.customSkill(bot, 'chopWood', 2),
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('woodfirst-timeout')), 30000)),
+                        ]);
+                    } catch (e) { try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} prog(`prepNether: C271 wood-first chop incomplete: ${e.message}`); }
+                    if (heldLogs() > 0 || maxHeldPlankStack() >= 4) { prog(`prepNether: ★C271 got wood (logs=${heldLogs()} planksMax=${maxHeldPlankStack()}) — resume to build tools`); return false; }
+                }
                 bot._prepOakApplePulseBackoffUntil = Date.now() + 90000;
                 bot._prepOakApplePulseBackoffTarget = oakSignal.target;
                 prog(`prepNether: bounded oak/apple forage — ${oakSignal.target}; direct feedUp pulse, no surfaceUp blind climb (food=${bot.food} hp=${Math.round(bot.health)})`);

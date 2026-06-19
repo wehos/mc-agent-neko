@@ -267,7 +267,33 @@ const modes_list = [
                 // This is threat arbitration, not a generic night curfew: quiet enclosed
                 // mines are already exempted by shouldNightShelter and should keep working.
                 const threatPressure = status.hostiles > 0 || Number.isFinite(status.creeperDist);
-                status.hold = threatPressure && !status.recentDamage && status.creeperDist > 3.6;
+                let hold = threatPressure && !status.recentDamage && status.creeperDist > 3.6;
+                // ★C266 FALSE-BUNKER / PHANTOM guard (death evidence 06:34: "covered night hold"
+                // while a phantom swooped hp 12→3 to death). hasOverheadCover() only requires ONE
+                // block 2-6 above — that does NOT stop an aerial/angled attacker (phantom swoops in
+                // diagonally; arrows come through gaps). The hold then sat PASSIVELY (wait 3000) as
+                // HP bled out, never noticing the shelter was a lie. Mechanism fix: track HP across
+                // the hold session — if we keep NET-LOSING HP while supposedly sheltered, the cover
+                // is ineffective → break the hold so the bot actively defends/relocates (dig-in for
+                // a REAL roof) instead of dying still. General (covers phantoms, through-gap arrows,
+                // any false bunker), non-cheat. Phantoms recur here: no bed (snowy_taiga, no sheep)
+                // → can't sleep → phantoms every few nights.
+                const nowT = Date.now();
+                if (hold) {
+                    if (typeof bot._coverHoldHp !== 'number' || nowT - (bot._coverHoldAt || 0) > 12000) {
+                        bot._coverHoldHp = bot.health; bot._coverHoldAt = nowT;   // (re)start session
+                    }
+                    if (bot.health <= bot._coverHoldHp - 2) {        // net HP loss while "sheltered" = false bunker
+                        hold = false;
+                        status.coverIneffective = true;
+                    } else {
+                        bot._coverHoldAt = nowT;                                 // session still working
+                        if (bot.health > bot._coverHoldHp) bot._coverHoldHp = bot.health;   // track regen
+                    }
+                } else {
+                    bot._coverHoldHp = null; bot._coverHoldAt = 0;
+                }
+                status.hold = hold;
             } catch (e) {}
             return status;
         },
@@ -3359,9 +3385,15 @@ const modes_list = [
                 const cs = bot.controlState || {};
                 const p = bot.entity.position;
                 const moving = (bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()) || !!cs.forward;
+                // ★edgeStall must measure ONLY a real travel WEDGE (trying to walk, zero horizontal
+                // progress, NOT digging). The raw "horizontal d<0.1 while moving" conflated 3 things:
+                // (a) real step-wedge [the bug], (b) vertical mining (digDown — x/z static by design),
+                // (c) destructive-path dig-through (pathfinder mines the block in its way). (b)+(c)
+                // are PROGRESS, not stalls — excluding targetDigBlock leaves only (a), the metric we
+                // verify edge_unstick against. (Mirrors edge_unstick's own targetDigBlock gate.)
                 if (this.lastPos) {
                     const d = Math.hypot(p.x - this.lastPos.x, p.z - this.lastPos.z);
-                    if (moving && d < 0.1) { if (!this.stallStart) this.stallStart = now; this.edgeStallMs = now - this.stallStart; }
+                    if (moving && d < 0.1 && !bot.targetDigBlock) { if (!this.stallStart) this.stallStart = now; this.edgeStallMs = now - this.stallStart; }
                     else { this.stallStart = 0; this.edgeStallMs = 0; }
                     this._disp += d; this._elapsed += 1;
                 }
@@ -3394,6 +3426,255 @@ const modes_list = [
                     if (this.sz > 10 * 1024 * 1024) { try { fs.renameSync('bots/_supervisor/motion_quality.jsonl', 'bots/_supervisor/motion_quality.jsonl.1'); } catch (e) {} this.sz = 1; }
                     fs.appendFileSync('bots/_supervisor/motion_quality.jsonl', line);
                     this.sz += line.length;
+                }
+            } catch (e) {}
+        }
+    },
+    {
+        name: 'edge_unstick',
+        description: 'Recovery reflex for the step-stall the user reported for a week: when the pathfinder WANTS to travel but the body is wedged against a 1-2 block step (zero horizontal progress), jump to mount it like a human; if still wedged, drop the path so the caller replans. Closes the loop motion_quality only measured.',
+        interrupts: [],
+        on: true,
+        active: false,
+        always: true,   // continuous low-level reflex — sets control states, never takes over execution
+        lastTick: 0, lastPos: null, wedgeStart: 0, jumpUntil: 0, lastReset: 0, resetStreak: 0, lastJumpLogAt: 0, jumpCount: 0,
+        update: async function (agent) {
+            // ★用户第三视角实拍+怒斥(观察一周,喊修4-5次未果): bot 上 1 格台阶"有时卡住",2 格更久。
+            // 取证(motion_quality.jsonl): edgeStallMs>1000 历史 1609 次,最严重 path=1 crossEff=0 楔死
+            // 20822ms / 18389ms(含 self_preservation 中)。机理: prismarine-physics stepHeight=0.6,
+            // bot 走路登不上整 1 格,必须靠 pathfinder 主动 jump;角落/斜approach/raw控制时 jump 没排上
+            // 或错时 → 顶着台阶 d≈0 楔死。motion_quality 只测不动(纯observer,注释自陈"修完用数字验证")
+            // → 缺的就是这个恢复反射。人类做法=遇台阶就跳;跳不出(墙/角)就换路。stepHeight 不动(真人
+            // 不能不跳滑上整格=作弊感),只补"跳"这个人类动作。
+            const bot = agent.bot;
+            const now = Date.now();
+            if (now - this.lastTick < 250) return;   // ~4Hz: 够快反应,够轻
+            this.lastTick = now;
+            const releaseJump = () => { if (this.jumpUntil) { this.jumpUntil = 0; try { bot.setControlState('jump', false); } catch (e) {} } };
+            try {
+                if (!bot || !bot.entity || !bot.entity.position) return;
+                // 只在寻路器"真想走"时介入 — 这是区分"楔住"与"有意静止"的权威信号
+                const moving = !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving());
+                if (!moving) { this.wedgeStart = 0; this.lastPos = null; this.resetStreak = 0; releaseJump(); return; }
+                // 别跟有意的静止打架: 正在挖块/游泳/被困(POCKET/ENTOMBED 有各自反射)
+                if (bot.targetDigBlock) { this.wedgeStart = 0; this.lastPos = null; releaseJump(); return; }
+                const mob = (bot._mobility && bot._mobility.state) || '';
+                if (mob === 'SWIM' || mob === 'POCKET' || mob === 'ENTOMBED') { this.wedgeStart = 0; this.lastPos = null; releaseJump(); return; }
+                const p = bot.entity.position;
+                if (this.lastPos) {
+                    const d = Math.hypot(p.x - this.lastPos.x, p.z - this.lastPos.z);
+                    if (d < 0.05) { if (!this.wedgeStart) this.wedgeStart = now; }
+                    else { this.wedgeStart = 0; this.resetStreak = 0; releaseJump(); }   // 在前进 → 清零
+                }
+                this.lastPos = { x: p.x, y: p.y, z: p.z };
+                if (!this.wedgeStart) return;
+                const stalled = now - this.wedgeStart;
+                const solid = (b) => b && b.boundingBox === 'block';
+                // 楔住 ≥600ms + 在地面 + 头顶有空间可起跳 → 跳(人遇台阶就跳)。不分析具体朝向几何:
+                // 多余的跳无害(原地一跳),关键是覆盖所有 step/角落;头顶实心(overSelf)才不跳(只会顶头)。
+                if (stalled >= 600 && bot.entity.onGround) {
+                    const overSelf = bot.blockAt(p.floored().offset(0, 2, 0));
+                    if (!solid(overSelf)) {
+                        this.jumpUntil = now + 450;
+                        try { bot.setControlState('jump', true); } catch (e) {}
+                        this.jumpCount = (this.jumpCount || 0) + 1;
+                        // throttled positive-verification log (jumps are normally silent to avoid spam):
+                        // proves the reflex is firing on real wedges and how often.
+                        if (now - this.lastJumpLogAt > 15000) {
+                            this.lastJumpLogAt = now;
+                            try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [edge_unstick] step-jump #${this.jumpCount} (wedged ${Math.round(stalled)}ms) @${p.x.toFixed(1)},${Math.round(p.y)},${p.z.toFixed(1)}\n`); } catch (e) {}
+                        }
+                    }
+                }
+                if (this.jumpUntil && now > this.jumpUntil) releaseJump();
+                // 升级: 跳了还楔死(墙/角陷阱/错路). 第1次 replan 丢当前路径让寻路重算;但 live 实测
+                // (07:13 @-35.5,48): 同一处重算又选同样堵死路线→原地弹跳 5×replan/20s。所以**再楔
+                // (resetStreak≥2)就物理后退+侧移脱离楔死几何**,让下一次重算从不同位置出发选不同路线。
+                // 后退方向=bot 来时的已知可通行地(它正朝前楔住),低风险;600ms 后清控制让寻路/march 接管。
+                if (stalled >= 2200 && now - this.lastReset > 2500) {
+                    this.lastReset = now;
+                    this.resetStreak = (this.resetStreak || 0) + 1;
+                    releaseJump();
+                    try { bot.pathfinder.stop(); } catch (e) {}
+                    if (this.resetStreak >= 2) {
+                        try {
+                            bot.clearControlStates();
+                            bot.setControlState('back', true);
+                            bot.setControlState(this.resetStreak % 2 ? 'left' : 'right', true);
+                            setTimeout(() => { try { bot.clearControlStates(); } catch (e) {} }, 600);
+                        } catch (e) {}
+                    }
+                    try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [edge_unstick] wedged ${Math.round(stalled)}ms (jump-fail, replan #${this.resetStreak}${this.resetStreak >= 2 ? ' +back-off relocate' : ''}) @${p.x.toFixed(1)},${Math.round(p.y)},${p.z.toFixed(1)}\n`); } catch (e) {}
+                    this.wedgeStart = 0;
+                }
+            } catch (e) {}
+        }
+    },
+    {
+        name: 'world_model',
+        description: 'Phase-2 READ-ONLY central WORLD MODEL (docs/world-model.md): god-view aggregation of situational truth — time/mobility/threat/vitals/kit/cover/surfaceGate — into bot._world, broadcast to world_model.json. Single source of truth for the LLM supervisor + all layers. Phase 2 computes+broadcasts ONLY; changes NO behavior (the surfaceGate is advisory here, wired to act in Phase 3+).',
+        interrupts: [],
+        on: true,
+        active: false,
+        always: true,   // pure observer in Phase 2
+        lastEval: 0, lastWrite: 0, lastHp: null, hpDropAt: 0,
+        update: async function (agent) {
+            const bot = agent.bot;
+            const now = Date.now();
+            if (now - this.lastEval < 2000) return;
+            this.lastEval = now;
+            try {
+                if (!bot || !bot.entity || !bot.entity.position) return;
+                const p = bot.entity.position;
+                const m = p.floored();
+                const solid = (b) => b && b.boundingBox === 'block';
+                // --- time ---
+                const tod = (bot.time && bot.time.timeOfDay) ?? 0;
+                const isNight = tod >= 13000 && tod < 23000;
+                const isDusk = tod >= 12000 && tod < 13000;
+                const isDawn = tod >= 23000;
+                const phase = isNight ? 'night' : (isDusk ? 'dusk' : (isDawn ? 'dawn' : 'day'));
+                // --- vitals ---
+                const hp = Math.round(bot.health ?? 0);
+                const food = bot.food ?? 0;
+                let armor = 0;
+                try { for (const it of bot.inventory.items()) { if (/_helmet$|_chestplate$|_leggings$|_boots$/.test(it.name || '')) armor++; } } catch (e) {}
+                try { const sl = bot.inventory.slots || []; for (let i = 5; i <= 8; i++) { const s = sl[i]; if (s && /_helmet$|_chestplate$|_leggings$|_boots$/.test(s.name || '')) armor++; } } catch (e) {}
+                let normalEdible = false;
+                try { normalEdible = bot.inventory.items().some(i => i && i.name && NORMAL_FOOD_RE.test(i.name)); } catch (e) {}
+                const canRegen = food >= 18;
+                if (this.lastHp === null) this.lastHp = hp;
+                if (hp < this.lastHp) this.hpDropAt = now;
+                this.lastHp = hp;
+                const takingDamage = (now - (bot.lastDamageTime || 0) < 4000) || (now - this.hpDropAt < 4000);
+                // --- threat ---
+                let hostiles = 0, closest = Infinity, creeperDist = Infinity, swarm = 0, phantomNear = false, actionable = 0;
+                try {
+                    for (const id in bot.entities) {
+                        const e = bot.entities[id];
+                        if (!e || e === bot.entity || !e.position || !mc.isHostile(e)) continue;
+                        const d = e.position.distanceTo(p);
+                        if (d < 16) hostiles++;
+                        if (d < closest) closest = d;
+                        if (/creeper/.test(e.name || '') && d < creeperDist) creeperDist = d;
+                        if (/phantom/.test(e.name || '') && d < 16) phantomNear = true;
+                        if (d < 10) swarm++;
+                        if (d < 12 && Math.abs(e.position.y - p.y) <= 4) actionable++;   // reachable/level threat (C34 spirit)
+                    }
+                } catch (e) {}
+                // --- mobility (★Phase-3: SELF-computed so the model never shows "?" when the
+                // mobility interrupt mode is starved during a self_preservation hold — an always:true
+                // observer must not depend on a starvable interrupt mode for a core field. MAROONED
+                // needs pathfinder-failure history the mobility mode owns → defer to it for that.) ---
+                let mob;
+                try {
+                    const exits = [];
+                    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                        if (solid(bot.blockAt(m.offset(dx, 0, dz))) || solid(bot.blockAt(m.offset(dx, 1, dz)))) continue;
+                        let floor = false;
+                        for (let dd = 1; dd <= 4; dd++) { const fb = bot.blockAt(m.offset(dx, -dd, dz)); if (solid(fb) || /water/.test((fb && fb.name) || '')) { floor = true; break; } }
+                        if (floor) exits.push([dx, dz]);
+                    }
+                    const upOpen = !solid(bot.blockAt(m.offset(0, 2, 0)));
+                    const inWater = /water/.test((bot.blockAt(m) || {}).name || '') || /water/.test((bot.blockAt(m.offset(0, 1, 0)) || {}).name || '');
+                    let enc = true;
+                    encScan:
+                    for (const ddx of [-4, 0, 4]) {
+                        for (const ddz of [-4, 0, 4]) {
+                            let cov = false;
+                            for (let dy = 2; dy <= 36; dy++) { const cb = bot.blockAt(m.offset(ddx, dy, ddz)); if (cb && cb.boundingBox === 'block') { cov = true; break; } }
+                            if (!cov) { enc = false; break encScan; }
+                        }
+                    }
+                    let st = inWater ? 'SWIM' : (exits.length ? 'FREE' : ((upOpen && enc) ? 'POCKET' : (upOpen ? 'FREE' : 'ENTOMBED')));
+                    if (bot._mobility && bot._mobility.state === 'MAROONED') st = 'MAROONED';
+                    mob = { state: st, enclosed: enc, exits };
+                } catch (e) { mob = bot._mobility || { state: '?', enclosed: false, exits: [] }; }
+                // --- cover --- (real roof = solid CLOSE above; blocks aerial/phantom, vs the loose 2-6 "overhead")
+                let overhead = false;
+                try { for (let dy = 2; dy <= 6; dy++) { if (solid(bot.blockAt(m.offset(0, dy, 0)))) { overhead = true; break; } } } catch (e) {}
+                const coverReal = solid(bot.blockAt(m.offset(0, 2, 0))) || solid(bot.blockAt(m.offset(0, 3, 0)));
+                // --- kit ---
+                let picks = 0; let bestTier = 0;
+                const tierRank = { wooden: 1, stone: 2, golden: 1, iron: 3, diamond: 4, netherite: 5 };
+                const tierName = ['none', 'wooden', 'stone', 'iron', 'diamond', 'netherite'];
+                try {
+                    for (const it of bot.inventory.items()) {
+                        if (!/_pickaxe$/.test(it.name)) continue;
+                        const max = it.maxDurability || 0;
+                        const used = (typeof it.durabilityUsed === 'number') ? it.durabilityUsed : 0;
+                        if (!max || (used / max) < 0.85) picks++;   // effective picks (mirror vitals pickFx)
+                        const t = tierRank[(it.name.split('_')[0])] || 0;
+                        if (t > bestTier) bestTier = t;
+                    }
+                } catch (e) {}
+                let counts = {}; try { counts = world.getInventoryCounts(bot); } catch (e) {}
+                const planksMax = Math.max(0, ...Object.keys(counts).filter(k => k.endsWith('_planks')).map(k => counts[k] || 0));
+                const logs = Object.keys(counts).filter(k => k.endsWith('_log')).reduce((s, k) => s + (counts[k] || 0), 0);
+                let tableNear = false; try { tableNear = !!world.getNearestBlock(bot, 'crafting_table', 4); } catch (e) {}
+                const hasTablePath = (counts['crafting_table'] || 0) > 0 || tableNear || planksMax >= 4 || logs > 0;
+                const cobble = counts['cobblestone'] || 0;
+                const torches = counts['torch'] || 0;
+                const foodSufficient = food >= 14 || normalEdible;
+                // ★镐够本下矿: ≥1 有效镐 且 (有备镐 或 能就地补镐) — 不在"最后一把镐"红线(memory resource-floor)
+                const sufficientForUnderground = picks >= 1 && (picks >= 2 || hasTablePath);
+                // --- depth band ---
+                const y = Math.round(p.y);
+                const depthBand = y >= 62 ? 'surface' : (y >= 40 ? 'shallow' : (y >= 16 ? 'mid' : 'deep'));
+                // --- migration (coarse) ---
+                let inDeathZone = false, biome = 'unknown';
+                try {
+                    const adv = JSON.parse(fs.readFileSync('bots/_supervisor/advisory.json', 'utf8'));
+                    if (adv && adv.dzone) inDeathZone = Math.hypot(p.x - adv.dzone.cx, p.z - adv.dzone.cz) <= (adv.dzone.r || 0);
+                } catch (e) {}
+                try { biome = world.getBiomeName(bot); } catch (e) {}
+                // recommend migration when the biome itself is unlivable (snowy/frozen/ice → no land
+                // animals → no sheep → no bed → respawn forever returns to the death-zone; THE unlock
+                // is migrating to a temperate biome with sheep, see migrate.js/C263) OR inside the
+                // death cluster.
+                const badBiome = /snow|frozen|ice|ocean|deep_/i.test(biome || '');
+                const migration = { biome, badBiome, inDeathZone, recommend: badBiome || inDeathZone };
+                // --- surfaceGate (AUTO; supervisor override read from advisory.surfaceGate) ---
+                let gateMode = 'free', gateReason = 'safe day', decidedBy = 'auto', gateUntil = 0;
+                try {
+                    const adv = JSON.parse(fs.readFileSync('bots/_supervisor/advisory.json', 'utf8'));
+                    const sg = adv && adv.surfaceGate;
+                    if (sg && sg.mode === 'committed_underground' && (!sg.until || now < sg.until)) {
+                        gateMode = 'committed_underground'; gateReason = sg.reason || 'supervisor commit'; decidedBy = 'supervisor'; gateUntil = sg.until || 0;
+                    }
+                } catch (e) {}
+                if (decidedBy === 'auto') {
+                    if (isNight || isDusk) { gateMode = 'hold'; gateReason = 'night/dusk'; }
+                    else if (actionable > 0) { gateMode = 'hold'; gateReason = `actionable threat x${actionable}`; }
+                    else if (!sufficientForUnderground) { gateMode = 'hold'; gateReason = 'kit insufficient (picks)'; }
+                    else if (!foodSufficient) { gateMode = 'hold'; gateReason = 'low food'; }
+                    else { gateMode = 'free'; gateReason = 'safe day, kitted'; }
+                }
+                const allowSurface = gateMode === 'free';
+                // --- recommendation ---
+                let action;
+                if (gateMode === 'committed_underground') action = 'GO_UNDERGROUND';
+                else if (actionable > 0 && hp < 10) action = 'FLEE';
+                else if (gateMode === 'hold') action = 'HOLD';
+                else if (migration.recommend && phase === 'day') action = 'MIGRATE';
+                else if (!foodSufficient) action = 'FORAGE_SURFACE';
+                else action = 'GO_UNDERGROUND';
+                bot._world = {
+                    ts: now,
+                    time: { tod, phase, isDay: !isNight && !isDusk },
+                    pos: { x: Math.round(p.x), y, z: Math.round(p.z), depthBand },
+                    mobility: { state: mob.state, enclosed: !!mob.enclosed, exits: mob.exits || [] },
+                    vitals: { hp, food, canRegen, armor },
+                    threat: { hostiles, closest: Number.isFinite(closest) ? +closest.toFixed(1) : null, creeperDist: Number.isFinite(creeperDist) ? +creeperDist.toFixed(1) : null, phantomNear, swarm, actionable, takingDamage },
+                    cover: { overhead, coverReal },
+                    kit: { picks, pickTier: tierName[bestTier] || 'none', hasTablePath, foodSufficient, cobbleBuffer: cobble, torches, sufficientForUnderground },
+                    migration,
+                    surfaceGate: { mode: gateMode, allowSurface, reason: gateReason, decidedBy, until: gateUntil },
+                    recommendation: { action, reason: gateReason },
+                };
+                if (now - this.lastWrite >= 2000) {
+                    this.lastWrite = now;
+                    try { fs.writeFileSync('bots/_supervisor/world_model.json', JSON.stringify(bot._world)); } catch (e) {}
                 }
             } catch (e) {}
         }
@@ -3545,8 +3826,12 @@ const modes_list = [
     },
     {
         name: 'item_collecting',
-        description: 'Collect nearby items when idle.',
-        interrupts: ['action:followPlayer'],
+        description: 'Collect nearby uncollected items, even mid-task (gated safe).',
+        // ★用户要求(2026-06-19): "周围有还没捡干净的物品时,捡一下"。原 interrupts:['action:followPlayer']
+        // 只在跟随玩家(idle)时跑——Neko 常驻 sticky missionNether,所以它几乎从不触发,打怪/挖矿/死亡
+        // 残留的掉落物没人捡。改 'all'(同 auto_eat/tool_keeper 的 scheduler-trap 家族修法)让作业中也捡。
+        // 已有节流: 2s notice-wait + isClearPath + empty_inv_slots>1 + prev_item 去重。
+        interrupts: ['all'],
         on: true,
         active: false,
 
@@ -3554,6 +3839,12 @@ const modes_list = [
         prev_item: null,
         noticed_at: -1,
         update: async function (agent) {
+            const bot = agent.bot;
+            // ★安全 gate (消费世界模型 bot._world): 别为捡东西破掉保命/掩护。
+            //   ① 战斗/受击中不分心捡; ② 夜间已真封顶(coverReal)时不破掩护出去捡。
+            const w = bot._world;
+            if (w && w.threat && (w.threat.actionable > 0 || w.threat.takingDamage)) { this.noticed_at = -1; return; }
+            if (w && w.time && !w.time.isDay && w.cover && w.cover.coverReal) { this.noticed_at = -1; return; }
             let item = world.getNearestEntityWhere(agent.bot, entity => entity.name === 'item', 8);
             let empty_inv_slots = agent.bot.inventory.emptySlotCount();
             if (item && item !== this.prev_item && await world.isClearPath(agent.bot, item) && empty_inv_slots > 1) {

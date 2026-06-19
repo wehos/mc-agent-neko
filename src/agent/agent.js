@@ -9,6 +9,7 @@ import { ActionManager } from './action_manager.js';
 import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
 import { SelfPrompter } from './self_prompter.js';
+import { createFramework } from './framework/index.js';
 import convoManager from './conversation.js';
 import { handleTranslation, handleEnglishTranslation } from '../utils/translator.js';
 import { addBrowserViewer } from './vision/browser_viewer.js';
@@ -854,6 +855,11 @@ export class Agent {
         this.npc.init();
 
         if (firstStart) {
+            // Framework v2 kernel (survival/companion decision loop). Feature-flagged
+            // OFF by default — when disabled tick() is a no-op and the existing
+            // missionNether path is untouched. See docs/framework-v2-scaffold.md.
+            try { this.framework = createFramework(this); } catch (e) { console.warn('framework init failed:', e && e.message); }
+
             // This update loop ensures that each update() is called one at a time, even if it takes longer than the interval
             const INTERVAL = 300;
             let last = Date.now();
@@ -876,6 +882,8 @@ export class Agent {
     async update(delta) {
         await this.bot.modes.update();
         this.self_prompter.update(delta);
+        // Framework v2 kernel tick (no-op while feature flag is OFF).
+        if (this.framework) { try { await this.framework.tick(delta); } catch (e) {} }
         await this.checkTaskDone();
     }
 

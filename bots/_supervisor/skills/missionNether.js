@@ -743,6 +743,22 @@ export default async function missionNether(bot, ctx) {
                     bot._lastBreakoutLowFoodHoldGateAt = Date.now();
                     prog(`★BREAKOUT gated: prepNether low-food hold evidence food=${bot.food} hp=${Math.round(bot.health)} y=${lowFoodHold.y} covered=${lowFoodHold.coveredOrEnclosed} actionable=${lowFoodHold.actionable} threatSrc=${lowFoodHold.source}; reset pinned timer, no blind shelter tunnel`);
                 }
+                // ★C273 BOOTSTRAP COMMIT (decision-speed / committed-plan, 用户#1 最大问题=决策太慢):
+                // 一个无工具的 bot 每个低食物周期就 forageExplore 漫游走 → 永远做不完早期 kit。新世界实证:
+                // 它手握 oak_planks+stick、臂展内有 oak,却一次次丢下去追逃跑的鸡,churn 到死(deaths 1-8)。
+                // 微观能力都修通了(C269找树/C270够树/C271砍木/C272过食物gate造具),缺的是 commit:不把
+                // table→镐→剑这串在原地做完。所以 bootstrap(无任何镐)+非硬饿(food>3)+白天+无actionable威胁
+                // 时,**压住 forage/migrate/roam,交回 prepNether 把早期 kit 做完**(C271 砍近木+C272 造具)。
+                // 有了剑才能有效猎食→食物回升。食物真危急(≤3)再 forage。这是"先把手头的事做完"的承诺。
+                const _bootstrapNoPick = !bot.inventory.items().some(i => /_pickaxe$/.test(i.name || ''));
+                if (_bootstrapNoPick && bot.food > 3 && !lowFoodHold.actionable && !isNightNow() && !isDuskNow()) {
+                    if (!bot._lastBootstrapCommitLogAt || Date.now() - bot._lastBootstrapCommitLogAt > 30000) {
+                        bot._lastBootstrapCommitLogAt = Date.now();
+                        prog(`★C273 BOOTSTRAP COMMIT: no pickaxe, food=${bot.food}>3, daytime safe — suppress forage/roam, finish early kit in place (prepNether: chop→table→pick→sword)`);
+                    }
+                    try { await skills.wait(bot, 800); } catch (e) {}   // small yield, avoid tight re-loop
+                    continue;
+                }
                 // ★ANTI-IDLE (food-desert livelock fix): a low-food hold in a food desert is an
                 // ABSORBING state — sitting still guarantees no food, while the only real fix is to
                 // TRAVEL until a food source / fresh biome appears. So when it's daytime, no close

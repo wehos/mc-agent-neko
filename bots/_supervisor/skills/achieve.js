@@ -135,7 +135,16 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
     };
     const essentialUndergroundKitGoal = /^(iron_pickaxe|iron_ingot|raw_iron|iron_ore|stone_pickaxe|cobblestone)$/.test(item);
     const survivalGearGoal = /^(wooden|stone|iron)_(sword|axe)$/.test(item);
-    if (!foodGoal && !survivalGearGoal && lowFoodNoSnack() && !(essentialUndergroundKitGoal && moderateUndergroundWorkOk())) {
+    // ★C272: cheap BOOTSTRAP crafts (crafting_table, wooden_pickaxe) — made in-place from held
+    // planks/sticks (~2s, no gathering/travel), the keystone to ALL tools+weapons. Blocking them
+    // at low food was the inversion that churned the bot to death (新世界: had oak_planks:4+stick:4
+    // RIGHT THERE, gate kicked it to feedUp which couldn't catch fleeing chickens → died #7 with
+    // wood in hand, never made a pickaxe/sword). A human with planks just crafts the table+pick,
+    // THEN a sword, THEN hunts effectively. keepInventory keeps the planks across death, so the
+    // craft is always available. (Gathering subgoals like oak_log are NOT exempted — only the
+    // zero-travel crafts.)
+    const cheapBootstrapCraft = /^(crafting_table|wooden_pickaxe)$/.test(item);
+    if (!foodGoal && !survivalGearGoal && !cheapBootstrapCraft && lowFoodNoSnack() && !(essentialUndergroundKitGoal && moderateUndergroundWorkOk())) {
         prog(`${tag}LOW-FOOD resource gate ${item}: food=${bot.food}, hp=${Math.round(bot.health)} no edible — return control to feedUp`);
         try { bot.clearControlStates(); } catch (e) {}
         try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}

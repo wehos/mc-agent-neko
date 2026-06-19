@@ -1310,9 +1310,17 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                 }
             } catch (e) {}
             try {
-                const bush = world.getNearestBlock(bot, 'sweet_berry_bush', 32);
+                // ★C268: pursuit range (was 32) must cover the SCAN range (berry48=48) or the bot
+                // freezes — confirmed food-strand livelock (07:28 @10,81 food4 hp13): scan reported
+                // sweet_berry_bush@44 but the 32-range pursuit returned null → "no long roam without
+                // a target" → calorie-floor stop → frozen 14s+ with KNOWN food 44b away. The
+                // calorie-floor fear (ping-ponging with NO target) does NOT apply when a concrete
+                // bush is known: a hungry bot MUST spend pips reaching the only food (daytime/Easy =
+                // safe). Widen to 56 when hungry (covers the 48 scan + margin). handoff §8 / memory
+                // food-desert-spawn-deadlock.
+                const bush = world.getNearestBlock(bot, 'sweet_berry_bush', bot.food <= 10 ? 56 : 32);
                 if (bush) {
-                    log(bot, 'feedUp: foraging sweet berries');
+                    log(bot, `feedUp: foraging sweet berries @${Math.round(bush.position.distanceTo(bot.entity.position))}b`);
                     try { await skills.goToPosition(bot, bush.position.x, bush.position.y, bush.position.z, 1); await bot.activateBlock(bush); foraged = true; } catch (e) {}
                     if (foraged) { await eat(); await skills.wait(bot, 600); continue; }
                 }
