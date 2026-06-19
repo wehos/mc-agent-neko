@@ -86,3 +86,6 @@ bot:hp9/food7(no-regen偏低但host=0白天),iron_pickaxe在手,copper216/raw_ir
 确认 ★STALL 13min @69,84,-13(food5/hp9白天→夜): bot 被 surfaceUp 弄到**无动物雪山顶**(`animal64=none`),但 `berry48=sweet_berry_bush@44` 有浆果丛。feedUp 只刷 `no huntable animal within 32`——**只32-cap找动物(没有)、不去够44格浆果丛、无动物时也不relocate**→卡死。我用 cancel_skill 破了(bot下移脱离)。
 **待修(③feedUp,接班做)**: ①浆果丛 pursuit 也随低食物放宽range(类C259,sweet_berry_bush@≤56该去);②**无动物且本地无食时触发 forageExplore relocate**(别在死山顶干刷"no animal within 32")。这是 C259 没覆盖的食物strand变体。
 **⚠️给接班的我**: 上个我本会话多次工具调用格式错误(漏`antml:`前缀导致 Write/Edit/Bash 没执行)——务必用正确的 `antml:invoke`/`antml:parameter` 格式,每次调用后确认 result 真返回(别假设成功)。
+
+## 9. 会话末追加(08:46) — 新 livelock: chopWood 卡 riskySkip 树
+确认 ★STALL 6min @76,76,33(白天hp20/food18): bot `> chop for planks` 卡在 `nearest=spruce_log@3.5b riskySkip=1 total=0`,act_trace `dig=spruce_log` 冻结但 total 不增——**chopWood 把某根树判 riskySkip 跳过但不换树/不放弃,反复刷同一根冻死**。cancel_skill 破了(重派后砍到planks14/stick11/food回满)。**待修(③chopWood)**: riskySkip 命中后应黑名单该树+找下一棵 或 N次后放弃返回,别死刷同一根。
