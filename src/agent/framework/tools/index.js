@@ -29,7 +29,7 @@ export const TOOL_CATALOG = Object.freeze([
     { name: 'clutchWater', lane: 'SURVIVAL_MLG', trigger: 'fallImminent(bot)', does: 'place clutch water on landing, then ALWAYS retract; refuses over lava' },
     { name: 'placeUnderFeet', lane: 'LOCOMOTION', trigger: 'bridging/pillar need', does: 'generous block-under-feet (longer jump/settle)' },
     { name: 'pillarUp', lane: 'LOCOMOTION', trigger: 'need to reach higher Y', does: 'repeated generous placeUnderFeet on one lane hold' },
-    { name: 'sealBunker', lane: 'PLACEMENT', trigger: 'night/threat dig-in', does: 'seal 4 head-level walls + roof' },
+    { name: 'sealBunker', lane: 'PLACEMENT', trigger: 'night/threat dig-in', does: '挖三填一: pin+mode-guard, dig down 3, cap overhead (rotate-in-place); pocket→cap-only' },
     { name: 'safeToDigDown', lane: '(predicate)', trigger: 'before any digDown', does: 'lava guard — refuse if lava at/under feet' },
 ]);
 

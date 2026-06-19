@@ -10,6 +10,17 @@
 
 ---
 
+## C277. ★★sealBunker 重写 + 首个游戏内真·验收(用户#7封顶把自己关外面 + #8验收纪律)（framework/tools/bunker.js,✅dev-trigger游戏内三信号一致验收cap路径）
+- **触发(用户 #7 肉眼观测 + #8 纪律)**: 用户看 live 报"晚上不挖三填一,封顶时跑到外面围着建筑盖→人在外面没庇护"。且 #8: "你实现的功能你自己没法好好评估,需想办法验收,做不到请人工帮,给手动触发钩子让我检查"。
+- **★根因(两层,V3 round1 实测挖出)**: ①`skills.placeBlock` 目标太近(<1.1)时 `GoalInvert` 把 bot 往外推腾放置空间(skills.js:1490)→封自己周围时所有目标都<1.1→bot 被推出圈=#7。②换成 `bot.placeBlock(ref,face)`(只转身不寻路)后 round1 仍失败: a) **mineflayer modes(unstuck等)在 tool 执行中把 bot 拽出坑**(JS tool-lane 挡不住底层 modes,见 [[mineflayer-layer-primitives]]); b) **只挖1-2格→cap 那格落在地表/空气层无可贴实心面**→贴到旁边树干飘头顶。
+- **改动(framework/tools/bunker.js 重写)**: ①**mode-guard**(暂停 unstuck/item_collecting/followers)+**pin**(pathfinder.stop+clearControlStates,挖前挖后放前都 pin)防 bot 被拽走;②**挖三填一=向下挖3格**(用户纠正:脚 Y-3 头 Y-2,cap=头顶=Y-1 在地表下→四周原土实心有可贴面)→ digDown(1)×3 逐格 pin;③cap 用 `bot.placeBlock(ref,faceVec)` 转身放置不走位;④**诚实上报**: covered 读世界模型真实方块,不信工具自报(#8);⑤POCKET(已封闭凹处)脚下空洞时 digDown 测到会掉落→dig=0 只补顶(正确)。
+- **★验收(游戏内真·验收,#8 工作法首次跑通)**: 建 dev-trigger(devTool.js 热加载 + dev_trigger.mjs WS 注入,main.js 无 bridge 跑→无 sticky 锁→run_skill 直派)。**round1 失败**(截图: bot 站草地只在头顶偏前贴树挂一块土,露天; 世界模型 coverReal=false 与工具自报 sealed=true **矛盾**→暴露假阳性,正是 #8 要防的)。**round2 通过**(jungle POCKET: dig=0+cap): 工具自报 cap=true/covered=true + 世界模型 **ENTOMBED/enclosed/coverReal=true/overhead=true** + **用户肉眼确认"成功了"** 三信号一致。
+- **预测(可证伪)**: cap 路径已验。**dig-3 平地路径尚未 live 走到**(round2 是 POCKET cap-only,dig=0)→待平坦开阔地触发验"挖3+封顶+pin住不被拽走"。若平地 dig-3 后 bot 仍被 mode 拽出或 cap 偏→mode-guard 覆盖不全或 pin 不够频。
+- **★方法论(写进 memory)**: [[validation-not-mock]](mock≠验收,三信号交叉,用户眼睛是真相)+[[mineflayer-layer-primitives]](modes vs tool 冲突须 mineflayer 层 resolve,地形原语下沉补丁)。dev-trigger 是 #8 的机制载体。
+- **关联**: docs/framework-v2-plan.md §0 工作法 + V 阶段。下一步: 平地 dig-3 验收,然后 #9 SWIM/#2 沙土,再 S4。
+
+---
+
 ## C276. ★★新世界 live 测试(shadow)——chopWood leash stale-reset 根因修复 + commit 病根精确定位（③chopWood 热加载✅live验证远征自救; missionNether commit seam 已定位待 S4 接管）
 - **触发(用户开新世界 wooded_badlands 实地测框架 v2 shadow)**: 框架 flag=shadow(零行为变更,跑 live missionNether 老路 + kernel 旁路记决策)。新世界出生点 wooded_badlands 河谷,chopDBG `nearest=NONE total=0`(树在台地顶,谷里无可达树)。
 - **★发现1(C275-fix leash 根因,✅live验证)**: `_treeDesert = _noWoodBootstrap && stale>=2` 中 `stale` 是**每次 chopWood 调用重置**的计数器。bot 跨调用漂到 90 格外时是新一轮调用(stale=0)→_treeDesert=false→_pullR=80→`LEASH 90格离锚硬回拉`,**永远够不到树荒外森林**。改:`_treeDesert = _noWoodBootstrap`(无木即放宽到 256,不依赖会重置的 stale;keepInventory 远征廉价=C269 原意)。**✅live 验证**: 部署后 bot 一路远征 300+ 格(spawn→badlands→desert→**forest**),在橡树林敲叶得苹果(food0→9)、猎羊(food→16),**自己走出了荒漠区**——leash 不再 80 格硬拉。
