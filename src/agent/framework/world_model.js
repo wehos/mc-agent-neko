@@ -54,6 +54,21 @@ export function mentalState(bot) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Stockpile targets + inventory helpers (user obs #3 don't-stop-at-2-logs, #5
+// don't-forget-to-stock-meat). A goal isn't "done" at the bare minimum — it's
+// done when there's a BUFFER, so the bot doesn't immediately re-enter the chore.
+// ─────────────────────────────────────────────────────────────────────────────
+const WOOD_BUFFER = 8;     // plank-equivalents to keep on hand (table+tools+spares)
+const FOOD_STOCK = 16;     // food level considered "stocked" (not just survival)
+
+function invCount(bot, re) {
+    try { return bot.inventory.items().filter(i => re.test(i.name || '')).reduce((s, i) => s + i.count, 0); } catch (e) { return 0; }
+}
+/** plank-equivalents on hand: logs count ×4 (each log → 4 planks) + loose planks. */
+function woodUnits(bot) { return invCount(bot, /_log$/) * 4 + invCount(bot, /_planks$/); }
+function hasStoneTierPick(world) { return /stone|iron|diamond|netherite/.test((world.kit && world.kit.pickTier) || ''); }
+
+// ─────────────────────────────────────────────────────────────────────────────
 // proposeTasks — survival fixed-opening flow (blueprint §D), as ranked Proposals.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -85,18 +100,23 @@ export function proposeTasks(world, bot) {
     }
 
     // ── Fixed opening flow (blueprint §D): first unmet prerequisite dominates. ──
-    // 1) Bootstrap kit: need a pickaxe (wood→planks→table→pick→stone tools).
-    if (kit.picks < 1) {
-        push({ kind: PROPOSAL_KIND.BOOTSTRAP_KIT, priority: 90, skill: 'prepNether',
-               rationale: 'no usable pickaxe — finish wood→planks→table→pickaxe→stone tools before anything else',
-               hints: { hasTablePath: kit.hasTablePath, pickTier: kit.pickTier } });
+    // 1) Bootstrap kit: wood→planks→table→pickaxe→stone tools — AND a wood buffer
+    //    (user #3: don't stop at 2 logs). Not "done" until pick + stone tier + buffer.
+    if (!isBootstrapDone(w, bot)) {
+        const noPick = kit.picks < 1;
+        push({ kind: PROPOSAL_KIND.BOOTSTRAP_KIT, priority: noPick ? 90 : 66, skill: 'prepNether',
+               rationale: noPick
+                   ? 'no usable pickaxe — finish wood→planks→table→pickaxe→stone tools before anything else'
+                   : `kit started but understocked (wood ${woodUnits(bot)}/${WOOD_BUFFER}, tier ${kit.pickTier}) — stock wood + upgrade to stone tools, don't wander off`,
+               hints: { hasTablePath: kit.hasTablePath, pickTier: kit.pickTier, wood: woodUnits(bot) } });
     }
 
-    // 2) Food sufficiency.
-    if (!kit.foodSufficient) {
-        const pri = vitals.food <= 6 ? 88 : 55;
+    // 2) Food: stock to a BUFFER, not just survival (user #5: stockpile meat).
+    if (vitals.food < FOOD_STOCK || !kit.foodSufficient) {
+        const pri = vitals.food <= 6 ? 88 : (vitals.food < 12 ? 55 : 35);
         push({ kind: PROPOSAL_KIND.GET_FOOD, priority: pri, skill: 'feedUp',
-               rationale: vitals.food <= 6 ? 'food critical — hunt/forage now' : 'top up food before committing to a venture' });
+               rationale: vitals.food <= 6 ? 'food critical — hunt/forage now'
+                   : `stock food to ${FOOD_STOCK} (now ${vitals.food}) — keep a meat buffer, don't run lean` });
     }
 
     // 3) Bed (mandatory respawn anchor) — once kit exists.
@@ -130,6 +150,78 @@ export function proposeTasks(world, bot) {
 
     out.sort((a, b) => b.priority - a.priority);
     return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Commitment ("承诺计划") — the #1 root fix (decision-speed / don't-yo-yo).
+// proposeTasks RANKS; commitGoal STICKS to one goal until it's actually DONE, so
+// the bot doesn't get pulled off bootstrap by every feedUp/roam impulse. Only a
+// genuine emergency (critical food / reachable threat at low hp / migration need)
+// preempts a live commitment. This is the seat that replaces missionNether's
+// food-gate tangle (CHANGELOG C276/C273): commit, then SUPPRESS wander (the
+// suppression hooks into the skills are S4.3).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Bootstrap = pickaxe + stone-tier + a wood buffer (user #3 don't-stop-at-2-logs). */
+function isBootstrapDone(world, bot) {
+    return (world.kit.picks >= 1) && hasStoneTierPick(world) && woodUnits(bot) >= WOOD_BUFFER;
+}
+
+/** Has the committed goal of `kind` been satisfied? (Completion criteria.) */
+export function isGoalDone(kind, world, bot) {
+    const w = world || EMPTY_WORLD;
+    switch (kind) {
+        case PROPOSAL_KIND.BOOTSTRAP_KIT: return isBootstrapDone(w, bot);
+        case PROPOSAL_KIND.GET_FOOD:      return (w.vitals.food >= FOOD_STOCK);
+        case PROPOSAL_KIND.GET_BED:       return bedKnown(bot);
+        case PROPOSAL_KIND.MIGRATE:       return !w.migration.recommend;     // arrived at a livable biome
+        case PROPOSAL_KIND.SLEEP:         return w.time.phase === 'day';
+        case PROPOSAL_KIND.HOLD:          return !(w.threat.actionable > 0 && w.vitals.hp < 10);
+        // GO_UNDERGROUND / FORAGE_SURFACE / BUILD_HOME / FREE_PLAY are open-ended → re-decide each idle.
+        default: return true;
+    }
+}
+
+/** Emergencies that may PREEMPT a live commitment (else we stay committed). */
+function isEmergency(p, world) {
+    if (!p) return false;
+    if (p.kind === PROPOSAL_KIND.HOLD) return true;                          // threat at low hp
+    if (p.kind === PROPOSAL_KIND.GET_FOOD && world.vitals.food <= 4) return true; // about to starve
+    if (p.kind === PROPOSAL_KIND.MIGRATE && world.migration.inDeathZone) return true;
+    return false;
+}
+
+/**
+ * Pick the goal to ACT on: sticky over proposeTasks. Maintains bot._commitment
+ * across ticks. Returns the chosen Proposal annotated with {committed:true}.
+ * @returns {(import('./contracts.js').Proposal & {committed:boolean})|null}
+ */
+export function commitGoal(bot, proposals, world) {
+    const w = world || (bot && bot._world) || EMPTY_WORLD;
+    const top = proposals && proposals[0];
+    const c = bot && bot._commitment;
+
+    // Keep the current commitment if it's still pending and no emergency overrides it.
+    // Scan ALL proposals for an emergency (a critical one need not be top-ranked —
+    // e.g. food=4 GET_FOOD@88 sits under BOOTSTRAP_KIT@90 but must still preempt).
+    if (c && !isGoalDone(c.kind, w, bot)) {
+        const emergency = (proposals || []).find(p => p.kind !== c.kind && isEmergency(p, w));
+        if (emergency) {
+            bot._commitment = { kind: emergency.kind, skill: emergency.skill, since: Date.now() };
+            return { ...emergency, committed: true, preemptedFrom: c.kind };
+        }
+        const match = (proposals || []).find(p => p.kind === c.kind)
+            || { kind: c.kind, skill: c.skill, priority: 50, rationale: '(holding commitment)' };
+        return { ...match, committed: true };
+    }
+
+    // No commitment, or it's done → commit to the new top-ranked goal.
+    if (top) {
+        if (bot) bot._commitment = { kind: top.kind, skill: top.skill, since: Date.now() };
+        return { ...top, committed: true };
+    }
+    if (bot) bot._commitment = null;
+    return null;
 }
 
 /** Cheap check whether a bed/respawn anchor is known. Defensive — reads files the

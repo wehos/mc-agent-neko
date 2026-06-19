@@ -17,7 +17,7 @@
  */
 
 import { AGENT_MODE, FRAMEWORK_ENABLED_DEFAULT } from './contracts.js';
-import { getWorld, mentalState, proposeTasks } from './world_model.js';
+import { getWorld, mentalState, proposeTasks, commitGoal } from './world_model.js';
 import { pending as pendingInstincts } from './instinct.js';
 
 export class Kernel {
@@ -87,7 +87,11 @@ export class Kernel {
         const proposals = proposeTasks(world, this.bot);
         if (!proposals.length) return;
 
-        const decision = await this.decide(proposals, world);
+        // commitGoal() makes the choice STICKY — it holds the committed goal until
+        // it's actually done (or an emergency preempts), so the bot stops yo-yoing
+        // (the #1 root fix). The LLM judge (S4.2) will layer on top of this.
+        const committed = commitGoal(this.bot, proposals, world);
+        const decision = await this.decide(proposals, world, committed);
         if (!decision || !decision.chosen) return;
 
         await this._commit(decision);
@@ -99,15 +103,17 @@ export class Kernel {
      * loop is testable end-to-end. The fallback is explicit, not silent.
      * @returns {Promise<import('./contracts.js').Decision>}
      */
-    async decide(proposals, world) {
-        // TODO(S4): call this.agent.prompter.promptProposalJudgment(proposals, world)
-        //           with the survival/companion mode semantics injected (blueprint §G).
-        const top = proposals[0];
-        if (top && top.kind === 'FREE_PLAY') {
-            // idle + nothing pressing → let the LLM improvise (S4 will route to free chat)
-            return { chosen: null, reason: 'idle, no pressing task (free-play deferred to S4)', freePlay: true };
+    async decide(proposals, world, committed) {
+        // TODO(S4.2): call this.agent.prompter.promptProposalJudgment(proposals, world,
+        //   committed) with the survival/companion mode semantics injected (blueprint §G).
+        //   For now the kernel acts on the STICKY committed goal (S4.1) — no LLM yet.
+        const pick = committed || proposals[0];
+        if (pick && pick.kind === 'FREE_PLAY') {
+            // idle + nothing pressing → let the LLM improvise (S4.2 routes to free chat)
+            return { chosen: null, reason: 'idle, no pressing task (free-play deferred to S4.2)', freePlay: true };
         }
-        return { chosen: top, reason: `proposer top-rank (no LLM yet): ${top ? top.rationale : 'none'}`, freePlay: false };
+        const tag = pick && pick.committed ? (pick.preemptedFrom ? `preempt ${pick.preemptedFrom}→${pick.kind}` : 'committed') : 'top-rank';
+        return { chosen: pick, reason: `${tag} (no LLM yet): ${pick ? pick.rationale : 'none'}`, freePlay: false };
     }
 
     /** Commit a decision = dispatch its skill (or shadow-log it). */

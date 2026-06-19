@@ -12,7 +12,7 @@ import { Kernel } from './kernel.js';
 import { getLaneManager } from './tool_lanes.js';
 import { FRAMEWORK_ENABLED_DEFAULT } from './contracts.js';
 
-export { getWorld, mentalState, proposeTasks, registerResourceNode, markDepleted, nearestNode, ingestScan } from './world_model.js';
+export { getWorld, mentalState, proposeTasks, commitGoal, isGoalDone, registerResourceNode, markDepleted, nearestNode, ingestScan } from './world_model.js';
 export { ToolLaneManager, getLaneManager, preempts, LanePreempted } from './tool_lanes.js';
 export * as instinct from './instinct.js';
 export * as contracts from './contracts.js';

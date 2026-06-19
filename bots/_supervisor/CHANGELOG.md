@@ -10,6 +10,14 @@
 
 ---
 
+## C278. ★★S4.1 承诺计划逻辑(治 #1决策慢/不commit + #3木囤量 + #5食物囤量)（framework world_model.js+kernel.js,✅9项逻辑单测;in-game待 S4.3 suppress钩子+driven验收）
+- **触发(用户 9 条观测 A 类 + C276 commit 病根定位)**: missionNether 有食物时不 commit、被 feedUp/漫游拽走(#1);木材砍2个就停(#3);不囤肉(#5)。治本=框架 propose→commit→suppress 取代食物 gate 泥潭。
+- **改动(纯逻辑,影子安全)**: world_model.js 加 ①囤量常量(WOOD_BUFFER=8 plank当量/FOOD_STOCK=16)+库存助手 woodUnits;②**完成判据**: isBootstrapDone=镐≥1&&石器&&木囤≥8(不在2个log算完,#3),GET_FOOD done=food≥16(#5),isGoalDone(kind)逐类;③**commitGoal 粘性选择器**: 维护 bot._commitment 跨tick,选定目标**死守到真完成**,只有 emergency(food≤4/低血威胁/死亡区)才抢占——扫全部proposal不只top(food=4的GET_FOOD@88在BOOTSTRAP@90之下也能抢占)。kernel decide 改走 commitGoal。
+- **预测(可证伪)**: ✅逻辑层: 食物中等(8)死守BOOTSTRAP不被拽走、危急(4)抢占GET_FOOD、补回继续bootstrap、囤够才move on——9/9单测过。**🟡 in-game 待验**: commitGoal 只让 kernel 决策粘住,但**skill 内部(prepNether/feedUp)仍可能自行让步**→需 S4.3 suppress 钩子(committed BOOTSTRAP 时 feedUp/forage 读 bot._commitment 让步,除非food危急)+ kernel 真 live 驱动。若只有 commitGoal 不接 suppress,bot 仍会被 skill 内部 feedUp 拽走(下一层 gate,C276 预言)。
+- **关联**: docs/framework-v2-plan.md S4。纯逻辑单测≠游戏内验收([[validation-not-mock]]),in-game 在 S4.3+driven 验。下一步 S4.3(suppress机制)+S4.2(LLM拍板)。[[decision-speed-keepinventory]]。
+
+---
+
 ## C277. ★★sealBunker 重写 + 首个游戏内真·验收(用户#7封顶把自己关外面 + #8验收纪律)（framework/tools/bunker.js,✅dev-trigger游戏内三信号一致验收cap路径）
 - **触发(用户 #7 肉眼观测 + #8 纪律)**: 用户看 live 报"晚上不挖三填一,封顶时跑到外面围着建筑盖→人在外面没庇护"。且 #8: "你实现的功能你自己没法好好评估,需想办法验收,做不到请人工帮,给手动触发钩子让我检查"。
 - **★根因(两层,V3 round1 实测挖出)**: ①`skills.placeBlock` 目标太近(<1.1)时 `GoalInvert` 把 bot 往外推腾放置空间(skills.js:1490)→封自己周围时所有目标都<1.1→bot 被推出圈=#7。②换成 `bot.placeBlock(ref,face)`(只转身不寻路)后 round1 仍失败: a) **mineflayer modes(unstuck等)在 tool 执行中把 bot 拽出坑**(JS tool-lane 挡不住底层 modes,见 [[mineflayer-layer-primitives]]); b) **只挖1-2格→cap 那格落在地表/空气层无可贴实心面**→贴到旁边树干飘头顶。
