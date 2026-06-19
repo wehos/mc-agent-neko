@@ -470,14 +470,25 @@ export default async function prepNether(bot, ctx) {
         }
     };
 
-    // Order matters: a weapon + body armour first (survival), then the rest of the
+    // Order matters: a weapon + FULL body armour first (survival), then the rest of the
     // kit, then portal materials. obsidian last (it's the risky/uncertain one).
+    // ★C262 (统一 1+2+3, 2026-06-19): the old goals jumped shield→iron_pickaxe→DIAMOND gear with
+    // NO iron armor and NO iron weapon. To get diamond armor the bot had to mine diamonds at y<16
+    // (the deadliest depth) while UNARMORED, and died there 20+ times before ever consolidating
+    // (deaths 19/20 carried raw_iron 15/31 — full armor's worth — and died before crafting it;
+    // death 21 had armorCount=1 but sword:null = no weapon). Insert the IRON tier (sword + full
+    // armor) BEFORE the diamond tier so the bot completes a survivable kit from the iron it can mine
+    // at moderate depth, THEN descends for diamonds already armored. 3-in-1: (1) full armor set,
+    // (2) always a real sword (no weapon gap), (3) armor+weapon complete before the deep diamond dive.
     const goals = [
-        { item: 'shield', count: 1 },        // FIRST: a shield blocks skeleton arrows + melee — the
-                                             // real counter to the "shot by Skeleton" deaths. Cheap
-                                             // (6 planks + 1 iron) and self_defense's shieldFight uses it.
-        { item: 'iron_pickaxe', count: 1 },
-        { item: 'diamond_sword', count: 1 },
+        { item: 'shield', count: 1 },          // shield blocks skeleton arrows + melee (shieldFight)
+        { item: 'iron_pickaxe', count: 1 },    // needed to mine the rest (and diamonds)
+        { item: 'iron_sword', count: 1 },      // ★2: a real weapon — death 21 was sword:null, couldn't fight back
+        { item: 'iron_chestplate', count: 1 }, // ★1: iron armor (chest=most protection) BEFORE the deep diamond dive
+        { item: 'iron_leggings', count: 1 },
+        { item: 'iron_helmet', count: 1 },
+        { item: 'iron_boots', count: 1 },
+        { item: 'diamond_sword', count: 1 },   // ★3: diamonds only after the iron survival kit is done
         { item: 'diamond_chestplate', count: 1 },
         { item: 'diamond_leggings', count: 1 },
         { item: 'diamond_helmet', count: 1 },
