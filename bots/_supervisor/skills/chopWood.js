@@ -1016,6 +1016,94 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         _dbg(`chopWood BAIL (MAROONED) at iter${iter} — local log reachable but no dig progress`);
         return false;
     };
+    // ★C279 WOOD-DESERT SELF-SUFFICIENCY (用户 no-reroll: bot 必须在任何世界能 bootstrap):
+    // 当 reachable 范围内 NO natural tree (badlands/mesa: 树只长在够不到的台地顶,
+    // blk=N 全黑名单, reachable nearest=NONE forever → 饿死式漫游) 但背包里揣着 sapling,
+    // 就地种树自产木,不再漫游到饿死。sapling 拒绝 sand/red_sand/terracotta → 先垫一块 dirt,
+    // 种下,再用骨粉催熟 (bone→bone_meal 无需工作台) 让它秒长成树。下一 iter 扫到树就砍。
+    const _trySaplingGrow = async () => {
+        try {
+            if (total() > 0) return false;                                   // already have logs
+            const items = bot.inventory.items();
+            if (items.some(i => /_planks$/.test(i.name) && i.count >= 4)) return false;
+            const sap = items.find(i => /_sapling$/.test(i.name || ''));
+            if (!sap) return false;
+            if (Date.now() < (bot._saplingGrowUntil || 0)) return false;
+            const me = bot.entity.position.floored();
+            const skyOpen = (cell) => {
+                for (let d = 1; d <= 6; d++) { const b = bot.blockAt(cell.offset(0, d, 0)); if (b && b.boundingBox === 'block') return false; }
+                return true;
+            };
+            const PLANTABLE = /grass_block|^dirt$|coarse_dirt|podzol|mycelium|rooted_dirt|moss_block|^mud$|farmland/;
+            const isAir = (b) => !b || b.name === 'air';
+            // nearest reachable ground cell: solid floor, open cell, sky clearance, not our own body
+            const ring = [];
+            for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) ring.push([dx, dz]);
+            ring.sort((a, b) => (Math.abs(a[0]) + Math.abs(a[1])) - (Math.abs(b[0]) + Math.abs(b[1])));
+            let spot = null;
+            for (const [dx, dz] of ring) {
+                for (const dy of [0, 1, -1]) {
+                    const air = me.offset(dx, dy, dz);
+                    if (air.equals(me) || air.equals(me.offset(0, 1, 0))) continue;   // can't place in our own body
+                    const ground = air.offset(0, -1, 0);
+                    const gb = bot.blockAt(ground), ab = bot.blockAt(air);
+                    if (!gb || gb.boundingBox !== 'block') continue;                  // need solid floor
+                    if (!isAir(ab) || !skyOpen(air)) continue;                        // open cell + clearance
+                    if (air.offset(0.5, 0.5, 0.5).distanceTo(bot.entity.position) > 4.2) continue;
+                    const needDirt = !PLANTABLE.test(gb.name || '');
+                    if (needDirt && !items.some(i => i.name === 'dirt')) continue;
+                    spot = { air, ground, needDirt };
+                    break;
+                }
+                if (spot) break;
+            }
+            if (!spot) { bot._saplingGrowUntil = Date.now() + 20000; return false; }
+            _dbg(`sapling-grow: planting ${sap.name} @${spot.air.x},${spot.air.y},${spot.air.z} needDirt=${spot.needDirt} (no reachable natural tree)`);
+            try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
+            try { bot.clearControlStates(); } catch (_) {}
+            // 1) ensure plantable ground — drop a dirt block into the cell, plant one above it
+            if (spot.needDirt) {
+                if (!await _placeConfirmed('dirt', spot.air, 'sapling-dirt')) { bot._saplingGrowUntil = Date.now() + 20000; return false; }
+                spot.ground = spot.air; spot.air = spot.air.offset(0, 1, 0);
+                if (!isAir(bot.blockAt(spot.air)) || !skyOpen(spot.air)) { bot._saplingGrowUntil = Date.now() + 20000; return false; }
+            }
+            // 2) plant the sapling (confirm by NAME — sapling boundingBox is 'empty', not 'block')
+            try { await bot.equip(sap, 'hand'); } catch (e) {}
+            try { await skills.placeBlock(bot, sap.name, spot.air.x, spot.air.y, spot.air.z, 'bottom', true); }
+            catch (e) { _dbg(`sapling place err: ${String(e.message).slice(0, 60)}`); }
+            const pb = bot.blockAt(spot.air);
+            if (!(pb && /_sapling$/.test(pb.name || ''))) { bot._saplingGrowUntil = Date.now() + 20000; return false; }
+            _dbg(`sapling planted @${spot.air.x},${spot.air.y},${spot.air.z}`);
+            // 3) bonemeal to grow now — craft bone→bone_meal (no table) if we have none
+            const getBoneMeal = () => bot.inventory.items().find(i => i.name === 'bone_meal');
+            if (!getBoneMeal()) {
+                const bone = bot.inventory.items().find(i => i.name === 'bone');
+                if (bone) {
+                    try {
+                        const bmId = bot.registry.itemsByName.bone_meal && bot.registry.itemsByName.bone_meal.id;
+                        const rec = bmId != null ? (bot.recipesFor(bmId, null, 1, null) || [])[0] : null;
+                        if (rec) await bot.craft(rec, bone.count, null);
+                    } catch (e) { _dbg(`bone→meal craft err: ${String(e.message).slice(0, 50)}`); }
+                }
+            }
+            let grew = false;
+            for (let k = 0; k < 8; k++) {
+                const bm = getBoneMeal();
+                const sb = bot.blockAt(spot.air);
+                if (sb && /_log$/.test(sb.name || '')) { grew = true; break; }
+                if (!bm || !sb || !/_sapling$/.test(sb.name || '')) break;
+                try { await bot.equip(bm, 'hand'); } catch (e) {}
+                try { await bot.lookAt(spot.air.offset(0.5, 0.5, 0.5), true); await bot.activateBlock(sb); }
+                catch (e) { _dbg(`bonemeal err: ${String(e.message).slice(0, 50)}`); }
+                await new Promise(r => setTimeout(r, 240));
+                const after = bot.blockAt(spot.air);
+                if (after && /_log$/.test(after.name || '')) { grew = true; break; }
+            }
+            bot._saplingGrowUntil = Date.now() + (grew ? 4000 : 30000);
+            _dbg(`sapling-grow done: grew=${grew} (re-scanning for tree)`);
+            return true;
+        } catch (e) { _dbg(`sapling-grow fail: ${String(e.message).slice(0, 60)}`); bot._saplingGrowUntil = Date.now() + 30000; return false; }
+    };
     const target = total() + count;
     let stale = 0, surfaced = 0;
     let _stairDir = null;   // LOCKED dig-out direction (set on first pinned stall, reused all call)
@@ -1480,6 +1568,10 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                 }
                 continue;
             }
+            // ★On the surface with NO reachable natural tree → grow our own from a carried
+            // sapling BEFORE roaming off to starve (badlands/mesa: only unreachable plateau
+            // trees, blk=N). Plants dirt+sapling+bonemeal; on success re-scan finds the tree.
+            if (await _trySaplingGrow()) { stale = 0; continue; }
             // No trees in 40-block range and we're at/near the surface — we're in a BARREN
             // or WATER zone (the water-edge spawn: 1hr stuck here, 0 logs). A flat 12-block
             // moveAway never escapes a big water body, and moveAway often can't even path

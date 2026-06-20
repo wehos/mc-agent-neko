@@ -49,7 +49,7 @@
 
 ### Phase S4 — commit 承诺计划（A 类治本，最大工程）
 - **S4.1**：proposer 增强——完成判据加"囤量"（木材/食物富余）、村庄资源点、kit 序列。
-- **S4.2**：kernel `decide` 接 LLM 拍板（改 prompter：$SELF_PROMPT→$WORLD_MODEL+$PROPOSALS，注入 survival/companion 语义）。
+- **S4.2 ⏸ PARKED（待证据，2026-06-20 用户拍板）**：kernel `decide` 接 LLM 拍板（改 prompter：$SELF_PROMPT→$WORLD_MODEL+$PROPOSALS，注入 survival/companion 语义）。**搁置理由**：取证确认现役 survival 循环是纯本能/状态机驱动（`ws_server.js:307` sticky 启动即 `self_prompter.stop()`；missionNether 1379 行 0 个 LLM 调用；supervisor skills 无任何 prompter/sendRequest）。LLM 不在环里，硬接 = 过早优化且拖慢决策（与"决策太慢"directive 冲突）。**解锁条件**：状态机在某真实卡点反复在 2+ 合法选项间抖动/选错、且歧义无法靠加一条确定性规则消掉 → 才接 LLM 拍板。
 - **S4.3**：kernel 接管 sticky 派发 + **承诺锁定**：committed 任务执行到底，suppress feedUp/forage/roam（取代 missionNether 食物 gate 泥潭，非打补丁）。先影子对照 missionNether，再切 live。
 - **S4.4 🙋需人工**：good-spawn 重 roll，driven 全程观测开局→建家→床→下矿。
 

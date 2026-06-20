@@ -2269,6 +2269,14 @@
 - **观测**: 🟡 `node --check bots/_supervisor/skills/feedUp.js` 通过。等待下一次 feedUp hot-load 验证。
 - **回滚**: 恢复 PlanD 先 `skills.customSkill(bot,'chopWood',...)`,再 `appleLeafSweep(32)` 的旧顺序。
 
+## C91. 缺木荒漠种树自给（C279,②层 chopWood,待验证）
+- **触发(2026-06-20 wooded_badlands 实机取证)**: bot hp20/food20 健康、commitment 正确锁 BOOTSTRAP_KIT,但背包 0 log/0 planks,chopDBG `nearest=NONE total=0 blk=3`——树只长在够不到的台地顶(3 棵全进 unreach 黑名单),reachable 永远 NONE。chopWood 空转 `chop→nothing→try craft table(0 planks 必败)→loop`,bot 漫游找 240 格外的 log,food 20→14 在掉。背包揣着 oak_sapling×8 + bone×2 却无代码用。
+- **机理**: chopWood 为"树存在但够不到"做了海量工程(生走/跳爬/贴脸砍/远征锁向),但**没有"无可达树时自产木"的回退**。缺木荒漠/mesa 是普适地形,robust agent 应能用携带的 sapling 自给。
+- **改动(C279)**: chopWood barren `!nearest` 路径(已 surfaced 后、漫游 relocate 前)新增 `_trySaplingGrow()`: 无 log/planks<4 且有 sapling 时,就近找 solid floor+开放 cell+sky clearance 的格子;地面非 plantable(red_sand/terracotta)就先垫一块 dirt;种下 sapling(按 NAME 确认,因 boundingBox=empty);craft bone→bone_meal(无需台)后 activateBlock 催熟最多 8 次。成功 stale=0 continue 让下一 iter 扫到树就砍;失败/未熟设 20-30s cooldown 落到原漫游逻辑,不死循环。
+- **预测(可证伪)**: 下次 day-phase bot 在无可达树区(chopDBG nearest=NONE 持续),progress.txt 应出现 `sapling-grow: planting` → `sapling planted @` →(有 bone 时)`sapling-grow done: grew=true`,随后一 iter `nearest=oak_log@<4b` 并 `dug N logs`,木材 0→正;**不应**再出现纯空转 `nearest=NONE` 持续 + food 单调下滑到饿死/漫游 240 格。
+- **观测**: 🟡 `node --check` 通过,chopWood 热加载已就位;当前为夜间(night-hold 跳过 chop),挂 Monitor baghy0pns 等天亮验收。
+- **回滚**: 删 `_trySaplingGrow` 定义 + barren 路径那行 `if (await _trySaplingGrow())`。
+
 ## 待修队列
 - **★★死6/7 根因=无甲+no-regen 脆弱(新世界值守,2026-06-19,下个聚焦项)**: C253/256/257 修好夜暴露后,死6(dawn骷髅射,无盾无甲)、死7(y45洞穴6怪swarm,hp20→13→8→5,无甲no-regen)接连发生。**总绑定约束=食物**: bot 反复卡 hp<14/food<18 no-regen→碰怪即崩,且拿到铁(12)先做 iron_pickaxe+盾、**不做甲**→撑不过 dawn/洞穴遭遇→死前丢光12铁。诊断到的具体机理: ①**feedUp 觅食窗口太窄**(desperationRoam line211): `food≥12 && !noRegenHurt → 不roam`,故 food13-16/hp满 时忽略 52格可见猪(maxAnimalClose food>10 达96但门先挡);food 跌破12 才触发,那时常已夜/有怪/地下→`hostileNear(8)`/`isNight` 又gate掉→**四条件(food<12+白天+8格无怪+动物近)难同时满足**。②**无食物缓冲**: 自认 food12=够,从不主动囤满→deep-mine 时 no-regen。③疑似**生肉直接吃**(porkchop 在手 food 没大涨)未 cook(生3熟8)。④**铁分配优先级**: 应甲优先于 pickaxe(survival>diamond),partial甲(chestplate/helmet)就能扛 dawn/洞穴。候选修(需干净设计+测试,勿rush): feedUp 安全时主动囤食到≥17建buffer / 低食物no-regen 时禁止 deep-mine 先上浮觅食 / 铁优先做甲 / 生肉入furnace cook。
 - **enderman 视线豁免**(死276根因,已二次): 行军/凿崖 lookAt 扫过 enderman 脸=激怒。修: lookAt 前查路径上 enderman,目标点压低绕开头部。①层,下个重启窗
