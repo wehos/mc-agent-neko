@@ -19,6 +19,18 @@ const prog = (s) => { try { fs.appendFileSync(PROG, `[${new Date().toISOString()
 
 export default async function feedUp(bot, ctx, targetFood = 18) {
     const { skills, world, mc, log } = ctx;
+    // ── S4.3 COMMITMENT SUPPRESS (user #1 decision-speed / #5 don't-run-off-hunting):
+    //    while the world model has committed to BOOTSTRAP_KIT and food isn't critical,
+    //    DON'T go on a hunting/foraging excursion — finish the kit in place. The
+    //    commitment (computed in modes.js world_model mode) emergency-preempts to
+    //    GET_FOOD when food<=4, so this only fires when it's safe to keep bootstrapping. ──
+    try {
+        const c = bot._commitment;
+        if (c && c.kind === 'BOOTSTRAP_KIT' && (bot.food || 0) > 6) {
+            log(bot, `feedUp: ★defer — committed BOOTSTRAP_KIT, food=${bot.food}>6 (suppress hunt, finish kit first)`);
+            return { deferred: true, reason: 'bootstrap-commitment' };
+        }
+    } catch (e) {}
     const has = (n) => world.getInventoryCounts(bot)[n] || 0;
     const eat = async () => {
         const f = bot.inventory.items().find(i => FOOD_RE.test(i.name) && i.name !== 'rotten_flesh');

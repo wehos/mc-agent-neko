@@ -40,6 +40,16 @@ const LAND_HUNT = ['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'mooshroom', 'goa
 export default async function forageExplore(bot, ctx, opts = {}) {
     const { log, skills, mc } = ctx;
     const log_ = (m) => log(bot, `[forageExplore] ${m}`);
+    // ── S4.3 COMMITMENT SUPPRESS: don't wander-forage while committed to BOOTSTRAP_KIT
+    //    and food isn't critical — finish the kit in place (user #1/#3). Emergency
+    //    food (<=4) preempts the commitment to GET_FOOD upstream, so this is safe. ──
+    try {
+        const c = bot._commitment;
+        if (c && c.kind === 'BOOTSTRAP_KIT' && (bot.food || 0) > 6 && !opts.force) {
+            log_(`★defer — committed BOOTSTRAP_KIT, food=${bot.food}>6 (suppress roam, finish kit)`);
+            return { deferred: true, reason: 'bootstrap-commitment' };
+        }
+    } catch (e) {}
     const maxBlocks = opts.maxBlocks || 160, legBlocks = opts.legBlocks || 16;
     const gateHp = opts.gateHp ?? 14, gateFood = opts.gateFood ?? 10;
 

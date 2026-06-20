@@ -3672,6 +3672,18 @@ const modes_list = [
                     surfaceGate: { mode: gateMode, allowSurface, reason: gateReason, decidedBy, until: gateUntil },
                     recommendation: { action, reason: gateReason },
                 };
+                // ── S4.1/4.3 COMMITMENT (decision-speed / don't-yo-yo, user #1): compute the
+                //    sticky committed goal as a world-model OUTPUT so ALL layers read it (the
+                //    blueprint's "world model propose → layers consume"). commitGoal holds the
+                //    goal until done; skills (feedUp/forageExplore) read bot._commitment and
+                //    defer while BOOTSTRAP_KIT is committed (the suppress hooks). No kernel
+                //    takeover needed — this runs in the always-on world_model mode. ──
+                try {
+                    if (!this._fw) this._fw = await import('./framework/index.js');
+                    const props = this._fw.proposeTasks(bot._world, bot);
+                    const committed = this._fw.commitGoal(bot, props, bot._world);   // mutates bot._commitment
+                    bot._world.commitment = committed ? { kind: committed.kind, skill: committed.skill, rationale: committed.rationale, preemptedFrom: committed.preemptedFrom || null } : null;
+                } catch (e) {}
                 if (now - this.lastWrite >= 2000) {
                     this.lastWrite = now;
                     try { fs.writeFileSync('bots/_supervisor/world_model.json', JSON.stringify(bot._world)); } catch (e) {}
