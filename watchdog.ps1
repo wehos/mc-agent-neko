@@ -122,6 +122,18 @@ while ($true) {
             -RedirectStandardError (Join-Path $proj 'bots\_supervisor\overseer.err') -WindowStyle Hidden
         Add-Content $log "[$(Get-Date -Format o)] started overseer.mjs (risk engine)"
     }
+    # TICKET-SERVER KEEP-ALIVE: the resident single-writer ticket store (:48920) that makes the
+    # one MC session parallel-fixable (auto+manual tickets, cross-session claim sync, human web
+    # UI). botwatch.mjs POSTs auto-tickets to it; a human/agent reads via ticket.mjs / the UI.
+    # See docs/parallel-tickets.md. Keep it alive so the board never goes dark.
+    $ticketAlive = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*ticket-server.mjs*' }
+    if (-not $ticketAlive) {
+        $env:TICKET_PORT = '48920'
+        Start-Process -FilePath 'node' -ArgumentList 'ticket-server.mjs' -WorkingDirectory (Join-Path $proj 'bots\_supervisor') `
+            -RedirectStandardOutput (Join-Path $proj 'bots\_supervisor\ticket-server.log') `
+            -RedirectStandardError (Join-Path $proj 'bots\_supervisor\ticket-server.err') -WindowStyle Hidden
+        Add-Content $log "[$(Get-Date -Format o)] started ticket-server.mjs (:48920)"
+    }
     $listening = Get-NetTCPConnection -LocalPort 48909 -State Listen -ErrorAction SilentlyContinue
     if (-not $listening) {
         Restart-Agent 'agent DOWN (48909 not listening)'
