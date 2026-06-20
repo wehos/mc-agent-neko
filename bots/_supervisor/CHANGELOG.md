@@ -2294,6 +2294,13 @@
 - **观测**: 🟡 `node --check` 两文件通过,已重启加载;Monitor bf4mqa6v2 盯死亡/濒死。待逮到"树下不发呆、下跳取树"的正面实例。
 - **回滚**: `hasOverheadCover` 删 leaves/vine 排除;`maxDropDown` 两处回 2。
 
+## C94. 挖掉的矿/工作台 ensure 安全捡拾（C282,①+③层,ticket T-0004,已修待验）
+- **触发(用户报告)**: bot 站高一级挖掉自己用过的工作台(挖了半天),走时没下去捡掉落物——掉在低一级台阶,collectBlock 没下探。用户要通用 ensure 机制:挖掉的矿/工作台等掉落只要**安全范围内**就必捡,但**绝不为捡东西摔死**。
+- **改动(C282)**: 新增库原语 `skills.ensurePickupAt(bot, pos, opts)`(skills.js):扫 mined 块附近掉落物,**安全门=落差≤3格(零摔伤)、掉落格非岩浆/火/仙人掌/深水/虚空边、有落脚**;只对安全可达的用 `goToGoal`(非破坏 movements,maxDropDown=3 自身兜底)下探+`pickupNearbyItems`;不安全的**记日志留原地不冒险**。wire 进 ① achieve.js 工作台/熔炉回收 + ② branchMine 贵重矿挖后。
+- **预测(可证伪)**: bot 站高处挖工作台/矿石后,若掉落物在 ≤3 格下方且无危险,progress 出现 `ensurePickup: collected N item(s)` 且工作台/矿回到背包;若掉落 >3 格下方或临岩浆,出现 `ensurePickup: ... not safely reachable ... leaving them` 而**不**触发寻路下坠摔伤。
+- **观测**: 🟡 `node --check` 三文件通过,重启加载无 import 报错(bot 重连正常 y45 挖矿);待实机逮到"挖台/矿→ensurePickup collected"正面实例。
+- **回滚**: 删 achieve.js/branchMine.js 的 `ensurePickupAt` 调用 + skills.js 的 `ensurePickupAt` 定义。
+
 ## 待修队列
 - **★★死6/7 根因=无甲+no-regen 脆弱(新世界值守,2026-06-19,下个聚焦项)**: C253/256/257 修好夜暴露后,死6(dawn骷髅射,无盾无甲)、死7(y45洞穴6怪swarm,hp20→13→8→5,无甲no-regen)接连发生。**总绑定约束=食物**: bot 反复卡 hp<14/food<18 no-regen→碰怪即崩,且拿到铁(12)先做 iron_pickaxe+盾、**不做甲**→撑不过 dawn/洞穴遭遇→死前丢光12铁。诊断到的具体机理: ①**feedUp 觅食窗口太窄**(desperationRoam line211): `food≥12 && !noRegenHurt → 不roam`,故 food13-16/hp满 时忽略 52格可见猪(maxAnimalClose food>10 达96但门先挡);food 跌破12 才触发,那时常已夜/有怪/地下→`hostileNear(8)`/`isNight` 又gate掉→**四条件(food<12+白天+8格无怪+动物近)难同时满足**。②**无食物缓冲**: 自认 food12=够,从不主动囤满→deep-mine 时 no-regen。③疑似**生肉直接吃**(porkchop 在手 food 没大涨)未 cook(生3熟8)。④**铁分配优先级**: 应甲优先于 pickaxe(survival>diamond),partial甲(chestplate/helmet)就能扛 dawn/洞穴。候选修(需干净设计+测试,勿rush): feedUp 安全时主动囤食到≥17建buffer / 低食物no-regen 时禁止 deep-mine 先上浮觅食 / 铁优先做甲 / 生肉入furnace cook。
 - **enderman 视线豁免**(死276根因,已二次): 行军/凿崖 lookAt 扫过 enderman 脸=激怒。修: lookAt 前查路径上 enderman,目标点压低绕开头部。①层,下个重启窗

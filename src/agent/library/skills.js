@@ -1213,6 +1213,79 @@ export async function pickupNearbyItems(bot) {
     return true;
 }
 
+export async function ensurePickupAt(bot, pos, opts = {}) {
+    /**
+     * Make sure the drops left by a just-mined block (ore / crafting_table / furnace /
+     * any valuable block) actually end up in the inventory — INCLUDING the common case
+     * where the bot mined a block from ONE LEVEL UP and the drop fell to a lower ledge,
+     * then walked off without it (user-reported: mined its own crafting_table from above,
+     * never went down to grab it).
+     *
+     * ★SAFETY FIRST (user: "别为了捡东西摔死"): a drop is fetched ONLY if it's within a
+     * SAFE descent (≤ maxDescend blocks down → ZERO fall damage) and its resting cell isn't
+     * over/in lava·fire·void. Anything below that, or that the (non-digging, maxDropDown=3)
+     * pathfinder refuses to safely reach, is LEFT BEHIND on purpose — losing an item is
+     * always cheaper than a death. Never throws.
+     *
+     * @param {MinecraftBot} bot
+     * @param {Vec3} pos   the position of the block that was just mined (drop origin)
+     * @param {{radius?:number,maxDescend?:number,timeoutMs?:number}} opts
+     * @returns {Promise<boolean>} true if at least one item was collected
+     */
+    const radius = opts.radius ?? 5;
+    const maxDescend = opts.maxDescend ?? 3;      // ≤3 blocks down = no fall damage
+    const timeoutMs = opts.timeoutMs ?? 8000;
+    const HAZARD = /lava|fire|magma|cactus|campfire|wither_rose|sweet_berry|powder_snow/;
+    const totalItems = () => { try { return Object.values(world.getInventoryCounts(bot)).reduce((a, b) => a + b, 0); } catch (e) { return 0; } };
+    try {
+        if (!bot || !bot.entity || !bot.entity.position || !pos) return false;
+        const before = totalItems();
+        for (let pass = 0; pass < 3; pass++) {
+            if (bot.interrupt_code || bot.death_abort) break;
+            const me = bot.entity.position;
+            const drops = Object.values(bot.entities || {}).filter(e =>
+                e && e.name === 'item' && e.position && e.position.distanceTo(pos) <= radius + 2);
+            if (!drops.length) break;
+            // nearest SAFELY-reachable drop
+            let target = null, td = Infinity, unsafeSeen = 0;
+            for (const e of drops) {
+                const dp = e.position;
+                if (me.y - dp.y > maxDescend) { unsafeSeen++; continue; }          // too far below → don't risk it
+                if (dp.distanceTo(me) > radius + 2) continue;
+                const cell = bot.blockAt(dp.floored());
+                const below = bot.blockAt(dp.floored().offset(0, -1, 0));
+                if (cell && HAZARD.test(cell.name || '')) { unsafeSeen++; continue; }
+                if (below && /lava|fire|magma/.test(below.name || '')) { unsafeSeen++; continue; }
+                // need real footing at the drop (solid, or at worst shallow water) — not a void edge
+                if (below && below.boundingBox !== 'block' && !/water/.test(below.name || '')) { unsafeSeen++; continue; }
+                const d = dp.distanceTo(me);
+                if (d < td) { td = d; target = e; }
+            }
+            if (!target) {
+                if (unsafeSeen && pass === 0) log(bot, `ensurePickup: ${unsafeSeen} drop(s) near ${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)} not safely reachable (descent/hazard) — leaving them rather than risk a fall.`);
+                break;
+            }
+            const tp = target.position;
+            if (tp.distanceTo(bot.entity.position) > 1.4) {
+                try {
+                    await Promise.race([
+                        goToGoal(bot, new pf.goals.GoalNear(tp.x, tp.y, tp.z, 1)),   // non-destructive, maxDropDown=3 = safe descents only
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('pickup-nav-timeout')), timeoutMs)),
+                    ]);
+                } catch (e) {
+                    log(bot, `ensurePickup: couldn't safely reach drop @${Math.floor(tp.x)},${Math.floor(tp.y)},${Math.floor(tp.z)} (${e.message}) — leaving it.`);
+                    break;   // pathfinder refused (likely unsafe / blocked) — don't fight it
+                }
+            }
+            try { await pickupNearbyItems(bot); } catch (e) {}
+            await new Promise(r => setTimeout(r, 200));
+        }
+        const got = totalItems() - before;
+        if (got > 0) log(bot, `ensurePickup: collected ${got} item(s) from the dig site.`);
+        return got > 0;
+    } catch (e) { return false; }
+}
+
 
 export async function breakBlockAt(bot, x, y, z) {
     /**

@@ -244,6 +244,9 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             await equipDig();
             if (r === 'ok') {
                 try { await skills.pickupNearbyItems(bot); } catch (e) {}
+                // ★C282: guarantee the ore drop lands in inventory even if mined from above and
+                // it fell to a ledge below — but ONLY via a SAFE descent (never fall for an ore).
+                try { await skills.ensurePickupAt(bot, oreBlock.position, { radius: 4 }); } catch (e) {}
                 return true;
             }
             log(bot, `branchMine ore-chase direct ${oreBlock.name}@${oreBlock.position.x},${oreBlock.position.y},${oreBlock.position.z} rel=${rel.join(',')} => ${r}`);

@@ -197,6 +197,11 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                 if (nb) {
                     const nbPos = nb.position;
                     await skills.collectBlock(bot, st, 1).catch(() => {});
+                    // ★C282: collectBlock can mine the station from one level UP and leave the
+                    // drop on the ledge below uncollected (user: dug its own crafting_table from
+                    // above, walked off without it). ENSURE the drop is picked up — but only if
+                    // it's a SAFE descent (never fall to death for a table). Safe-pickup primitive.
+                    try { await skills.ensurePickupAt(bot, nbPos, { radius: 4 }); } catch (e) {}
                     // 收回成功(原地没了)→ 状态池注销
                     try { const still = bot.blockAt(nbPos); if (!still || still.name !== st) stDeregister(st, nbPos); } catch (e) {}
                 }
