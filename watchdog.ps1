@@ -138,6 +138,17 @@ while ($true) {
             -RedirectStandardError (Join-Path $proj 'bots\_supervisor\ticket-server.err') -WindowStyle Hidden
         Add-Content $log "[$(Get-Date -Format o)] started ticket-server.mjs (:48920)"
     }
+    # BOTWATCH KEEP-ALIVE: the anomaly detector — classifies death/stuck/idle/seal-fail from the
+    # telemetry and POSTs auto-tickets to the ticket-server. Without it the board stops filling
+    # itself. Needs TICKET_PORT (set above, persists in this PS session).
+    $botwatchAlive = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*botwatch.mjs*' }
+    if (-not $botwatchAlive) {
+        $env:TICKET_PORT = '48920'
+        Start-Process -FilePath 'node' -ArgumentList 'botwatch.mjs', '240' -WorkingDirectory (Join-Path $proj 'bots\_supervisor') `
+            -RedirectStandardOutput (Join-Path $proj 'bots\_supervisor\botwatch_stdout.log') `
+            -RedirectStandardError (Join-Path $proj 'bots\_supervisor\botwatch.err') -WindowStyle Hidden
+        Add-Content $log "[$(Get-Date -Format o)] started botwatch.mjs (anomaly->ticket detector)"
+    }
     $listening = Get-NetTCPConnection -LocalPort 48909 -State Listen -ErrorAction SilentlyContinue
     if (-not $listening) {
         Restart-Agent 'agent DOWN (48909 not listening)'
