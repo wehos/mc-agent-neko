@@ -704,7 +704,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // dirt=21 yet it fell through to the unstable staircase). Do it by hand reliably:
             // clear the head, equip filler, jump, and place a block under our feet at the apex.
             // Vertical rise that CANNOT fall back (unlike raw stair-climbing in cave terrain).
-            const _fill = bot.inventory.items().find(it => /dirt|cobblestone|cobbled|granite|andesite|diorite|^stone$|tuff|gravel|^sand$|_planks$|_log$/.test(it.name));
+            const _fill = bot.inventory.items().find(it => /dirt|cobblestone|cobbled|granite|andesite|diorite|^stone$|tuff|gravel|^sand$|red_sand|sandstone|terracotta|_planks$|_log$/.test(it.name));   // ★C280 +red_sand/terracotta (badlands)
             // ★STAIR-PLACE first (deterministic +1, proven in LEASH; the self-pillar
             // below is a hitbox race that mostly loses — saw y oscillate 60↔62 for 5min
             // with 22 dirt in the bag). Place into an ADJACENT cell at foot height

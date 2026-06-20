@@ -30,7 +30,14 @@
 import { LANE } from '../contracts.js';
 import { getLaneManager } from '../tool_lanes.js';
 
-const SEAL_RE = /^(dirt|grass_block|cobblestone|cobbled_deepslate|granite|diorite|andesite|tuff|gravel|netherrack|stone|sand|sandstone)$/;
+// ★C280: include red_sand + terracotta(+color variants) + sandstones so the bot can
+// seal in BADLANDS/MESA, where red_sand/terracotta are THE abundant blocks (the bot dug
+// 163 red_sand but SEAL_RE didn't recognize ANY of it → sealItem()=null → never sealed →
+// died 3× to melee mobs in the open on a single night, 2026-06-20).
+const SEAL_RE = /^(dirt|coarse_dirt|rooted_dirt|grass_block|cobblestone|cobbled_deepslate|granite|diorite|andesite|tuff|gravel|netherrack|stone|sand|red_sand|sandstone|red_sandstone|smooth_sandstone|[a-z_]*terracotta)$/;
+// Gravity blocks fall when placed with air below (bad for a CAP — can drop on the bot and
+// suffocate). Acceptable for walls/floor (ground-supported); prefer non-gravity when we have it.
+const GRAVITY_RE = /^(sand|red_sand|gravel)$/;
 const solid = (b) => !!b && b.boundingBox === 'block';
 const isLava = (b) => !!b && /lava/.test(b.name || '');
 
@@ -38,7 +45,12 @@ const isLava = (b) => !!b && /lava/.test(b.name || '');
 const GUARD_MODES = ['unstuck', 'item_collecting', 'torch_placing', 'elbow_room', 'hunting'];
 
 function sealItem(bot) {
-    try { return bot.inventory.items().find(i => SEAL_RE.test(i.name)) || null; } catch (e) { return null; }
+    try {
+        const fill = bot.inventory.items().filter(i => SEAL_RE.test(i.name));
+        // prefer a non-gravity block (safe for caps); fall back to gravity (red_sand/sand) only
+        // when that's all we carry — in badlands that's still better than not sealing at all.
+        return fill.find(i => !GRAVITY_RE.test(i.name)) || fill[0] || null;
+    } catch (e) { return null; }
 }
 function pin(bot) {
     try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}

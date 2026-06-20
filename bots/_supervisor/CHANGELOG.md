@@ -2274,8 +2274,16 @@
 - **机理**: chopWood 为"树存在但够不到"做了海量工程(生走/跳爬/贴脸砍/远征锁向),但**没有"无可达树时自产木"的回退**。缺木荒漠/mesa 是普适地形,robust agent 应能用携带的 sapling 自给。
 - **改动(C279)**: chopWood barren `!nearest` 路径(已 surfaced 后、漫游 relocate 前)新增 `_trySaplingGrow()`: 无 log/planks<4 且有 sapling 时,就近找 solid floor+开放 cell+sky clearance 的格子;地面非 plantable(red_sand/terracotta)就先垫一块 dirt;种下 sapling(按 NAME 确认,因 boundingBox=empty);craft bone→bone_meal(无需台)后 activateBlock 催熟最多 8 次。成功 stale=0 continue 让下一 iter 扫到树就砍;失败/未熟设 20-30s cooldown 落到原漫游逻辑,不死循环。
 - **预测(可证伪)**: 下次 day-phase bot 在无可达树区(chopDBG nearest=NONE 持续),progress.txt 应出现 `sapling-grow: planting` → `sapling planted @` →(有 bone 时)`sapling-grow done: grew=true`,随后一 iter `nearest=oak_log@<4b` 并 `dug N logs`,木材 0→正;**不应**再出现纯空转 `nearest=NONE` 持续 + food 单调下滑到饿死/漫游 240 格。
-- **观测**: 🟡 `node --check` 通过,chopWood 热加载已就位;当前为夜间(night-hold 跳过 chop),挂 Monitor baghy0pns 等天亮验收。
+- **观测**: ✅ **实机验证成功(2026-06-20 04:28)**: progress.txt `sapling-grow: planting oak_sapling @38,67,-6 needDirt=true`(红沙先垫土)→ `sapling planted @38,68,-6` → `sapling-grow done: grew=true`(骨粉催熟)→ 下一 iter `nearest=oak_log@8.3b`,与可证伪预测一字不差。旁路逻辑正确。(注:同一夜 bot 因独立的封顶 bug 被怪杀,见 C92,与本修复正交。)
 - **回滚**: 删 `_trySaplingGrow` 定义 + barren 路径那行 `if (await _trySaplingGrow())`。
+
+## C92. BADLANDS 封不了顶——red_sand 全系统不在填料白名单（C280,①+②层,已修待验）
+- **触发(2026-06-20 实机,一夜连死3次)**: bot 04:24 蜘蛛、04:25 僵尸、04:28 僵尸三连死(keepInventory 未掉物)。死亡机理同一:夜里 `Nightfall — securing till dawn (proactive)` 与 `Can't seal here, no mobs — standing down, skill-layer dig-in owns it` 每 30s 互相打架,**安全窗口内从没真正围起来**;等怪 distance≈1 贴脸近战(hp 18→5→0 约 10s)再 `Outmatched — digging in` 已来不及。
+- **根因**: 第 3 死背包 red_sand×163 + 杂物,**无一匹配 `FILL_RE`/`SEAL_RE`** → `fillerOf()`/`sealItem()` 返回 undefined → 封顶 build 整段跳过 → 裸站被秒。**red_sand 是 badlands 最丰富方块、bot 挖了一堆,却不被任何填料白名单识别**(4 处: modes.js:579 FILL_RE、modes.js:1034 SWIM FILL、bunker.js:33 SEAL_RE、chopWood.js:707 catch-ledge)。杀招是 distance 1-1.4 近战 → **四面墙(red_sand 有地面支撑能立住)本可挡住**。
+- **改动(C280)**: 4 处白名单全补 `red_sand|red_sandstone|sandstone|[a-z_]*terracotta`;并加 `GRAVITY_RE/GRAVITY_FILL` 让 `fillerOf`/`sealItem` **优先非重力块**(red_sand/sand/gravel 盖顶会掉、可能压脸窒息),仅当只剩重力块时才用它兜底。①层(modes/bunker)已随 `node main.js` 重启加载(pid 49452 @12:44, port48909 ✓);②层 chopWood 热加载。
+- **预测(可证伪)**: 下个夜晚 bot 在 badlands(仅 red_sand/terracotta 在手)应能真正封顶——progress.txt 出现成功 seal(不再每 30s `Can't seal here, no mobs — standing down` 与 `securing till dawn` 死循环),`mobility.enclosed=true` 至天亮;**不应**再出现"无怪安全窗口里站着不封顶 → 怪贴脸近战连死"。
+- **观测**: 🟡 `node --check` 三文件通过,已重启加载;挂 Monitor bf4mqa6v2(死亡/濒死/封顶 thrash)等下个夜晚验收。
+- **回滚**: 4 处白名单删回 red_sand/terracotta/sandstone;`fillerOf`/`sealItem` 恢复 `.find(first-match)`。
 
 ## 待修队列
 - **★★死6/7 根因=无甲+no-regen 脆弱(新世界值守,2026-06-19,下个聚焦项)**: C253/256/257 修好夜暴露后,死6(dawn骷髅射,无盾无甲)、死7(y45洞穴6怪swarm,hp20→13→8→5,无甲no-regen)接连发生。**总绑定约束=食物**: bot 反复卡 hp<14/food<18 no-regen→碰怪即崩,且拿到铁(12)先做 iron_pickaxe+盾、**不做甲**→撑不过 dawn/洞穴遭遇→死前丢光12铁。诊断到的具体机理: ①**feedUp 觅食窗口太窄**(desperationRoam line211): `food≥12 && !noRegenHurt → 不roam`,故 food13-16/hp满 时忽略 52格可见猪(maxAnimalClose food>10 达96但门先挡);food 跌破12 才触发,那时常已夜/有怪/地下→`hostileNear(8)`/`isNight` 又gate掉→**四条件(food<12+白天+8格无怪+动物近)难同时满足**。②**无食物缓冲**: 自认 food12=够,从不主动囤满→deep-mine 时 no-regen。③疑似**生肉直接吃**(porkchop 在手 food 没大涨)未 cook(生3熟8)。④**铁分配优先级**: 应甲优先于 pickaxe(survival>diamond),partial甲(chestplate/helmet)就能扛 dawn/洞穴。候选修(需干净设计+测试,勿rush): feedUp 安全时主动囤食到≥17建buffer / 低食物no-regen 时禁止 deep-mine 先上浮觅食 / 铁优先做甲 / 生肉入furnace cook。

@@ -576,8 +576,18 @@ const modes_list = [
             // fillerOf() returned nothing → the bot couldn't cap/wall its shelter → it just
             // spammed "digging in" and bled out to a single zombie. A human walls up with
             // whatever's in hand — so do we: planks and logs seal a bunker just fine.
-            const FILL_RE = /cobblestone|cobbled|deepslate|^dirt$|andesite|diorite|granite|^stone$|tuff|gravel|^sand$|netherrack|_planks$|_log$|_wood$|^planks$|hyphae|^mud$|^clay$|terracotta|^dirt_path$|coarse_dirt|rooted_dirt|mossy/;
-            const fillerOf = () => { const c = world.getInventoryCounts(bot); return Object.keys(c).find(n => c[n] > 0 && FILL_RE.test(n)); };
+            // ★C280: +red_sand|red_sandstone|sandstone — BADLANDS' abundant block. Without it
+            // the bot dug 163 red_sand yet fillerOf()=undefined → couldn't seal → died 3× to
+            // melee mobs in the open on one night (2026-06-20). terracotta was already in.
+            const FILL_RE = /cobblestone|cobbled|deepslate|^dirt$|andesite|diorite|granite|^stone$|tuff|gravel|^sand$|red_sand|sandstone|netherrack|_planks$|_log$|_wood$|^planks$|hyphae|^mud$|^clay$|terracotta|^dirt_path$|coarse_dirt|rooted_dirt|mossy/;
+            // Gravity blocks (sand/red_sand/gravel) fall when capping over air → can drop on the
+            // bot and suffocate. Prefer a non-gravity block for placement; gravity only as fallback.
+            const GRAVITY_FILL = /^(sand|red_sand|gravel)$/;
+            const fillerOf = () => {
+                const c = world.getInventoryCounts(bot);
+                const all = Object.keys(c).filter(n => c[n] > 0 && FILL_RE.test(n));
+                return all.find(n => !GRAVITY_FILL.test(n)) || all[0];
+            };
             try { bot.clearControlStates(); } catch (e) {}
             // ★ STEP ONTO DRY LAND FIRST (the human move at a water edge). The endless
             // "Can't seal" came from trying to dig DOWN where we stand — but the spawn is a
@@ -1021,7 +1031,7 @@ const modes_list = [
                         const isWater = (b) => b && WSET.includes(b.name);
                         const AIRY = ['air', 'cave_air', 'void_air', 'short_grass', 'tall_grass', 'fern'];
                         const isAir = (b) => b && AIRY.includes(b.name);
-                        const FILL = ['dirt', 'cobblestone', 'cobbled_deepslate', 'andesite', 'diorite', 'granite', 'stone', 'tuff', 'gravel', 'sand', 'netherrack', 'deepslate'];
+                        const FILL = ['dirt', 'cobblestone', 'cobbled_deepslate', 'andesite', 'diorite', 'granite', 'stone', 'tuff', 'terracotta', 'sandstone', 'red_sandstone', 'netherrack', 'deepslate', 'gravel', 'sand', 'red_sand'];   // ★C280 +terracotta/sandstone/red_sand (badlands); gravity blocks last
                         const filler = () => { const c = world.getInventoryCounts(bot); return FILL.find(n => (c[n] || 0) > 0) || Object.keys(c).find(n => /_planks$|_log$/.test(n) && c[n] > 0); };
                         const inWaterNow = () => isWater(bot.blockAt(bot.entity.position)) || isWater(bot.blockAt(bot.entity.position.offset(0, 1, 0)));
                         const findShore = () => {
