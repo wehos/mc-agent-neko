@@ -27,7 +27,11 @@ try {
         }
 } catch {}
 Add-Content $log "[$(Get-Date -Format o)] watchdog started (pid $PID)"
-$env:NEKO_AGENT_SCREENSHOT_INTERVAL_MS = '0'      # screenshots OFF by default; keep the prismarine renderer out of unattended restarts.
+# ★C283 FLIGHT RECORDER: screenshots ON at 15s so bridge.mjs keeps a rolling timestamped
+# filmstrip (frames/, pruned to FRAME_RETAIN_MS) — the visual black box for post-hoc replay
+# ("frame-at.mjs 04:52"). Was '0' (off, to spare the renderer); 15s is a light cadence. If the
+# prismarine renderer ever destabilizes an unattended run, drop this back to '0'.
+if (-not $env:NEKO_AGENT_SCREENSHOT_INTERVAL_MS) { $env:NEKO_AGENT_SCREENSHOT_INTERVAL_MS = '15000' }
 
 $progFile = Join-Path $proj 'bots\_supervisor\progress.txt'
 $freezeLimitSec = 360    # progress.txt stale this long while agent is up = skill hung -> restart

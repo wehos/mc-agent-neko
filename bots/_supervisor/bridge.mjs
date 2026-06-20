@@ -32,7 +32,12 @@ const STATUS = path.join(DIR, 'status.json');
 // the survival modes (night-shelter etc.) drive instead of the suicidal walk-back.
 // Write {"skill":"achieveLoop","args":[...]} to arm; delete the file to stop.
 const STICKY = path.join(DIR, 'sticky_skill.json');
-const FRAME_EVERY_MS = 15000; // filmstrip cadence
+// ★C283 FLIGHT RECORDER: the timestamped filmstrip in frames/ is the visual black box —
+// any agent can reconstruct "what did 04:52 look like" AFTER the fact (frames/frame-at.mjs
+// finds the nearest frame to a time). Two knobs (env-tunable to trade CPU/disk vs fidelity):
+const FRAME_EVERY_MS = parseInt(process.env.FRAME_EVERY_MS || '15000', 10);   // filmstrip cadence
+const FRAME_RETAIN_MS = parseInt(process.env.FRAME_RETAIN_MS || '7200000', 10); // rolling window (2h); older frames pruned
+let _lastFramePrune = 0;
 // Hard-state telemetry from the agent's vitals broadcast (15s cadence):
 //   vitals.json   latest snapshot (overwritten) — watchdog/patrol read this
 //   vitals.jsonl  history for trend analysis (rotated at 20MB)
@@ -89,6 +94,17 @@ function handle(msg) {
             if (now - lastFrameSaved >= FRAME_EVERY_MS) {
                 lastFrameSaved = now;
                 fs.writeFileSync(path.join(FRAMES_DIR, `${now}.jpg`), buf);
+                // ROLLING WINDOW: prune frames older than FRAME_RETAIN_MS so the black box
+                // never fills the disk (at 15s cadence ~480 frames/2h ≈ 11MB). Cheap, ~1/min.
+                if (now - _lastFramePrune > 60000) {
+                    _lastFramePrune = now;
+                    try {
+                        for (const f of fs.readdirSync(FRAMES_DIR)) {
+                            const m = /^(\d{10,})\.jpg$/.exec(f);
+                            if (m && now - parseInt(m[1], 10) > FRAME_RETAIN_MS) { try { fs.unlinkSync(path.join(FRAMES_DIR, f)); } catch {} }
+                        }
+                    } catch {}
+                }
             }
         } catch (e) { /* ignore bad frame */ }
         return;

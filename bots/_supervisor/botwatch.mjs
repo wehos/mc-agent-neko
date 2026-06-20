@@ -31,8 +31,18 @@ const TICKET_PORT = parseInt(process.env.TICKET_PORT || '48920', 10);
 // Fire-and-forget POST to the ticket-server. Auto-tickets carry a dedupKey so an ONGOING
 // problem (death loop, pacing, seal-fail thrash) is ONE ticket that bumps occurrences, not
 // hundreds. Never throws — if the server is down, detection just no-ops (botwatch survives).
+// newest black-box frame path (so a ticket carries a visual of the moment it fired)
+function latestFrame() {
+    try {
+        const d = path.join(DIR, 'frames');
+        const fs2 = fs.readdirSync(d).filter(f => /^\d{10,}\.jpg$/.test(f)).sort();
+        const f = fs2[fs2.length - 1];
+        return f ? path.join('bots', '_supervisor', 'frames', f) : null;
+    } catch { return null; }
+}
 function postTicket(t) {
     try {
+        if (t.evidence && !t.evidence.frames) { const fr = latestFrame(); if (fr) t.evidence.frames = [fr]; }
         const data = JSON.stringify({ source: 'auto', actor: 'botwatch', ...t });
         const req = http.request({ host: '127.0.0.1', port: TICKET_PORT, path: '/api/tickets', method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } }, (res) => { res.on('data', () => {}); res.on('end', () => {}); });
         req.on('error', () => {});

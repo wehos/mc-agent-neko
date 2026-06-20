@@ -2301,7 +2301,12 @@
 - **观测**: 🟡 `node --check` 三文件通过,重启加载无 import 报错(bot 重连正常 y45 挖矿);待实机逮到"挖台/矿→ensurePickup collected"正面实例。
 - **回滚**: 删 achieve.js/branchMine.js 的 `ensurePickupAt` 调用 + skills.js 的 `ensurePickupAt` 定义。
 
-## 待修队列
+## C95. 滚动帧黑匣子（C283,飞行记录仪,已建已验）
+- **触发(用户)**: frame.jpg 被覆盖,事后没法回放"04:52 啥样";要按时间戳留帧让任何 agent 事后重建现场。
+- **现状根因**: bridge.mjs 其实已写 `frames/<unixms>.jpg`(每 15s),但 ① 截图被 watchdog 关了(`NEKO_AGENT_SCREENSHOT_INTERVAL_MS=0`,相机没初始化,frame.jpg 8 天没动) ② frames/ 无清理会撑爆盘。
+- **改动(C283)**: ① bridge.mjs 加滚动清理(FRAME_RETAIN_MS 默认 2h,~1/min prune)+ FRAME_EVERY_MS/RETAIN env 可调。② watchdog.ps1 截图改 15s ON(env 可覆盖/出问题可回 0)。③ 新 `frame-at.mjs`: 给时间(HH:MM UTC/ISO/unix ms/now/--window)→ 最近帧路径,"回放 04:52"一条命令。④ botwatch 工单证据自动带当时最新帧。
+- **观测**: ✅ 实机验证:重启开相机后 frame.jpg 2s 新鲜,frames/ 每~20s 进时间戳帧;`frame-at 05:45:31`→Δ0.1s 精确命中,`--window 40` 列窗口帧。**注:只从启用时刻起录,启用前的过去时刻(如今早 04:52)无帧可回放。**
+- **回滚**: watchdog 截图回 '0';bridge prune 段删;frame-at.mjs 删。
 - **★★死6/7 根因=无甲+no-regen 脆弱(新世界值守,2026-06-19,下个聚焦项)**: C253/256/257 修好夜暴露后,死6(dawn骷髅射,无盾无甲)、死7(y45洞穴6怪swarm,hp20→13→8→5,无甲no-regen)接连发生。**总绑定约束=食物**: bot 反复卡 hp<14/food<18 no-regen→碰怪即崩,且拿到铁(12)先做 iron_pickaxe+盾、**不做甲**→撑不过 dawn/洞穴遭遇→死前丢光12铁。诊断到的具体机理: ①**feedUp 觅食窗口太窄**(desperationRoam line211): `food≥12 && !noRegenHurt → 不roam`,故 food13-16/hp满 时忽略 52格可见猪(maxAnimalClose food>10 达96但门先挡);food 跌破12 才触发,那时常已夜/有怪/地下→`hostileNear(8)`/`isNight` 又gate掉→**四条件(food<12+白天+8格无怪+动物近)难同时满足**。②**无食物缓冲**: 自认 food12=够,从不主动囤满→deep-mine 时 no-regen。③疑似**生肉直接吃**(porkchop 在手 food 没大涨)未 cook(生3熟8)。④**铁分配优先级**: 应甲优先于 pickaxe(survival>diamond),partial甲(chestplate/helmet)就能扛 dawn/洞穴。候选修(需干净设计+测试,勿rush): feedUp 安全时主动囤食到≥17建buffer / 低食物no-regen 时禁止 deep-mine 先上浮觅食 / 铁优先做甲 / 生肉入furnace cook。
 - **enderman 视线豁免**(死276根因,已二次): 行军/凿崖 lookAt 扫过 enderman 脸=激怒。修: lookAt 前查路径上 enderman,目标点压低绕开头部。①层,下个重启窗
 - **tool_keeper 备镐失灵**(16:40): 木镐磨尽无备——根因=木材buffer没囤够就开挖矿(#21 资源节奏)
