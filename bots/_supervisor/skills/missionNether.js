@@ -293,7 +293,13 @@ export default async function missionNether(bot, ctx) {
             const p = bot.entity.position.floored();
             for (let dy = 2; dy <= 6; dy++) {
                 const b = bot.blockAt(p.offset(0, dy, 0));
-                if (b && b.boundingBox === 'block') return true;
+                // ★C281: leaves/vines are NOT a ceiling. A tree canopy at the open surface counts
+                // as "enclosed" → a FREE bot under a tree read as sealed-underground → fired C237
+                // NO-PICK surfaceUp (climbing AWAY from the wood it needed) while prepNether's
+                // hunger gate held → the two gates oscillated = 发呆 (用户截图:藤蔓/树冠下斜坡).
+                // Leaves are also not real night shelter (mobs spawn/reach under trees), so
+                // excluding them is correct everywhere hasOverheadCover gates "I'm covered".
+                if (b && b.boundingBox === 'block' && !/_leaves$|^leaves$|vine/.test(b.name || '')) return true;
             }
         } catch (e) {}
         return false;

@@ -876,8 +876,11 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
     // huge ravine/mineshaft complex with the ore embedded in cliff walls): the default
     // maxDropDown=4 lets the pathfinder descend cliffs via chained 4-block hops — at
     // armor0 that's cumulative chip damage and ONE mis-evaluated landing from death.
-    // A human in a ravine takes 2-block steps or doesn't go. Clamp it.
-    movements.maxDropDown = 2;
+    // ★C281: 2→3. A 3-block drop deals ZERO fall damage (damage only past 3 blocks), so the
+    // bot can step/hop down small ledges/slopes instead of freezing at the top of every
+    // minor drop (用户实拍:站斜坡顶不肯下跳够不到下方的树). 3 keeps the ravine chip-death
+    // discipline (4-hop chains still blocked) while honoring "落差不大就该允许跳下".
+    movements.maxDropDown = 3;
 
     // Enable water movement for collectBlock — but ONLY near the surface. Underground
     // (y<55) the pathfinder happily routes through flooded aquifer tunnels; with a sealed
@@ -2668,9 +2671,9 @@ export async function goToGoal(bot, goal) {
     nonDestructiveMovements.canDig = false;
     // ★走位质量: parkour 开 (上游默认) — 让规划器能跨 1 格缺口/小跳越,破碎地形不再
     // 只能绕路/挖路 (用户实拍"跨越地形困难"的主因之一). scaffold 仍关(不乱搭),maxDropDown
-    // 仍 2(不跳致命落差),lava 仍在 blocksToAvoid — parkour 只走规划器判定安全的落点.
+    // C281 提到 3(3 格落差零摔伤,允许小落差下跳;4-hop 连跳仍挡),lava 仍在 blocksToAvoid.
     nonDestructiveMovements.allowParkour = true;
-    nonDestructiveMovements.maxDropDown = 2;
+    nonDestructiveMovements.maxDropDown = 3;
     nonDestructiveMovements.scafoldingBlocks = [];
     nonDestructiveMovements.placeCost = 2;
     nonDestructiveMovements.digCost = 10;
