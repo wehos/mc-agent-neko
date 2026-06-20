@@ -41,3 +41,11 @@ heartbeat.log
 watchdog.log
 watchdog.stop
 .mon_state
+
+# overseer source — re-include from the broad `bots/**/` rule (line 8) which excludes the
+# whole bots/_supervisor/ parent dir. Three-part negate: un-ignore the dir, re-ignore its
+# contents (keep runtime artifacts out), then whitelist only the two source .mjs.
+!bots/_supervisor/
+bots/_supervisor/*
+!bots/_supervisor/bb-readers.mjs
+!bots/_supervisor/overseer-snapshot.mjs
