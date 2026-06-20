@@ -3487,6 +3487,39 @@ const modes_list = [
                     }
                 }
                 if (this.jumpUntil && now > this.jumpUntil) releaseJump();
+                // ★HEADROOM-BREAK (用户 2026-06-20 实拍: "她头顶有一个方块,通道不够跳起来过去"):
+                // 楔住的不是普通台阶 —— 头顶有块(overSelf 实心→上面的 jump 分支被跳过,永远不跳)或
+                // 台阶上方天花板太低,跳也钻不过去。跳永远解不了,要**破掉那个挡住爬升的块**(土/沙/砾石
+                // 徒手秒破;陶瓦/石头/无镐则破不动→落到下面 replan 重路)。精确 gate: 必须"前方有台阶
+                // (脚位实心)+爬升被头顶/台阶顶天花板挡住"才破,不乱挖普通隧道顶。busy-guard 异步挖。
+                if (stalled >= 900 && bot.entity.onGround && !this._digBusy) {
+                    const fl = p.floored();
+                    const hasPick = (() => { try { return bot.inventory.items().some(i => /_pickaxe$/.test(i.name || '')); } catch (e) { return false; } })();
+                    const hard = (b) => /stone|deepslate|terracotta|andesite|diorite|granite|tuff|_ore$|obsidian|cobble|basalt|blackstone|netherrack|end_stone|prismarine|brick|concrete|amethyst|copper/.test((b && b.name) || '');
+                    const keep = (b) => /bedrock|barrier|chest|furnace|crafting_table|_bed$|door|sign|portal|spawner|enchanting/.test((b && b.name) || '');
+                    const breakable = (b) => solid(b) && !keep(b) && (!hard(b) || hasPick);
+                    const overSelf2 = bot.blockAt(fl.offset(0, 2, 0));
+                    let obstr = null;
+                    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                        const fFoot = bot.blockAt(fl.offset(dx, 0, dz));
+                        if (!solid(fFoot)) continue;                       // 需前方脚位有台阶(实心)
+                        if (breakable(overSelf2)) { obstr = overSelf2; break; }   // 头顶挡住起跳
+                        const fCeil = bot.blockAt(fl.offset(dx, 2, dz));
+                        if (breakable(fCeil)) { obstr = fCeil; break; }    // 台阶上方天花板挡住钻过
+                    }
+                    if (obstr) {
+                        this._digBusy = true;
+                        const ob = obstr;
+                        (async () => {
+                            try { await bot.dig(ob, true); } catch (e) {}
+                            finally { this._digBusy = false; this.wedgeStart = 0; }
+                        })();
+                        if (now - (this.lastBreakLogAt || 0) > 8000) {
+                            this.lastBreakLogAt = now;
+                            try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [edge_unstick] headroom-break ${ob.name}@${ob.position.x},${ob.position.y},${ob.position.z} (wedged ${Math.round(stalled)}ms, low-ceiling step)\n`); } catch (e) {}
+                        }
+                    }
+                }
                 // 升级: 跳了还楔死(墙/角陷阱/错路). 第1次 replan 丢当前路径让寻路重算;但 live 实测
                 // (07:13 @-35.5,48): 同一处重算又选同样堵死路线→原地弹跳 5×replan/20s。所以**再楔
                 // (resetStreak≥2)就物理后退+侧移脱离楔死几何**,让下一次重算从不同位置出发选不同路线。
