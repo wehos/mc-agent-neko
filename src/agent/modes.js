@@ -3453,8 +3453,43 @@ const modes_list = [
             const releaseJump = () => { if (this.jumpUntil) { this.jumpUntil = 0; try { bot.setControlState('jump', false); } catch (e) {} } };
             try {
                 if (!bot || !bot.entity || !bot.entity.position) return;
-                // 只在寻路器"真想走"时介入 — 这是区分"楔住"与"有意静止"的权威信号
-                const moving = !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving());
+                // ★CAPPED-HEAD BREAKER (用户 2026-06-20 实拍: 脚底薄水+头顶一块土+面前台阶,
+                // self_preservation 原地狂跳想出水却被头顶封住,出不来). 独立于下面所有门控(尤其
+                // SWIM 的 early-return)运行 —— 只要 bot 想上升(按jump/在水里/寻路在走)却被头顶一块
+                // 可破实心块封住且~静止,就破掉它(土/沙/砾石徒手秒破;陶瓦/石头需镐;破不动则不动)。
+                // 这是"破块"能力,self_preservation/mobility 的水逃/挖反射都不具备 → 必须独立兜底。
+                {
+                    const _solid = (b) => b && b.boundingBox === 'block';
+                    const p0 = bot.entity.position, fl0 = p0.floored();
+                    const moved0 = this._chLastPos ? Math.hypot(p0.x - this._chLastPos.x, p0.z - this._chLastPos.z) : 1;
+                    this._chLastPos = { x: p0.x, y: p0.y, z: p0.z };
+                    let wantsUp = false;
+                    try { wantsUp = !!(bot.entity.controlState && bot.entity.controlState.jump); } catch (e) {}
+                    if (!wantsUp) { try { wantsUp = !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()); } catch (e) {} }
+                    if (!wantsUp) { try { wantsUp = /water/.test((bot.blockAt(fl0) || {}).name || ''); } catch (e) {} }
+                    const cap0 = bot.blockAt(fl0.offset(0, 2, 0));
+                    if (!this._chDigBusy && wantsUp && _solid(cap0) && moved0 < 0.06 && !bot.targetDigBlock) {
+                        if (!this._chStuckSince) this._chStuckSince = now;
+                        const hasPick0 = (() => { try { return bot.inventory.items().some(i => /_pickaxe$/.test(i.name || '')); } catch (e) { return false; } })();
+                        const hard0 = (b) => /stone|deepslate|terracotta|andesite|diorite|granite|tuff|_ore$|obsidian|cobble|basalt|blackstone|netherrack|end_stone|prismarine|brick|concrete|amethyst|copper/.test((b && b.name) || '');
+                        const keep0 = (b) => /bedrock|barrier|chest|furnace|crafting_table|_bed$|door|sign|portal|spawner|enchanting/.test((b && b.name) || '');
+                        if (now - this._chStuckSince > 900 && now - (this._chLastBreakAt || 0) > 700 && !keep0(cap0) && (!hard0(cap0) || hasPick0)) {
+                            this._chLastBreakAt = now; this._chDigBusy = true;
+                            const ob0 = cap0;
+                            (async () => { try { await bot.dig(ob0, true); } catch (e) {} finally { this._chDigBusy = false; this._chStuckSince = 0; } })();
+                            if (now - (this._chLogAt || 0) > 8000) { this._chLogAt = now; try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [edge_unstick] capped-head break ${ob0.name}@${ob0.position.x},${ob0.position.y},${ob0.position.z} (jump/swim/path blocked)\n`); } catch (e) {} }
+                        }
+                    } else if (!(wantsUp && _solid(cap0) && moved0 < 0.06)) { this._chStuckSince = 0; }
+                }
+                // 介入条件 = "想动却动不了"。寻路器在走是权威信号,但★用户 2026-06-20 实拍证明
+                // 不够: bot 脚底薄水+头顶土块,self_preservation 原地狂跳想出水却被头顶封住,pathfinder
+                // 没在走 → 旧门控漏掉 → headroom-break 永不触发。所以放宽: 按着 jump(想上升)或在水里
+                // (想出水)也算"想动",让 headroom-break/replan 在 self_preservation 等驱动下也能解困。
+                // 仍靠下面 600ms 零水平位移的 wedge 判定区分真楔死 vs 正常移动,不误伤。
+                const pfMoving = !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving());
+                let jumpPressed = false; try { jumpPressed = !!(bot.entity.controlState && bot.entity.controlState.jump); } catch (e) {}
+                let inWater = false; try { const _fb = bot.blockAt(bot.entity.position.floored()); inWater = /water/.test((_fb && _fb.name) || ''); } catch (e) {}
+                const moving = pfMoving || jumpPressed || inWater;
                 if (!moving) { this.wedgeStart = 0; this.lastPos = null; this.resetStreak = 0; releaseJump(); return; }
                 // 别跟有意的静止打架: 正在挖块/游泳/被困(POCKET/ENTOMBED 有各自反射)
                 if (bot.targetDigBlock) { this.wedgeStart = 0; this.lastPos = null; releaseJump(); return; }
