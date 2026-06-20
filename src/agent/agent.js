@@ -10,6 +10,7 @@ import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
 import { SelfPrompter } from './self_prompter.js';
 import { createFramework } from './framework/index.js';
+import { installVineUnstick } from './library/vine_unstick.js';
 import convoManager from './conversation.js';
 import { handleTranslation, handleEnglishTranslation } from '../utils/translator.js';
 import { addBrowserViewer } from './vision/browser_viewer.js';
@@ -859,6 +860,8 @@ export class Agent {
             // OFF by default — when disabled tick() is a no-op and the existing
             // missionNether path is untouched. See docs/framework-v2-scaffold.md.
             try { this.framework = createFramework(this); } catch (e) { console.warn('framework init failed:', e && e.message); }
+            // Mineflayer-layer vine-trap unstick (recurring terrain trap, user-flagged).
+            try { installVineUnstick(this.bot, (m) => { try { console.log(m); } catch (e) {} }); } catch (e) { console.warn('vine_unstick init failed:', e && e.message); }
 
             // This update loop ensures that each update() is called one at a time, even if it takes longer than the interval
             const INTERVAL = 300;

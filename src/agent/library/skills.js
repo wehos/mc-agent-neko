@@ -3,6 +3,7 @@ import * as world from "./world.js";
 import * as tickConfirm from "./tick_confirm.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
+import { unclimbVines } from './vine_unstick.js';
 import settings from "../../../settings.js";
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -50,6 +51,11 @@ class _NoScaffoldMovements extends _PFMovements {
     constructor(...args) {
         super(...args);
         this.scafoldingBlocks = [];
+        // ★VINE TRAP (user: recurring, ≥5/15 explorations): don't PLAN to climb vines —
+        // the physics treats them as ladders and clings/climbs, trapping the bot in
+        // jungles. Removing them from climbables stops the pathfinder routing onto them
+        // to climb; the vine_unstick bot hook clears any that still wedge it.
+        try { unclimbVines(this, (args[0] && args[0].registry) || this.registry); } catch (e) {}
         if (Array.isArray(this.exclusionAreasStep)) {
             this.exclusionAreasStep.push((block) => {
                 const z = _pathDangerZone();
