@@ -192,6 +192,34 @@ const METRICS = [
             };
         },
     },
+    {
+        id: 'progress_velocity', label: '进度速度 / tier停滞 (治水踏步)', source: 'sentinel#ach + progress.txt',
+        // ★区别于 staleMin(成果向量微增即清零, 被 w:0→2 这种微动骗过): 追踪里程碑 TIER 是否在
+        // 小时级真推进。bot 可以原地刷微动但 tier 卡 p:stone 数小时 = 净进度 0 = 治水踏步(用户:
+        // "进度不增长本身就是罪")。也测 mission/prep 重启 thrash(反复放弃重来而非坚持累积)。
+        compute() {
+            const s = rj('sentinel.json'); const ach = (s && s.realProgress && s.realProgress.ach) || '';
+            const TIER = { none: 0, wood: 1, stone: 2, iron: 3, diamond: 4, netherite: 5 };
+            const pm = ach.match(/p:(\w+)/); const tier = pm ? pm[1] : 'none';
+            const tierRank = TIER[tier] ?? 0;
+            const hasTable = /t:1/.test(ach);
+            const recent = (rd('progress.txt') || '').trim().split(/\n/).slice(-400);
+            const restarts = recent.filter(l => /prepNether START|missionNether START/.test(l)).length;
+            const p = prevOf('progress_velocity');
+            // 持久化 bestRank + 自何时未推进(stuck 计时); tier 真推进才重置 sinceTs。
+            const bestRank = Math.max((p && p.bestRank) ?? 0, tierRank);
+            const advanced = tierRank > ((p && p.bestRank) ?? -1);
+            const sinceTs = advanced ? T : ((p && p.sinceTs) || T);
+            const stuckH = round((T - sinceTs) / 3600000, 2);
+            // 治水踏步: tier 长期没推进(主信号) AND 任务在 thrash(辅证, 区别于"在踏实grind下个tier")
+            const treadingWater = stuckH >= 1.5 && restarts >= 10;
+            return {
+                value: { tier, tierRank, bestRank, hasTable, sinceTs, stuckHours: stuckH, restarts400: restarts, treadingWater, ach },
+                evidence: { tier, stuckHours: stuckH, restartsIn400Lines: restarts, ach, signal: treadingWater ? `tier卡${tier} ${stuckH}h + 任务thrash(${restarts}重启/400行)=净进度≈0` : '' },
+                change: p ? { tierAdvanced: advanced, stuckHoursDelta: round(stuckH - ((p && p.stuckHours) ?? 0), 2) } : 'first-run',
+            };
+        },
+    },
 ];
 
 function zoneHistory() {
