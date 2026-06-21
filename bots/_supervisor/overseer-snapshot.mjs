@@ -211,11 +211,13 @@ const METRICS = [
             const advanced = tierRank > ((p && p.bestRank) ?? -1);
             const sinceTs = advanced ? T : ((p && p.sinceTs) || T);
             const stuckH = round((T - sinceTs) / 3600000, 2);
+            // ★tier 回落: 当前 rank < 历史最佳 = reset-loop 咬了(iron→stone), 立即报, 不等 stuckHours.
+            const regressed = tierRank < bestRank;
             // 治水踏步: tier 长期没推进(主信号) AND 任务在 thrash(辅证, 区别于"在踏实grind下个tier")
             const treadingWater = stuckH >= 1.5 && restarts >= 10;
             return {
-                value: { tier, tierRank, bestRank, hasTable, sinceTs, stuckHours: stuckH, restarts400: restarts, treadingWater, ach },
-                evidence: { tier, stuckHours: stuckH, restartsIn400Lines: restarts, ach, signal: treadingWater ? `tier卡${tier} ${stuckH}h + 任务thrash(${restarts}重启/400行)=净进度≈0` : '' },
+                value: { tier, tierRank, bestRank, hasTable, sinceTs, stuckHours: stuckH, restarts400: restarts, treadingWater, regressed, ach },
+                evidence: { tier, bestRank, stuckHours: stuckH, restartsIn400Lines: restarts, ach, signal: regressed ? `★tier从rank${bestRank}回落到${tier}(rank${tierRank})=reset-loop咬了, 突破没hold住` : (treadingWater ? `tier卡${tier} ${stuckH}h + 任务thrash(${restarts}重启/400行)=净进度≈0` : '') },
                 change: p ? { tierAdvanced: advanced, stuckHoursDelta: round(stuckH - ((p && p.stuckHours) ?? 0), 2) } : 'first-run',
             };
         },
