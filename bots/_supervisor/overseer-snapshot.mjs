@@ -213,8 +213,9 @@ const METRICS = [
             const stuckH = round((T - sinceTs) / 3600000, 2);
             // ★tier 回落: 当前 rank < 历史最佳 = reset-loop 咬了(iron→stone), 立即报, 不等 stuckHours.
             const regressed = tierRank < bestRank;
-            // 治水踏步: tier 长期没推进(主信号) AND 任务在 thrash(辅证, 区别于"在踏实grind下个tier")
-            const treadingWater = stuckH >= 1.5 && restarts >= 10;
+            // 治水踏步: tier 长期(≥1.5h)没推进就报——不论是 thrash(高restarts)还是卡死/gated(低restarts)。
+            // 早期版用 restarts≥10 当门, 漏了"卡死不thrash"的崩溃态(tier→none但restarts低), 故去掉门, restarts 仅作 evidence。
+            const treadingWater = stuckH >= 1.5;
             return {
                 value: { tier, tierRank, bestRank, hasTable, sinceTs, stuckHours: stuckH, restarts400: restarts, treadingWater, regressed, ach },
                 evidence: { tier, bestRank, stuckHours: stuckH, restartsIn400Lines: restarts, ach, signal: regressed ? `★tier从rank${bestRank}回落到${tier}(rank${tierRank})=reset-loop咬了, 突破没hold住` : (treadingWater ? `tier卡${tier} ${stuckH}h + 任务thrash(${restarts}重启/400行)=净进度≈0` : '') },
