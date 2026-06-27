@@ -8,6 +8,8 @@
 //   targetY = if a number, staircase down to this Y first (e.g. -50 for diamonds)
 // ctx = { skills, world, mc, Vec3, log }
 import fs from 'fs';
+import mfp from 'mineflayer-pathfinder';
+const { goals: BM_GOALS, Movements: BM_MOVES } = mfp;
 
 const ORES = ['diamond_ore', 'deepslate_diamond_ore', 'iron_ore', 'deepslate_iron_ore',
               'coal_ore', 'deepslate_coal_ore', 'gold_ore', 'deepslate_gold_ore',
@@ -63,6 +65,40 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
         /^(cobblestone|cobbled_deepslate|deepslate|stone|dirt|granite|diorite|andesite|tuff)$/.test(i.name));
     const distToBlock = (block) => bot.entity.position.offset(0, 1.62, 0).distanceTo(block.position.offset(0.5, 0.5, 0.5));
     const blockObj = (b) => b ? { name: b.name, x: b.position.x, y: b.position.y, z: b.position.z, bb: b.boundingBox } : null;
+    // ★C305 (T-0035) HUMAN-LIKE ORE REACH for branchMine — the SECOND x-ray path (collectBlock's
+    // C304 doesn't cover this one). directMineOre digs ANY ore within 4.6 raw eye-distance (line
+    // ~242) with NO path check → reaches straight THROUGH an air gap to ore in an opposite cliff/
+    // ravine wall (用户实拍:站墙头够对面峡谷矿). Gate: ore must have a real SHORT walk/dig path to
+    // an adjacent stand cell — canDig (mine toward a buried vein) but NO scaffolding/pillaring (can't
+    // bridge a gap). Mirrors C304. Self-contained (imports pf) so it's live on ③ hot-reload, no restart.
+    let _bmReach = null, _bmReachErr = false;
+    const _mineDBG = (m) => { try { fs.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ${m}\n`); } catch (e) {} };
+    const _oreReachableBM = async (oreBlock) => {
+        if (_bmReachErr) return true;   // pathfinder unavailable → fail open (never block mining outright)
+        try {
+            if (!_bmReach) {
+                _bmReach = new BM_MOVES(bot);
+                _bmReach.canDig = true;
+                _bmReach.scafoldingBlocks = [];
+                _bmReach.allow1by1towers = false;
+                _bmReach.maxDropDown = 3;
+                _bmReach.dontCreateFlow = true;
+            }
+            const bp = oreBlock.position;
+            const d3 = distToBlock(oreBlock);
+            const res = await bot.pathfinder.getPathTo(_bmReach, new BM_GOALS.GoalNear(bp.x, bp.y, bp.z, 2), 800);
+            const st = res ? res.status : 'null';
+            if (!res || res.status !== 'success') {
+                _mineDBG(`★C305 ${oreBlock.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} REJECT status=${st} (no walk/dig path, no bridge)`);
+                return false;
+            }
+            const len = (res.path && res.path.length) || 0;
+            const budget = Math.max(8, Math.ceil(d3 * 2.5));
+            const ok = len <= budget;
+            _mineDBG(`★C305 ${oreBlock.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} len=${len} budget=${budget} ${ok ? 'OK' : 'REJECT(detour too long)'}`);
+            return ok;
+        } catch (e) { _bmReachErr = true; return true; }   // construction/path error → fail open
+    };
     const envSnap = () => {
         const c = bot.entity.position.floored();
         const out = [];
@@ -238,8 +274,27 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             log(bot, `branchMine ore-chase skip ${oreBlock.name}@${oreBlock.position.x},${oreBlock.position.y},${oreBlock.position.z} rel=${rel.join(',')} lava-near`);
             return false;
         }
+        // ★C305 HUMAN-LIKE REACH GATE: only mine ore we can genuinely WALK/dig up to (short path
+        // to an adjacent stand cell, no bridging). Blocks the raw-4.6 direct-dig from reaching
+        // straight through an air gap to ore in an opposite wall. Unreachable → caller adds to
+        // `skipped`, bot keeps tunnelling and exposes reachable ore instead of x-ray-grabbing this.
+        if (!(await _oreReachableBM(oreBlock))) {
+            log(bot, `branchMine ore-chase skip ${oreBlock.name}@${oreBlock.position.x},${oreBlock.position.y},${oreBlock.position.z} rel=${rel.join(',')} ★C305 no-short-reach-path (across gap/wall) — not x-ray-mining`);
+            motion('branchMine.ore.skip', { reason: 'C305-no-short-reach-path', block: blockObj(oreBlock) });
+            return false;
+        }
         await equipBest();
-        if (distToBlock(oreBlock) <= 4.6) {
+        // ★C337 (T-0035 reopen·回归根治): the C305 path-exists gate is NECESSARY but NOT SUFFICIENT —
+        // a DETOUR path can exist (gate OK) while the ore sits behind a SOLID wall within 4.6b, and
+        // the raw distToBlock<=4.6 direct-dig then reaches THROUGH the near wall = x-ray (用户实拍
+        // "矿在距离内但中间完全没通、隔着石头"; mine_dbg: copper_ore d3=5.5 budget=14 OK→still dug).
+        // distToBlock<=4.6 is necessary-not-sufficient; add a REAL occlusion check: only DIRECT-dig
+        // when we have clear line-of-sight to the ore (no solid block between eye and ore). If walled
+        // off → fall through to the carve-stand-cell path below, which APPROACHES properly (digs an
+        // adjacent stand cell + steps in) instead of x-ray-grabbing. canSeeBlock=false for fully-buried
+        // ore is fine here: that just routes it to the carve path, which exposes it legitimately.
+        const _canSee = (b) => { try { return bot.canSeeBlock(b); } catch (e) { return false; } };
+        if (distToBlock(oreBlock) <= 4.6 && _canSee(oreBlock)) {
             const r = await digBlock(oreBlock, `ore-chase rel=${rel.join(',')}`, 9000);
             await equipDig();
             if (r === 'ok') {
@@ -270,7 +325,7 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             if (!(await carveStandCell(feet))) continue;
             try { await skills.goToPosition(bot, feet.x, feet.y, feet.z, 0); } catch (e) {}
             const cur = bot.blockAt(oreBlock.position);
-            if (cur && ORES.includes(cur.name) && distToBlock(cur) <= 4.6) {
+            if (cur && ORES.includes(cur.name) && distToBlock(cur) <= 4.6 && _canSee(cur)) {
                 await equipBest();
                 const r = await digBlock(cur, `ore-chase-window rel=${rel.join(',')}`, 9000);
                 await equipDig();
@@ -303,7 +358,13 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
                 try { bot.clearControlStates(); } catch (e) {}
                 return false;
             }
-            const ores = world.getNearestBlocks(bot, ORES, 5, 16)
+            // ★T-0094 SCAN-RADIUS FIX: getNearestBlocks signature is (bot, types, DISTANCE, COUNT) —
+            // the old (bot, ORES, 5, 16) read as distance=5/count=16, i.e. it only ever saw ore
+            // within 5 blocks (NOT the 16 the surrounding comments assumed). At y14 a 5-block bubble
+            // misses most of the iron the tunnel walks PAST, so mineNearby found "0 ores" and the bot
+            // tunnelled straight on by exposed iron → mining-yield≈0. Restore the intended 16-block
+            // reach (count 24, plenty for a dense seam) so each step actually harvests the band.
+            const ores = world.getNearestBlocks(bot, ORES, 16, 24)
                 .filter(b => b && ORES.includes(b.name) && !skipped.has(`${b.position.x},${b.position.y},${b.position.z}`))
                 .filter(b => !(bot.food <= 8 && !edibleHeld()) || isIronOre(b.name))
                 .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position));
@@ -567,10 +628,63 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
 
     if ((await mineNearby()) === false) return false;
 
-    // Horizontal tunnel along the bot's current facing (snapped to a cardinal axis).
-    const yaw = bot.entity.yaw;
-    let dx = -Math.sin(yaw), dz = Math.cos(yaw);
-    if (Math.abs(dx) >= Math.abs(dz)) { dx = Math.sign(dx) || 1; dz = 0; } else { dz = Math.sign(dz) || 1; dx = 0; }
+    // ── Horizontal tunnel heading ──────────────────────────────────────────────
+    // ★T-0094 ORE-DIRECTED HEADING: the old heading was a pure yaw snapshot snapped to a
+    // cardinal axis — i.e. whichever way the bot happened to be facing (often the descent
+    // direction or a flee-turn), NOT toward ore. So at the iron band it blind-tunnelled past
+    // iron seams instead of into them (mining-yield≈0). Instead: scan the band for the
+    // nearest REACHABLE ore (prefer iron — the bottleneck for the armor/tool chain) and aim
+    // the tunnel at it, so the lateral dig drives THROUGH the seam. The reach gate (_oreReachableBM)
+    // is the same C305 human-like check used for ore-chasing, so we never aim at x-ray-only ore
+    // across a gap. Fall back to the yaw heading when nothing reachable is in range.
+    const cardinalToward = (fromPos, toPos) => {
+        const ddx = toPos.x - fromPos.x, ddz = toPos.z - fromPos.z;
+        if (Math.abs(ddx) >= Math.abs(ddz)) return { dx: Math.sign(ddx) || 1, dz: 0 };
+        return { dx: 0, dz: Math.sign(ddz) || 1 };
+    };
+    let dx, dz, headingSrc = 'yaw';
+    {
+        const yaw = bot.entity.yaw;
+        dx = -Math.sin(yaw); dz = Math.cos(yaw);
+        if (Math.abs(dx) >= Math.abs(dz)) { dx = Math.sign(dx) || 1; dz = 0; } else { dz = Math.sign(dz) || 1; dx = 0; }
+        try {
+            const me = bot.entity.position.floored();
+            // Prefer iron when in/near the iron band; otherwise aim at any ore on offer.
+            const wantIron = Math.floor(bot.entity.position.y) <= 40;
+            const scan = world.getNearestBlocks(bot, wantIron ? IRON_ORES : ORES, 16, 24) || [];
+            let pool = scan.filter(b => b && (wantIron ? IRON_ORES : ORES).includes(b.name));
+            if (wantIron && pool.length === 0) pool = (world.getNearestBlocks(bot, ORES, 16, 24) || []).filter(b => b && ORES.includes(b.name));
+            // nearest-first; pick the first that passes the reach gate so we head at real ore.
+            pool.sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position));
+            for (const ob of pool.slice(0, 6)) {
+                if (Math.abs(ob.position.x - me.x) < 1 && Math.abs(ob.position.z - me.z) < 1) continue; // directly above/below — heading undefined
+                if (await _oreReachableBM(ob)) {
+                    const c = cardinalToward(me, ob.position);
+                    dx = c.dx; dz = c.dz; headingSrc = `ore:${ob.name}@${ob.position.x},${ob.position.y},${ob.position.z}`;
+                    break;
+                }
+            }
+        } catch (e) {}
+        log(bot, `branchMine heading ${dx},${dz} src=${headingSrc}`);
+        motion('branchMine.tunnel.heading', { dx, dz, src: headingSrc });
+    }
+
+    // ★T-0094 SYSTEMATIC COVERAGE: every RIB_EVERY steps, look down each side wall and run an
+    // ore pass there. Combined with the restored 16-block scan radius, a side glance lets the
+    // ore-chaser carve in to seams flanking the spine instead of only the seams the spine cuts —
+    // approximating standard branch-mining coverage without committing to (and getting lost in)
+    // long perpendicular spurs. Perp axis = rotate heading 90°.
+    const RIB_EVERY = 3;
+    const perp = { dx: -dz, dz: dx };
+    const ribGlance = async () => {
+        const me = bot.entity.position;
+        for (const sgn of [1, -1]) {
+            if (bot.interrupt_code) return true;
+            try { await bot.lookAt(me.offset(perp.dx * sgn * 2, 1.0, perp.dz * sgn * 2), true); } catch (e) {}
+            if ((await mineNearby()) === false) return false;  // survival yield — propagate so the tunnel aborts too
+        }
+        return true;
+    };
 
     let stale = 0;
     for (let i = 0; i < length; i++) {
@@ -584,6 +698,9 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
         const ok = await stepInto(new Vec3(p.x + dx, p.y, p.z + dz), dx, dz, `tunnel-step ${i + 1}/${length}`);
         if (!ok) stale++;
         if ((await mineNearby()) === false) return false;
+        // Standard branch-mining rib: glance down both side walls periodically so flanking
+        // seams get exposed/mined, not just the ore the spine happens to slice through.
+        if ((i + 1) % RIB_EVERY === 0) { if ((await ribGlance()) === false) return false; if (bot.interrupt_code) break; }
         const np = bot.entity.position.floored();
         if (`${np.x},${np.z}` === beforePos) { stale++; if (stale >= 4) { log(bot, 'tunnel blocked, stopping'); break; } }
         else stale = 0;

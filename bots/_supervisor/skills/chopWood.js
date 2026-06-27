@@ -156,6 +156,22 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
     };
     const guardedDig = async (block, why = '') => {
         if (!block) return false;
+        // ★C339 (T-0064): no x-ray TRUNK reach. Don't chop a LOG/WOOD block we can NEITHER stand next
+        // to NOR see — that's reaching THROUGH leaf canopy to a trunk a human couldn't (the tree analog
+        // of the mining x-ray guard, skills.js:815 / branchMine canSeeBlock). Only gates LOGS: leaf /
+        // dirt / navigation digs are NOT logs → unaffected, so the legit human way (clear the
+        // intervening leaves to open a path/sightline, THEN chop) still works. Adjacent logs (≤2.2b,
+        // genuinely reachable) pass even if canSeeBlock flickers; only distant+occluded logs are skipped.
+        if (/_log$|_wood$/.test(block.name || '')) {
+            try {
+                const d = bot.entity.position.offset(0, 1.6, 0).distanceTo(block.position.offset(0.5, 0.5, 0.5));
+                const see = (() => { try { return bot.canSeeBlock(block); } catch (e) { return true; } })();
+                if (d > 2.2 && !see) {
+                    _motion('dig.xray_skip', { target: `${block.name}@${block.position.x},${block.position.y},${block.position.z}`, dist: +d.toFixed(1), why });
+                    return false;
+                }
+            } catch (e) {}
+        }
         const owner = `chopWood:${why || 'dig'}`;
         const acquire = async () => {
             const t0 = Date.now();
@@ -837,17 +853,135 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
     const _gen = bot._chopGen;
     // ★走格子扫荡 (用户实拍×2: 挖了树不捡 — item_collecting 模式在 achieve 期间是被禁用的,
     // 所以掉落必须由我们显式走过去踩格子捡): walk onto each dropped item entity within r.
-    const _sweepDrops = async (r = 8, maxN = 6) => {
+    const _isDropEntity = (e) => e && e.position && (
+        e.name === 'item' || e.objectType === 'Item' || e.displayName === 'Item' || /item/i.test(e.name || '')
+    );
+    // ★C299 THE wood-famine root cause (live 2026-06-20): inventory was 36/36 FULL of mesa junk
+    // (red_sand×474=8 slots, terracotta×100s, sand) → the server CANNOT deposit a picked-up log into
+    // a full inventory → bot dug 6-log columns, stood h0.4b ON the drops (near=dy0.0/h0.4), total
+    // stayed 0 FOREVER and it blacklisted every tree (blk 8→28). All of C297(aim)/C298(reach) is moot
+    // if there's no slot to put the log in. When full, toss the bulkiest low-value bulk junk to free
+    // slots. Whitelisted KEEP-set never tossed (tools/food/wood/saplings/ores/utility).
+    // ★C309-A (claude-A, T-0041): the mesa-tuned junk list missed the bot's ACTUAL hoard in other
+    // biomes — inv 36/36 FULL of raw_copper×192(3 slots)+lapis×44+dripstone×24+... so "no droppable
+    // junk" fired and she could NEVER free a slot for the keystone log (iron-tier blocked forever:
+    // she had furnace+iron×2+2 stone picks, just needed 1 log→table→stick; no chest to bank either).
+    // Add the non-bootstrap bulk she actually carries. KEEP dirt (sapling planting / T-0030) + cobble
+    // (filler/seal) + iron/coal + food/tools/wood/saplings — only toss what's useless for the
+    // survival→iron→diamond path (copper has no tools, lapis is far-future enchant, dripstone is decor).
+    const _JUNK_RE = /terracotta$|^red_sand$|^sand$|^clay_ball$|^cactus$|^gravel$|^granite$|^diorite$|^andesite$|^tuff$|^ink_sac$|^raw_copper$|^copper_ingot$|^lapis_lazuli$|^pointed_dripstone$|^dripstone_block$|^raw_gold$|^amethyst_shard$|^calcite$/;
+    const _emptySlots = () => { try { return typeof bot.inventory.emptySlotCount === 'function' ? bot.inventory.emptySlotCount() : 9; } catch (e) { return 9; } };
+    const _ensureInvRoom = async (want = 5) => {
         try {
-            const items = Object.values(bot.entities)
-                .filter(e => e && e.position && e.name === 'item' && e.position.distanceTo(bot.entity.position) < r)
-                .slice(0, maxN);
-            for (const it of items) {
+            if (_emptySlots() >= want) return true;
+            // Free MULTIPLE slots, not one: a single freed slot is instantly re-filled by jungle leaf-drops
+            // (saplings/sticks) or by re-walking over the very junk we tossed → logs never win a slot
+            // (live: "free now 1" then next call FULL again, total stuck 0). Toss bulk junk until we hold
+            // a healthy buffer of empties so logs have somewhere to go. ★C299b
+            let tossed = 0;
+            for (let g = 0; g < 8 && _emptySlots() < want; g++) {
+                const junk = bot.inventory.items().filter(it => _JUNK_RE.test(it.name || '')).sort((a, b) => b.count - a.count);
+                if (!junk.length) break;
+                const d = junk[0];
+                // tossStack(item) drops THIS exact slot — robust vs bot.toss(type,...) which searches by
+                // type and throws "Can't find X in slots" when the stack sits in the hotbar range. ★C299
+                try { await bot.tossStack(d); tossed += d.count; } catch (e) { _dbg(`★C299 toss fail: ${e.message}`); break; }
+            }
+            if (tossed > 0) _dbg(`★C299 inv near-full → tossed ${tossed} junk to free slots for logs (empty now ${_emptySlots()})`);
+            // ★C321 (T-0055): second tier — when there's NO _JUNK_RE junk left but the inv is STILL
+            // full and voiding the bootstrap-critical wood pickup, TRIM the excess of over-hoarded
+            // BULK stackables above a generous keep-cap. Live root: 377 cobblestone(6 slots)+157 coal+
+            // 107 sandstone+60 dirt filled the bag, so every chopped log landed unstorable → total
+            // stayed 0 → trees got mis-blacklisted "unreachable, 树柱fails" (the failure is PICKUP, not
+            // reachability — that's why migrate-to-trees still couldn't bootstrap). A human with 377
+            // cobble drops 250 to grab the log they need. NEVER touches tools/armor/food/wood/sapling/
+            // seeds — only bulk building/fuel/dirt the bot demonstrably over-hoards.
+            if (_emptySlots() < want) {
+                const _BULK_CAP = { cobblestone: 128, cobbled_deepslate: 128, stone: 64, coal: 64, charcoal: 64, sandstone: 48, red_sandstone: 48, sand: 48, red_sand: 48, gravel: 48, dirt: 64, netherrack: 64, torch: 64, sugar_cane: 16 };
+                for (const it of bot.inventory.items().slice().sort((a, b) => b.count - a.count)) {
+                    if (_emptySlots() >= want) break;
+                    const cap = _BULK_CAP[it.name];
+                    if (cap == null || it.count <= cap) continue;
+                    const drop = it.count - cap;
+                    try { await bot.toss(it.type, null, drop); tossed += drop; _dbg(`★C321 inv-full no-junk → trimmed ${drop} ${it.name} (kept ${cap}) for log slots (empty now ${_emptySlots()})`); }
+                    catch (e) { _dbg(`★C321 trim ${it.name} fail: ${e.message}`); }
+                }
+            }
+            if (tossed === 0 && _emptySlots() === 0) _dbg(`★C299/C321 inv FULL — no junk and no over-cap bulk to trim, can't make room for logs`);
+            return _emptySlots() > 0;
+        } catch (e) { _dbg(`★C299 inv-room check fail: ${e.message}`); return false; }
+    };
+    // ★C298 returns {seen,reached} so direct-chop can report WHY total stayed 0 (drops not
+    // spawned/seen vs seen-but-unreachable). Re-scans each pass: a felled trunk column drops logs
+    // over several ticks and they settle a beat after the dig — a single up-front snapshot missed
+    // the late-landing logs (jungle live 2026-06-20: dug 6 logs, total stayed 0 every pass).
+    const _sweepDrops = async (r = 8, maxN = 6) => {
+        let seen = 0, reached = 0, _nearDrop = '';
+        try {
+            for (let pass = 0; pass < maxN; pass++) {
                 if (bot.interrupt_code || bot.death_abort || bot._chopGen !== _gen) break;
+                // ★C299c don't chase the junk we just tossed for room — sweep walks the bot over its own
+                // discarded red_sand and vanilla auto-collects it right back (live: red_sand 346→381, a
+                // toss↔re-pickup loop that re-fills the very slots C299 freed). Skip drops whose name is
+                // KNOWN junk; keep unknown-name drops (might be a log whose name didn't resolve).
+                const _dropNm = (e) => { try { const di = e.getDroppedItem && e.getDroppedItem(); return di && di.name ? di.name : ''; } catch (x) { return ''; } };
+                const items = Object.values(bot.entities)
+                    .filter(e => _isDropEntity(e) && e.position.distanceTo(bot.entity.position) < r && !_JUNK_RE.test(_dropNm(e)))
+                    .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position));
+                if (!items.length) break;
+                seen = Math.max(seen, items.length);
+                const it = items[0];
+                if (pass === 0) {   // ★C298 record nearest-drop geometry + name: dy>1⇒leaf canopy; big h⇒gap; name=log vs sapling/stick tells log-fell-away from inv/desync
+                    const _me = bot.entity.position;
+                    let _nm = ''; try { const _di = it.getDroppedItem && it.getDroppedItem(); _nm = _di && _di.name ? _di.name : ''; } catch (e) {}
+                    _nearDrop = `${_nm || '?'} dy${(it.position.y - _me.y).toFixed(1)}/h${Math.hypot(it.position.x - _me.x, it.position.z - _me.z).toFixed(1)}`;
+                }
                 try { await skills.goToPosition(bot, it.position.x, it.position.y, it.position.z, 0); } catch (e) {}
-                await new Promise(rr => setTimeout(rr, 200));
+                // ★C298 goToPosition silently fails to ARRIVE the last 1-3 blocks in jungle (leaf-blocked
+                // paths / drop sits on a +1-2 rise) → the bot never physically stands on the drop → the
+                // SERVER never auto-collects it (vanilla pickup is hitbox-overlap, independent of the
+                // item_collecting mode chopWood disables at L220) → dug N logs but total=0 for minutes
+                // (live jungle 2026-06-20). RAW-walk onto the tile to bypass the pathfinder verdict,
+                // exactly like raw-approach does for the trunk itself.
+                // ★C303 park on the drop's HORIZONTAL column, not by 3D distance: a drop above/below the
+                // bot (dy≥1 ⇒ leaf canopy or a dug pit, e.g. C300's harvested dirt 2 below) has a 3D
+                // distance that can NEVER fall under 0.7 (the vertical gap alone exceeds it), so the old
+                // exit test was unsatisfiable → the bot walked the full 1.5s and OVERSHOT straight past
+                // the drop's column, never settling over it. Stop when horizontally aligned (h<0.4) so we
+                // park directly over/under it and either auto-collect (same level/±1) or fall onto it.
+                const _hd = () => { const p = it.position, m = bot.entity.position; return Math.hypot(p.x - m.x, p.z - m.z); };
+                if (it.isValid && _hd() > 0.6) {
+                    try {
+                        await bot.lookAt(it.position.offset(0, 0.1, 0), true);
+                        const _up = it.position.y - bot.entity.position.y > 0.6;
+                        bot.setControlState('forward', true);
+                        if (_up) bot.setControlState('jump', true);
+                        const t0 = Date.now();
+                        while (Date.now() - t0 < 1500 && it.isValid && _hd() > 0.4) await new Promise(rr => setTimeout(rr, 100));
+                        bot.clearControlStates();
+                    } catch (e) { try { bot.clearControlStates(); } catch (_) {} }
+                }
+                // ★C298b FUNNEL-DIG: jungle drops rest ON the leaf canopy ABOVE the bot (leaves are solid,
+                // items don't fall through) — raw-walk can't climb onto leaves, so seen=N reached=0 forever
+                // (live 2026-06-20: seen climbed 2→14, total=0, blk exploded 16→28). Dig the block the drop
+                // is sitting on so it FALLS toward the ground where we can walk onto it; repeat next pass.
+                if (it.isValid && (it.position.y - bot.entity.position.y) > 0.6) {
+                    try {
+                        const under = bot.blockAt(it.position.offset(0, -0.4, 0).floored());
+                        const reach = bot.entity.position.offset(0, 1.6, 0).distanceTo(it.position);
+                        if (under && /_leaves$|_log$|_wood$/.test(under.name || '') && reach <= 4.8) {
+                            await bot.lookAt(under.position.offset(0.5, 0.5, 0.5), true);
+                            try { await bot.tool.equipForBlock(under); } catch (e) {}
+                            if (bot.heldItem && /_sword$/.test(bot.heldItem.name)) { try { await bot.unequip('hand'); } catch (e) {} }
+                            await bot.dig(under);
+                        }
+                    } catch (e) {}
+                }
+                if (!it.isValid) reached++;   // entity gone = collected (or despawned/out-of-range)
+                await new Promise(rr => setTimeout(rr, 200));   // settle for server-side auto-pickup
             }
         } catch (e) {}
+        return { seen, reached, near: _nearDrop };
     };
     const _skyAboveHere = () => {
         try {
@@ -1037,33 +1171,70 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             const PLANTABLE = /grass_block|^dirt$|coarse_dirt|podzol|mycelium|rooted_dirt|moss_block|^mud$|farmland/;
             const isAir = (b) => !b || b.name === 'air';
             // nearest reachable ground cell: solid floor, open cell, sky clearance, not our own body
-            const ring = [];
-            for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) ring.push([dx, dz]);
-            ring.sort((a, b) => (Math.abs(a[0]) + Math.abs(a[1])) - (Math.abs(b[0]) + Math.abs(b[1])));
-            let spot = null;
-            for (const [dx, dz] of ring) {
-                for (const dy of [0, 1, -1]) {
-                    const air = me.offset(dx, dy, dz);
-                    if (air.equals(me) || air.equals(me.offset(0, 1, 0))) continue;   // can't place in our own body
-                    const ground = air.offset(0, -1, 0);
-                    const gb = bot.blockAt(ground), ab = bot.blockAt(air);
-                    if (!gb || gb.boundingBox !== 'block') continue;                  // need solid floor
-                    if (!isAir(ab) || !skyOpen(air)) continue;                        // open cell + clearance
-                    if (air.offset(0.5, 0.5, 0.5).distanceTo(bot.entity.position) > 4.2) continue;
-                    const needDirt = !PLANTABLE.test(gb.name || '');
-                    if (needDirt && !items.some(i => i.name === 'dirt')) continue;
-                    spot = { air, ground, needDirt };
-                    break;
+            const _hasDirt = () => bot.inventory.items().some(i => /^dirt$|^coarse_dirt$/.test(i.name || ''));
+            const findSpot = () => {
+                const ring = [];
+                for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) ring.push([dx, dz]);
+                ring.sort((a, b) => (Math.abs(a[0]) + Math.abs(a[1])) - (Math.abs(b[0]) + Math.abs(b[1])));
+                for (const [dx, dz] of ring) {
+                    for (const dy of [0, 1, -1]) {
+                        const air = me.offset(dx, dy, dz);
+                        if (air.equals(me) || air.equals(me.offset(0, 1, 0))) continue;   // can't place in our own body
+                        const ground = air.offset(0, -1, 0);
+                        const gb = bot.blockAt(ground), ab = bot.blockAt(air);
+                        if (!gb || gb.boundingBox !== 'block') continue;                  // need solid floor
+                        if (!isAir(ab) || !skyOpen(air)) continue;                        // open cell + clearance
+                        if (air.offset(0.5, 0.5, 0.5).distanceTo(bot.entity.position) > 4.2) continue;
+                        const needDirt = !PLANTABLE.test(gb.name || '');
+                        if (needDirt && !_hasDirt()) continue;
+                        return { air, ground, needDirt };
+                    }
                 }
-                if (spot) break;
-            }
+                return null;
+            };
+            // ★C300 badlands no-dirt gap (T-0030): mesa surface = red_sand/terracotta (NOT plantable) and
+            // carried dirt can be 0 → no spot ever qualifies → sapling-grow always fails → bot camps a
+            // treeless plateau forever (nearest=NONE, deaths climb). The OLD code only checked inventory
+            // for dirt and gave up. Before giving up, HARVEST a nearby plantable block (grass_block→dirt /
+            // dirt / coarse_dirt — common at the badlands/plateau/forest edge) within arm's reach to obtain
+            // soil, then re-scan. If none is reachable (pure mesa) it returns false → existing relocate runs.
+            const _harvestDirtNearby = async () => {
+                try {
+                    const SOIL = /grass_block|^dirt$|^coarse_dirt$|rooted_dirt|podzol/;
+                    let best = null, bd = Infinity;
+                    for (let dx = -4; dx <= 4; dx++) for (let dy = -3; dy <= 2; dy++) for (let dz = -4; dz <= 4; dz++) {
+                        const b = bot.blockAt(me.offset(dx, dy, dz));
+                        if (!b || !SOIL.test(b.name || '')) continue;
+                        const d = bot.entity.position.offset(0, 1.6, 0).distanceTo(b.position.offset(0.5, 0.5, 0.5));
+                        if (d <= 4.6 && d < bd) { bd = d; best = b; }
+                    }
+                    if (!best) return false;
+                    const _dirtCt = () => bot.inventory.items().reduce((s, i) => s + (/^dirt$|^coarse_dirt$/.test(i.name || '') ? i.count : 0), 0);
+                    const had = _dirtCt();
+                    _dbg(`★C300 no plantable ground + dirt=0 → harvesting ${best.name}@${best.position.x},${best.position.y},${best.position.z} (${bd.toFixed(1)}b) for sapling soil`);
+                    // ★C303 walk ADJACENT to the soil block before digging — digging at 2-4b range drops the
+                    // dirt where the bot isn't standing, and the at-range sweep failed to collect it (live
+                    // 15:07: "dirt harvest FAILED — drop not collected"). Standing next to it = drop at feet.
+                    if (bd > 2.0) { try { await skills.goToPosition(bot, best.position.x, best.position.y, best.position.z, 1); } catch (e) {} }
+                    try { await bot.tool.equipForBlock(best); } catch (e) {}
+                    if (bot.heldItem && /_sword$/.test(bot.heldItem.name)) { try { await bot.unequip('hand'); } catch (e) {} }
+                    try { await bot.dig(best); } catch (e) { return false; }
+                    await _sweepDrops(5, 4);
+                    const got = _dirtCt() > had;
+                    _dbg(`★C300 dirt harvest ${got ? 'OK' : 'FAILED (drop not collected)'} — dirt now ${_dirtCt()}`);
+                    return got;
+                } catch (e) { _dbg(`★C300 dirt harvest err: ${String(e.message).slice(0, 50)}`); return false; }
+            };
+            let spot = findSpot();
+            if (!spot && !_hasDirt() && await _harvestDirtNearby()) spot = findSpot();
             if (!spot) { bot._saplingGrowUntil = Date.now() + 20000; return false; }
             _dbg(`sapling-grow: planting ${sap.name} @${spot.air.x},${spot.air.y},${spot.air.z} needDirt=${spot.needDirt} (no reachable natural tree)`);
             try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
             try { bot.clearControlStates(); } catch (_) {}
             // 1) ensure plantable ground — drop a dirt block into the cell, plant one above it
             if (spot.needDirt) {
-                if (!await _placeConfirmed('dirt', spot.air, 'sapling-dirt')) { bot._saplingGrowUntil = Date.now() + 20000; return false; }
+                const _dirtItem = bot.inventory.items().find(i => /^dirt$|^coarse_dirt$/.test(i.name || ''));   // ★C300 place whichever soil we carry/harvested
+                if (!await _placeConfirmed(_dirtItem ? _dirtItem.name : 'dirt', spot.air, 'sapling-dirt')) { bot._saplingGrowUntil = Date.now() + 20000; return false; }
                 spot.ground = spot.air; spot.air = spot.air.offset(0, 1, 0);
                 if (!isAir(bot.blockAt(spot.air)) || !skyOpen(spot.air)) { bot._saplingGrowUntil = Date.now() + 20000; return false; }
             }
@@ -1120,6 +1291,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         // replacement instance (same class as the digToSurface dual-loop wedge)
         if (bot.death_abort || bot.health <= 0) { _dbg(`chopWood ABORT (death) at iter${i}`); return total(); }
         if (bot._chopGen !== _gen) { _dbg(`chopWood YIELD (superseded gen${_gen}→${bot._chopGen}) at iter${i}`); return total(); }
+        await _ensureInvRoom();   // ★C299 free a slot BEFORE chopping — a full inventory silently voids every pickup (logs land, can't be stored, total stays 0)
         if (!_opts.needLogs && !_opts.allowCriticalForage && _planksEq() >= 8) {
             _motion('chopWood.wood_eq_satisfied', { where: 'mainLoop', iter: i, logs: total(), planksEq: _planksEq(), target });
             _dbg(`chopWood BAIL (woodEq=${_planksEq()} already enough, logs=${total()}/${target}) — no optional tree route`);
@@ -1433,7 +1605,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         // through to the next-nearest reachable tree (or to relocate if all nearby are blacklisted).
         // bot.findBlocks returns many coords (getNearestBlock returns only the single closest, which
         // is exactly what kept handing us back the same unreachable tree every pass).
-        let nearest = null, ndist = Infinity;
+        let nearest = null, ndist = Infinity, nearestAnyDist = Infinity, nearestAnyDy = 0;   // nearestAny = closest detected tree INCLUDING blacklisted (cost model: don't plant a sapling when a real tree is right here)
         // ★TREE-FAMINE leash extension: with 8+ trees blacklisted (all unreachable
         // jungle canopies), an 80-block leash re-scans the same dead orchard forever —
         // the whole rebuild is gated on ONE log. Famine (blacklist≥8) temporarily
@@ -1441,6 +1613,23 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         // blacklist empties as TTLs expire after we leave the area).
         const _leashR = _unreach.size >= 8 ? 160 : 80;
         let riskySkipped = 0;
+        // ★C297 TRUNK-BASE targeting (用户实拍根因: 雨林高树 — findBlocks 返回的"最近 log"常是树冠高处
+        // 那截 (dy>5) → riskyTree 判 high-tree 跳过 → 拉黑 → 误当够不到 → 退化乱转/种苗,而那棵树的树干
+        // 基部就在地面、完全可达,只是瞄错了目标). 修复: 对每个候选 log,沿其 x,z 列向下扫到最低的连续
+        // log = 树干基部,用基部的距离/落差/可达性来判定与导航,而不是检测到的树冠 log. 这样雨林高树变可达,
+        // sapling fallback 根本不触发. mesa 高原仍正确跳过 — 那里整列都在台顶,基部 y 也高、落差仍 >5.
+        const _isLog = (b) => b && /(_log|_wood|_stem)$/.test(b.name || '');
+        const _trunkBase = (p) => {
+            try {
+                const bx = Math.floor(p.x), bz = Math.floor(p.z);
+                let by = Math.floor(p.y);
+                for (let k = 0; k < 40; k++) {
+                    if (_isLog(bot.blockAt(new Vec3(bx, by - 1, bz)))) { by--; continue; }
+                    break;
+                }
+                return new Vec3(bx + 0.5, by, bz + 0.5);
+            } catch (e) { return p; }
+        };
         const riskyTree = (p, d) => {
             if (_criticalForageAllowed()) return '';
             const dy = p.y - bot.entity.position.y;
@@ -1463,17 +1652,77 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             if (id != null) { try { cands = bot.findBlocks({ matching: id, maxDistance: 40, count: 16 }) || []; } catch (e) { cands = []; } }
             if (!cands.length) { const b = world.getNearestBlock(bot, t, 40); if (b) cands = [b.position]; }  // fallback
             for (const p of cands) {
-                const key = `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
+                const base = _trunkBase(p);                    // ★C297 resolve to trunk base (ground), not the detected canopy log
+                const key = `${Math.floor(base.x)},${Math.floor(base.y)},${Math.floor(base.z)}`;
+                if (Math.hypot(base.x - _ax, base.z - _az) > _leashR) continue;   // 缰绳源头过滤(树荒时放宽)
+                const d = bot.entity.position.distanceTo(base);
+                if (d < nearestAnyDist) { nearestAnyDist = d; nearestAnyDy = base.y - bot.entity.position.y; }   // closest tree even if blacklisted — feeds the cost model below
                 if (_blk(key)) continue;                       // skip blacklisted unreachable tree
-                if (Math.hypot(p.x - _ax, p.z - _az) > _leashR) continue;   // 缰绳源头过滤(树荒时放宽)
-                const d = bot.entity.position.distanceTo(p);
-                if (_opts.criticalForageLocalOnly && (d > 10.5 || (p.y - bot.entity.position.y) > 5)) continue;
-                const risk = riskyTree(p, d);
+                if (_opts.criticalForageLocalOnly && (d > 10.5 || (base.y - bot.entity.position.y) > 5)) continue;
+                const risk = riskyTree(base, d);
                 if (risk) { riskySkipped++; continue; }
-                if (d < ndist) { ndist = d; nearest = { b: bot.blockAt(p), t, key }; }
+                if (d < ndist) { ndist = d; nearest = { b: bot.blockAt(base), t, key, drop: Math.round(p.y - base.y) }; }   // drop = how far the canopy log was lowered to its base (★C297 evidence)
             }
         }
-        _dbg(`iter${i} y=${Math.floor(bot.entity.position.y)} nearest=${nearest ? nearest.t + '@' + ndist.toFixed(1) + 'b' : 'NONE'} total=${total()} stale=${stale} surfaced=${surfaced} blk=${_unreach.size} riskySkip=${riskySkipped}`);
+        _dbg(`iter${i} y=${Math.floor(bot.entity.position.y)} nearest=${nearest ? nearest.t + '@' + ndist.toFixed(1) + 'b' + (nearest.drop > 1 ? `↓${nearest.drop}(★C297base)` : '') : 'NONE'} total=${total()} stale=${stale} surfaced=${surfaced} blk=${_unreach.size} riskySkip=${riskySkipped}`);
+        // ★C342 (T-0055, composes with C339): a CLOSE trunk we can't SEE is leaf-occluded — C339 now
+        // (rightly) refuses to x-ray-chop it, but the HUMAN fix is to CLEAR the intervening leaves, not
+        // give up → blacklist. Dig the nearest reachable occluding leaf (leaves are NOT gated by C339)
+        // until the trunk is visible, THEN the normal approach/chop passes the gate. Bounded (≤6 leaves,
+        // only when trunk ≤5.5b + occluded) so it can't loop. This closes the dense-jungle reach residual.
+        if (nearest && nearest.b && nearest.b.position && ndist <= 5.5) {
+            try {
+                const _tk = nearest.b;
+                const _see = () => { try { return bot.canSeeBlock(_tk); } catch (e) { return true; } };
+                if (!_see()) {
+                    const _eye = () => bot.entity.position.offset(0, 1.6, 0);
+                    let _cleared = 0;
+                    for (let pass = 0; pass < 6 && !_see(); pass++) {
+                        let best = null, bestD = 1e9;
+                        const tp = _tk.position;
+                        for (let dx = -3; dx <= 3; dx++) for (let dy = -1; dy <= 4; dy++) for (let dz = -3; dz <= 3; dz++) {
+                            const lb = bot.blockAt(tp.offset(dx, dy, dz));
+                            if (!lb || !/_leaves$/.test(lb.name || '')) continue;
+                            const dR = _eye().distanceTo(lb.position.offset(0.5, 0.5, 0.5));
+                            if (dR > 4.4) continue;                 // must be in genuine reach to dig (no x-ray)
+                            if (dR < bestD) { bestD = dR; best = lb; }
+                        }
+                        if (!best) break;                            // no reachable occluding leaf from here → let approach/climb handle it
+                        if (!(await guardedDig(best, 'clear-occluding-leaf'))) break;
+                        _cleared++;
+                    }
+                    if (_cleared) _dbg(`★C342 cleared ${_cleared} occluding leaf(s) → trunk ${nearest.t}@${ndist.toFixed(1)}b ${_see() ? 'now VISIBLE (chop can proceed)' : 'still occluded (approach/climb next)'}`);
+                }
+            } catch (e) {}
+        }
+        // ★C295: GROW OWN TREE when natural trees are SEEN but all UNREACHABLE. The C279 sapling-grow
+        // (1574) only fired on nearest=NONE (truly barren); but a wooded_badlands/mesa surrounds the
+        // bot with trees on plateau TOPS it can't climb pickless — each blacklists on 树柱fails, nearest
+        // is never null, so it thrashed forever chasing unclimbable trees and NEVER grew its own (live
+        // 2026-06-20: pickless in wooded_badlands, oak_log@23b but 树柱fails×∞, 0 logs all day, deaths
+        // 53→92). When ≥4 trees are confirmed unreachable and we carry a sapling, grow our OWN reachable
+        // tree NOW (≤cooldown) instead of chasing plateau trees. _trySaplingGrow self-guards on a
+        // plantable sky-open spot, so it no-ops cleanly if the ground/cover won't allow it.
+        // ★C296 COST MODEL (用户实拍: 雨林里全是树却到处乱转种树苗=荒谬,缺成本模型). C295 种苗本为
+        // mesa 高原(树在够不到的台顶,落差大)兜底;但雨林里树近在咫尺、落差小,只因树冠/藤蔓寻路失败被
+        // 拉黑→误当"够不到"→退化到最慢的种苗+乱转. 判别: 最近的树(含拉黑)在 ≤16 格且落差 dy≤5 = 森林,
+        // 不是 mesa → 种苗是错的成本(海量真树就在旁边,该去够). 此时不种,清掉近处拉黑让下一拍重试硬够.
+        const _forestNear = nearestAnyDist <= 16 && nearestAnyDy <= 5;
+        if (total() === 0 && _unreach.size >= 4 && _forestNear && !nearest) {
+            if (Date.now() - (bot._chopForestUnblkAt || 0) > 20000) {
+                bot._chopForestUnblkAt = Date.now();
+                let _cleared = 0;
+                for (const k of [..._unreach.keys()]) {
+                    const c = k.split(',').map(Number);
+                    if (Math.hypot(c[0] - bot.entity.position.x, c[2] - bot.entity.position.z) <= 16) { _unreach.delete(k); _cleared++; }
+                }
+                _dbg(`★C296 forest (nearest tree @${nearestAnyDist.toFixed(1)}b dy${nearestAnyDy.toFixed(0)}) — NOT planting sapling amid real trees; cleared ${_cleared} close blacklist entries to retry reaching them`);
+            }
+        } else if (total() === 0 && _unreach.size >= 4 && !_forestNear && Date.now() >= (bot._saplingGrowUntil || 0)
+            && bot.inventory.items().some(it => /_sapling$/.test(it.name || ''))) {
+            _dbg(`★C295 ${_unreach.size} natural trees unreachable (sparse/high — nearest @${nearestAnyDist === Infinity ? '∞' : nearestAnyDist.toFixed(1)}b dy${nearestAnyDy.toFixed(0)}) + carrying sapling → grow OWN reachable tree`);
+            if (await _trySaplingGrow()) { stale = 0; continue; }
+        }
         if (_opts.criticalForageLocalOnly && !nearest) {
             _motion('chopWood.critical_local_no_tree', {
                 iter: i,
@@ -1688,10 +1937,33 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                         if (bot.heldItem && /_sword$/.test(bot.heldItem.name)) { try { await bot.unequip('hand'); } catch (e) {} }
                         try { await bot.dig(lb); dug++; } catch (e) { break; }
                     }
-                    await _sweepDrops(8, 6);   // 踩格子捡掉落 — pickupNearbyItems 不够可靠
-                    if (dug > 0) _dbg(`direct-chop: dug ${dug} logs (full column, drops swept) total=${total()}`);
+                    const _sw = await _sweepDrops(8, 6);   // 踩格子捡掉落 — pickupNearbyItems 不够可靠
+                    if (dug > 0) _dbg(`direct-chop: dug ${dug} logs (full column) total=${total()} sweep[seen=${_sw.seen} reached=${_sw.reached} near=${_sw.near || '-'}]`);   // ★C298 seen=0→drops not spawning/falling away; seen>0 reached=0→unreachable (dy>1=on leaf canopy above; big h=across gap)
                 } catch (e) { _dbg(`direct-chop fail: ${e.message}`); }
                 if (total() > before) { stale = 0; continue; }   // it worked — no blacklist
+            }
+            // ★C323 (T-0055): elevated/terrace tree the flat raw-approach can't climb to (live:
+            // bot y65 → oak_log@y68-69 on a 3-block mesa terrace, 12-16b; collectBlock pathfind +
+            // 2.5s flat sprint can't scale a multi-block terrace →棵棵 blacklist "unreachable",
+            // migrate-to-trees still can't bootstrap). Use the now-capable goToPosition (C319
+            // destructive scaffolding pillars up the terrace, C320 partial follows toward the
+            // trunk) to GET to the tree base, then loop to direct-chop from there. Timeboxed (can't
+            // hang); once per tree per 30s so it can't spin. This is the reachability core of T-0055
+            // (C321 only fixed the inv-full sub-cause).
+            if (nearest && nearest.b && nearest.b.position && total() <= before) {
+                const tb = nearest.b.position;
+                const _td0 = bot.entity.position.distanceTo(tb.offset(0.5, 0.5, 0.5));
+                const _ck = _colKey(nearest.key);
+                const _tried = (bot._chopGotoTriedAt = bot._chopGotoTriedAt || new Map());
+                if (_td0 > 12 && _td0 <= 32 && (!_tried.get(_ck) || Date.now() - _tried.get(_ck) > 30000)) {   // ★C323 window 12<d≤32: far plateau trees only. Lower bound 12 (was 4.5) — live a 6.5b elevated tree got DISPLACED to 21.6b by the goToPosition climb (routed around/down a plateau); leave 4.5-12b trees to raw-approach, don't let C323 push the bot AWAY from a near tree.
+                    _tried.set(_ck, Date.now());
+                    _dbg(`★C323 elevated/far tree @${nearest.key} d=${_td0.toFixed(1)} — goToPosition climb (C319/C320-capable) before blacklist`);
+                    try { await Promise.race([skills.goToPosition(bot, tb.x, tb.y, tb.z, 2), new Promise((_, rej) => setTimeout(() => rej(new Error('c323-goto-timeout')), 18000))]); }
+                    catch (e) { try { bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} }
+                    const _td1 = bot.entity.position.distanceTo(tb.offset(0.5, 0.5, 0.5));
+                    if (_td1 < _td0 - 1.5) { _dbg(`★C323 closed ${_td0.toFixed(1)}→${_td1.toFixed(1)}b — retry chop, no blacklist`); stale = Math.max(0, stale - 1); continue; }
+                    _dbg(`★C323 no closer (${_td0.toFixed(1)}→${_td1.toFixed(1)}b) — fall through to blacklist (genuinely unreachable)`);
+                }
             }
             // No progress this pass. The killer case: weaponless after a death, a
             // skeleton arrows the bot from a ledge it can't path to, and small shuffles

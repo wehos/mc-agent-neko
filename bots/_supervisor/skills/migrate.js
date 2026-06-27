@@ -47,7 +47,13 @@ function biomeScore(biome) {
     if (/ocean|river|beach|shore|deep_/.test(b)) return -12;
     if (/(^|_)(plains|meadow|savanna|forest|taiga|grove|birch|flower)/.test(b)) return 10;
     if (/(jungle|swamp|sparse|mangrove|cherry)/.test(b)) return 6;   // livable but trickier
-    if (/(desert|badlands|stony|peaks|snowy|ice|frozen|wooded_badlands)/.test(b)) return -4;
+    // ★C323-A (T-0059, 用户实证 desert husk 死循环 deaths0→7 全甲也磨死): desert/badlands 是 HUSK
+    // 死亡陷阱——husk 日光免疫(白天也杀),裸/半甲被持续群压必死。旧 -4 太弱:沙漠有兔子(animals≥2)+
+    // grass 把 siteScore 推到≥0 → 过 C325 targetSafe → 锚进 husk 沙漠。提到 -12(同 water 死亡陷阱级),
+    // 让 siteScore 必为负 → targetSafe 否决 → 不锚沙漠 → setBed 自选非沙漠安全家。stony/雪/冰无 husk,
+    // 仍 -4(harsh 但非死亡陷阱)。
+    if (/(desert|badlands)/.test(b)) return -12;   // ★husk death-trap (day-immune mobs) — never anchor home here
+    if (/(stony|peaks|snowy|ice|frozen)/.test(b)) return -4;
     return 0;   // unknown/neutral
 }
 
@@ -58,7 +64,7 @@ function siteScore(s) {
     const a = s || {};
     return biomeScore(a.biome)
         + Math.min(a.landAnimals || 0, 3) * 4
-        + Math.min(a.trees || 0, 6)
+        + Math.min((a.reachableTrees != null ? a.reachableTrees : a.trees) || 0, 6)   // ★C324: REACHABLE trees only (plateau-top visible trees don't count)
         + ((a.grass || 0) > 0 ? 2 : 0)
         - (a.deathsNear || 0) * 5;
 }
@@ -113,9 +119,17 @@ function shouldMigrate(signals) {
     // biome). Either alone is sufficient — staying is the proven-fatal choice.
     const desert = (s.oceanStreak || 0) >= 3 || (s.noAnimalStreak || 0) >= 4 || s.currentOcean === true;
     const diedHere = !!(s.foodDeathsClustered || s.insideDeathZone);
-    if (!desert && !diedHere)
-        return { go: false, reason: `no unlivable evidence (oceanStreak=${s.oceanStreak} noAnimalStreak=${s.noAnimalStreak} currentOcean=${s.currentOcean} diedHere=${diedHere}) — let forageExplore try first` };
-    return { go: true, reason: `unlivable: desert=${desert}(ocean=${s.currentOcean} streak=${s.oceanStreak}/${s.noAnimalStreak}) diedHere=${diedHere} hp=${s.hp} food=${s.food} — relocate cross-continent` };
+    // ★C309 (T-0042): woodless-bootstrap deadlock is a THIRD kind of unlivable. The old gate had
+    // only a FOOD dimension (ocean/no-animal) and a death-cluster dimension — NO wood/tree
+    // dimension. A pickless bot in a treeless desert (0 reachable logs, 0 wood in inv) can never
+    // progress wood→table→pickaxe HERE no matter how healthy, so it thrashes forever (live 18:38:
+    // hp20/food20/picks0, chopDBG nearest=NONE, cycling prepNether→chop(none)→swim). Treat a
+    // CONFIRMED woodless-bootstrap (caller's noTreeStreak>=2, so one scan-miss can't fire a march)
+    // as unlivable → relocate to a tree-bearing biome.
+    const bootstrapStuck = !!s.bootstrapStuck;
+    if (!desert && !diedHere && !bootstrapStuck)
+        return { go: false, reason: `no unlivable evidence (oceanStreak=${s.oceanStreak} noAnimalStreak=${s.noAnimalStreak} currentOcean=${s.currentOcean} diedHere=${diedHere} bootstrapStuck=${bootstrapStuck}) — let forageExplore try first` };
+    return { go: true, reason: `unlivable: desert=${desert}(ocean=${s.currentOcean} streak=${s.oceanStreak}/${s.noAnimalStreak}) diedHere=${diedHere} bootstrapStuck=${bootstrapStuck}(noTree) hp=${s.hp} food=${s.food} — relocate cross-continent` };
 }
 
 // ---------------------------------------------------------------------------
@@ -198,12 +212,23 @@ export default async function migrate(bot, ctx, opts = {}) {
                     && e.position.distanceTo(p) < 48) landAnimals++;
             }
         } catch (e) {}
-        let trees = 0, grass = 0;
-        try { trees = (world.getNearestBlocks(bot, ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log'], 40, 30) || []).length; } catch (e) {}
+        let trees = 0, reachableTrees = 0, grass = 0;
+        try {
+            const logs = world.getNearestBlocks(bot, ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log'], 40, 30) || [];
+            trees = logs.length;
+            // ★C324 (T-0055 keystone): count REACHABLE trees, not just VISIBLE ones. A log whose
+            // base sits ≤2 above our standing level (we can step/jump up) and not buried far below
+            // is approachable; plateau-top trees (wooded_badlands: trunks +3..+8 on VERTICAL terraces
+            // we can't climb) are visible but unreachable. Counting visible trees made migrate
+            // SETTLE in tree-rich badlands the bot then starved in — chopWood blacklisted every
+            // plateau tree "unreachable" (T-0055). Cheap y-band proxy (no per-tree pathfind).
+            const by = p.y;
+            for (const lp of logs) { const ly = (lp && lp.position) ? lp.position.y : (lp ? lp.y : null); if (ly != null && ly <= by + 2 && ly >= by - 6) reachableTrees++; }
+        } catch (e) {}
         try { grass = (world.getNearestBlocks(bot, ['grass_block', 'short_grass', 'tall_grass'], 24, 8) || []).length; } catch (e) {}
         const deaths = readRecentDeaths();
         const deathsNear = deaths.filter(d => Math.hypot(d.x - p.x, d.z - p.z) < 24).length;
-        return { biome, landAnimals, trees, grass, deathsNear, x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) };
+        return { biome, landAnimals, trees, reachableTrees, grass, deathsNear, x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) };
     };
 
     // ---- START GATE (re-confirm the human "this place is unlivable" decision) ----
@@ -218,9 +243,25 @@ export default async function migrate(bot, ctx, opts = {}) {
     const foodDeathsClustered = deaths.filter(d => Math.hypot(d.x - pos0.x, d.z - pos0.z) < 80).length >= 3;
     const currentOcean = /ocean|river|beach|shore/.test(curBiome().toLowerCase());
 
+    // ★C309 (T-0042): woodless-bootstrap signal — pickless + no wood in inv + no reachable logs
+    // = the tool chain can't progress here. Streak (mirrors noAnimalStreak) so a single scan-miss
+    // (chunk not loaded / tree just out of range) can't fire a long march; reset the instant any
+    // wood/pick appears. Only the EARLY healthy-day gate (missionNether:759) reaches here for a
+    // food-full bot, so this is the lever that unlocks the treeless-desert deadlock.
+    const LOGS = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
+    const _noPick = !bot.inventory.items().some(i => /_pickaxe$/.test(i.name || ''));
+    const _noWoodInv = !bot.inventory.items().some(i => /_log$|_planks$/.test(i.name || ''));
+    let _logsNear = 0;
+    try { _logsNear = (world.getNearestBlocks(bot, LOGS, 48, 1) || []).length; } catch (e) {}
+    const _woodlessBootstrap = _noPick && _noWoodInv && _logsNear === 0;
+    mstate.noTreeStreak = _woodlessBootstrap ? ((mstate.noTreeStreak || 0) + 1) : 0;
+    writeMState(mstate);
+    const bootstrapStuck = (mstate.noTreeStreak || 0) >= 2;
+    log_(`bootstrap-scan: noPick=${_noPick} noWoodInv=${_noWoodInv} logsNear=${_logsNear} → woodless=${_woodlessBootstrap} noTreeStreak=${mstate.noTreeStreak} bootstrapStuck=${bootstrapStuck}`);
+
     const decision = shouldMigrate({
         oceanStreak: mstate.oceanStreak, noAnimalStreak: mstate.noAnimalStreak, currentOcean,
-        foodDeathsClustered, insideDeathZone,
+        foodDeathsClustered, insideDeathZone, bootstrapStuck,
         hp: Math.round(bot.health), food: bot.food,
         isNight: isNight(), actionableClose: closeActionable(),
         msSinceLastMigrate: Date.now() - (mstate.lastMigrateAt || 0),
@@ -253,6 +294,26 @@ export default async function migrate(bot, ctx, opts = {}) {
     const t0 = Date.now();
     let best = null, settled = false, settleSite = null, abort = null;
     let waterStreak = 0, stalls = 0, totalAdv = 0;
+    let imprisonEgressTried = false;   // ★C318 (T-0052): one surfaceUp break-out per imprisonment
+    // ★C312 (T-0051): when FLEEING a death zone / bootstrap-stuck, the score>=14 + animals>=2 settle
+    // bar (tuned for an IDEAL home) rejects perfectly good ESCAPE sites and traps the bot oscillating
+    // around the kill-zone wood-starved (live: 4 migrations in 15min, each finds 34,85 trees=18
+    // deathsNear=0 score=12<14 desert → never settles → re-migrates → never gets wood to craft a bed →
+    // setBed fails forever). When the goal is to GET OFF a death zone, ANY tree-bearing, death-free,
+    // non-water site is a valid escape: the bot settles there, chops the trees → wood → table/bed →
+    // real anchor. deathsNear=0 guarantees we're clear of the cluster; trees>=4 guarantees wood to
+    // bootstrap; the min-advance guard avoids settling right next to the zone on a fluke.
+    const fleeingDeathZone = insideDeathZone || foodDeathsClustered || bootstrapStuck;
+    const escapeSettleOk = (s) => {
+        const a = s || {};
+        const waterBiome = /ocean|river|beach|shore/.test((a.biome || '').toLowerCase());
+        // ★C324 (T-0055 keystone): require REACHABLE trees≥4, not just visible. The whole T-0055
+        // bug was C312 escape-settling in a wooded_badlands with 10 VISIBLE plateau trees the bot
+        // could never reach → starved at a "tree-rich" home. reachableTrees (y-band filtered)
+        // ensures the escape home actually has wood we can harvest to bootstrap.
+        const usableTrees = (a.reachableTrees != null ? a.reachableTrees : a.trees) || 0;
+        return !waterBiome && usableTrees >= 4 && (a.deathsNear || 0) === 0;
+    };
     let waterLegs = 0;   // ★CUMULATIVE water legs (NOT reset on turn) — detects an open-ocean crossing
 
     // ★TRAVERSAL ROBUSTNESS (C222): the old single goToPosition(24b, GoalNear 3D) per leg stalled
@@ -306,6 +367,11 @@ export default async function migrate(bot, ctx, opts = {}) {
             log_(`★ARRIVED livable land @${site.x},${site.z} biome=${site.biome} animals=${site.landAnimals} trees=${site.trees} score=${score} — settle here`);
             break;
         }
+        if (fleeingDeathZone && totalAdv >= 48 && escapeSettleOk(site)) {
+            settled = true; settleSite = { ...site, score };
+            log_(`★C312 ESCAPE-SETTLE @${site.x},${site.z} biome=${site.biome} trees=${site.trees} reachableTrees=${site.reachableTrees} deathsNear=${site.deathsNear} score=${score} (fleeing death-zone; reachable-tree+death-free escape beats oscillating) — settle here`);
+            break;
+        }
         // water-drift: ending legs in/over open water counts toward a turn even when ADVANCING (a
         // straight march into open ocean "progresses" every leg but never finds land).
         const inWater = inFluid() || /ocean|river/.test((site.biome || '').toLowerCase());
@@ -342,6 +408,23 @@ export default async function migrate(bot, ctx, opts = {}) {
         // ---- recovery: rotate bearing on a stalled leg OR persistent water-drift ----
         if (stalled || waterStreak >= 3) {
             stalls++;
+            // ★C318 (T-0052): pathfinder-imprisonment. Every bearing stalls = horizontally boxed in
+            // (mesa-pocket / death-zone terraces), yet mobility reads FREE so the MAROONED road-out
+            // never fires and goToPosition just throws noPath on ALL directions → the bearing fan
+            // exhausts → migrate aborts and "settles" IN the death-zone pocket (act_trace 23:45:
+            // stalls=10 totalAdv=0b, imprisoned @28,-37). The ONE egress a horizontal fan can't give
+            // is UP: surfaceUp pillars out of the pocket above the terraces, where horizontal pathing
+            // works again. Fire ONCE per imprisonment (flag), reset to good progress, then retry the
+            // fan from the higher vantage. surfaceUp self-no-ops if already open-sky (C307), so this
+            // only acts when genuinely pocket-boxed. ③ hot-reload, no core-pathfinder change.
+            if (stalls >= 2 && !imprisonEgressTried) {
+                imprisonEgressTried = true;
+                const sy = Math.round(bot.entity.position.y) + 10;
+                log_(`★C318 imprisoned (stalls=${stalls} totalAdv=${Math.round(totalAdv)}b, bearings noPath) → surfaceUp(${sy}) break out of pocket, retry fan from higher vantage`);
+                try { await skills.customSkill(bot, 'surfaceUp', sy); } catch (e) { log_(`C318 imprison-surfaceUp err: ${e && e.message || e}`); }
+                turnIdx = 0; cur = rot(base, TURNS[0]); waterStreak = 0;
+                continue;
+            }
             turnIdx++;
             if (turnIdx < TURNS.length) {
                 cur = rot(base, TURNS[turnIdx]);
@@ -353,6 +436,7 @@ export default async function migrate(bot, ctx, opts = {}) {
             }
         } else {
             stalls = 0;                 // good progress on this heading — keep it
+            imprisonEgressTried = false; // ★C318: real progress → re-arm break-out for any later pocket
         }
     }
 
@@ -371,8 +455,22 @@ export default async function migrate(bot, ctx, opts = {}) {
 
     // ---- SETTLE (write the anchor FIRST, then setBed builds the home here) ----
     const target = settleSite || best || sampleSite();
-    const reachedGood = settled || (best && isSettleSite(best, settleScore));
-    try {
+    // ★C312: fleeing a death zone → the best tree-bearing, death-free site we saw counts as a real
+    // settle (not just an ideal-score home), so we COMMIT + write its anchor instead of returning
+    // settled=false and re-migrating next cycle (the oscillation that kept the bot wood-starved).
+    const reachedGood = settled
+        || (best && isSettleSite(best, settleScore))
+        || (fleeingDeathZone && best && escapeSettleOk(best));
+    // ★C325 (T-0059): NEVER re-anchor HOME into a hazard. A stalled/failed migration sets target =
+    // best/sampleSite = wherever it ended up — which can be a death-zone / deep-mining hazard (live:
+    // bed re-anchored to 64,60,63 score-1, the #121 fall+drown death zone). On respawn the KILL-BOX
+    // expels the bot from spawn → it runs to this "home" → dies → respawns → roam-far-die loop. Only
+    // pin the anchor when we genuinely SETTLED, or the target is at least death-free with a non-negative
+    // score. For an unsettled hazard target, DON'T overwrite bed.json — leave setBed's own auto-selector
+    // (which picks deaths-near=0 sites) to choose a safer home than the hazard we stalled in.
+    const targetSafe = reachedGood || ((target.deathsNear || 0) === 0 && siteScore(target) >= 0);
+    if (targetSafe) {
+      try {
         // Overwrite bed.json so setBed's own remote site-selector keeps the home HERE
         // (without this, auto-site-select's far-ring candidates would walk the bot away again).
         const hy = Math.max(60, Math.min(95, Math.floor(bot.entity.position.y)));
@@ -382,7 +480,10 @@ export default async function migrate(bot, ctx, opts = {}) {
             biome: target.biome, animals: target.landAnimals, trees: target.trees,
         }));
         log_(`anchor written @${target.x},${target.z} (score=${target.score ?? '?'} biome=${target.biome}) — invoking setBed`);
-    } catch (e) { log_(`anchor write err: ${e && e.message || e}`); }
+      } catch (e) { log_(`anchor write err: ${e && e.message || e}`); }
+    } else {
+        log_(`★C325 anchor SKIP @${target.x},${target.z} (deathsNear=${target.deathsNear ?? '?'} score=${siteScore(target)}, unsettled hazard) — keep prior home, don't re-anchor a death zone → setBed auto-selects safer`);
+    }
 
     let bedOk = false;
     try { bedOk = await skills.customSkill(bot, 'setBed'); } catch (e) { log_(`setBed threw: ${e && e.message || e}`); }

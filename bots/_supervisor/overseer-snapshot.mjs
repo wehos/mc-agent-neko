@@ -59,7 +59,7 @@ function zoneNow() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════════════
-// ZONE: history — 6-metric registry. Each compute() returns {value, evidence, change}.
+// ZONE: history — metric registry (8). Each compute() returns {value, evidence, change}.
 // Add a metric ⇒ add one entry. id/label/source documented inline; status mirrors overseer.md.
 // ══════════════════════════════════════════════════════════════════════════════════════════
 const METRICS = [
@@ -96,6 +96,35 @@ const METRICS = [
                 value: { topChunk: top[0] ? top[0].chunk : null, topPct, stuck, distinct: Object.keys(freq).length, samples: total, spanMin: VSPAN_MIN },
                 evidence: { top, spanMin: VSPAN_MIN, lastPos: [last.x, last.y, last.z] },
                 change: p ? { topPctDelta: round(topPct - (p.topPct ?? 0), 3), topChunkMoved: p.topChunk !== (top[0] && top[0].chunk) } : 'first-run',
+            };
+        },
+    },
+    {
+        id: 'survival_thrash', label: '求生反射打转 (churn主导, 满血/FREE也算)', source: 'events.log + vitals.jsonl + sentinel',
+        // ★盲点补丁(用户报"坑里打转很久没报警"): bot满血+FREE+夜里在峡谷反复钻坑/kite/夜hold, 战略零进度.
+        // 漏在 no-progress(门=chunks<=2)/ mobility-stuck(门=MAROONED)/ staleMin(被giveKit拾取的ach微增清零) 三者缝隙.
+        // 主信号=求生反射churn压倒性主导 events(kite/夜hold/marooned/digging/fighting 占>=45%), position/hp/mob 全无关 —
+        // 正是其它检测器忽略的维度. 辅证=近窗位置包围盒(小盒=困在一坑钻, 大盒=边打边游 roam-thrash).
+        compute() {
+            const lines = eventsTail(600);
+            if (!lines.length) return { value: null, evidence: { missing: 'events.log' }, change: null };
+            const SURV = /kiting|night hold|staying sealed|marooned|engineering a road|digging out|getting out|backing off|fighting|outmatched|holed up|fleeing|entombed/i;
+            const freq = {};
+            for (const ln of lines) { const norm = ln.replace(/^\[[^\]]*\]\s*/, '').replace(/-?\d+(\.\d+)?/g, '#').replace(/\s+/g, ' ').trim().slice(0, 120); if (norm) freq[norm] = (freq[norm] || 0) + 1; }
+            const topE = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
+            const topLine = topE ? topE[0] : ''; const topPctV = topE ? pct(topE[1], lines.length) : 0;
+            const thrash = SURV.test(topLine) && topPctV >= 0.45;               // 求生churn主导
+            // 辅证: 近 ~12min 位置包围盒 — 小=困一坑钻(pit-loop), 大=边打边游(roam-thrash)
+            const recent = VITALS.filter(v => v.x != null && v.z != null && (T - v.ts) <= 12 * 60000);
+            let bboxDiam = null;
+            if (recent.length >= 4) { const xs = recent.map(v => v.x), zs = recent.map(v => v.z); bboxDiam = round(Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...zs) - Math.min(...zs)), 1); }
+            const s = rj('sentinel.json'); const rp = (s && s.realProgress) || {}; const mob = (s && s.mobility) || '';
+            const subtype = thrash ? (bboxDiam != null && bboxDiam <= 30 ? 'pit-loop(困一坑)' : 'roam-thrash(边打边游)') : '-';
+            const p = prevOf('survival_thrash');
+            return {
+                value: { thrash, topLine, topPct: topPctV, subtype, bboxDiam, mob, ach: rp.ach, staleMin: rp.staleMin, windowLines: lines.length },
+                evidence: { signal: thrash ? `★求生反射打转: "${topLine}" 占 events ${Math.round(topPctV * 100)}% (${subtype}), mob=${mob} ach=${rp.ach} — 求生churn主导=战略零进度, 漏在 no-progress/mobility-stuck/staleMin 三者缝隙` : '' },
+                change: p ? { thrashOnset: thrash && !p.thrash, topPctDelta: round(topPctV - (p.topPct ?? 0), 3) } : 'first-run',
             };
         },
     },

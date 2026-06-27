@@ -46,7 +46,7 @@ node bots/_supervisor/ticket.mjs mine --as claude-B   # 看自己认领了哪些
 
 ## 工单生命周期
 
-`open → claimed → in_progress → fixed → verifying → closed`（或 `wontfix`）
+`open → claimed → in_progress → fixed → verifying(=观察中) → closed`（或 `wontfix`）
 
 ```
 node bots/_supervisor/ticket.mjs update T-0007 --status in_progress
@@ -56,6 +56,41 @@ node bots/_supervisor/ticket.mjs update T-0007 --status fixed --note "C282 ..." 
 node bots/_supervisor/ticket.mjs update T-0007 --status verifying   # 已部署,盯实机
 node bots/_supervisor/ticket.mjs update T-0007 --status closed --note "实机验证通过:..."
 ```
+
+## ★Autonomous 工作契约（agent 不空转 / 观察中不阻塞接单）
+
+**核心：每个 agent 同一时刻只"真正在改" ≤1 张单（`in_progress`）；首次修完转"观察中"就立刻去接下一张，永不空转。**
+
+- **observing ＝ `verifying`**：首次修好 + 部署 + 冒烟自检通过 → 转 `verifying`（语义＝**观察中**：补丁已部署在跑，等是否复发）。**转入观察后不再主动死盯**——靠 botwatch / Monitor 的复发信号被动触发返工。挂个 Monitor 盯回归信号即可，人/agent 不用守着。
+- **不空转铁律**：当你**没有任何 `in_progress` 单**时（`verifying`/观察中的**不计入**占用），**立即 `claim next` 接下一张未认领单**开工。一个 agent 可以同时挂着 N 张 `verifying`（观察中）＋ 至多 1 张 `in_progress`（在改）。
+- **复发 → 原认领者返工**：一张 `verifying` 单若**复发**（botwatch 对其 `dedupKey` 再次命中，或人工发现），该单 **reopen**（转回 `open`/`in_progress`），由**原 `claimedBy` 返工**（不是丢给新人）——预测落空的条目要么修正要么回滚（同 CHANGELOG 科学家纪律）。
+- **真正 `closed`**：只有"观察足够久没复发 ＋ 游戏内验证通过"才 `closed`。observing 不是终点，是**待复发裁决的中间态**。
+
+agent 主循环（伪代码）：
+```
+loop:
+  if 我有 in_progress 单 → 继续改 → 修好+部署+冒烟 → update verifying(观察中) + 挂 Monitor 盯复发
+  elif 有未认领 open 单   → claim next --as <我的唯一tag> → update in_progress → 开干
+  else                    → 盯自己 verifying 单的复发信号 / 帮审别人的补丁 / 打磨三层
+```
+
+### ★agent 自驱动：别停在 checkpoint（自 loop 反模式，实测踩过）
+
+**反模式（2026-06-20 实测）**：agent 做完一个工作单元，输出一段 checkpoint 进度报告，然后**停下来等用户**——即使没有任何需要用户拍板的事、`in_progress` 单还没推进、`open` 队列还有活。"我继续推 T-XXXX" 成了空话：**对话式 agent 输出文本＝让出控制＝回合结束**，没有外部驱动就自续不下去。
+
+**根因**：这正是 mc-agent 反复强调的 bot 第三原则——"**周期性承诺必须有机制载体（节拍器强制叫醒），不靠自觉**"——agent 把它用在了 bot 身上，却对自己的工作循环靠自觉续航。自觉必断。
+
+**改进①（行为）**：autonomous 模式下，**一个回合内做完一单立即调下一个工具推进下一单**，连续工作，进度报告**穿插从简、绝不作为停止信号**。只在两种情况收尾让出控制：(a) 看板真没有可推进的活（无 in_progress + 无未认领 open），或 (b) 撞到**不可逆操作 / 必须用户拍板**的硬阻塞（如重开世界、删数据、策略级抉择）。checkpoint 报告 ≠ 回合结束。
+
+**改进②（机制载体）**：跨回合续航必须有节拍器，三选一——
+- **用户 `/loop`**（dynamic，无间隔自排）驱动 agent：最可靠，agent 每轮被叫回来扫看板。
+- agent 自挂 **`ScheduleWakeup`**（loop 上下文内）或 **cron** 定期回来跑"看板扫描"：有 `in_progress` 没推进？有未认领 `open`？有 `verifying` 复发被 reopen？→ 接着干。
+- 节拍器内容固定为：`ticket.mjs onboard` + `mine --as <tag>` → 按主循环伪代码推进。
+
+> 一句话：**agent 治 bot 的"靠自觉必断"，先治自己**。
+
+**机制载体（已实现，T-0018）**：复发裁决由 `ticket-server.mjs` 的 `createOrMerge` 落地——同 `dedupKey` 的复发命中一张 `verifying`(观察中)/`fixed`(待部署) 单时，**自动 reopen**：有 `claimedBy` → `in_progress`（原认领者返工）、无认领 → `open`，并清空 `resolution`、history 记 `RECURRED while verifying — reopened`。所以"观察中的单复发→原认领者返工"是 server 强制的，不靠自觉。
+- **配套纪律**：**别把还在复发的条件 `closed`**——`closed`/`wontfix` 不在 merge 范围，关了它复发就只能另开新 dup 单（实测 T-0010/13/16 三连重复＝当时误把食物荒漠 pin 反复 close 所致）。复发的条件留 `verifying`，让 server 自动 reopen。`closed` 仅用于"观察够久确实没复发"。
 
 ## 改码隔离（并行不踩）
 

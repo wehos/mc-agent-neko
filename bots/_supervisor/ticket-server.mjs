@@ -86,13 +86,26 @@ function newTicket(body) {
 
 // auto-tickets dedup: if an OPEN ticket with the same dedupKey exists, bump it instead of
 // creating a duplicate (an ongoing seal-fail / pacing loop is ONE ticket, not 200).
+// ★AUTONOMOUS-CONTRACT REOPEN: a recurrence that lands on a ticket already in an
+// "observing / done-pending" state (verifying = 观察中, or fixed = 待部署) means the
+// previous fix did NOT hold — the condition came back. Per the autonomous contract
+// (docs/parallel-tickets.md), such a recurrence must REOPEN the ticket for rework by its
+// ORIGINAL claimer, not silently bump-and-stay-verifying (which leaves it looking healed
+// while it keeps recurring). claimedBy set → in_progress (原认领者返工); unclaimed → open.
 function createOrMerge(body) {
     if (body.dedupKey) {
         for (const t of tickets.values()) {
             if (t.dedupKey === body.dedupKey && OPEN_STATUSES.has(t.status)) {
                 t.occurrences += 1; t.updatedAt = nowIso();
                 if (body.evidence) t.evidence = body.evidence;   // freshest snapshot
-                t.history.push({ ts: nowIso(), actor: body.actor || 'detector', action: 'recurred', note: `occurrence #${t.occurrences}` });
+                let note = `occurrence #${t.occurrences}`;
+                if (t.status === 'verifying' || t.status === 'fixed') {
+                    const prev = t.status;
+                    t.status = t.claimedBy ? 'in_progress' : 'open';
+                    t.resolution = null;   // the prior fix is no longer considered resolved
+                    note = `RECURRED while ${prev}(观察中) — reopened → ${t.status} for rework${t.claimedBy ? ` by ${t.claimedBy}` : ''} (occurrence #${t.occurrences})`;
+                }
+                t.history.push({ ts: nowIso(), actor: body.actor || 'detector', action: 'recurred', note });
                 if (t.history.length > 60) t.history = t.history.slice(-60);
                 persist(t);
                 return { ticket: t, merged: true };

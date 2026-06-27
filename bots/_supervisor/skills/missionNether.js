@@ -1,3 +1,31 @@
+// ============================================================================
+// [DEPRECATED — framework-v2 retirement anchor]
+//
+// This top-level mission is SUPERSEDED by the framework-v2 decision stack:
+//   - modes.js  : computeNightPlan / computeOpening derive the intent
+//                 (FIGHT / MINE_THROUGH_NIGHT / GO_BED / DIG_ONE_CAP / SEAL_FORT;
+//                  SCOUT / WOOD_BUFFER / VILLAGE_HARVEST / DONE) every ~2s,
+//                 LLM-silent and purely deterministic.
+//   - world_model.js proposeTasks : translates that intent into prioritized
+//                 task proposals and commitGoal() writes bot._commitment
+//                 {kind, skill, args, since}.
+//   - kernelDriver.js : the single top-level sticky dispatch source — owns the
+//                 ws_server _skillRunning lock and fans out the committed
+//                 skill+args via customSkill.
+//
+// missionNether is RETIRED, NOT deleted: it is kept verbatim as a ROLLBACK
+// ANCHOR until kernelDriver is proven live. DO NOT blind-delete it.
+//
+// The active sticky is selected in sticky_skill.json — NOT in this file. Editing
+// this banner does not re-arm the mission; flipping sticky_skill.json (+ restart /
+// watchdog) does.
+//
+// NOTE: the old "GO_UNDERGROUND" mission step now maps to the mineDown skill
+// under the framework-v2 stack (DUSK_MINE_NIGHT / GO_UNDERGROUND -> mineDown),
+// not to this mission's internal underground logic.
+//
+// Everything below this banner is unchanged, executable rollback code.
+// ============================================================================
 // Hot-reloadable TOP-LEVEL MISSION: get Neko into the Nether and stay there, fully
 // unattended. This is the new sticky skill — it closes the autonomy gap where
 // prepNether RETURNS after gathering its kit and the bot then idles until the next
@@ -414,6 +442,29 @@ export default async function missionNether(bot, ctx) {
             }
         } catch (e) {}
 
+        // ★C293 DEATH-ZONE escape — fire on death-zone MEMBERSHIP, not nakedness. C226-A above only
+        // migrates a "naked" respawn (inv<=8); a bot hoarding 272 red_sand + terracotta with NO
+        // pickaxe/bed reads inv>8, so it was SKIPPED and re-died at the death-zone spawn every night
+        // (live 2026-06-20: deaths 53→56, world model said inDeathZone=true/recommend=true/rec=MIGRATE
+        // but C226-A never fired because inv>8). A junk hoard ≠ progress. Migrate OUT of a CONFIRMED
+        // death zone whenever pickless (can't bootstrap here), solid-daytime, and safe — bigger
+        // maxBlocks (400) + 4-min re-fire so she actually CLEARS the gauntlet to a livable biome.
+        // Not a reroll — relocate within the SAME world (user: fix the卡点 in the current world, 别恋战).
+        try {
+            const _mig = bot._world && bot._world.migration;
+            const _noPick293 = !bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
+            const _todNow = (bot.time && typeof bot.time.timeOfDay === 'number') ? bot.time.timeOfDay : 6000;
+            if (_mig && _mig.inDeathZone && _mig.recommend && _noPick293 && bot.health >= 14
+                && !isNightNow() && _todNow < 11000 && actionableHostilesNear(6) === 0
+                && (!bot._lastC293FireAt || Date.now() - bot._lastC293FireAt > 4 * 60 * 1000)) {
+                bot._lastC293FireAt = Date.now();
+                prog(`★C293 death-zone escape: inDeathZone + pickless (junk hoard ≠ progress) hp=${Math.round(bot.health)} tod=${_todNow} → strong migrate OUT maxBlocks=400 to livable biome`);
+                try { await skills.customSkill(bot, 'migrate', { force: true, gateFood: 0, gateHp: 8, abortHp: 6, maxBlocks: 400, settleScore: 6 }); }
+                catch (e) { prog(`C293 migrate threw: ${e.message}`); }
+                continue;
+            }
+        } catch (e) {}
+
         // ★EVAC reflex — a human who respawns (or wakes) surrounded doesn't fight or
         // grind: they sprint away first and think later. Death #261 (blackbox replay):
         // respawned with a zombie 2.8b away + 11 hostiles in 24b, full hp, yet
@@ -516,10 +567,23 @@ export default async function missionNether(bot, ctx) {
                             await wait(5000);
                             continue;
                         }
-                        const surfTarget = Math.max(70, Math.floor(p0.y) + 12);
-                        prog(`★KILL-BOX: pocket/low-roof in cluster (y=${Math.round(p0.y)}) → surfaceUp target=${surfTarget} before horizontal expel`);
-                        try { await skills.customSkill(bot, 'surfaceUp', surfTarget); } catch (e) {}
-                        continue;
+                        // ★C310-A (claude-A, T-0044): surfaceUp post-C281 REFUSES to pillar into OPEN
+                        // SKY (returns "already at open surface" the instant openAbove — by design, to
+                        // prevent the y86-spire→walk-off→fall death, the SAME #106 mechanism). So when
+                        // she's at open sky but y<70 (live 19:40: y67 open desert in a death cluster,
+                        // host=0 daytime), the old `surfaceUp; continue` looped FOREVER — surfaceUp can't
+                        // raise her, p0.y<70 stays true, 12min+ pinned. Only run the surfaceUp pre-step
+                        // when she's actually UNDER COVER (a real cave/pocket surfaceUp CAN break out of,
+                        // preserving the #270 climb-high-before-expel intent). If she already has open
+                        // sky, skip it and expel horizontally from here — she's surfaced, not in the
+                        // honeycomb, so a horizontal expel is safe (no cave-drop).
+                        if (hasOverheadCover()) {
+                            const surfTarget = Math.max(70, Math.floor(p0.y) + 12);
+                            prog(`★KILL-BOX: covered pocket in cluster (y=${Math.round(p0.y)}) → surfaceUp target=${surfTarget} before horizontal expel`);
+                            try { await skills.customSkill(bot, 'surfaceUp', surfTarget); } catch (e) {}
+                            continue;
+                        }
+                        prog(`★KILL-BOX: open-sky at y=${Math.round(p0.y)}<70 — surfaceUp can't pillar open air (C281 anti-spire-fall), expelling horizontally from here`);
                     }
                     const ux = d0 > 0.5 ? (p0.x - z.cx) / d0 : 1, uz = d0 > 0.5 ? (p0.z - z.cz) / d0 : 0;
                     const tx = Math.round(z.cx + ux * (z.r + 16)), tz = Math.round(z.cz + uz * (z.r + 16));
@@ -564,9 +628,15 @@ export default async function missionNether(bot, ctx) {
                     const moved = bot.entity.position.distanceTo(p0);
                     if (moved < 3) {
                         bot._killBoxFailedExpels = (bot._killBoxFailedExpels || 0) + 1;
-                        if (bot._killBoxFailedExpels >= 3 && p0.y >= 60 && !inMelee) {
+                        // ★C312-A (claude-A, T-0044): the expel-fail SUPPRESS gated on p0.y>=60, but the
+                        // open-sky anchor where the expel deadlocks (goToPosition path-locked + manual-
+                        // sprint ledge-aborted, C310-A's open-sky branch) sits at y58 — just under 60 →
+                        // suppress NEVER fired → infinite expel loop (live: stuck 30min @14,58,-28, the
+                        // anchor death-cluster). Open sky IS surfaced regardless of exact y; suppress when
+                        // she has open sky OR is high, so a near-sea-level surface cluster can't trap her.
+                        if (bot._killBoxFailedExpels >= 3 && (p0.y >= 60 || !hasOverheadCover()) && !inMelee) {
                             bot._killBoxSuppressUntil = Date.now() + 120000;
-                            prog(`★KILL-BOX: expel failed x${bot._killBoxFailedExpels} on safe surface — suppressing for 120s so task flow can rebuild gear`);
+                            prog(`★KILL-BOX: expel failed x${bot._killBoxFailedExpels} on safe surface (y=${Math.round(p0.y)} openSky=${!hasOverheadCover()}) — suppressing for 120s so task flow can rebuild gear`);
                         }
                     } else {
                         bot._killBoxFailedExpels = 0;
@@ -692,21 +762,36 @@ export default async function missionNether(bot, ctx) {
         try {
             if (bot._mobility && bot._mobility.state === 'MAROONED') {
                 const noPick = !bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
-                const scaffold = ['gravel', 'dirt', 'sand', 'cobblestone', 'cobbled_deepslate']
-                    .reduce((s, n) => s + (has(n) || 0), 0);
+                // ★C292: count BADLANDS/desert fillers too (terracotta/sandstone/red_sand) — C280/C288
+                // added these everywhere else but this rescue trigger still only counted gravel/dirt/
+                // sand/cobble, so a mesa-dug bot holding 272 red_sand + 69 terracotta read "scaffold=0".
+                const scaffold = bot.inventory.items().reduce((s, it) =>
+                    s + (/^(gravel|dirt|sand|red_sand|cobblestone|cobbled_deepslate|stone|[a-z_]*terracotta|sandstone|red_sandstone)$/.test(it.name || '') ? it.count : 0), 0);
                 const blockedRecent = bot._maroonedNoPickBlockedAt && Date.now() - bot._maroonedNoPickBlockedAt < 15000;
-                if (noPick && scaffold > 0 && blockedRecent && (!bot._lastMaroonedRescueAt || Date.now() - bot._lastMaroonedRescueAt > 60000)) {
+                const rescueReady = !bot._lastMaroonedRescueAt || Date.now() - bot._lastMaroonedRescueAt > 30000;
+                // ★C292 PERSISTENT-STANDDOWN break-out: the old rescue required blockedRecent — a flag
+                // that goes STALE while the bot just "stands down" without trying to move — so a
+                // MAROONED+enclosed bot whose surfaceGate ALREADY says "surface for wood" (C289) logged
+                // "standing down — march owns the body" FOREVER (live 2026-06-20: the original 277×打转
+                // bug, recurring post-bootstrap at y55 with 272 red_sand unused). When the world model
+                // RECOMMENDS surfacing (gate.allowSurface) OR we're pickless, with filler on hand, TOWER
+                // OUT (surfaceUp now uses C288's badlands-aware pillar). Gated only by a 30s rate-limit
+                // (rescueReady) — robust to mobility flicker (an earlier 20s-stand-down timer kept getting
+                // reset by MAROONED↔FREE flicker and never fired). The perpetual stand-down IS the block.
+                let gateWantsSurface = false;
+                try { gateWantsSurface = !!(bot._world && bot._world.surfaceGate && bot._world.surfaceGate.allowSurface); } catch (e) {}
+                if (scaffold > 0 && rescueReady && (blockedRecent || gateWantsSurface || noPick)) {
                     bot._lastMaroonedRescueAt = Date.now();
                     bot._climbingAt = Date.now();
-                    const ty = Math.max(84, Math.floor(bot.entity.position.y) + 8);
-                    prog(`[mission] MAROONED no-pick stone gate + scaffold=${scaffold} → surfaceUp rescue target=${ty}`);
-                    try { await skills.customSkill(bot, 'surfaceUp', ty); } catch (e) { prog(`surfaceUp rescue threw: ${e.message}`); }
+                    const ty = Math.max(72, Math.floor(bot.entity.position.y) + 10);
+                    prog(`[mission] ★C292 MAROONED break-out (scaffold=${scaffold} gateSurface=${gateWantsSurface} noPick=${noPick} y=${Math.floor(bot.entity.position.y)}) → surfaceUp target=${ty}`);
+                    try { await skills.customSkill(bot, 'surfaceUp', ty); } catch (e) { prog(`C292 break-out threw: ${e.message}`); }
                     continue;
                 }
                 prog(`[mission] standing down: MAROONED — march owns the body`);
                 await wait(5000);
                 continue;
-            }
+            } else if (bot._maroonedStandDownSince) { bot._maroonedStandDownSince = 0; }
         } catch (e) {}
 
         // ★MIGRATE — EARLY placement (C220 fix): on a healthy day, BEFORE the local grind
@@ -757,13 +842,35 @@ export default async function missionNether(bot, ctx) {
                 // 时,**压住 forage/migrate/roam,交回 prepNether 把早期 kit 做完**(C271 砍近木+C272 造具)。
                 // 有了剑才能有效猎食→食物回升。食物真危急(≤3)再 forage。这是"先把手头的事做完"的承诺。
                 const _bootstrapNoPick = !bot.inventory.items().some(i => /_pickaxe$/.test(i.name || ''));
-                if (_bootstrapNoPick && bot.food > 3 && !lowFoodHold.actionable && !isNightNow() && !isDuskNow()) {
+                // ★C309 (T-0042) escape hatch: only COMMIT to local bootstrap if there's actually
+                // wood to bootstrap WITH (logs/planks in inv OR reachable logs nearby). In a
+                // treeless area, suppressing migrate locks a pickless bot in a dead-end FOREVER
+                // (live 18:38: hp20/food20/picks0, chopDBG nearest=NONE, thrashing in a water pit).
+                // The early healthy-day migrate (L759) handles food-full bots; this guards the
+                // low-food 4–10 path that reaches C273. When woodless, DON'T suppress — fall through
+                // so the lowFoodHold migrate/forageExplore below can relocate to a tree biome.
+                let _bootstrapWoodless = false;
+                if (_bootstrapNoPick) {
+                    const _noWoodInv = !bot.inventory.items().some(i => /_log$|_planks$/.test(i.name || ''));
+                    let _logsNear = 0;
+                    try {
+                        const _ids = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log']
+                            .map(n => bot.registry && bot.registry.blocksByName[n] ? bot.registry.blocksByName[n].id : null).filter(x => x != null);
+                        if (_ids.length) _logsNear = (bot.findBlocks({ matching: _ids, maxDistance: 48, count: 1 }) || []).length;
+                    } catch (e) {}
+                    _bootstrapWoodless = _noWoodInv && _logsNear === 0;
+                }
+                if (_bootstrapNoPick && !_bootstrapWoodless && bot.food > 3 && !lowFoodHold.actionable && !isNightNow() && !isDuskNow()) {
                     if (!bot._lastBootstrapCommitLogAt || Date.now() - bot._lastBootstrapCommitLogAt > 30000) {
                         bot._lastBootstrapCommitLogAt = Date.now();
-                        prog(`★C273 BOOTSTRAP COMMIT: no pickaxe, food=${bot.food}>3, daytime safe — suppress forage/roam, finish early kit in place (prepNether: chop→table→pick→sword)`);
+                        prog(`★C273 BOOTSTRAP COMMIT: no pickaxe, food=${bot.food}>3, daytime safe, wood reachable — suppress forage/roam, finish early kit in place (prepNether: chop→table→pick→sword)`);
                     }
                     try { await skills.wait(bot, 800); } catch (e) {}   // small yield, avoid tight re-loop
                     continue;
+                }
+                if (_bootstrapWoodless && (!bot._lastWoodlessReleaseLogAt || Date.now() - bot._lastWoodlessReleaseLogAt > 30000)) {
+                    bot._lastWoodlessReleaseLogAt = Date.now();
+                    prog(`★C309 BOOTSTRAP COMMIT released: pickless but WOODLESS (no log/plank inv + no reachable log ≤48b) — cannot bootstrap here, fall through to migrate/forage (relocate to tree biome)`);
                 }
                 // ★ANTI-IDLE (food-desert livelock fix): a low-food hold in a food desert is an
                 // ABSORBING state — sitting still guarantees no food, while the only real fix is to

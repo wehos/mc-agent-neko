@@ -75,26 +75,130 @@ function progressStaleMs(s, t) {
     chunksSinceAch.add(s.chunk);
     return { staleMs: t - lastAchAt, chunks: chunksSinceAch.size };
 }
+// ── FROZEN-ALIVE tracker (T-0058, [monitoring-multi-signal]): a 'frozen data + live writer' hang —
+//    the broadcast loop keeps stamping a FRESH vitals.ts while the bot's real state is dead-pinned
+//    (pos+hp unchanged, events.log silent). STALE_SEC (ts age) + watchdog (process alive) both pass.
+//    Track how long pos+hp have been identical, plus events.log silence age. ──
+let _frozenKey = null, _frozenSince = now();
+function frozenAliveMs(s, t) {
+    const key = s.v ? `${s.v.x},${s.v.y},${s.v.z}|${s.hp}` : null;
+    if (key !== _frozenKey) { _frozenKey = key; _frozenSince = t; }
+    let eventsAgeS = 1e9;
+    try { eventsAgeS = (t - fs.statSync(path.join(DIR, 'events.log')).mtimeMs) / 1000; } catch {}
+    return { frozenMs: key ? (t - _frozenSince) : 0, eventsAgeS };
+}
+
+// ── WEDGE / FALSE-HOLD tracker (T-0062, screenshot-confirmed 2026-06-21 [validation-not-mock]):
+//    the bot self-reports "Covered night hold staying sealed" / mob=POCKET while ACTUALLY wedged in
+//    a useless dug niche, pinned 18min, LOSING hp to falls/mobs. FROZEN-ALIVE misses it (events keep
+//    flowing so its events-silent gate never trips); NO-PROGRESS clears on micro-oscillation; the
+//    "covered"=1-block-above self-report masks it. The tell a LEGIT safe hold CANNOT fake: HP DROP
+//    while pinned (a real shelter takes zero damage). Track pos-pinned time (pos-only key so an hp
+//    change doesn't reset it, unlike frozenAlive's pos+hp key) + max-hp-during-pin → hpDrop. ──
+let _wedgeKey = null, _wedgeSince = now(), _wedgeHpMax = 0;
+function wedgePinnedMs(s, t) {
+    // ~3-block cell so micro-jitter (bobbing in a niche / edge-wedge) still counts as pinned
+    const key = s.v ? `${Math.round(s.v.x / 3)},${Math.round(s.v.y / 3)},${Math.round(s.v.z / 3)}` : null;
+    if (key !== _wedgeKey) { _wedgeKey = key; _wedgeSince = t; _wedgeHpMax = s.hp || 0; }
+    else if ((s.hp || 0) > _wedgeHpMax) _wedgeHpMax = s.hp;   // track the peak so falls/hits show as a drop
+    return { pinnedMs: key ? (t - _wedgeSince) : 0, hpDrop: Math.max(0, _wedgeHpMax - (s.hp || 0)) };
+}
+
+// ── SURVIVAL-CHURN tracker (T-0073): a HEALTHY + FREE bot stuck in a survival-reflex loop
+//    (kiting mobs / circling a canyon / digging in pits all night) MAKING NO TIER PROGRESS.
+//    Slips the existing trio: no-progress wants chunks<=2 (it MOVES → chunks>2), mobility-stuck
+//    wants MAROONED (it's FREE), staleMin clears on giveKit pickup micro-bumps. The robust tell:
+//    pickTier FLAT (a tier can't be faked by an item pickup) for a long window WHILE the recent
+//    event log is REFLEX/combat/flee-DOMINATED (not skill-driven productive work) and hp is healthy
+//    (≥14 → not the LOWHP emergency, which owns its own flag). Track continuous time the churn holds;
+//    a tier advance (real progress) OR dropping out of the churn condition resets it.
+//    Thresholds (reflexLines≥8 of last-80 events, 15min) are tunable if it over/under-fires.
+const _REFLEX_RE = /Fighting|Outmatched|digging in|kit(e|ing)|running from|flee|getting out|Drowning|dig(ging)? out|escaping|MLG|clutch|swim|heading for air/i;
+let _churnTier = null, _churnSince = now();
+function survivalChurnMs(s, t) {
+    const reflexLines = (s.events || []).filter(l => _REFLEX_RE.test(l)).length;
+    const churning = (s.hp != null && s.hp >= 14)
+        && !/MAROONED|ENTOMB|POCKET/i.test(s.mob || '')
+        && reflexLines >= 8;
+    const tier = churning ? (s.pickTier || 'none') : null;
+    if (tier !== _churnTier) { _churnTier = tier; _churnSince = t; }   // tier advance OR churn-off → reset
+    return { churnMs: (churning && _churnTier != null) ? (t - _churnSince) : 0, reflexLines };
+}
 
 // ── generic STATE-detector engine: debounce on (fire) AND off (clear+auto-verify) ─────────
 // Each detector: { key, type, severity, dedupKey, label, fireMs, clearMs, active(s), ticket(s,durMs) }
 const D = [
     {
+        key: 'frozen-alive', type: 'stuck', severity: 'critical', dedupKey: 'frozen-alive-hang', label: 'FROZEN-ALIVE',
+        fireMs: 0, clearMs: 30000,   // frozenMs IS the timer; clear 30s after pos/hp/events resume
+        // ★T-0058 ([monitoring-multi-signal]): the 'frozen data + live writer' hang. The broadcast loop
+        // keeps stamping a FRESH vitals.ts (so STALE_SEC age-check AND the watchdog's process-alive check
+        // both pass) while the bot's REAL state is dead-pinned: pos+hp unchanged AND events.log silent
+        // (live 02:34: hp fell 19→0 in water then froze, ts fresh 8s, death_log NOT incrementing, pos
+        // pinned 66,58,64 for 190s+ — both sentinels blind). NEVER trust a single fresh ts. This runs only
+        // when vitals IS fresh (the else branch), so it catches exactly the writer-outlived-the-loop case.
+        // Legit night-holds keep EMITTING events (table-recovery / Pocketed every 2-15s) → events.log stays
+        // fresh → they don't trip this (宁缺毋滥, no T-0027-style false-fire on a healthy sealed hold).
+        active: (s) => !!(s._frozen && s._frozen.frozenMs >= 2 * 60000 && s._frozen.eventsAgeS >= 120),
+        ticket: (s, dur) => ({
+            type: 'stuck', severity: 'critical', dedupKey: 'frozen-alive-hang',
+            title: `冻结假活 ${Math.round(dur / 60000)}min — pos/hp死钉+events静默,vitals ts仍刷新 @${s.v ? s.v.x + ',' + s.v.y + ',' + s.v.z : '?'} hp=${s.hp}`.slice(0, 140),
+            detail: `'冻结数据+活写入器'hang: vitals.ts新鲜(${s.ageS}s)但 pos=${s.v ? s.v.x + ',' + s.v.y + ',' + s.v.z : '?'}+hp=${s.hp} 已 ${Math.round(s._frozen.frozenMs / 60000)}min 完全不变,events.log 静默 ${Math.round(s._frozen.eventsAgeS)}s,deaths=${s.deaths}(未涨=死亡未注册/未重生)。写入器还在stamp新ts但bot loop冻死→STALE_SEC+watchdog进程存活全盲。须 watchdog kick/重连bridge恢复。skill=${s.skill} mob=${s.mob}.`.slice(0, 240),
+            evidence: { pos: s.v ? [s.v.x, s.v.y, s.v.z] : null, vitals: { hp: s.hp, food: s.food, skill: s.skill }, frozenMin: Math.round(s._frozen.frozenMs / 60000), eventsAgeS: Math.round(s._frozen.eventsAgeS), deaths: s.deaths, mobility: s.mob, progressTail: s.progTail },
+        }),
+    },
+    {
+        key: 'false-hold', type: 'stuck', severity: 'high', dedupKey: 'false-hold-wedge', label: 'FALSE-HOLD',
+        fireMs: 0, clearMs: 45000,
+        // ★T-0062 (用户截图实证 2026-06-21, [validation-not-mock]/[monitoring-multi-signal]): bot 自报
+        // "Covered night hold staying sealed"/mob=POCKET 但实际楔在挖坏的废坑里, pos 钉死 18min 且持续
+        // 被 falls/怪掉血。FROZEN-ALIVE 漏(events 在刷,其 events-silent 门不 trip)、NO-PROGRESS 被微动
+        // 清、"covered"(头顶1块)自报骗过监控。真安全 hold 学不来的破绽=钉死期间掉血(真庇护零伤害)。
+        // fire: pinned>=10min AND (hpDrop>=3 OR pinned>=20min), 不管 events/covered。frame 自动附 → 必看。
+        active: (s) => !!(s._wedge && s._wedge.pinnedMs >= 10 * 60000
+            && (s._wedge.hpDrop >= 3 || s._wedge.pinnedMs >= 20 * 60000)
+            && !/sleep|^bed$/i.test(s.skill || '')),
+        ticket: (s, dur) => ({
+            type: 'stuck', severity: 'high', dedupKey: 'false-hold-wedge',
+            title: `假庇护/楔死 ${Math.round(s._wedge.pinnedMs / 60000)}min — 自报covered/hold但pos钉死@${s.v ? s.v.x + ',' + s.v.y + ',' + s.v.z : '?'}且掉血${s._wedge.hpDrop}`.slice(0, 140),
+            detail: `bot自报"covered night hold"/mob=${s.mob}但实际楔在原地${Math.round(s._wedge.pinnedMs / 60000)}min、hold期间掉血${s._wedge.hpDrop}(真安全hold零伤害=假庇护/楔坑,#FROZEN漏因events在刷/#NO-PROGRESS被微动清)。★必看附帧(frames/)核实geometry,别信log自报"covered"。skill=${s.skill} hp=${s.hp} food=${s.food} stale=${Math.round((s._stale ? s._stale.staleMs : 0) / 60000)}min.`.slice(0, 240),
+            evidence: { pos: s.v ? [s.v.x, s.v.y, s.v.z] : null, pinnedMin: Math.round(s._wedge.pinnedMs / 60000), hpDrop: s._wedge.hpDrop, vitals: { hp: s.hp, food: s.food, skill: s.skill }, mobility: s.mob, progressTail: s.progTail },
+        }),
+    },
+    {
         key: 'no-progress', type: 'idle', severity: 'high', dedupKey: 'no-progress', label: 'NO-PROGRESS',
         fireMs: 0, clearMs: 60000,   // staleness IS the timer; clear after 60s of real progress
-        // ★宁缺毋滥: NO-PROGRESS is the CATCH-ALL stall signal — it must YIELD to a more-specific
-        // detector that already explains the stall, or one root spawns two tickets (live 2026-06-20:
-        // bootstrap-deadlock T-0012 + no-progress T-0024 for the SAME pickless stuck bot). Only fire
-        // when the stall has NO specific owner: not bootstrap-deadlocked (picks=0/no pickaxe) and not
-        // mobility-stuck (MAROONED/ENTOMBED/POCKET).
-        active: (s) => s._stale.staleMs >= 8 * 60000 && s._stale.chunks <= 2 && !/sleep|bed|idle/i.test(s.skill || '')
-            && !(s.picks === 0 && !s.has(/_pickaxe$/))
-            && !/MAROONED|ENTOMB|POCKET/i.test(s.mob || ''),
+        // ★C340 (T-0072) RETIRED — DISABLED (active→false). This staleMin-based catch-all was
+        // SUPERSEDED by the overseer's `progress_velocity` metric (catches NET tier regression that
+        // staleMin missed — a micro-increment kept clearing staleMin while the bot net-stagnated, the
+        // 6.7h Sisyphus) + the T-0060 headline umbrella that tracks the stall. Left running it kept
+        // SPAWNING DUP idle tickets each stall (T-0026→T-0070→…, dedupKey misses once the prior is
+        // verified/closed → fresh dup) → board pollution. The specific stall owners still fire
+        // (frozen-alive / false-hold / mobility-stuck / bootstrap-deadlock / self-pin-kick), so no
+        // real-time coverage is lost. Re-enable (restore the old active()) ONLY if an owner-less
+        // real-time stall is shown to slip past both progress_velocity AND the specific detectors.
+        // (Kept the definition for context/reversibility per 宁缺毋滥; just gated off.)
+        active: (s) => false,
         ticket: (s, dur) => ({
             type: 'idle', severity: 'high', dedupKey: 'no-progress',
             title: `零真实进展 ${Math.round(dur / 60000)}min — 成果向量未变 (skill=${s.skill})`.slice(0, 140),
             detail: `成果向量 [${s.ach}] 已 ${Math.round(s._stale.staleMs / 60000)}min 未推进, 仅 ${s._stale.chunks} 个区块; skill 在churn但无产出. mob=${s.mob} hp=${s.hp} food=${s.food} commit=${s.commitment ? s.commitment.kind : '-'}`.slice(0, 240),
             evidence: { pos: s.v ? [s.v.x, s.v.y, s.v.z] : null, vitals: { hp: s.hp, food: s.food, skill: s.skill }, ach: s.ach, mobility: s.mob, commitment: s.commitment, progressTail: s.progTail },
+        }),
+    },
+    {
+        // ★C338 (T-0073) SURVIVAL-CHURN: the gap left by no-progress(C337)/mobility-stuck/staleMin —
+        // a HEALTHY + FREE bot churning in a survival-reflex loop (kite/circle/dig) all night with NO
+        // tier advance. pickTier-flat is the giveKit-proof progress signal; reflex-dominated recent log
+        // is the "thrashing not working" signal. See survivalChurnMs() for the tracker rationale.
+        key: 'survival-churn', type: 'idle', severity: 'high', dedupKey: 'survival-churn', label: 'SURVIVAL-CHURN',
+        fireMs: 0, clearMs: 90000,   // the 15min accumulation IS the timer; clear after 90s out of churn
+        active: (s) => s._churn && s._churn.churnMs >= 15 * 60000,
+        ticket: (s, dur) => ({
+            type: 'idle', severity: 'high', dedupKey: 'survival-churn',
+            title: `求生反射churn主导 ${Math.round(dur / 60000)}min — 满血/FREE打转无tier进展 (skill=${s.skill})`.slice(0, 140),
+            detail: `hp=${s.hp} mob=${s.mob} 困在反射loop(kite/dig/flee, 近80事件中${s._churn.reflexLines}条反射), pickTier=${s.pickTier}已${Math.round(dur / 60000)}min未推进. 漏在no-progress(在移动chunks>2)/mobility-stuck(FREE非MAROONED)/staleMin(giveKit拾取微增清零)三者缝隙. progTail=${s.progTail}`.slice(0, 240),
+            evidence: { pos: s.v ? [s.v.x, s.v.y, s.v.z] : null, vitals: { hp: s.hp, food: s.food, skill: s.skill }, mobility: s.mob, pickTier: s.pickTier, reflexLines: s._churn.reflexLines, churnMin: Math.round(dur / 60000), events: (s.events || []).filter(l => _REFLEX_RE.test(l)).slice(-6), progressTail: s.progTail },
         }),
     },
     {
@@ -131,6 +235,29 @@ const D = [
                 evidence: { pos: s.v ? [s.v.x, s.v.y, s.v.z] : null, vitals: { hp: s.hp, food: s.food, skill: s.skill }, kit: s.wm ? s.wm.kit : null, commitment: s.commitment, progressTail: s.progTail },
             };
         },
+    },
+    {
+        key: 'false-shelter', type: 'shelter', severity: 'high', dedupKey: 'false-shelter', label: 'FALSE-SHELTER',
+        fireMs: 3 * 60000, clearMs: 60000,
+        // ★防漏单 (T-0040): the SILENT night near-miss — bot is night-sheltering (prepNether/bunker
+        // intent or contained mobility) but the roof is NOT actually sealed (wm.cover.coverReal===false).
+        // If no mob happens to come, NOTHING fires: no death, no seal-fail event, and mobility-stuck
+        // explicitly EXCLUDES this (it only fires on coverReal===TRUE legit holds) → the unsealed-shelter
+        // risk goes fully undetected (user's founding complaint: "把自己放碉堡里没封顶,没怪来=无声近失").
+        // Precision guards: night strictly known (isDay===false), cover strictly known-unsealed
+        // (coverReal===false, not just missing), shelter intent, holding ≥1min, and NO actionable threat
+        // (an active threat is already owned by seal-fail/death/combat — this is the silent case only).
+        active: (s) => !!(s.wm && s.wm.time && s.wm.time.isDay === false
+            && s.wm.cover && s.wm.cover.coverReal === false
+            && (/prepNether|shelter|bunker|sleep|bed/i.test(s.skill || '') || /POCKET|ENC|ENTOMB|MAROON/i.test(s.mob || ''))
+            && (s._stale ? s._stale.staleMs >= 60000 : false)
+            && (s.threat ? (s.threat.actionable | 0) === 0 : true)),
+        ticket: (s, dur) => ({
+            type: 'shelter', severity: 'high', dedupKey: 'false-shelter',
+            title: `夜间庇护未封顶(无声近失) ${Math.round(dur / 60000)}min — coverReal=false @${s.v ? s.v.x + ',' + s.v.y + ',' + s.v.z : '?'}`.slice(0, 140),
+            detail: `夜间(isDay=false)+庇护意图(skill=${s.skill} mob=${s.mob})但世界模型 cover.coverReal=false=顶未真封,持续${Math.round(dur / 60000)}min且无actionable怪→恰好没怪来则无死亡/无seal-fail事件/mobility-stuck也豁免=旧检测器全漏(本检测器专补此洞)。hp=${s.hp} food=${s.food} picks=${s.picks}. 须查为何没封顶(无料?placeBlock无参考面?digDown失败?见 T-0037/T-0001 seal机理).`.slice(0, 240),
+            evidence: { pos: s.v ? [s.v.x, s.v.y, s.v.z] : null, vitals: { hp: s.hp, food: s.food, skill: s.skill }, cover: s.wm ? s.wm.cover : null, time: s.wm ? s.wm.time : null, threat: s.threat, progressTail: s.progTail },
+        }),
     },
 ];
 
@@ -248,6 +375,9 @@ async function tick() {
     flagsOut.length = 0;
     const s = readState(t);
     s._stale = progressStaleMs(s, t);
+    s._frozen = frozenAliveMs(s, t);   // ★T-0058 'frozen data + live writer' hang tracker
+    s._wedge = wedgePinnedMs(s, t);    // ★T-0062 false-hold/wedge tracker (pinned + hp-drop = fake shelter)
+    s._churn = survivalChurnMs(s, t);  // ★T-0073 healthy+FREE survival-reflex churn (mobile stall, tier-flat)
 
     if (!s.v || s.ageS > STALE_SEC) {
         flagsOut.push(`★STALE(vitals ${s.ageS}s old)`);

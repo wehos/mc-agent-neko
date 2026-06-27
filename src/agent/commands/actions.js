@@ -101,6 +101,22 @@ export const actionsList = [
         }
     },
     {
+        name: '!vetoInstinct',
+        description: 'VETO an executing instinct (e.g. go_to_bed_sleep) — it stops NOW and stays suppressed for the rest of this trigger cycle (e.g. this night), re-arming only when the trigger lapses. Use when an instinct is acting but you judge it wrong right now (a reflex notified you "[本能] ...执行中").',
+        params: {
+            'name': { type: 'string', description: 'instinct name to veto, e.g. "go_to_bed_sleep"' },
+            'reason': { type: 'string', description: 'short reason for the veto' }
+        },
+        perform: async function (agent, name, reason) {
+            try {
+                const fw = await import('../framework/index.js');
+                fw.instinct.vetoInstinct(agent.bot, name, reason || 'llm-veto');
+                try { if (agent.bot.interrupt_code !== undefined) agent.bot.interrupt_code = true; } catch (e) {}
+                return `Vetoed instinct '${name}' for this cycle (${reason || 'no reason'}).`;
+            } catch (e) { return `Veto failed: ${e && e.message || e}`; }
+        }
+    },
+    {
         name: '!stfu',
         description: 'Stop all chatting and self prompting, but continue current action.',
         perform: async function (agent) {

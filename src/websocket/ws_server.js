@@ -123,6 +123,16 @@ class WSMessageServer {
                         if (!max || (used / max) < 0.85) pickFx++;
                     }
                 } catch (e) {}
+                // ★C314-A: expose worn ARMOR — we were BLIND to it (no armor field), so a cheat-given
+                // iron set that never auto-equipped left her defenseless and we couldn't tell why she
+                // kept dying to swarms (#117: 3-sec zombie kill "armored"). Armor slots = inventory
+                // slots 5(head)/6(torso)/7(legs)/8(feet). Report worn pieces so survival is observable.
+                let armor = '?';
+                try {
+                    const _sl = bot.inventory && bot.inventory.slots;
+                    const _a = [_sl && _sl[5], _sl && _sl[6], _sl && _sl[7], _sl && _sl[8]].filter(Boolean).map(it => it.name);
+                    armor = _a.length ? _a.join(',') : 'none';
+                } catch (e) { armor = '?'; }
                 this.broadcast({
                     type: 'vitals', ts: Date.now(),
                     x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z),
@@ -133,6 +143,7 @@ class WSMessageServer {
                     skill: this._skillRunningName || null,
                     held: (bot.heldItem && bot.heldItem.name) || 'empty',   // exposes digging-with-wrong-tool
                     pickFx,                                                  // effective (non-worn-out) pickaxes
+                    armor,                                                   // ★C314-A worn armor pieces (none = defenseless → swarm death risk)
                     mob: ((bot._mobility && bot._mobility.state) || '?') + (bot._mobility && bot._mobility.enclosed ? '/ENC' : ''),   // mobility state machine (FREE/POCKET/ENTOMBED/SWIM[/ENC=封闭地穴])
                     pinKicks: bot._persistentPinKicks || 0,   // ★reflex_watchdog escalation: N (>3) = bot is in a PERSISTENT pin the forced-interrupt kick can't break — supervisor should dispatch a relocating recovery (forageExplore/escapePlan). 0 = not pinned / kick still working.
                     inv,

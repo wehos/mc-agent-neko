@@ -11,7 +11,11 @@
 // opts: { steps=40, heading=null (auto), targetY=45 }
 
 const ORE = /(iron_ore|deepslate_iron_ore|coal_ore|deepslate_coal_ore|copper_ore|gold_ore|diamond_ore|deepslate_diamond_ore|redstone_ore|lapis_ore)/;
-const FLUID = /(lava|flowing_lava)/;
+// ★C311 (T-0048): WATER was missing here — only lava was guarded. mineDown dug a staircase
+// straight into an aquifer at depth (y35) and the bot drowned (#112), while its siblings
+// branchMine (BAD_FLUID=/lava|water/) and digDown (_WL incl. water) both stop on water.
+// Water in the feet/head/floor cell, or flowing in from a side, must STOP the descent.
+const FLUID = /(lava|flowing_lava|water|flowing_water)/;
 const UNBREAKABLE = /(bedrock|barrier|obsidian|reinforced_deepslate)/;
 
 // PURE: descending-staircase feet-cell sequence from start along a cardinal heading.
@@ -23,9 +27,9 @@ function stairCells(start, sx, sz, n) {
     return cells;
 }
 
-// PURE: safe to dig+drop into this stair cell? reads = {feet,head,floor,lavaNear}
+// PURE: safe to dig+drop into this stair cell? reads = {feet,head,floor,fluidNear}
 function stairSafety(reads) {
-    if (reads.lavaNear) return { safe: false, reason: 'lava near stair cell' };
+    if (reads.fluidNear) return { safe: false, reason: 'fluid (lava/water) near stair cell' };
     if (FLUID.test(reads.feet || '') || FLUID.test(reads.head || '') || FLUID.test(reads.floor || '')) return { safe: false, reason: 'fluid in/under stair cell' };
     if (UNBREAKABLE.test(reads.feet || '') || UNBREAKABLE.test(reads.head || '')) return { safe: false, reason: `unbreakable (${reads.feet}/${reads.head})` };
     return { safe: true, reason: 'ok' };
@@ -81,7 +85,38 @@ export default async function mineDown(bot, ctx, opts = {}) {
     for (let i = 0; i < steps; i++) {
         const cur = bot.entity.position;
         const cy = Math.round(cur.y);
-        if (cy <= targetY) { log_(`reached targetY=${targetY} at step ${i}`); break; }
+        if (cy <= targetY) {
+            // ★AT-DEPTH NO-OP FREEZE FIX (live y12 pin 450s+): mineDown ONLY descends, so once it reaches
+            //   targetY it returns instantly and the proposer (GO_UNDERGROUND/DUSK_MINE_NIGHT) re-dispatches
+            //   it → no-op every ~1.5s → the bot freezes at the bottom of the iron band having mined NO ore
+            //   (live: y12, coal but 0 raw_iron). Fall through to branchMine — a horizontal ore tunnel
+            //   (its own lava/water guards) — so the bot actually MINES iron/diamond at the band.
+            // ★T-0092 AT-DEPTH BRANCH LOOP: a SINGLE branchMine(24) then return wasn't enough — the
+            //   proposer re-dispatched, branchMine re-tunnelled the same dead-end, and the bot空转 at
+            //   the band底. Instead LOOP branchMine here with a NET-PROGRESS judge: keep tunnelling for
+            //   ore until either (a) no new ore came in over the last 2 rounds (this seam is mined out →
+            //   return so a fresh dispatch starts a new heading/depth), (b) the pack is full (go bank),
+            //   or (c) the pick is about to snap with no recraft (don't strand deep). This makes
+            //   descend-then-MINE-OUT the productive unit instead of descend-then-touch-and-leave.
+            const oreUnits = () => invCount(/^raw_iron$/) + invCount(/^raw_copper$/) + invCount(/^raw_gold$/)
+                + invCount(/^(iron_ore|deepslate_iron_ore|gold_ore|deepslate_gold_ore|redstone|lapis_lazuli|diamond)$/)
+                + invCount(/_ore$/);
+            let lastUnits = oreUnits(), stallRounds = 0, rounds = 0;
+            log_(`reached targetY=${targetY} at step ${i} — branch-mining loop for ore (oreUnits=${lastUnits})`);
+            while (rounds++ < 8) {
+                if (bot.interrupt_code) { abort = 'interrupted at-depth branch loop'; break; }
+                // pack full → stop mining, let the higher layer bank/declutter (drops would be lost).
+                let free = 36; try { free = bot.inventory.emptySlotCount(); } catch (e) {}
+                if (free <= 1) { log_(`pack full (free=${free}) — stop at-depth mining (bank/declutter)`); break; }
+                // pick guard: about to break + can't recraft → return before stranding deep.
+                if (pickAboutToBreak() && !canCraftPick()) { log_('pick about to break + no recraft — stop at-depth mining'); break; }
+                try { await skills.customSkill(bot, 'branchMine', 24); } catch (e) { log_(`branchMine threw: ${e && e.message || e}`); break; }
+                const now = oreUnits();
+                if (now > lastUnits) { stallRounds = 0; lastUnits = now; }
+                else { stallRounds++; if (stallRounds >= 2) { log_(`no new ore over ${stallRounds} rounds (oreUnits=${now}) — seam mined out, return for fresh dispatch`); break; } }
+            }
+            break;
+        }
         // bail to survival if an actionable hostile got close (shouldn't in a sealed stair, but guard)
         try {
             const close = Object.values(bot.entities || {}).some(e => e && e !== bot.entity && e.position && ctx.mc.isHostile(e) && e.position.distanceTo(cur) < 4);
@@ -104,11 +139,13 @@ export default async function mineDown(bot, ctx, opts = {}) {
         // the new feet is (fx,cy-2,fz) and MUST stay solid or the bot free-falls.
         const newFeet = bn(fx, cy - 1, fz), newHead = bn(fx, cy, fz), clear = bn(fx, cy + 1, fz);
         const support = bn(fx, cy - 2, fz);
-        let lavaNear = false;
+        // ★C311 (T-0048): was lava-only; now lava+water — an aquifer floods the stair from the
+        // SIDE (not just the cell we break), the recurring deep drowning (#112). Same ring, both fluids.
+        let fluidNear = false;
         for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0], [0, -2, 0]]) {
-            if (/lava/.test(nm(bn(fx + dx, cy - 1 + dy, fz + dz)))) { lavaNear = true; break; }
+            if (/lava|water/.test(nm(bn(fx + dx, cy - 1 + dy, fz + dz)))) { fluidNear = true; break; }
         }
-        const safe = stairSafety({ feet: nm(newFeet), head: nm(newHead), floor: nm(support), lavaNear });
+        const safe = stairSafety({ feet: nm(newFeet), head: nm(newHead), floor: nm(support), fluidNear });
         if (!safe.safe) { abort = `unsafe at ${fx},${cy - 1},${fz}: ${safe.reason}`; break; }
         // No solid support under the new feet (cliff/cave) => don't blind-drop; stop.
         if (/^(air|cave_air|void_air|water|flowing_water)$/.test(nm(support))) { abort = `no floor support under ${fx},${cy - 2},${fz} (${nm(support)}) — stop, don't free-fall`; break; }
@@ -122,8 +159,17 @@ export default async function mineDown(bot, ctx, opts = {}) {
             dug += 3;
             // opportunistic ore around the dug column (one ring)
             for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, 1, 0]]) {
-                const b = bn(fx + dx, cy + dy, fz + dz);
-                if (b && ORE.test(b.name)) { try { await skills.breakBlockAt(bot, fx + dx, cy + dy, fz + dz); ore++; } catch (e) {} }
+                const ox = fx + dx, oy = cy + dy, oz = fz + dz;
+                const b = bn(ox, oy, oz);
+                if (!(b && ORE.test(b.name))) continue;
+                // ★C311 (T-0048): don't pop an ore that's plugging a fluid pocket — breaking it
+                // releases lava/water into the stair (#113 lava: deep ore-ring with no fluid check).
+                let oreFluidAdj = false;
+                for (const [ex, ey, ez] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]) {
+                    if (/lava|water/.test(nm(bn(ox + ex, oy + ey, oz + ez)))) { oreFluidAdj = true; break; }
+                }
+                if (oreFluidAdj) continue;
+                try { await skills.breakBlockAt(bot, ox, oy, oz); ore++; } catch (e) {}
             }
         } catch (e) { abort = `dig threw: ${e && e.message || e}`; break; }
 

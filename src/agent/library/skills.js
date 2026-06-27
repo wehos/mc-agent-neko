@@ -318,10 +318,33 @@ export async function craftRecipeLocal(bot, itemName, num=1) {
 
     let recipes = bot.recipesFor(itemId, null, 1, null);
     let craftingTable = null;
+    // ★C301: bot.recipesFor() can return [] for a 2x2-craftable item EVEN WHEN the bot holds the
+    // ingredients — crafting_table is built from the #planks tag, which doesn't resolve for jungle/
+    // birch/etc. planks in some minecraft-data versions. The code then WRONGLY assumed a 3x3 table was
+    // needed, hunted for one, found none, and gave up — so a bot with 14 jungle_planks could never
+    // craft a crafting_table → no table → no tools/sword, the keystone dead-lock (T-0017). Before
+    // assuming a table is needed, try recipesAll() (inventory-independent) and keep any NO-table recipe
+    // the bot actually has ingredients for.
     if (!recipes || recipes.length === 0) {
-        const hasCarriedTable = world.getInventoryCounts(bot)['crafting_table'] > 0;
-        if (hasCarriedTable) {
+        try {
+            const all = bot.recipesAll(itemId, null, null) || [];
+            const inv0 = world.getInventoryCounts(bot);
+            const makeable = all.filter(r => r && !r.requiresTable
+                && mc.calculateLimitingResource(inv0, mc.ingredientsFromPrismarineRecipe(r)).num > 0);
+            if (makeable.length) { recipes = makeable; log(bot, `${itemName}: recipesFor empty but recipesAll found a no-table recipe with held ingredients (C301).`); }
+        } catch (e) {}
+    }
+    let placedTableFromCarry = false;
+    let placedTablePos = null;
+    if (!recipes || recipes.length === 0) {
+        const tblBefore = world.getInventoryCounts(bot)['crafting_table'] || 0;
+        if (tblBefore > 0) {
             craftingTable = await placeCraftingTableWithinReach(bot);
+            // ★T-0079: did we actually PLACE one from carry (vs reuse a nearby existing table)?
+            // placeCraftingTableWithinReach returns an in-range existing table without placing — only
+            // reclaim a table WE put down, never someone else's / a home/work-area table.
+            const tblAfter = world.getInventoryCounts(bot)['crafting_table'] || 0;
+            if (craftingTable && tblAfter < tblBefore) { placedTableFromCarry = true; placedTablePos = craftingTable.position; }
         } else {
             const near = world.getNearestBlock(bot, 'crafting_table', 4);
             if (near && bot.entity.position.distanceTo(near.position) <= 4.5) craftingTable = near;
@@ -359,6 +382,22 @@ export async function craftRecipeLocal(bot, itemName, num=1) {
         log(bot, `Local craft ${itemName} failed: ${e.message}.`);
         return false;
     } finally {
+        // ★T-0079 (perpetual-pickless / tier-wood relapse keystone): RECLAIM the table we placed from
+        // carry. Unlike craftRecipe's stay-put "16-block reuse" (a work area where leaving the table is
+        // fine), craftRecipeLocal is MOBILE emergency cave-recraft — a left table is stranded the instant
+        // the bot descends/moves, so the carried-table count drops to 0 → next deep pick-recraft has no
+        // table → canRecraftPick=false → picks drain to 0 → wood relapse (the西西弗斯 churn). Reclaiming
+        // keeps ONE carried table cycling with the bot so it can always remake a pickaxe underground from
+        // free cobble+sticks. Done here while guard modes are still suppressed (no mode walks the bot off
+        // mid-reclaim and re-strands it). Break the EXACT block we placed, sweep the drop, retry a few.
+        if (placedTableFromCarry && placedTablePos) {
+            for (let t = 0; t < 3; t++) {
+                try { const blk = bot.blockAt(placedTablePos); if (blk && blk.name === 'crafting_table') await breakBlockAt(bot, placedTablePos.x, placedTablePos.y, placedTablePos.z); } catch (e) {}
+                try { await pickupNearbyItems(bot); } catch (e) {}
+                if ((world.getInventoryCounts(bot)['crafting_table'] || 0) > 0) break;
+                await new Promise(r => setTimeout(r, 200));
+            }
+        }
         try { for (const m in prevModes) bot.modes.setOn(m, prevModes[m]); } catch (e) {}
         try { bot.clearControlStates(); } catch (e) {}
     }
@@ -778,7 +817,7 @@ async function equipForDig(bot, block) {
 // Returns 'ok' | 'gone' | 'unreachable' | 'timeout' | 'error'. Caller decides cleanup
 // (exclude, expand neighbours, relocate, ...). Opts: maxMs dig backstop, approach (path
 // closer), equip (run equipForDig — false if caller already equipped), pickup (vacuum drop).
-async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = true, pickup = false } = {}) {
+async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = true, pickup = false, requireLOS = false } = {}) {
     const dead = (b) => !b || b.boundingBox === 'empty' || b.name === 'air';
     if (dead(block)) return 'gone';
     const reachOf = () => bot.entity.position.offset(0, 1.62, 0).distanceTo(block.position.offset(0.5, 0.5, 0.5));
@@ -788,6 +827,17 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
         if (reachOf() > 4.6) return 'unreachable';
         const cur = bot.blockAt(block.position);
         if (dead(cur)) return 'gone';
+        // ★C337 (T-0035 reopen·回归): anti-x-ray LOS gate, opt-in via requireLOS (collectBlock passes it
+        // for ORE). After approach the bot can still be on the NEAR side of a thin wall with the target
+        // 2.5-4.6b away THROUGH solid rock → digging it = x-ray (用户"矿在距离内但中间隔着石头,违反规则").
+        // Block ONLY the unambiguous x-ray: at-distance(>2.5b, not tunneled-adjacent) AND occluded
+        // (no line-of-sight). A buried ore we legitimately tunneled UP TO is reachOf≤2.5 (exempt), and a
+        // genuinely visible ore passes canSeeBlock — so legit vein/tunnel mining is unaffected; only the
+        // reach-through-a-wall grab is refused, routing the caller to expose it properly or skip it.
+        if (requireLOS && reachOf() > 2.5) {
+            const _los = (() => { try { return bot.canSeeBlock(cur); } catch (e) { return true; } })();
+            if (!_los) return 'occluded';
+        }
         if (equip) await equipForDig(bot, cur);
         // ★Shorter timeout for normal blocks: a mineral/block we CAN'T actually break (wedged in
         // a corner / behind rock whose face we can't reach — the "对着夹角拼命空挥" the user keeps
@@ -895,6 +945,49 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
     // Blocks to ignore safety for, usually next to lava/water
     const unsafeBlocks = ['obsidian'];
 
+    // ★C304 (T-0035) HUMAN-LIKE ORE REACH — "只在可触达范围内碰矿".
+    // The nearest ore by straight-line can sit ACROSS an air gap / behind a thin wall the bot
+    // is standing on. safeDig only gates on raw eye→block distance (≤4.6), so when such an ore
+    // is within 4.6 the approach branch is skipped and bot.dig swings straight THROUGH the gap —
+    // x-ray-like "隔着峡谷够对面铜矿" (用户实拍:站墙头挖对面矿). A human only mines ore it can
+    // actually WALK/dig up to. Gate: for ORE targets, require a real SHORT path to a cell adjacent
+    // to the block. canDig=true (digging TOWARD a buried vein is legit mining) but NO scaffolding
+    // (scafoldingBlocks=[]) and no pillaring — so the bot can't "bridge" across an air gap to reach
+    // far ore. "短" = node count bounded vs straight-line distance: a buried-adjacent vein is a few
+    // dig-nodes (passes); an across-ravine detour is dozens (rejected). Ore-only & cheap: one bounded
+    // pathfind on the candidate we'd otherwise mine, skipped entirely for logs/dirt/stone.
+    const reachMoves = new pf.Movements(bot);
+    reachMoves.dontMineUnderFallingBlock = false;
+    reachMoves.dontCreateFlow = true;
+    reachMoves.canDig = true;            // mining toward a buried vein is legitimate
+    reachMoves.scafoldingBlocks = [];    // but NEVER bridge across air gaps to reach ore
+    reachMoves.allow1by1towers = false;  // nor pillar up to a high cliff-face ore
+    reachMoves.maxDropDown = 3;
+    // ★C304 DBG: persistent one-liner per ore reach-decision so the gate is observable in-game
+    // (mirrors chopDBG — bot.output only reaches the LLM, never a file). Cheap: ore-only.
+    const _mineDBG = (m) => { try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ${m}\n`); } catch (e) {} };
+    const _oreReachable = async (cand) => {
+        try {
+            const bp = cand.position;
+            const eye = bot.entity.position.offset(0, 1.62, 0);
+            const d3 = eye.distanceTo(bp.offset(0.5, 0.5, 0.5));
+            const goal = new pf.goals.GoalNear(bp.x, bp.y, bp.z, 2);
+            const res = await bot.pathfinder.getPathTo(reachMoves, goal, 800);
+            const st = res ? res.status : 'null';
+            if (!res || res.status !== 'success') {
+                _mineDBG(`★C304 ${cand.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} REJECT status=${st} (no walk/dig path, no bridge)`);
+                return false;
+            }
+            const len = (res.path && res.path.length) || 0;
+            // generous slack so legit travel-to-ore / dig-to-vein isn't rejected; only the
+            // wildly-longer-than-straight-line detours (gaps/ravines/walls) blow the budget.
+            const budget = Math.max(8, Math.ceil(d3 * 2.5));
+            const ok = len <= budget;
+            _mineDBG(`★C304 ${cand.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} len=${len} budget=${budget} ${ok ? 'OK' : 'REJECT(detour too long)'}`);
+            return ok;
+        } catch (e) { return true; }   // on pathfinder error, don't over-block (fail open)
+    };
+
     // Bound the work: normally `num` finds, but vein-follow can satisfy `num` in
     // fewer outer iterations (and may overshoot a little — desired for ores), so
     // loop on `collected < num` with an attempt cap to avoid spinning on
@@ -939,7 +1032,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
                     }
                     return movements.safeToBreak(block) || unsafeBlocks.includes(block.name);
                 } catch (e) { return false; }
-            }, 64, 1);
+            }, 64, veinActive ? 8 : 1);   // ★C304 ore: keep fallbacks so we can skip across-gap nearest to a reachable one
         } catch (err) {
             const frame = (err.stack || '').split('\n')[1] || '';
             log(bot, `⚠️ ${blockType} scan failed: ${err}.${frame ? ' @' + frame.trim() : ''} — retrying next pass.`);
@@ -954,7 +1047,32 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
                 log(bot, `No more ${blockType} nearby to collect.`);
             break;
         }
-        const block = blocks[0];
+        // ★C304 ORE: pick the nearest candidate that is genuinely reachable via a short walk/dig
+        // path (no bridging across gaps). Skip+exclude unreachable ones so we don't lock onto — and
+        // x-ray-mine through — an ore across a ravine/wall. Non-ore (logs/dirt/stone) unchanged: nearest.
+        let block;
+        if (veinActive) {
+            block = null;
+            let _checked = 0;
+            for (const cand of blocks) {
+                if (_checked >= 4) break;   // bound pathfinds/pass; exclude grows so we probe outward next pass
+                _checked++;
+                if (await _oreReachable(cand)) { block = cand; break; }
+                exclude = exclude || [];
+                exclude.push(cand.position);
+                log(bot, `↪ ${cand.name}@${cand.position.x},${cand.position.y},${cand.position.z} no short reach-path (across gap/wall) — skip, not mining through.`);
+            }
+            if (!block) {
+                log(bot, `No reachable ${blockType} (nearest candidates all across gaps / behind walls) — not x-ray-mining.`);
+                _mineDBG(`★C304 pass: ${blocktypes.join('/')} — ${blocks.length} cand all unreachable (collected=${collected}) → ${collected > 0 ? 'stop' : 'reprobe'}`);
+                if (collected > 0) break;
+                // nothing reachable yet; let exclude-driven outward probing try again next pass
+                await new Promise(r => setTimeout(r, 300));
+                continue;
+            }
+        } else {
+            block = blocks[0];
+        }
         try {
         await bot.tool.equipForBlock(block);
         // ★Never harvest WOOD with a SWORD (chops slowly + burns the sword durability we need
@@ -998,7 +1116,11 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
                 // sword-guard above (537-545). 15s backstop covers the slowest legit break
                 // (obsidian ~9.4s w/ diamond pick, for the nether portal) with margin.
                 exclude = exclude || [];
-                const r = await safeDig(bot, block, { maxMs: 15000, equip: false });
+                // ★C337 (T-0035 reopen): require line-of-sight for ORE so we never x-ray-grab ore
+                // through a wall (the C304 path-exists gate selected it, but distToBlock<=4.6 alone
+                // let it reach through solid rock). Non-ore (logs/stone/dirt) dig as before.
+                const _isOre = /_ore$/.test(block.name || '');
+                const r = await safeDig(bot, block, { maxMs: 15000, equip: false, requireLOS: _isOre });
                 if (r === 'ok') {
                     // ★Actually COLLECT the drop (fixes "挖了树不捡木头"): step ONTO the broken
                     // block's spot via a dig-capable path so mineflayer auto-vacuums the item,
@@ -1236,10 +1358,17 @@ export async function ensurePickupAt(bot, pos, opts = {}) {
     const maxDescend = opts.maxDescend ?? 3;      // ≤3 blocks down = no fall damage
     const timeoutMs = opts.timeoutMs ?? 8000;
     const HAZARD = /lava|fire|magma|cactus|campfire|wither_rose|sweet_berry|powder_snow/;
+    // ★T-0004 DBG: persistent one-liner per ensure-pickup outcome (bot.output never reaches a
+    // file, so the in-game effect was unobservable). Shares mine_dbg.log; ★PICKUP prefix.
+    const _pkDBG = (m) => { try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★PICKUP ${m}\n`); } catch (e) {} };
     const totalItems = () => { try { return Object.values(world.getInventoryCounts(bot)).reduce((a, b) => a + b, 0); } catch (e) { return 0; } };
     try {
         if (!bot || !bot.entity || !bot.entity.position || !pos) return false;
         const before = totalItems();
+        { // entry trace: confirm wiring actually fires + how many drops are in range
+          const _nd = Object.values(bot.entities || {}).filter(e => e && e.name === 'item' && e.position && e.position.distanceTo(pos) <= radius + 2).length;
+          _pkDBG(`call @${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)} drops=${_nd} (achieve/branchMine post-dig)`);
+        }
         for (let pass = 0; pass < 3; pass++) {
             if (bot.interrupt_code || bot.death_abort) break;
             const me = bot.entity.position;
@@ -1262,7 +1391,7 @@ export async function ensurePickupAt(bot, pos, opts = {}) {
                 if (d < td) { td = d; target = e; }
             }
             if (!target) {
-                if (unsafeSeen && pass === 0) log(bot, `ensurePickup: ${unsafeSeen} drop(s) near ${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)} not safely reachable (descent/hazard) — leaving them rather than risk a fall.`);
+                if (unsafeSeen && pass === 0) { log(bot, `ensurePickup: ${unsafeSeen} drop(s) near ${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)} not safely reachable (descent/hazard) — leaving them rather than risk a fall.`); _pkDBG(`skip ${unsafeSeen} unsafe-drop @${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)} (descent>3/hazard/no-footing) — left (no death-risk)`); }
                 break;
             }
             const tp = target.position;
@@ -1274,6 +1403,7 @@ export async function ensurePickupAt(bot, pos, opts = {}) {
                     ]);
                 } catch (e) {
                     log(bot, `ensurePickup: couldn't safely reach drop @${Math.floor(tp.x)},${Math.floor(tp.y)},${Math.floor(tp.z)} (${e.message}) — leaving it.`);
+                    _pkDBG(`reach-refuse @${Math.floor(tp.x)},${Math.floor(tp.y)},${Math.floor(tp.z)} (${e.message}) — left (pathfinder refused)`);
                     break;   // pathfinder refused (likely unsafe / blocked) — don't fight it
                 }
             }
@@ -1281,7 +1411,7 @@ export async function ensurePickupAt(bot, pos, opts = {}) {
             await new Promise(r => setTimeout(r, 200));
         }
         const got = totalItems() - before;
-        if (got > 0) log(bot, `ensurePickup: collected ${got} item(s) from the dig site.`);
+        if (got > 0) { log(bot, `ensurePickup: collected ${got} item(s) from the dig site.`); _pkDBG(`got ${got} item(s) @${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)} (safe descend+pickup ✓)`); }
         return got > 0;
     } catch (e) { return false; }
 }
@@ -1796,7 +1926,16 @@ export async function placeBlockNearby(bot, blockName, maxTries=4) {
     // So FIRST pillar UP on filler (FAST: placing ~0.4s) until a side opens or we surface — a
     // human just towers out of the hole. Then place normally in the opener space. (用户:"原地
     // 垫石头就能上去"。)
-    const _fill2 = () => { const c = world.getInventoryCounts(bot); return ['dirt','cobblestone','cobbled_deepslate','stone','andesite','diorite','granite','tuff','gravel','netherrack'].find(n => (c[n]||0) > 0) || Object.keys(c).find(n => /_planks$/.test(n) && c[n] > 0); };
+    const _fill2 = () => {
+        const c = world.getInventoryCounts(bot); const has = (n) => (c[n] || 0) > 0;
+        return ['dirt','cobblestone','cobbled_deepslate','stone','andesite','diorite','granite','tuff','gravel','netherrack'].find(has)
+            || Object.keys(c).find(n => /_planks$/.test(n) && c[n] > 0)
+            // ★C288: badlands/desert fallback so a mesa-dug bot (248 red_sand + 184 terracotta, 0
+            // cobble) can still tower out of a cramped pocket — non-gravity terracotta/sandstone
+            // first, then sand/red_sand (gravity, last resort).
+            || Object.keys(c).find(n => /(_terracotta|^terracotta|sandstone)$/.test(n) && c[n] > 0)
+            || ['sand','red_sand'].find(has);
+    };
     const _crampedNow = () => ![[1,0,0],[-1,0,0],[0,0,1],[0,0,-1]].some(o => { const bl = bot.blockAt(bot.entity.position.offset(o[0],o[1],o[2])); return bl && empty.has(bl.name); });
     for (let up = 0; up < 8 && _crampedNow() && Math.floor(bot.entity.position.y) < 70 && !bot.interrupt_code; up++) {
         const f = _fill2(); if (!f) break;
@@ -1830,8 +1969,18 @@ export async function placeBlockNearby(bot, blockName, maxTries=4) {
     // a cramped pocket (naked in a stone shaft: can't dig stone fast, no room). PILLAR UP on any
     // filler we carry (planks/dirt/cobble) toward open sky so the caller's retry lands in the
     // open. Bounded to 6 — escapes a shallow pocket; a human just towers out.
-    const FILL2 = ['dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'andesite', 'diorite', 'granite', 'tuff', 'gravel', 'netherrack', 'oak_planks', 'spruce_planks', 'jungle_planks', 'birch_planks', 'dark_oak_planks', 'acacia_planks', 'mangrove_planks', 'cherry_planks'];
-    const filler2 = () => { const c = world.getInventoryCounts(bot); return FILL2.find(n => (c[n] || 0) > 0) || Object.keys(c).find(n => /_planks$|_log$/.test(n) && c[n] > 0); };
+    // ★C300: include BADLANDS/desert fillers (terracotta/sandstone/red_sand) — the STUCK-ESCAPE pillar
+    // that lets the bot tower out of a cramped/footing-less spot to place a table couldn't fire in a
+    // mesa (it holds 400+ red_sand but FILL2 listed none), so table placement → tool/sword crafting
+    // dead-locked there (T-0017 keystone; same C280/C288 whitelist gap, yet another site). Non-gravity
+    // first (terracotta/sandstone — safe to stand on while towering), red_sand/sand last.
+    const FILL2 = ['dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'andesite', 'diorite', 'granite', 'tuff', 'netherrack', 'oak_planks', 'spruce_planks', 'jungle_planks', 'birch_planks', 'dark_oak_planks', 'acacia_planks', 'mangrove_planks', 'cherry_planks'];
+    const filler2 = () => {
+        const c = world.getInventoryCounts(bot);
+        return FILL2.find(n => (c[n] || 0) > 0)
+            || Object.keys(c).find(n => (/_planks$|_log$|terracotta$|sandstone$/.test(n)) && c[n] > 0)
+            || ['gravel', 'sand', 'red_sand'].find(n => (c[n] || 0) > 0);
+    };
     const headOpen = () => { const h = bot.blockAt(bot.entity.position.offset(0, 2, 0)); return !h || /^(air|cave_air|void_air|short_grass|tall_grass|snow)$/.test(h.name || ''); };
     for (let up = 0; up < 6 && filler2() && !bot.interrupt_code; up++) {
         if (!headOpen()) { const h = bot.blockAt(bot.entity.position.offset(0, 2, 0)); try { if (h) await breakBlockAt(bot, h.x, h.y, h.z); } catch (e) {} }
@@ -2760,7 +2909,22 @@ export async function goToGoal(bot, goal) {
     destructiveMovements.canDig = true;
     destructiveMovements.allowParkour = true; // ★同上: 破坏式导航也允许 parkour 跨缺口
     destructiveMovements.maxDropDown = 2;
-    destructiveMovements.scafoldingBlocks = [];
+    // ★C319 (T-0053): let the DESTRUCTIVE fallback BUILD its way out, not just dig. A pocket /
+    // mesa-terrace imprisonment (T-0052) is escapable ONLY by PLACING blocks (pillar up / bridge a
+    // gap) — canDig alone can't rise out of a pit (digging up just lengthens the shaft you're stuck
+    // at the bottom of). Both modes had scafoldingBlocks=[], so destructive A* returned noPath on
+    // any up-and-over egress → goToPosition threw "refusing blind destructive navigation" and
+    // stranded the bot (every caller, not just migrate which C318 band-aided). Give destructive the
+    // fillers we ACTUALLY carry (planning with blocks we lack = a place-path that fails at exec).
+    // Non-destructive stays scaffold-free — ordinary travel never improvises placement.
+    const _SCAFFOLD_RE = /^(cobblestone|cobbled_deepslate|dirt|coarse_dirt|sand|red_sand|gravel|stone|granite|diorite|andesite|tuff|netherrack|sandstone|red_sandstone)$|_planks$|terracotta$/;
+    const _scaffoldIds = [];
+    try {
+        for (const it of bot.inventory.items()) {
+            if (_SCAFFOLD_RE.test(it.name || '')) { const id = mc.getBlockId(it.name); if (id != null && !_scaffoldIds.includes(id)) _scaffoldIds.push(id); }
+        }
+    } catch (e) {}
+    destructiveMovements.scafoldingBlocks = _scaffoldIds;
     destructiveMovements.liquids.add(mc.getBlockId('water'));
     destructiveMovements.liquids.add(mc.getBlockId('flowing_water'));
     destructiveMovements.liquids.add(mc.getBlockId('lava'));
@@ -2791,31 +2955,55 @@ export async function goToGoal(bot, goal) {
 
     // Determine initial path type
     const pathfind_timeout = 1000;
+    // ★C320 (T-0053): ACCEPT 'partial' plans, not only 'success'. The initial getPathTo is just a
+    // PRE-CHECK to pick non-destructive vs destructive; the real navigation (executePathfindingPhase
+    // → bot.pathfinder.setGoal) continuously follows partial paths and RE-PLANS as the bot moves.
+    // The old gate threw `refusing blind destructive navigation` whenever BOTH modes returned
+    // anything but 'success' — but in broken/mesa/pocket terrain A* routinely returns 'partial' (a
+    // real route 7-14 nodes TOWARD the goal). Discarding partial = the bot refuses to make progress
+    // it CAN make → stall/imprisonment (live 00:14-00:16: skill=achieve, nd=partial/len14,
+    // d=partial/len14 → selected=none → stuck). Follow the partial, the executor re-plans from the
+    // new spot; genuine no-path (no partial either) still throws. Preference: complete before
+    // partial, non-destructive before destructive (don't dig/build when a walk-route progresses).
+    const _usable = (s) => s === 'success' || s === 'partial';
     const nonDestructivePath = await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout);
-    if (nonDestructivePath.status === 'success') {
+    let _destructivePath = null;
+    if (nonDestructivePath.status !== 'success') {
+        _destructivePath = await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout);
+    }
+    // pick: nd-success > d-success > nd-partial > d-partial
+    let _pick = null;
+    if (nonDestructivePath.status === 'success') _pick = 'nd';
+    else if (_destructivePath && _destructivePath.status === 'success') _pick = 'd';
+    else if (nonDestructivePath.status === 'partial') _pick = 'nd';
+    else if (_destructivePath && _destructivePath.status === 'partial') _pick = 'd';
+    if (_pick === 'nd') {
         currentMovements = nonDestructiveMovements;
         isDestructive = false;
-        log(bot, `Found non-destructive path.`);
+        log(bot, `Found non-destructive path (${nonDestructivePath.status}).`);
         motionAudit(bot, 'path.plan', {
             seq: navSeq,
             selected: 'non-destructive',
+            status: nonDestructivePath.status,
             nonDestructive: { status: nonDestructivePath.status, len: motionPathLen(nonDestructivePath) },
+            destructive: _destructivePath ? { status: _destructivePath.status, len: motionPathLen(_destructivePath) } : undefined,
+            goal: goalInfo,
+        });
+    } else if (_pick === 'd') {
+        currentMovements = destructiveMovements;
+        isDestructive = true;
+        log(bot, `Found destructive path (${_destructivePath.status}).`);
+        motionAudit(bot, 'path.plan', {
+            seq: navSeq,
+            selected: 'destructive',
+            status: _destructivePath.status,
+            nonDestructive: { status: nonDestructivePath.status, len: motionPathLen(nonDestructivePath) },
+            destructive: { status: _destructivePath.status, len: motionPathLen(_destructivePath) },
             goal: goalInfo,
         });
     } else {
-        const destructivePath = await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout);
-        if (destructivePath.status === 'success') {
-            currentMovements = destructiveMovements;
-            isDestructive = true;
-            log(bot, `Found destructive path.`);
-            motionAudit(bot, 'path.plan', {
-                seq: navSeq,
-                selected: 'destructive',
-                nonDestructive: { status: nonDestructivePath.status, len: motionPathLen(nonDestructivePath) },
-                destructive: { status: destructivePath.status, len: motionPathLen(destructivePath) },
-                goal: goalInfo,
-            });
-        } else {
+        {
+            const destructivePath = _destructivePath || { status: 'noPath' };
             const betterError = new Error(
                 `No complete path to destination. Non-destructive=${nonDestructivePath.status}, ` +
                 `destructive=${destructivePath.status}; refusing blind destructive navigation.`
@@ -3885,6 +4073,110 @@ export async function digDown(bot, distance = 10) {
     return true;
 }
 
+export async function digOneCapOne(bot) {
+    /**
+     * "挖三填一" night-shelter primitive: dig ONE block straight down (reusing
+     * digDown's water/lava neighbour + fall guards), then cap the head with a
+     * non-gravity block and patch only the genuinely open side holes — netting a
+     * sealed 1x1 pocket to ride out the night without a fortress' wall spend.
+     *
+     * Replaces the old digDown(2)+8-wall fortress: in solid terrain this places
+     * ~0-1 blocks (cap + at most the open sides), instead of a fixed 8-block ring.
+     *
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @returns {Promise<boolean>} true if the pocket was dug AND fully capped/sealed.
+     **/
+    const _GRAVITY = new Set([
+        'sand', 'red_sand', 'gravel',
+        'suspicious_sand', 'suspicious_gravel',
+    ]);
+    const _isGravity = (b) => !!b && (_GRAVITY.has(b.name) || /^suspicious_/.test(b.name));
+
+    const feet = bot.entity.position.floored();
+
+    // ① _gravityPitTrap (C334 sand/gravel column): if a gravity block sits just
+    // below the dig target (dy-1 / dy-2) or is poised to fall onto the cap (dy+2),
+    // digging one down would bury the bot. Bail to seal instead.
+    const _trapProbe = [
+        bot.blockAt(feet.offset(0, -1, 0)),
+        bot.blockAt(feet.offset(0, -2, 0)),
+        bot.blockAt(feet.offset(0, 2, 0)),
+    ];
+    if (_trapProbe.some(_isGravity)) {
+        log(bot, 'digOneCapOne: gravity column above/below (C334 _gravityPitTrap) — refusing dig-one, downgrade to seal.');
+        return false;
+    }
+
+    // ② Bedrock-floor / deep-shaft guard: never dig the one-down at or below y=16.
+    const startY = Math.floor(bot.entity.position.y);
+    if (startY <= 16) {
+        log(bot, `digOneCapOne: y=${startY} too low (<=16) to dig down — downgrade to seal.`);
+        return false;
+    }
+
+    // ③ Dig exactly ONE block down through digDown's safety gates (water/lava
+    // 6-neighbour flood guard + >=2 fall guard). Reusing it means we never
+    // bypass the aquifer / cliff protections.
+    const dugOk = await digDown(bot, 1);
+    if (!dugOk) {
+        log(bot, 'digOneCapOne: digDown(1) refused/failed — downgrade to seal.');
+        return false;
+    }
+
+    // ④ Cap the head: place a NON-gravity block two above the (new) feet so it
+    // can't fall through the pocket. Pick a solid filler we actually carry.
+    const inv = world.getInventoryCounts(bot);
+    const _CAP_PREFS = [
+        'cobblestone', 'cobbled_deepslate', 'stone', 'dirt', 'deepslate',
+        'andesite', 'diorite', 'granite', 'netherrack', 'tuff', 'oak_planks',
+    ];
+    let capName = _CAP_PREFS.find(n => (inv[n] || 0) > 0);
+    if (!capName) {
+        // Fall back to any carried solid block that isn't a gravity / falling type.
+        const _block = bot.inventory.items().find(it =>
+            !_isGravity({ name: it.name }) &&
+            !/sword|pickaxe|axe|shovel|hoe|_ingot|_pickaxe|bucket|torch|seeds|^bed$|_bed$|food|apple|bread|meat|fish/.test(it.name) &&
+            (mc.getItemId(it.name) != null));
+        capName = _block ? _block.name : null;
+    }
+
+    const here = bot.entity.position.floored();
+    const top = here.offset(0, 2, 0);
+    let capped = false;
+    const existingCap = bot.blockAt(top);
+    if (existingCap && existingCap.boundingBox === 'block') {
+        capped = true; // already roofed by terrain
+    } else if (capName) {
+        capped = await placeBlock(bot, capName, top.x, top.y, top.z, 'bottom', true);
+    } else {
+        log(bot, 'digOneCapOne: no non-gravity cap block carried — cannot roof pocket.');
+    }
+
+    // ⑤ Patch ONLY the genuinely open side holes (boundingBox !== 'block') across
+    // the two body layers (feet dy0, head dy1). Solid terrain is left untouched
+    // (net ~0-1 blocks placed), so we don't waste cobble walling solid stone.
+    const _H = [
+        [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1],
+    ];
+    let openRemaining = false;
+    for (let dy = 0; dy <= 1; dy++) {
+        for (const [dx, , dz] of _H) {
+            const cell = here.offset(dx, dy, dz);
+            const blk = bot.blockAt(cell);
+            if (blk && blk.boundingBox === 'block') continue; // solid wall already
+            // open side — try to fill it
+            if (!capName) { openRemaining = true; continue; }
+            const filled = await placeBlock(bot, capName, cell.x, cell.y, cell.z, 'side', true);
+            const after = bot.blockAt(cell);
+            if (!filled || !after || after.boundingBox !== 'block') {
+                openRemaining = true;
+            }
+        }
+    }
+
+    return capped && !openRemaining;
+}
+
 export async function goToSurface(bot) {
     /**
      * Navigate to the surface (highest non-air block at current x,z).
@@ -3954,8 +4246,16 @@ export async function pillarUp(bot, targetY = null) {
         'acacia_planks', 'dark_oak_planks'];
     const held = new Set(bot.inventory.items().map(i => i.name));
     const usable = SCAFFOLD.filter(n => held.has(n));
+    // ★C288: SCAFFOLD lists no badlands/desert fillers — a mesa-dug bot holding 248 red_sand +
+    // 184 terracotta + 24 sandstone but 0 cobble/dirt got "no placeable full blocks" and stayed
+    // MAROONED+entombed, unable to tower out (C280 added these to modes.js FILL_RE but never
+    // reached pillarUp). Append held terracotta/sandstone (non-gravity, safe footing) FIRST, then
+    // red_sand (gravity, still climbable) — purely a FALLBACK after all standard blocks, so normal
+    // pillaring is unchanged; it only kicks in when nothing better is held.
+    for (const n of [...held]) { if (!usable.includes(n) && /(_terracotta|^terracotta|sandstone)$/.test(n)) usable.push(n); }
+    for (const n of [...held]) { if (!usable.includes(n) && n === 'red_sand') usable.push(n); }
     if (usable.length === 0) {
-        log(bot, `Can't pillar up: no placeable full blocks (dirt/cobblestone/etc.) in inventory.`);
+        log(bot, `Can't pillar up: no placeable full blocks (dirt/cobblestone/terracotta/etc.) in inventory.`);
         return false;
     }
 

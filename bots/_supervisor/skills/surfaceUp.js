@@ -20,7 +20,20 @@ const OPEN = new Set(['air', 'cave_air', 'void_air']);
 const NO_DIG = new Set(['water', 'flowing_water', 'lava', 'flowing_lava']);
 const SCAFFOLD = ['cobblestone', 'dirt', 'cobbled_deepslate', 'andesite', 'granite', 'diorite', 'tuff', 'stone', 'deepslate', 'gravel', 'netherrack'];
 const STONY = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
-const NO_PICK_BREACHABLE = new Set(['stone', 'cobblestone', 'andesite', 'diorite', 'granite', 'tuff', 'deepslate', 'cobbled_deepslate']);
+// Bare-hand BREAKABLE stone-family (pick only needed for the DROP, not to break). C304-A: the
+// sandstone family matches STONY (substring "stone") but was MISSING here — so a no-pick bot
+// under a red_sandstone/sandstone roof (ubiquitous just below red_sand in mesa/badlands +
+// desert) hit canPlanNoPickStoneBreach==false → verticalBlocked → fell through to the
+// lateral/DEEP-DESCEND escape and drifted DOWN under the cap (T-0023: y60→54→49 越逃越深).
+// All sandstone variants are hardness 0.8, hand-breakable; adding them lets the vertical
+// breach punch the mesa cap so the down-drift branch is never reached. (Plain/colored
+// terracotta is hand-breakable too but is NOT STONY, so it already takes the soft guardedDig
+// path and never consults this set.)
+const NO_PICK_BREACHABLE = new Set([
+    'stone', 'cobblestone', 'andesite', 'diorite', 'granite', 'tuff', 'deepslate', 'cobbled_deepslate',
+    'sandstone', 'red_sandstone', 'smooth_sandstone', 'smooth_red_sandstone',
+    'cut_sandstone', 'cut_red_sandstone', 'chiseled_sandstone', 'chiseled_red_sandstone',
+]);
 const FOOD_RE = /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|^cod$|^salmon$|melon_slice|sweet_berries|_stew|^rabbit$|baked_|rotten_flesh|spider_eye/;
 const WOOD_TYPES = ['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry'];
 const FOOT_REPLACEABLE = new Set(['torch', 'wall_torch', 'redstone_torch', 'redstone_wall_torch', 'soul_torch', 'soul_wall_torch']);
@@ -123,7 +136,29 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
     };
     // Height alone is not surface. Live failure: y=62 inside a sealed hill pocket made
     // prepNether/feedUp loop forever. A climb is done only once the bot has real headroom.
-    const surfaceReady = () => yNow() >= targetY - 2 && openAbove(8);
+    //
+    // C281 (T-0038): the absolute targetY is a CEILING, NOT a goal to pillar toward.
+    // surfaceUp exists to escape a SEAL (rock/water overhead). Once the bot has genuine
+    // OPEN SKY overhead it is already surfaced — forcing the climb up to targetY just
+    // builds a 1-wide cobble spire in open air, and the instant the next skill's
+    // pathfinder takes the body it sprint-walks off the spire to a fatal fall (实拍
+    // 2026-06-20 16:10:37: surfaceUp pillared to y86 in open desert → chopWood path →
+    // 坠落 y86→67 摔死; mine_motion place env @y82 showed all 36 neighbors air = pure
+    // free-standing spire). So: a deep clear column overhead (real sky, not just an
+    // 8-block cave pocket) = done, regardless of yNow. The targetY-2 gate stays as the
+    // fallback for the tall-but-finite cave-ceiling case (openSky false) where we've
+    // nonetheless climbed high enough. A sealed hill pocket keeps openAbove(8) false, so
+    // that case still climbs as before.
+    const openSky = () => openAbove(48);
+    // ★C307-fix: standing IN water with open sky overhead is NOT "surfaced" — surfaceUp's
+    // job includes swimOutOfWater(), which lives inside climbToSurface() AFTER this entry
+    // early-exit. Without the !inWater() guard, a bot treading water at a watery worksite
+    // (open sky above) early-exits as "already at open surface" and never gets pulled out →
+    // prepNether's WET-WORKSITE place-table guard ("body in water — surface/escape first")
+    // re-calls surfaceUp every ~3s forever (live 17:37 idle-spin @-101,62,147). Treat
+    // in-water as not-ready so swimOutOfWater runs. (Sealed-pocket case keeps openAbove(8)
+    // false as before; this only adds the water exclusion.)
+    const surfaceReady = () => !inWater() && openAbove(8) && (openSky() || yNow() >= targetY - 2);
     const inWater = () => {
         try {
             const p = bot.entity.position.floored();

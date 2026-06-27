@@ -1283,13 +1283,20 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         // fight back, and at food=0 hunting is the ONLY path back to regen — a blanket
         // hp<8 bail locked a daytime hp3 bot at no-regen forever. Bail only when low HP
         // is COMBINED with an actual threat nearby (that's the hunt-into-death case).
+        // ★C310 (T-0047): ALWAYS eat held food FIRST — it's safe, in-place, and the ONLY
+        // path back to natural regen. The critical guard below used to `break` BEFORE this
+        // line, so a bot at hp<8 with 14 cooked_beef in the bag + a NON-actionable hostile
+        // 9.3b away (can't even reach it) starved FROZEN at hp4 forever (live 20:13 用户实拍
+        // "原地不动"). Eating ≈1.6s in place can't be punished by a mob that can't reach you;
+        // food→18 unlocks natural regen, which unfreezes everything (fight/flee/migrate were
+        // ALL hp-gated). The guard now only gates the ROAM/HUNT path below — the actual
+        // hunt-into-death case it was written for.
+        if (await eat()) { await skills.wait(bot, 1200); continue; }
         if (bot.health < 8 && hostileNear(16)) {
-            log(bot, `feedUp: HP critical (${Math.round(bot.health)}) + hostile near — bailing to survival modes.`);
-            prog(`feedUp: critical guard hp=${Math.round(bot.health)} hostile16=true`);
+            log(bot, `feedUp: HP critical (${Math.round(bot.health)}) + hostile near + no held food — bailing roam/hunt to survival modes.`);
+            prog(`feedUp: critical guard hp=${Math.round(bot.health)} hostile16=true (no held food in bag to eat in place)`);
             break;
         }
-        // Eat anything we already hold first (safe, in place).
-        if (await eat()) { await skills.wait(bot, 1200); continue; }
         // No held food. PlanC short fetch FIRST (低险快进快出,守卫前放行——烧怪掉落
         // 5分钟 despawn,等不起), then the roam guard.
         if (await fetchFoodDrop()) { await eat(); await skills.wait(bot, 600); continue; }

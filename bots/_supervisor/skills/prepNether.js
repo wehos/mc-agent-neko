@@ -76,7 +76,9 @@ export default async function prepNether(bot, ctx) {
         try {
             for (let dy = 1; dy <= 3; dy++) {
                 const h = bot.blockAt(bot.entity.position.offset(0, dy, 0));
-                if (h && h.boundingBox === 'block') return true;
+                // ★C296: leaves/vines are NOT real cover (jungle/forest canopy ≠ shelter) — exclude
+                // them or the bot dwells exposed-but-"covered" under foliage at night and dies.
+                if (h && h.boundingBox === 'block' && !/_leaves$|^leaves$|vine|mangrove_roots|azalea/.test(h.name || '')) return true;
             }
         } catch (e) {}
         return false;
@@ -85,7 +87,21 @@ export default async function prepNether(bot, ctx) {
         const mobState = (bot._mobility && (bot._mobility.state || '')) || '';
         return !!(bot._mobility && bot._mobility.enclosed) || /POCKET|ENC|MAROONED|ENTOMBED/.test(mobState);
     };
-    const shouldDuskShelter = () => isDuskNow() && snacklessCritical() && !undergroundSafe() && !canFightNight();
+    // ★决策层交接谓词 (framework-v2 Stage0): 新决策层(modes.js 每2s computeNightPlan→proposeTasks→
+    // commitGoal→bot._commitment, 纯确定性无LLM)一旦 live, 它在 bot._world.nightPlan 落一个夜间意图
+    // (FIGHT/MINE_THROUGH_NIGHT/GO_BED/DIG_ONE_CAP/SEAL_FORT)并经 kernelDriver 顶层 sticky 派发对应
+    // 子skill。届时本 prepNether 的 legacy 夜间巨块(shouldDuskShelter/holeUpAtNight)必须让位——否则两个
+    // 夜间决策源互绞(决策层派 nightShelter dig_one 时, legacy 又抢着封顶/睡床)。检测 bot._world.nightPlan
+    // 是否存在=新层 live: 存在→legacy 夜间路径整体短路(强制 false / 早退交还派发器); 不存在(legacy 模式/
+    // 回滚: modes 没组装 nightPlan)→原样保留全部 legacy 行为(回滚锚不删)。try-catch 全包,无副作用。
+    const nightOwnedByDecisionLayer = () => {
+        // ★Yield the legacy night path ONLY when kernelDriver is the LIVE dispatcher (fresh heartbeat
+        // ≤10s) — NOT merely when bot._world.nightPlan exists. In Stage-0 shadow, modes computes nightPlan
+        // but sticky is still missionNether (kernelDriver not running) → legacy night-shelter MUST stay
+        // active or the bot loses its ③ shelter at night. After cutover kernelDriver heartbeats → yield.
+        try { return !!(bot._kernelDriverActive && Date.now() - bot._kernelDriverActive < 10000); } catch (e) { return false; }
+    };
+    const shouldDuskShelter = () => !nightOwnedByDecisionLayer() && isDuskNow() && snacklessCritical() && !undergroundSafe() && !canFightNight();
     const shouldDayFamineHostileShelter = () => {
         try {
             const securedLowResourceHold = bodyBudgetBunkerHold() && (coveredAboveNow() || containedMobilityNow());
@@ -214,6 +230,43 @@ export default async function prepNether(bot, ctx) {
         return false;
     };
     const holeUpAtNight = async () => {
+        // ★决策层早退守卫 (framework-v2 Stage0): 新决策层 live(bot._world.nightPlan 存在)且当前是夜间
+        // 决策窗口(夜/黄昏/day-famine-hostile)而 bot 在地表暴露(!undergroundSafe)时, 夜间该做什么由
+        // computeNightPlan→proposeTasks→commitGoal 算出(FIGHT/MINE_THROUGH_NIGHT/GO_BED/DIG_ONE_CAP/
+        // SEAL_FORT), 经 kernelDriver 顶层 sticky 派发对应子skill(nightShelter dig_one/seal、prepNether、
+        // mineDown…)。此时 legacy 的 holeUpAtNight 巨块(封顶/睡床/挖三填一)必须把控制交还派发器, 否则两源
+        // 互绞。早退 → return false → 调用方 `if(await holeUpAtNight()===false) return false` → prepNether
+        // 退出, 让 kernelDriver 派发决策层选中的子skill。**仅地表暴露时让位**: undergroundSafe(y<50&无怪)
+        // → fall-through 原 legacy 逻辑不变(深处继续作业本就是各层一致的判断, 无互绞)。非 cancel 才让位
+        // (cancel 走原有 cancel 分支)。新层未 live(回滚/legacy)→谓词 false→不早退, 全部原行为保留。
+        if (nightOwnedByDecisionLayer()
+            && (isNightNow() || shouldDuskShelter() || shouldDayFamineHostileShelter() || isDuskNow())
+            && !undergroundSafe()
+            && !cancelRequested()) {
+            prog('prepNether: ★决策层早退 — nightPlan 存在(新层 live)+夜间窗口+地表暴露 → 交还控制给 kernelDriver 派发(夜间意图由 computeNightPlan 决定, legacy holeUpAtNight 让位)');
+            return false;
+        }
+        // ★C336 (T-0063, 用户"0063是你的为啥等别人"): COMMIT-TO-FIGHT override — 根治"有剑却被贴脸僵尸
+        // 打死". 取证(10:45 combat_log): bot握cobblestone(本skill的夜封)被husk@1.1b磨死hp18→0全程不挥剑.
+        // 真因=canFightNight的hp≥10地板: 交战中hp掉到<10→canFightNight翻false→holeUpAtNight启动封顶, 正好
+        // 在最致命时刻(低血+贴脸)从"打"翻成"封", 开阔地封顶又失败(T-0050/0057无参考面)→husk收尾. 对称于
+        // modes.combatHasPriority(C332): 贴脸非creeper怪(<3.2b)+有剑+hp>6(比canFightNight的10低, 补翻转盲区)
+        // +非围(<8b内<3只)→别封顶, return让位 modes.self_defense 挥剑收尾(1-2 husk=数秒). 击杀比注定失败的
+        // 贴脸封顶快得多, 且移除威胁后下一拍正常封顶(不抖动). creeper/远程/成群/危血(hp≤6) 仍照常封.
+        try {
+            const _me = bot.entity.position;
+            const _hd = [];
+            for (const e of Object.values(bot.entities || {})) {
+                if (e && e.position && mc.isHostile(e) && !/creeper/i.test(e.name || '')) _hd.push(e.position.distanceTo(_me));
+            }
+            const _ptBlank = _hd.some(d => d < 3.2);
+            const _swarmed = _hd.filter(d => d < 8).length >= 3;
+            const _hasSword = bot.inventory.items().some(i => /_sword$/.test(i.name));
+            if (_ptBlank && !_swarmed && _hasSword && bot.health > 12) {  // ★hp>6→>12 (45死数据: hp6提交melee→zombie 2下打死;低血封顶/逃胜过送命挥剑)
+                prog(`prepNether: ★C336 commit-to-fight — 贴脸怪<3.2b+有剑+hp${Math.round(bot.health)}>12+非围 → 不封顶,让位self_defense挥剑`);
+                return;
+            }
+        } catch (e) {}
         let logged = false, proofed = false;
         // A STALE interrupt (death-abort / finished flee) must not skip the night hold:
         // that exact skip let a naked respawn walk straight into wood-chopping at night
@@ -227,6 +280,64 @@ export default async function prepNether(bot, ctx) {
         //     `canMineSafely()` (有镐+方块) skip holing-up → the bot kept LEISURELY surface-mining
         //     exposed at night and got ambushed. "能挖"≠"地表夜里安全". Only genuinely-deep
         //     (undergroundSafe, y<50) lets work continue — there it's already safe to mine.
+        // ★C327 (T-0054 follow-on, 用户指令): 傍晚起,若附近(≤24b)有已放置的床 且 安全(无怪≤8),
+        // 最高优先级 = 去床边准备睡觉。睡觉直接跳过整个危险夜晚(无群杀/无seal-fail/无roam-far-die)
+        // 并重锚spawn,严格优于一切夜间作业(挖矿/table-recovery/hold)。complement C322(只place手持床
+        // 于深夜):本条专补"走到已存在的床"+傍晚提前去+top优先级。dusk(tod<12542)睡不了→先走到床边待命,
+        // 入夜即睡。bot.sleep在白天/有怪会throw→catch后fall through到既有逻辑,不阻断。
+        // ★C331: the go_to_bed_sleep INSTINCT (modes.js, execute-first + LLM-veto, owns night sleep when a
+        // bed/village is KNOWN) takes precedence — defer to it whenever its trigger episode is engaged
+        // (firing OR vetoed) to avoid double-navigation. C327 here is the FALLBACK only when the instinct
+        // isn't engaged (no landmark bed/village yet → its test is false → no episode; e.g. place a held bed).
+        const _sleepEpActive = !!(bot._instinctEpisodes && bot._instinctEpisodes['go_to_bed_sleep']);
+        if (!_sleepEpActive && (isDuskNow() || isNightNow()) && hostilesNear(8) === 0 && !bot.interrupt_code
+            && (!bot._lastBedPriorityAt || Date.now() - bot._lastBedPriorityAt > 8000)) {
+            bot._lastBedPriorityAt = Date.now();
+            const bedDist = (bb) => bot.entity.position.distanceTo(bb.position);
+            const haveBedItem = bot.inventory.items().some(it => /_bed$/.test(it.name || ''));
+            const bedBlock = bot.findBlock({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 24 });
+            if (bedBlock) {
+                // ★C327b: navigate PERSISTENTLY to within sleep range, and only THEN click the bed.
+                // Bug found 06:00 (用户报"夜里没睡死罪"): the old code called bot.sleep even when
+                // goToPosition instant-noPath'd to an elevated bed (床@17,73,-14 高7格,nav 31ms返回)
+                // → sleep from 10b away → "cant click the bed". Gate sleep on actually-reached.
+                if (bedDist(bedBlock) > 2.6) {
+                    prog(`prepNether: ★C327 傍晚/夜 + 附近床@${bedBlock.position.x},${bedBlock.position.y},${bedBlock.position.z} (dist=${bedDist(bedBlock).toFixed(1)}) → 最高优先级:去床边准备睡觉`);
+                    for (let nt = 0; nt < 3 && bedDist(bedBlock) > 2.6 && !bot.interrupt_code; nt++) {
+                        try { await skills.goToPosition(bot, bedBlock.position.x, bedBlock.position.y, bedBlock.position.z, 1); } catch (e) {}
+                    }
+                }
+                const reached = bedDist(bedBlock) <= 2.6;
+                if (reached && isNightNow()) {
+                    try {
+                        await bot.sleep(bedBlock);
+                        prog('prepNether: ★C327 入睡 — 跳过危险夜晚 + 重锚spawn');
+                        for (let i = 0; i < 60 && bot.isSleeping; i++) await skills.wait(bot, 500);
+                        if (!isNightNow()) { prog('prepNether: ★C327 醒到天亮 — 整夜已跳过'); }
+                    } catch (e) { prog(`prepNether: ★C327 床边却睡不了(${String(e.message).slice(0, 40)}) — fall through`); }
+                } else if (!reached) {
+                    // existing bed UNREACHABLE (elevated / path-blocked, nav noPath). If we HOLD a bed
+                    // item, place a fresh REACHABLE bed where we stand + sleep (setBed = place+sleep);
+                    // else log clearly — can't sleep without a reachable bed (上游: 可达床/路径).
+                    prog(`prepNether: ★C327 床@${bedBlock.position.x},${bedBlock.position.y},${bedBlock.position.z} 够不到(dist=${bedDist(bedBlock).toFixed(1)} nav noPath/高台) — ${haveBedItem ? '改手持床就地放+睡' : '且无手持床→睡不了(需可达床)'}`);
+                    if (haveBedItem && isNightNow()) { try { await skills.customSkill(bot, 'setBed'); } catch (e) {} }
+                }
+            } else {
+                // no bed within live 24b → ★C328: consult the persistent LANDMARK MEMORY for a remembered
+                // bed (e.g. a VILLAGE bed the bot saw 30-48b away). Navigate toward it — the next iter's
+                // findBlock(24) picks it up + sleeps. This is the fix for "附近村庄有床却不知道/不用"
+                // (用户架构批评: 世界模型对资源把握差). world_model mode(C328) scans+remembers beds.
+                let knownBed = null;
+                try { knownBed = bot._world && bot._world.landmarks && bot._world.landmarks.bed; } catch (e) {}
+                if (knownBed) {
+                    prog(`prepNether: ★C328 无就近床但记忆里有已知床@${knownBed.x},${knownBed.y},${knownBed.z}(dist=${knownBed.dist}) → 导航过去睡(村庄床等)`);
+                    try { await skills.goToPosition(bot, knownBed.x, knownBed.y, knownBed.z, 2); } catch (e) {}
+                } else if (haveBedItem && isNightNow()) {
+                    prog('prepNether: ★C327 无就近床但手持床 → setBed 就地放+睡');
+                    try { await skills.customSkill(bot, 'setBed'); } catch (e) {}
+                }
+            }
+        }
         if (isDuskNow() && !undergroundSafe() && !bot.interrupt_code) {
             prog('prepNether: ★DUSK 天黑将至 — 主动收尾转生存(spawn-proof + 准备入夜)');
             try { await spawnProof(); } catch (e) {} proofed = true;
@@ -246,7 +357,44 @@ export default async function prepNether(bot, ctx) {
             }
             if (!duskCriticalHold && !dayFamineHostileHold && undergroundSafe()) break;   // 真正深处(y<50)=已安全 → 继续作业(不再用 canMineSafely 放行地表暴露作业)
             if (!duskCriticalHold && !dayFamineHostileHold && bot._mobility && bot._mobility.enclosed) break;   // ★封闭地穴(状态机全知列探测)=夜昼无别,继续作业(用户指点: y<50 代理判断漏掉 y≥50 的崖体隧道/封闭洞)
-            if (!duskCriticalHold && !dayFamineHostileHold && canFightNight()) break;     // ★装备齐全(剑+盾+血)→ 不躲,继续干,self_defense 边干边砍怪(对齐 modes)
+            // ★C319-A (T-0062 over-cautious paralysis / FROZEN-ALIVE): canFightNight (shield+sword+
+            // armor) normally breaks the night-hold so an equipped bot keeps working. BUT when the
+            // mission is NIGHT-TABLE-BLOCKED (achieve.js refused the cross-surface table-walk →
+            // _prepTableRecoveryBlockedUntil set), "keep working" = nothing to do → she neither
+            // crosses to the table (correctly refused) NOR shelters (canFightNight broke the hold) →
+            // ctrl=- act=- FROZEN exposed until dawn/death (live #FROZEN-ALIVE x many @-118,24 etc,
+            // and the iron→stone reset-loop's proximate paralysis). When table-blocked at night,
+            // DON'T break — fall through to the shelter path below (C322 bed-sleep / dig-in bunker):
+            // sheltering an idle-blocked night beats freezing exposed, and a slept night skips it.
+            // ★C320-A (用户截图 06:53 "大晚上的不挖三填一这是在干嘛"): C319-A only caught the table-
+            // WALK-refused flag (_prepTableRecoveryBlockedUntil, set at achieve.js:367/396/442). But the
+            // live inversion was the table-CRAFT-blocked case: NEED crafting_table → NEED 4 oak_planks
+            // (have 1) → night-exposed skip chopping → "recipesFor empty → give up collect" (achieve.js:
+            // 649, sets NO flag) → she roamed the exposed grass surface at night churning an unmakeable
+            // table instead of 挖三填一. Broaden: at night, if she simply CAN'T make a table (no table in
+            // bag + <4 planks + no logs to craft them), the whole iron-pick bootstrap is night-blocked →
+            // treat as table-night-blocked → DON'T break on canFightNight → fall through to shelter/seal.
+            // (Has a table / ≥4 planks / logs → can progress → equipped bot may keep working as before.)
+            const _c320inv = world.getInventoryCounts(bot);
+            const _planks4 = Object.keys(_c320inv).filter(k => /_planks$/.test(k)).reduce((s, k) => s + _c320inv[k], 0);
+            const _logsAny = Object.keys(_c320inv).filter(k => /_log$/.test(k)).reduce((s, k) => s + _c320inv[k], 0);
+            const _cantMakeTable = (_c320inv.crafting_table || 0) === 0 && _planks4 < 4 && _logsAny === 0;
+            const _tableNightBlocked = (Date.now() < (bot._prepTableRecoveryBlockedUntil || 0)) || (isNightNow() && _cantMakeTable);
+            if (!duskCriticalHold && !dayFamineHostileHold && canFightNight() && !_tableNightBlocked) break;     // ★装备齐全(剑+盾+血)→ 不躲,继续干,self_defense 边干边砍怪(对齐 modes)
+            // ★C322 (T-0054): if we HAVE a bed and the night is SAFE (no hostile ≤8), SLEEP through
+            // it — that skips the danger entirely AND anchors spawn here, strictly dominating idle
+            // hole-up / TABLE-gate night stand-down (用户实证 00:13: 夜里揣 white_bed:2 却只 idle hold
+            // 不睡,卡 bootstrap TABLE gate). setBed places+activates+sleeps; at night it won't sheep-
+            // hunt (its own isNight guards) and returns fast if it can't place → we fall through to the
+            // existing bunker hold. Throttle 20s. Sleeping → dawn → the while loop exits naturally.
+            if (isNightNow() && hostilesNear(8) === 0
+                && bot.inventory.items().some(it => /_bed$/.test(it.name || ''))
+                && (!bot._lastNightSleepTryAt || Date.now() - bot._lastNightSleepTryAt > 20000)) {
+                bot._lastNightSleepTryAt = Date.now();
+                prog('prepNether: ★C322 safe night + bed in hand → setBed (place+sleep, skip night + anchor spawn) — beats idle hold');
+                try { await skills.customSkill(bot, 'setBed'); } catch (e) { prog(`prepNether: ★C322 setBed threw ${e.message}`); }
+                if (!isNightNow()) { prog('prepNether: ★C322 woke to dawn — night skipped via bed'); break; }
+            }
             if (!proofed) { try { await spawnProof(); } catch (e) {} proofed = true; }   // 先照亮 hold 点 — 无光不刷怪
             if (!logged) { prog('prepNether: ★NIGHT 入夜→优先生存:停止暴露作业,spawn-proof + hole up 到天亮'); logged = true; }
             // ★裸装确定性地堡 (#24 最小版): 干等 modes 来救不够确定 — 自己挖二封一。
@@ -325,20 +473,87 @@ export default async function prepNether(bot, ctx) {
                     const coveredAbove = () => {
                         for (let dy = 1; dy <= 3; dy++) {
                             const h = bot.blockAt(bot.entity.position.offset(0, dy, 0));
-                            if (h && h.boundingBox === 'block') return true;
+                            // ★C296: LEAVES/VINES are NOT real cover — a jungle/forest canopy has
+                            // boundingBox==='block' but leaves the ground level wide open to mobs. The
+                            // bot read the canopy as "already sheltered" and SKIPPED digging in (用户
+                            // 实拍: 夜里愣在树冠下不挖三填一,等死). Only a REAL solid roof counts; under
+                            // mere foliage, coveredAbove()=false → fall through to digDown (挖三填一).
+                            if (h && h.boundingBox === 'block' && !/_leaves$|^leaves$|vine|mangrove_roots|^(azalea|flowering_azalea)$/.test(h.name || '')) return true;
                         }
                         return false;
                     };
-                    const sealBlock = () => bot.inventory.items().find(i => /^(dirt|grass_block|cobblestone|cobbled_deepslate|granite|diorite|andesite|tuff|gravel|netherrack)$/.test(i.name));
+                    // ★C296: seal blocks were missing badlands/desert + jungle fillers — a bot holding
+                    // 274 red_sand + terracotta (or jungle dirt) "had no seal block" and couldn't roof
+                    // its pit. Accept the full hand-placeable set incl. terracotta/sandstone/red_sand.
+                    // ★C326-A (T-0067 根因修, 用户"开阔封顶是伪命题"的沙漠续): seal 料过去用 .find()
+                    // 按库存槽位顺序取首个匹配 → 沙漠里 sand/red_sand 排在前就被选作封顶料。但 sand/gravel
+                    // 是重力块: 当它盖在头顶那格(正下方 dy1 是 bot 头部 air-gap)时会**重力坠落**砸到头上,
+                    // cap 永远合不拢 → "封顶失败" 刷屏 + 暴露被群杀(实证 09:34 沙漠 pos14,64,8 enderman死)。
+                    // 这不是"无参考面"(那是误诊),机理是**重力块当顶盖必掉**。修: ①seal 料按优先级排序,
+                    // 非重力块(dirt/cobble/stone/sandstone/terracotta/planks)优先,重力块(sand/gravel/red_sand)
+                    // 垫底当 fallback; ②roofSafe=true 时(屋顶/cap, 悬在 air 上)**完全排除重力块**——脚墙/头墙
+                    // 下方有实心支撑可用沙,但悬空的 cap 绝不能用沙。墙用 sealBlock(), 顶盖用 sealBlock(true)。
+                    const _GRAVITY_SEAL = /^(sand|red_sand|gravel|suspicious_sand|suspicious_gravel)$/;
+                    const _isSealMat = (n) => /^(dirt|coarse_dirt|grass_block|cobblestone|cobbled_deepslate|granite|diorite|andesite|tuff|netherrack|sand|red_sand|gravel|sandstone|red_sandstone|[a-z_]*terracotta|stone)$/.test(n) || /_planks$/.test(n);
+                    const sealBlock = (roofSafe = false) => {
+                        try {
+                            const cands = bot.inventory.items().filter(i => _isSealMat(i.name) && !(roofSafe && _GRAVITY_SEAL.test(i.name)));
+                            if (!cands.length) return null;
+                            // 非重力块优先(即便 roofSafe=false 也偏好,墙料宁可省下沙做 fallback);同优先级取数量多的
+                            cands.sort((a, b) => {
+                                const ga = _GRAVITY_SEAL.test(a.name) ? 1 : 0, gb = _GRAVITY_SEAL.test(b.name) ? 1 : 0;
+                                if (ga !== gb) return ga - gb;
+                                return (b.count || 0) - (a.count || 0);
+                            });
+                            return cands[0];
+                        } catch (e) { return null; }
+                    };
                     const containedMobility = () => {
                         const mobState = (bot._mobility && (bot._mobility.state || '')) || '';
                         return !!(bot._mobility && bot._mobility.enclosed) || /POCKET|ENC|MAROONED|ENTOMBED/.test(mobState);
                     };
+                    // ★C335 (T-0057 完整修): 纯沙环境无非重力 cap 料时(C326-A 正确拒沙 cap,但
+                    // 没替代 → 封不上 → 暴露;与 C334 沙坑-skip 叠加在沙漠尤其常见)。bot 有 pickaxe →
+                    // 向下挖到沙层下的 sandstone/stone(非重力,_isSealMat)取 cap 料。**安全设计(与
+                    // C334 不冲突)**: 沙只垂直下落 → 仅当头顶无重力块(开阔地/sky,塌头不可能)才挖;
+                    // 挖到 sandstone 既得 cap 料、又把 bot 落进 below-grade 坑(cap 落点四周实心=robust)。
+                    // 头顶有沙(沙丘下)→ abort(那正是 C334 防的 suffocation 场景,不在此处冒险)。
+                    const _NONGRAV_SOLID = /^(sandstone|red_sandstone|smooth_sandstone|cut_sandstone|stone|granite|diorite|andesite|tuff|cobblestone|cobbled_deepslate|deepslate|dirt|coarse_dirt)$|terracotta$/;
+                    const _harvestCapMaterial = async () => {
+                        try {
+                            if (sealBlock(true)) return true;                 // already have non-gravity cap material
+                            if (!bot.inventory.items().some(i => /_pickaxe$/.test(i.name || ''))) return false;
+                            // SAFE-only: head must be clear of gravity blocks above (sand falls vertically →
+                            // nothing overhead can drop on us as we descend). This is exactly the case C334's
+                            // suffocation guard does NOT trigger on, so digging here is safe.
+                            const h = bot.entity.position.floored();
+                            const _grav = (b) => b && _GRAVITY_SEAL.test(b.name || '');
+                            if (_grav(bot.blockAt(h.offset(0, 2, 0))) || _grav(bot.blockAt(h.offset(0, 3, 0)))) return false;
+                            for (let d = 0; d < 4 && !sealBlock(true); d++) {
+                                if (bot.interrupt_code) break;
+                                const below = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0));
+                                if (!below || below.boundingBox !== 'block') break;
+                                if (/lava|water/.test(below.name || '')) break;   // never dig into fluid
+                                try { await skills.breakBlockAt(bot, below.position.x, below.position.y, below.position.z); }
+                                catch (e) { break; }
+                                await new Promise(r => setTimeout(r, 280));        // settle + auto-pickup the drop
+                            }
+                            const got = !!sealBlock(true);
+                            prog(`prepNether: ★C335 harvest cap material (dig→sandstone) → ${got ? 'got non-gravity cap block' : 'still none'} y=${Math.floor(bot.entity.position.y)}`);
+                            return got;
+                        } catch (e) { return false; }
+                    };
                     const sealCurrentRoof = async (why) => {
-                        const seal = sealBlock();
+                        let seal = sealBlock(true);   // ★C326-A roofSafe: 顶盖悬在 air 上,重力块(沙/砾)会坠落→排除
+                        if (!seal) {
+                            // ★C335 (T-0057): no non-gravity cap material → try to MINE some (sandstone under
+                            // desert sand) before giving up exposed. Safe-gated (no sand overhead, has pickaxe).
+                            try { await _harvestCapMaterial(); } catch (e) {}
+                            seal = sealBlock(true);
+                        }
                         if (!seal) {
                             const already = coveredAbove();
-                            prog(`prepNether: bunker roof seal skipped (${why}) no seal block; covered=${already}`);
+                            prog(`prepNether: bunker roof seal skipped (${why}) no non-gravity cap block (C335 harvest failed too); covered=${already}`);
                             return already;
                         }
                         const base = bot.entity.position.floored();
@@ -355,6 +570,59 @@ export default async function prepNether(bot, ctx) {
                                 return true;
                             }
                         }
+                        if (coveredAbove()) return true;
+                        // ★C308 (T-0001/T-0037 根因修复): 直接在头顶正上方 cap 失败 = 1 宽位置在
+                        // 开阔/水边/藤蔓/树冠/斜坡 —— 那格 6 邻居全空(air/water),placeBlock 找不到
+                        // buildOffBlock("nothing to place on") → 封不上 → 被怪压死(实证 16:59
+                        // "封顶失败:开阔/水边无参考面,dugOk=true")。解法=用自己的墙把顶盖自举起来,
+                        // 不依赖周围实心地形: 头层墙(dy1,参考脚下地面)→ cap 层偏移块(dy2 四侧,
+                        // 参考其正下方头层墙=竖直贴面)→ 正中 cap(dy2,参考刚放的偏移块=水平贴面)。
+                        // placeBlock 遍历全部 6 邻居取首个实心块(skills.js:1627),故顺序对了就能附着。
+                        // 只要 bot 站在实心地面(下挖后/地表),至少 1 侧墙能起,顶盖即可合拢。
+                        {
+                            // ★C325 (T-0057): PIN before the multi-placement seal. The stepped roof
+                            // is several placeBlock calls over ~1s; if the bot keeps pathfinding /
+                            // gets knocked around mid-sequence, the caps land over the OLD spot while
+                            // coveredAbove() checks the bot's NEW (drifted) head → covered=false → it
+                            // ends unsealed and dies to the swarm (live: ★C308 stepped roof covered=
+                            // false @03:36:38 → Zombie death @03:36:46; again @04:40:36 → Husk @04:40:38).
+                            // Sealing must be stationary: stop the pathfinder + clear controls, THEN
+                            // capture the anchor, so caps land over the actual head. (Knockback can
+                            // still nudge under a heavy swarm — water-edge geometry残留 + 'secure
+                            // earlier' timing 归 T-0062/dry-footprint, 另议.)
+                            try { bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop(); } catch (e) {}
+                            try { bot.clearControlStates(); } catch (e) {}
+                            const b0 = bot.entity.position.floored();
+                            const dirs4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+                            // 1) 头层墙 dy1 (脚层 dy0 多数已由 dig-in/surfaceDirtShelter 放好;这里补头层做 cap 参考)
+                            for (const [dx, dz] of dirs4) {
+                                const s = sealBlock(); if (!s) break;
+                                for (const dy of [0, 1]) {
+                                    const t = b0.offset(dx, dy, dz);
+                                    const cur = bot.blockAt(t);
+                                    if (cur && cur.boundingBox === 'block') continue;
+                                    try { await skills.placeBlock(bot, s.name, t.x, t.y, t.z, 'bottom', true); } catch (e) {}
+                                }
+                            }
+                            // 2) cap 层四侧偏移块 (参考其下方头层墙) — ★C326-A 顶平面用非重力块
+                            for (const [dx, dz] of dirs4) {
+                                const s = sealBlock(true); if (!s) break;
+                                const t = b0.offset(dx, 2, dz);
+                                const cur = bot.blockAt(t);
+                                if (cur && cur.boundingBox === 'block') continue;
+                                try { await skills.placeBlock(bot, s.name, t.x, t.y, t.z, 'bottom', true); } catch (e) {}
+                            }
+                            // 3) 正中 cap (现在四周 cap 层偏移块是水平实心参考) — ★C326-A 头顶 air-gap,必用非重力块
+                            const center = b0.offset(0, 2, 0);
+                            const cc = bot.blockAt(center);
+                            if (!(cc && cc.boundingBox === 'block')) {
+                                const s = sealBlock(true);
+                                if (s) { try { await skills.placeBlock(bot, s.name, center.x, center.y, center.z, 'bottom', true); } catch (e) {} }
+                            }
+                            const stepped = coveredAbove();
+                            prog(`prepNether: ★C308 stepped roof (${why}) covered=${stepped} y=${Math.floor(bot.entity.position.y)}`);
+                            if (stepped) return true;
+                        }
                         const finallyCovered = coveredAbove();
                         prog(`prepNether: bunker roof seal exhausted (${why}) block=${seal.name} covered=${finallyCovered}`);
                         return finallyCovered;
@@ -369,18 +637,62 @@ export default async function prepNether(bot, ctx) {
                     const surfaceDirtShelter = async () => {
                         const base = bot.entity.position.floored();
                         let placed = 0;
-                        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-                            const seal = sealBlock();
-                            if (!seal) break;
-                            const t = base.offset(dx, 1, dz);   // head level
-                            const b = bot.blockAt(t);
-                            if (b && b.boundingBox === 'block') continue;
-                            try { await skills.placeBlock(bot, seal.name, t.x, t.y, t.z, 'bottom', true); placed++; } catch (e) {}
+                        // ★C298: wall BOTH foot (dy 0) and head (dy 1) levels. Head-only left a foot-level
+                        // gap mobs reached through; and on an OVERHANG/PLATFORM (where digDown can't make a
+                        // pit — air below) a full surface BOX is the only shelter. Foot first (reference =
+                        // the ground below) then head (reference = the foot wall just placed).
+                        for (const dy of [0, 1]) {
+                            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                                const seal = sealBlock();
+                                if (!seal) break;
+                                const t = base.offset(dx, dy, dz);
+                                const b = bot.blockAt(t);
+                                if (b && b.boundingBox === 'block') continue;
+                                try { await skills.placeBlock(bot, seal.name, t.x, t.y, t.z, 'bottom', true); placed++; } catch (e) {}
+                            }
                         }
                         const roofed = await sealCurrentRoof('surface dirt-shelter');
-                        prog(`prepNether: ★surface dirt-shelter walls=${placed} roof=${roofed} y=${Math.floor(bot.entity.position.y)} (no-pick, can't dig — box in vs expose)`);
+                        prog(`prepNether: ★surface dirt-shelter walls=${placed} roof=${roofed} y=${Math.floor(bot.entity.position.y)} (box-in vs expose)`);
+                        if (roofed) return true;
+                        // ★C344 (T-0075): SAND/WATER-EDGE DOUBLE-BIND escape. When digDown is skipped (gravity
+                        // collapse, C334) AND this surface box-in roof FAILS ("无参考面" at a water/sand edge),
+                        // the bot thrashes — SWIM↔FREE oscillation + wander, never settling (用户实拍"完全发狂";
+                        // swim震荡18/10min). Build our OWN dry high ground: pillar UP 2 on a NON-gravity block
+                        // (pillarUp prefers cobble/dirt over sand) so we rise onto a fresh solid platform whose
+                        // TOP is the reference face the roof needs, then box-in there. Only fires AFTER the normal
+                        // box-in already failed → strictly can't be worse than the exposed roof=false we'd leave.
+                        try {
+                            const p0 = bot.entity.position.floored();
+                            const WS = (b) => b && /water|^sand$|red_sand|gravel/.test(b.name || '');
+                            const waterSandAdj = [[1, 0], [-1, 0], [0, 1], [0, -1], [0, 0]].some(([dx, dz]) =>
+                                WS(bot.blockAt(p0.offset(dx, -1, dz))) || /water/.test((bot.blockAt(p0.offset(dx, 0, dz)) || {}).name || ''));
+                            const _nonGrav = ['cobblestone', 'cobbled_deepslate', 'dirt', 'stone', 'tuff', 'andesite', 'diorite', 'granite', 'deepslate', 'netherrack'].some(n => (world.getInventoryCounts(bot)[n] || 0) > 0);
+                            if (waterSandAdj && _nonGrav && !bot.interrupt_code) {
+                                prog(`prepNether: ★C344 沙/水边双死锁(挖不下+封不上无参考面) → cobble垫高2格建干平台再box-in`);
+                                try { await skills.pillarUp(bot, Math.floor(bot.entity.position.y) + 2); } catch (e) {}
+                                const base2 = bot.entity.position.floored();
+                                let placed2 = 0;
+                                for (const dy of [0, 1]) {
+                                    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                                        const seal = sealBlock();
+                                        if (!seal) break;
+                                        const t = base2.offset(dx, dy, dz);
+                                        const b = bot.blockAt(t);
+                                        if (b && b.boundingBox === 'block') continue;
+                                        try { await skills.placeBlock(bot, seal.name, t.x, t.y, t.z, 'bottom', true); placed2++; } catch (e) {}
+                                    }
+                                }
+                                const roofed2 = await sealCurrentRoof('C344 pillar platform');
+                                prog(`prepNether: ★C344 platform box-in walls=${placed2} roof=${roofed2} y=${Math.floor(bot.entity.position.y)}`);
+                                return roofed2;
+                            }
+                        } catch (e) {}
                         return roofed;
                     };
+                    // ★夜封顶活跃信号 (worker-death 06-26): 进入夜庇护封顶逻辑即标记,让 modes.js mobility 的
+                    // MAROONED 反射让位(不抢身体中断 digDown). 覆盖 covered-hold/body-budget/dug-in 三分支,每轮
+                    // (~1.5s)刷新,12s 过期. 解 prepNether 封顶 ⟷ mobility MAROONED dig 反射互绞(25次封顶失败真根因).
+                    try { bot._nightSealingUntil = Date.now() + 12000; } catch (e) {}
                     const lowResourceNoDigHold = bodyBudgetBunkerHold();
                     if (coveredAbove()) {
                         prog(`prepNether: bunker already covered — hold position y=${Math.floor(bot.entity.position.y)}, no extra digDown`);
@@ -395,13 +707,79 @@ export default async function prepNether(bot, ctx) {
                         // ★C252: catch digDown's no-pick/stone throw HERE (was bubbling to the
                         // outer catch → dugIn=false → re-loop exposed). On dig failure, box in
                         // with dirt on the surface instead of standing in the open.
-                        let dugOk = true;
-                        try { await skills.digDown(bot, 2); }
-                        catch (e) { dugOk = false; prog(`prepNether: digDown blocked (${e.message}) — surface dirt-shelter fallback`); }
-                        const seal = sealBlock();
+                        // ★C298: CAPTURE digDown's RETURN value — it returns false (NO throw) on an
+                        // overhang/platform/cave-roof (air below → digging would drop the bot >2 → it
+                        // refuses). The old code only caught THROWS, so a false return left dugOk=true and
+                        // the bot tried to roof a pit it never dug (roof block in open air, no reference
+                        // face → placeBlock fails → exposed ALL NIGHT on open ground = user-reported "晚上
+                        // 空地发呆"). A false return now routes to surfaceDirtShelter (box in) like a throw.
+                        // ★C321-A (用户 07:18 "开阔封顶是伪命题/挖三填一零成本/左脑右脑打架" 系统性修):
+                        // 系统根 = 床/锚在湖边(T-0059)→永远在水边→digDown 灌水、井壁是水→cap 真无参考面
+                        // →"封顶失败"刷屏。但 placeBlock 本就自动遍历6邻居找实心参考(skills.js:1627),所以
+                        // **干实地上挖三填一必成**(井壁=参考)。"开阔无参考面"是把水边误标成开阔的伪命题。修:
+                        // 挖之前先确保站干实地(脚下3格全实心+四邻非水);水边就横移到最近干实心点再挖→从根上
+                        // 消除"水边封顶失败"(不在水里挖),让挖三填一任处可靠。
+                        const _dryDigSpot = () => {
+                            try {
+                                const p0 = bot.entity.position.floored();
+                                const WL = (b) => b && /water|lava/.test(b.name || '');
+                                const SOL = (b) => b && b.boundingBox === 'block' && !WL(b);
+                                const AIRY = (b) => b && (b.name === 'air' || b.name === 'cave_air' || /grass|fern|snow/.test(b.name || ''));
+                                const good = (q) => {
+                                    if (!(SOL(bot.blockAt(q.offset(0, -1, 0))) && SOL(bot.blockAt(q.offset(0, -2, 0))) && SOL(bot.blockAt(q.offset(0, -3, 0))))) return false;
+                                    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) if (WL(bot.blockAt(q.offset(dx, 0, dz))) || WL(bot.blockAt(q.offset(dx, 1, dz)))) return false;
+                                    return true;
+                                };
+                                if (good(p0)) return null;   // already on a dry dig footprint → no relocate
+                                let best = null, bd = 1e9;
+                                for (let dx = -6; dx <= 6; dx++) for (let dz = -6; dz <= 6; dz++) {
+                                    const d2 = dx * dx + dz * dz; if (d2 < 1 || d2 >= bd) continue;
+                                    for (let dy = 2; dy >= -3; dy--) {
+                                        const g = bot.blockAt(p0.offset(dx, dy, dz));
+                                        if (!SOL(g)) continue;
+                                        const stand = p0.offset(dx, dy + 1, dz);
+                                        if (AIRY(bot.blockAt(stand)) && AIRY(bot.blockAt(stand.offset(0, 1, 0))) && good(stand)) { best = stand; bd = d2; }
+                                        break;
+                                    }
+                                }
+                                return best;
+                            } catch (e) { return null; }
+                        };
+                        try {
+                            const _dry = _dryDigSpot();
+                            if (_dry && !bot.interrupt_code) {
+                                prog(`prepNether: ★C321-A 水边/无干井位 — 横移到干实地 ${_dry.x},${_dry.y},${_dry.z} 再挖三填一(井壁实心→cap必成)`);
+                                try { await Promise.race([skills.goToPosition(bot, _dry.x, _dry.y, _dry.z, 0), new Promise(r => setTimeout(r, 6000))]); } catch (e) {}
+                            }
+                        } catch (e) {}
+                        // ★C334 (T-0066, act_trace 实锤 09:01: dig:sand→埋头 suffocation, armor=4 挡不住):
+                        // 在 SAND/GRAVEL(重力块)列里 digDown 掘坑是致命的——坑壁/上方无支撑的沙塌进坑
+                        // 砸到头格 → 窒息(armor 无效)。检测脚下/上方是重力块列 → 跳过掘坑(必塌),退
+                        // surfaceDirtShelter(地表盒,无塌方)。exposed-but-armored 远胜 buried-and-dead。
+                        // 石/土列不受影响(坑安全)。完整修(无重力 seal 料→用 stone_pickaxe 挖 cobble 封顶)见 T-0066。
+                        const _GRAV = /^(sand|red_sand|gravel|suspicious_sand|suspicious_gravel)$/;
+                        const _gravityPitTrap = () => {
+                            try {
+                                const p = bot.entity.position.floored();
+                                const b1 = bot.blockAt(p.offset(0, -1, 0));   // dug first
+                                const b2 = bot.blockAt(p.offset(0, -2, 0));   // dug second
+                                const ab = bot.blockAt(p.offset(0, 2, 0));    // sand that drops into dug head space
+                                return [b1, b2, ab].some(b => b && _GRAV.test(b.name || ''));
+                            } catch (e) { return false; }
+                        };
+                        let dugOk = false;
+                        if (_gravityPitTrap()) {
+                            prog(`prepNether: ★C334 sand/gravel column — SKIP dig-in pit (gravity collapse→suffocation), surface box-in instead`);
+                            // leave dugOk=false → falls through to the surfaceDirtShelter branch below
+                        } else {
+                            try { dugOk = await skills.digDown(bot, 2); }
+                            catch (e) { dugOk = false; prog(`prepNether: digDown blocked (${e.message}) — surface dirt-shelter fallback`); }
+                        }
+                        const seal = sealBlock();   // 门: 有任意 seal 料即可下挖+砌墙(墙脚有支撑,沙可用)
                         if (dugOk && seal) {
                             const top = bot.entity.position.floored().offset(0, 2, 0);
-                            try { await skills.placeBlock(bot, seal.name, top.x, top.y, top.z, 'bottom', true); } catch (e) {}
+                            const _cap = sealBlock(true);   // ★C326-A 顶盖那格悬 air 上,必用非重力块(沙会坠落砸头)
+                            if (_cap) { try { await skills.placeBlock(bot, _cap.name, top.x, top.y, top.z, 'bottom', true); } catch (e) {} }
                             // ★C260: digDown assumes the pit's 4 sides are solid ground, but on a
                             // hilltop/slope the hillside drops away and leaves sides OPEN — death 8
                             // (@y85, coveredAbove=1, zombie reached through an open side at 1.2b despite
@@ -418,11 +796,28 @@ export default async function prepNether(bot, ctx) {
                                     try { await skills.placeBlock(bot, s.name, t.x, t.y, t.z, 'bottom', true); } catch (e) {}
                                 }
                             }
-                        } else if (!dugOk) {
+                            // ★C308 (T-0001/T-0037): 上面的直接 cap@dy2 在开阔/水边无参考面会失败,
+                            // 留下"有料但封顶失败"的半暴露坑→被怪压死。墙已放好(脚+头层),此处用
+                            // sealCurrentRoof 的 stepped 自举把顶盖合拢(cap 层偏移块参考头层墙→正中
+                            // cap 参考偏移块),不依赖周围实心地形。idempotent,已盖则 coveredAbove 直接 true。
+                            if (!coveredAbove()) { try { await sealCurrentRoof('dug-in pit stepped'); } catch (e) {} }
+                        } else {
+                            // ★C298: digDown didn't actually dig (false return on overhang/platform, or no
+                            // seal) → box in on the surface instead of trying to roof a non-existent pit.
                             await surfaceDirtShelter();
                         }
                         const sealedNow = coveredAbove();
-                        prog(`prepNether: ★dug-in bunker ${sealedNow ? 'SEALED' : 'unsealed(无封顶料,坑里也比地表强)'} y=${Math.floor(bot.entity.position.y)}`);
+                        // ★C306-A (T-0037): the old label HARDCODED "无封顶料" whenever unsealed — a
+                        // MISDIAGNOSIS. Live coast case: bot held cobblestone:62 (sealBlock() non-null)
+                        // yet ended unsealed because the dy2/dy3 roof placeBlock FAILS for lack of a
+                        // reference face on open/water-adjacent terrain (y62 sea level), not for lack of
+                        // material. Report the TRUE cause + held seal count so the next coast-night gives
+                        // ground-truth for the behavioral root-fix (site-selection to dry footprint /
+                        // pillar-and-cap on open terrain), which needs in-game validation before shipping.
+                        let _sealCnt = 0; try { const _sb = sealBlock(); _sealCnt = _sb ? _sb.count : 0; } catch (e) {}
+                        const _sealWhy = sealedNow ? 'SEALED'
+                            : (_sealCnt > 0 ? `unsealed(有料x${_sealCnt}但封顶失败:开阔/水边无参考面,dugOk=${dugOk})` : 'unsealed(真无封顶料)');
+                        prog(`prepNether: ★dug-in bunker ${_sealWhy} y=${Math.floor(bot.entity.position.y)} 坑里也比地表强`);
                         await nightBunkerStaticWeapon();
                     }
                 } catch (e) { dugIn = false; prog(`prepNether: bunker err ${e.message}`); }
@@ -480,15 +875,21 @@ export default async function prepNether(bot, ctx) {
     // armor) BEFORE the diamond tier so the bot completes a survivable kit from the iron it can mine
     // at moderate depth, THEN descends for diamonds already armored. 3-in-1: (1) full armor set,
     // (2) always a real sword (no weapon gap), (3) armor+weapon complete before the deep diamond dive.
+    // ★C325-A (T-0060 自给根, Plan-agent breakpoint ②, 用户选"先治自给"): the OLD order put `shield`
+    // (needs 6 planks — the wood-bottleneck она常缺) FIRST and iron ARMOR at index 3+. So shield/pickaxe
+    // stalling/return-false'ing on a gate exited prepNether before ANY armor was attempted → she died
+    // NAKED carrying raw_iron "full armor's worth" (prepNether.js:721 comment, the 6.7h Sisyphus). Deaths
+    // are overwhelmingly under-armored, so REORDER to survival-first: pickaxe (mine iron) → FULL IRON ARMOR
+    // (the survival kit) → sword → shield (planks-gated, last so it can't block armor) → diamond/nether.
     const goals = [
-        { item: 'shield', count: 1 },          // shield blocks skeleton arrows + melee (shieldFight)
-        { item: 'iron_pickaxe', count: 1 },    // needed to mine the rest (and diamonds)
-        { item: 'iron_sword', count: 1 },      // ★2: a real weapon — death 21 was sword:null, couldn't fight back
-        { item: 'iron_chestplate', count: 1 }, // ★1: iron armor (chest=most protection) BEFORE the deep diamond dive
-        { item: 'iron_leggings', count: 1 },
+        { item: 'iron_pickaxe', count: 1 },    // mine iron/the rest; cheap (3 iron+2 stick)
+        { item: 'iron_chestplate', count: 1 }, // ★ARMOR FIRST now (chest=most protection) — survival before weapons
         { item: 'iron_helmet', count: 1 },
+        { item: 'iron_leggings', count: 1 },
         { item: 'iron_boots', count: 1 },
-        { item: 'diamond_sword', count: 1 },   // ★3: diamonds only after the iron survival kit is done
+        { item: 'iron_sword', count: 1 },      // a real weapon (death 21 was sword:null)
+        { item: 'shield', count: 1 },          // shield (skeleton arrows) — LAST of the iron tier: needs 6 planks (wood-gated), must not block armor
+        { item: 'diamond_sword', count: 1 },   // diamonds only after the iron survival kit is done
         { item: 'diamond_chestplate', count: 1 },
         { item: 'diamond_leggings', count: 1 },
         { item: 'diamond_helmet', count: 1 },
@@ -1055,7 +1456,11 @@ export default async function prepNether(bot, ctx) {
     // 24 deaths). Fix: the FIRST thing each life, punch a buffer of dirt (free, everywhere on
     // the surface, no tool needed) so the shelter reflexes always have material. "Survive
     // first, grind later" — the human move. Skip once we have enough.
-    const buildBlocks = () => { const c = world.getInventoryCounts(bot); return (c.dirt || 0) + (c.cobblestone || 0) + (c.stone || 0) + (c.dirt_path || 0) + Object.keys(c).filter(n => /_planks$|_log$/.test(n)).reduce((s, n) => s + c[n], 0); };
+    // ★C296: count the FULL hand-placeable filler set — badlands/desert fillers (red_sand/sand/
+    // terracotta/sandstone) were absent, so a bot holding 274 red_sand read "shelter blocks=0" and
+    // couldn't roof its 挖三填一 pit → dwelled exposed and died at night (用户实拍 + death #94). One
+    // block to seal a dug pit is all it takes; recognize everything it can actually place.
+    const buildBlocks = () => { const c = world.getInventoryCounts(bot); return Object.keys(c).filter(n => /^(dirt|coarse_dirt|grass_block|cobblestone|cobbled_deepslate|stone|dirt_path|granite|diorite|andesite|tuff|gravel|sand|red_sand|sandstone|red_sandstone|netherrack)$/.test(n) || /_planks$|_log$|terracotta$/.test(n)).reduce((s, n) => s + c[n], 0); };
     // NIGHT GATE: sticky re-arm re-enters prepNether every ~8s, and at night this
     // stocking step was DIGGING THE BOT OUT OF ITS OWN SEALED BUNKER to go find dirt
     // (alarm caught it punching its own cobblestone cap at 05:09). Block-stocking is
@@ -1377,6 +1782,70 @@ export default async function prepNether(bot, ctx) {
         const lowHpNoRegen = bot.health < 14 && bot.food < 18;
         if (lowHpNoRegen && !hasEdible()) await noRegenStaticKit('keepFed');
         if (bot.food >= 12 && !lowHpNoRegen) return true;        // no food held but enough buffer to continue short prep work
+        // ★C291: the food gate must not block the PICKAXE CRAFT when the bot is pickless but already
+        // HOLDS the materials — the craft is zero-food-cost and IS the bootstrap escape. Live
+        // 2026-06-20 (sibling to C285/C286): food=11 keepFed looped on a futile forest feedUp while
+        // 2 oak_logs + a crafting_table sat ready to become a pickaxe; C285 didn't fire (it requires
+        // 0 wood) and the food<12 gate kept kicking to feedUp → never crafted. So: if pickless and
+        // holding pick-makings (logs/planks + a table or table-path) and not critically hurt, let
+        // prep proceed — the KIT craft (C286-exempt) makes the pick without eating anything.
+        {
+            const noPick = !bot.inventory.items().some(i => /_pickaxe$/.test(i.name || ''));
+            const woodForPick = heldLogs() > 0 || maxHeldPlankStack() >= 3;
+            const tableForPick = has('crafting_table') > 0 || !!world.getNearestBlock(bot, 'crafting_table', 4) || heldLogs() > 0;
+            if (noPick && woodForPick && tableForPick && bot.health >= 8) {
+                if (!bot._lastC291LogAt || Date.now() - bot._lastC291LogAt > 30000) {
+                    bot._lastC291LogAt = Date.now();
+                    prog(`prepNether: ★C291 craft-pick-over-food — pickless + holding pick-makings (logs=${heldLogs()} planksMax=${maxHeldPlankStack()} table=${has('crafting_table')}); proceed to craft pick (zero-food) instead of futile feedUp (food=${bot.food} hp=${Math.round(bot.health)})`);
+                }
+                return true;
+            }
+        }
+        // ★C285 BOOTSTRAP-WOOD escape — the food gate must not hard-stop the ONE escape from a
+        // resource-floor deadlock. Live 2026-06-20 (用户实拍"沙漠发呆十几分钟"): surface, daytime,
+        // food=8 desert (feedUp futile — no animals), 0 logs/planks, no table, no pick, but holding
+        // 6 saplings — keepFed kept hitting "stop prep work" return false (line ~1674), so the
+        // wood→table→pickaxe chain NEVER ran and the bot spun 30min+ (277× "standing down" / 5×
+        // self-pin-kick). This is the documented run-killer. Wood is the path to tools AND to a
+        // sword for real hunting, so when FULLY tool-blocked + holding saplings + non-lethal +
+        // daytime + no actionable threat, chop/grow wood instead of bailing to a hopeless feedUp.
+        // Additive: fires ONLY in this exact deadlock; every keepFed gate below is untouched.
+        // chopWood reaches a tree if one is pathable, else plants+grows a sapling (C279). 60s
+        // cooldown so a failed attempt doesn't hammer. Must be validated in-game at daylight.
+        {
+            const fullyToolBlocked = heldLogs() === 0 && maxHeldPlankStack() === 0
+                && has('crafting_table') === 0 && !world.getNearestBlock(bot, 'crafting_table', 5)
+                && !hasAnyHeldPick();
+            const saplingCt = bot.inventory.items().filter(i => /_sapling$/.test(i.name || '')).reduce((s, i) => s + i.count, 0);
+            const nonLethal = bot.health >= 10 && bot.food >= 6;
+            const escapeReady = !bot._prepBootstrapWoodUntil || Date.now() > bot._prepBootstrapWoodUntil;
+            if (fullyToolBlocked && saplingCt > 0 && nonLethal && !isNightNow() && !isDuskNow()
+                && hostilesNear(12) === 0 && escapeReady) {
+                bot._prepBootstrapWoodUntil = Date.now() + 60000;
+                prog(`prepNether: ★C285 BOOTSTRAP-WOOD escape — fully tool-blocked (0 wood/table/pick) + ${saplingCt} sapling, non-lethal (hp=${Math.round(bot.health)} food=${bot.food}), daytime/no-threat → chopWood (reach tree or grow sapling) instead of futile desert feedUp`);
+                try {
+                    if (!openSurfaceNow()) {
+                        const surfTarget = Math.max(63, Math.floor(bot.entity.position.y) + 6);
+                        await Promise.race([
+                            skills.customSkill(bot, 'surfaceUp', surfTarget),
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('c285-surfaceUp-timeout')), 45000)),
+                        ]);
+                    }
+                    await Promise.race([
+                        skills.customSkill(bot, 'chopWood', 2, { allowCriticalForage: true }),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('c285-chop-timeout')), 120000)),
+                    ]);
+                } catch (e) {
+                    try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
+                    try { bot.clearControlStates(); } catch (_) {}
+                    prog(`prepNether: C285 bootstrap-wood incomplete: ${e.message}`);
+                }
+                if (heldLogs() > 0 || maxHeldPlankStack() > 0) {
+                    prog(`prepNether: ★C285 got wood (logs=${heldLogs()} planksMax=${maxHeldPlankStack()}) — proceed to table→pickaxe`);
+                    return true;
+                }
+            }
+        }
         if (isNightNow()) {
             prog(`prepNether: ★HUNGRY/LOWHP food=${bot.food} hp=${Math.round(bot.health)}, no food held, night — HOLD all work until dawn`);
             let held = 0;
@@ -1921,6 +2390,13 @@ export default async function prepNether(bot, ctx) {
 
         if (!hasSwordTier() && count('cobblestone') >= 2 && count('stick') >= 1) {
             const before = count('stone_sword');
+            // ★C299: PLACE the held table first (mirrors the C287 spare-PICKAXE fix). craftRecipeLocal
+            // needs a PLACED table; the pickaxe path got this fix but the sword path never did, so the
+            // bot crafted spare pickaxes yet stayed SWORD-LESS and died defenseless (death #104:
+            // skeleton @0.7b, sword=null armor=0; chronic "48%空手死"). Same place-then-craft as the pick.
+            if (!world.getNearestBlock(bot, 'crafting_table', 4) && count('crafting_table') > 0) {
+                try { await skills.placeBlockNearby(bot, 'crafting_table', 2); } catch (e) { prog(`prepNether: NO-REGEN sword table place err ${e.message}`); }
+            }
             try { await skills.craftRecipeLocal(bot, 'stone_sword', 1); } catch (e) { prog(`prepNether: NO-REGEN static sword err ${e.message}`); }
             refresh();
             if (count('stone_sword') > before) {
@@ -1935,6 +2411,25 @@ export default async function prepNether(bot, ctx) {
     };
     const keepKit = async () => {
         if (bot.interrupt_code) return;
+        // ★C324-A (T-0060 自给根, Plan-agent breakpoint ①, 用户选"先治自给"): THE root of the stone-age
+        // Sisyphus loop — she hoards 300+ cobblestone (6+ slots) + coal/sand/terracotta → bag hits 36/36
+        // → felled logs/loot/CRAFTED items have no slot → no wood → no table → no tools/armor → die naked.
+        // chopWood's reactive cap (128, only when a log needs room, via toss=re-collected) is too weak.
+        // Fix: PROACTIVELY cap bulk surplus every prep cycle via /clear (the ONLY thing that frees slots —
+        // toss is instantly re-grabbed by item_collecting, declutterInv.js:30). Keep a working buffer of each.
+        try {
+            const ic = world.getInventoryCounts(bot);
+            const CAPS = { cobblestone: 64, cobbled_deepslate: 64, stone: 0, dirt: 16, coal: 64, sand: 0, red_sand: 0, sandstone: 0, red_sandstone: 0, smooth_sandstone: 0, gravel: 0, granite: 0, andesite: 0, diorite: 0, tuff: 0, flint: 0, raw_copper: 0, terracotta: 0, white_terracotta: 0, orange_terracotta: 0, yellow_terracotta: 0, red_terracotta: 0, brown_terracotta: 0, light_gray_terracotta: 0, gray_terracotta: 0, cyan_terracotta: 0, rabbit_hide: 0, sugar_cane: 0 };
+            let emptySlots = 36; try { emptySlots = bot.inventory.emptySlotCount(); } catch (e) {}
+            let cleared = 0;
+            for (const [name, cap] of Object.entries(CAPS)) {
+                const have = ic[name] || 0;
+                if (have <= cap) continue;
+                try { bot.chat(`/clear @s minecraft:${name} ${have - cap}`); cleared += (have - cap); } catch (e) {}
+                await skills.wait(bot, 120);
+            }
+            if (cleared > 0) prog(`prepNether: ★C324-A capSurplus /clear'd ${cleared} bulk surplus (emptySlots was ${emptySlots}) — keep slots free for wood/loot/crafts`);
+        } catch (e) {}
         if (famineBudget()) {
             await famineStaticKit();
             prog(`prepNether: SKIP roaming kit — famine body budget food=${bot.food} hp=${Math.round(bot.health)} no edible`);
@@ -1951,6 +2446,15 @@ export default async function prepNether(bot, ctx) {
             prog(`prepNether: KIT — effective picks ${effectivePicks()}<2 → crafting spare stone_pickaxe`);
             try {
                 if (cnt('stick') < 2) { try { await skills.customSkill(bot, 'achieve', { item: 'stick', count: 4 }); } catch (e) {} }
+                // ★C287: stone_pickaxe requiresTable, but craftRecipe does NOT reliably place a held
+                // table — live 2026-06-20 it threw "Recipe requires craftingTable, but one was not
+                // supplied" every loop while a crafting_table sat IN INVENTORY, stalling the bootstrap
+                // one craft short of the pickaxe (and the retry loop pillared the bot 56 blocks into
+                // the sky burning cobble). Place the held table first — mirrors the static-weapon path
+                // (~L191) that works — so craftRecipe finds a placed table within reach.
+                if (!world.getNearestBlock(bot, 'crafting_table', 3) && cnt('crafting_table') > 0) {
+                    try { await skills.placeBlockNearby(bot, 'crafting_table', 2); } catch (e) { prog(`prepNether: spare-pick table place err ${e.message}`); }
+                }
                 await skills.craftRecipe(bot, 'stone_pickaxe', 1);
             } catch (e) { prog(`prepNether: spare pick err ${e.message}`); break; }
         }
@@ -2075,6 +2579,21 @@ export default async function prepNether(bot, ctx) {
         if (cancelRequested()) {
             prog('prepNether: supervisor cancel observed — returning');
             return false;
+        }
+        // ★C338-A (T-0076): iron_pickaxe dead-end pivot. A stone_pickaxe mines everything except
+        // DIAMOND/OBSIDIAN — iron_pickaxe is ONLY needed for those. With 0 obtainable iron (raw_iron/
+        // ingot < 3, must deep-mine to find ore) the kit spins on iron_pickaxe — either "iron probe
+        // cooldown ... yield"(return false→missionNether re-calls→re-yield = 空转) or achieve's
+        // "NO KNOWN WAY to obtain iron_pickaxe" — while holding 14 idle stone_pickaxes that mine iron
+        // ore fine. Don't block the main line on iron_pickaxe when a usable pickaxe is in hand: SKIP it
+        // so prep proceeds (she mines iron ore WITH the stone pick); the moment raw_iron≥3 lands this
+        // gate falls (condition false) and the very next cycle crafts the iron pickaxe. Pickaxe only —
+        // iron ARMOR/sword keep their own gates (survival-critical, fail-fast on 0 iron anyway).
+        if (g.item === 'iron_pickaxe' && has('iron_pickaxe') < 1
+            && has('raw_iron') < 3 && has('iron_ingot') < 3
+            && (has('stone_pickaxe') >= 1 || has('diamond_pickaxe') >= 1 || has('netherite_pickaxe') >= 1)) {
+            prog(`prepNether: ★C338-A pivot iron_pickaxe — 0 obtainable iron (raw=${has('raw_iron')} ingot=${has('iron_ingot')}) but ${has('stone_pickaxe')} stone_pickaxe in hand; SKIP, mine iron ore WITH stone pick (craft iron pick once raw_iron≥3)`);
+            continue;
         }
         if (/^diamond_/.test(g.item) && !ironPlusPick() && has('diamond') < diamondCost(g.item)) {
             prog(`prepNether: hold ${g.item} — no iron+ pickaxe and diamonds=${has('diamond')}; finish iron tier before diamond gear`);

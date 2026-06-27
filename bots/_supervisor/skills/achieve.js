@@ -143,7 +143,17 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
     // THEN a sword, THEN hunts effectively. keepInventory keeps the planks across death, so the
     // craft is always available. (Gathering subgoals like oak_log are NOT exempted — only the
     // zero-travel crafts.)
-    const cheapBootstrapCraft = /^(crafting_table|wooden_pickaxe)$/.test(item);
+    // ★C286: the exemption was TOO NARROW — only crafting_table|wooden_pickaxe. Live 2026-06-20
+    // (用户实拍"沙漠发呆"续): C285 got the bot 4 logs at food=4-7, but crafting a crafting_table
+    // sub-goals oak_planks, and stone_pickaxe (which she had 99 cobble + 25 stick for) was the real
+    // KIT goal — NEITHER oak_planks NOR stone_pickaxe was exempt, so the low-food gate kicked the
+    // bot back to a futile desert feedUp every cycle and it starved+died (#47) holding all the
+    // materials to craft its way out. Extend the exemption to the ENTIRE zero-travel pickaxe chain:
+    // planks (logs→planks), stick, crafting_table, wooden/stone_pickaxe. Gather sub-goals (oak_log,
+    // cobblestone) remain NON-exempt and hit their own low-food gates downstream (lines ~444/458),
+    // so this frees ONLY the pure in-inventory crafts — which cost zero hunger and zero travel and
+    // are the sole escape from the resource floor. Never gate the bootstrap craft on food.
+    const cheapBootstrapCraft = /^(crafting_table|wooden_pickaxe|stone_pickaxe|stick)$/.test(item) || /_planks$/.test(item);
     if (!foodGoal && !survivalGearGoal && !cheapBootstrapCraft && lowFoodNoSnack() && !(essentialUndergroundKitGoal && moderateUndergroundWorkOk())) {
         prog(`${tag}LOW-FOOD resource gate ${item}: food=${bot.food}, hp=${Math.round(bot.health)} no edible — return control to feedUp`);
         try { bot.clearControlStates(); } catch (e) {}
@@ -227,7 +237,17 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
             // Do not ask for a sword while bootstrapping the crafting table itself:
             // wooden_sword needs a table, so "crafting_table -> wooden_sword ->
             // placeTable -> crafting_table" immediately hits the active-loop guard.
-            if (item !== 'crafting_table' && !hasSword && !_nightExposed) await achieve(bot, ctx, 'wooden_sword', depth + 1, _active).catch(() => {});
+            // ★C343 (husk death-spike root): prefer the MORE DURABLE stone_sword whenever we have cobble
+            // (≥2). A wooden_sword needs PLANKS we often lack while sitting on stacks of cobble, so the hard
+            // 'wooden_sword' target dead-ended ("NO KNOWN WAY to obtain wooden_sword") and left the bot
+            // SWORD-LESS in a husk loop (live 13:00-03: 7 deaths/10min, ALL sword=null, while holding 56
+            // cobble + 3 stick). Stone sword is craftable from cobble+stick AND ~2× the durability (won't
+            // shatter mid-fight like wooden → the recurring "木剑打几只husk就碎→无剑→死"). Wooden only as
+            // the no-cobble fallback (the truly-naked early game the wooden pre-step was written for).
+            if (item !== 'crafting_table' && !hasSword && !_nightExposed) {
+                const _swordGoal = (inv()['cobblestone'] || 0) >= 2 ? 'stone_sword' : 'wooden_sword';
+                await achieve(bot, ctx, _swordGoal, depth + 1, _active).catch(() => {});
+            }
         } catch (e) {}
         // PLAN AHEAD — stock a WOOD BUFFER up front. Every tool/table/furnace craft
         // needs a few planks; gathered just-in-time, each shortfall sends the bot on a
@@ -409,7 +429,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
         // footing cell, returns fast, the caller retries forever — a confirmed 6-min STALL
         // @117,41,-47 (hp20/food16, act="-", looping "place table → too far/cramped → craft local").
         // Carve a short 1x2 branchMine tunnel to create the open cells a table needs, then retry.
-        if (!findTable() && bot._mobility && (bot._mobility.enclosed || bot._mobility.state === 'POCKET')) {
+        if (!findTable() && bot._mobility && (bot._mobility.enclosed || /POCKET|ENTOMBED/.test(bot._mobility.state || ''))) {   // ★C297: ENTOMBED was missing — a bot that dug a 1-wide night-shelter pit (C296) reads ENTOMBED, not POCKET, so the cramped-pocket table recovery never fired and it stalled with table+planks in hand, unable to place (live 2026-06-20 deaths=102 post-give). Include ENTOMBED so it surfaces to open ground and places there.
             // ★C258 cramped-pocket table livelock (confirmed 6-min STALL @117,41,-47, hp20/food16):
             // a 1-wide dug shaft has NO open footing cell for a table, placeBlockNearby returns
             // fast, the caller retries placeTable every ~0.6s forever. iron_pickaxe/furnace are
@@ -844,6 +864,68 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
         }
         return have() >= need;
     }
+
+    // ---- 4. PIVOT (general dead-end resolution — T-0078) ----
+    // Reaching here means SMELT+CRAFT+COLLECT all failed: the goal is genuinely
+    // unobtainable RIGHT NOW (no recipe affordable, no source mineable). Two
+    // item-specific patches already existed for this — C338-A (iron_pickaxe →
+    // fall back to stone_pickaxe in hand) and C343 (wooden_sword → stone_sword) —
+    // each bolted on at the ENTRY for one item. They left every OTHER unreachable
+    // goal (every Nth tier tool, every armor piece) to dead-loop the orchestrator:
+    // "NO KNOWN WAY" → caller re-requests the same goal → same dead-end (打地鼠根).
+    // Resolve the whole CLASS here, at the single exit, with two general rules:
+    //   (a) TOOL/ARMOR DOWNGRADE: the goal is a tiered tool/armor we can't build,
+    //       but we already hold a LOWER-tier equivalent of the same family → that
+    //       equivalent lets the bot keep progressing (a stone pickaxe still mines
+    //       iron; a wooden sword still kills). Report it as satisfied-by-equivalent
+    //       so the caller advances instead of dying on the unbuildable upgrade.
+    //       (ensureTool already short-circuits same-or-higher tier; this covers the
+    //       strictly-lower case those two patches hand-coded per item.)
+    //   (b) PREREQUISITE PIVOT: no equivalent on hand → pivot to the missing
+    //       PRE-REQUISITE one level down (smelt input, or the ore behind it) and
+    //       try to obtain THAT, so the next attempt at `item` has materials. Guarded
+    //       so we pivot to a given prereq at most once per ~60s (no pivot thrash).
+    const _toolFam = (item.match(/_(pickaxe|sword|axe|shovel|hoe)$/) || [, ''])[1];
+    const _armorFam = (item.match(/_(helmet|chestplate|leggings|boots)$/) || [, ''])[1];
+    const _equipFam = _toolFam || _armorFam;
+    if (_equipFam) {
+        // Any same-family item in hand (incl. strictly lower tier) is a usable
+        // equivalent — wood/stone/iron/diamond/leather/chainmail/gold all share the
+        // family suffix. tierOf returns -1 for materials we don't rank (leather,
+        // chainmail, golden armor), but presence alone means "we can function".
+        const heldEquiv = Object.keys(inv()).find(n => n.endsWith('_' + _equipFam) && n !== item && inv()[n] > 0);
+        if (heldEquiv) {
+            prog(`${tag}★PIVOT(T-0078) ${item} unobtainable now — already hold ${heldEquiv} (same ${_equipFam}); advance with the equivalent instead of dead-looping the upgrade`);
+            return true;
+        }
+    }
+    // No equivalent on hand → pivot DOWN to the missing prerequisite once. The
+    // prereq is the smelt input (iron_ingot → raw_iron) or, failing that, the
+    // first naturally-mined source block (raw_iron → iron_ore). Obtaining the
+    // prereq is what unblocks the real goal on the next pass.
+    try {
+        const prereq = mc.getItemSmeltingIngredient(item)
+            || (() => { const s = mc.getItemBlockSources(item); return (s && s.length && s[0] !== item) ? (s.find(b => /_ore$/.test(b)) || s[0]) : null; })();
+        if (prereq && prereq !== item && have(prereq) <= 0) {
+            const pKey = `${item}<-${prereq}`;
+            const now = Date.now();
+            const last = bot._achievePivot && bot._achievePivot.key === pKey ? bot._achievePivot : null;
+            if (!last || now - last.ts > 60000) {
+                bot._achievePivot = { key: pKey, ts: now };
+                prog(`${tag}★PIVOT(T-0078) ${item} unobtainable now & no equivalent — pivot to missing prerequisite ${prereq} (caller's next ${item} pass then has materials)`);
+                const okP = await achieve(bot, ctx, { item: prereq, count: need }, depth + 1, _active).catch(() => false);
+                // Do NOT recurse back into achieve(item) here: `item` is already in
+                // `_active` (added at entry, line ~172), so a same-item re-entry is
+                // short-circuited by the loop guard and would no-op. Instead, having
+                // stocked the prereq, return false and let the orchestrator re-issue
+                // achieve(item) next tick on a FRESH stack (empty _active) — where
+                // SMELT/CRAFT now find the materials and succeed.
+                if (okP) prog(`${tag}★PIVOT(T-0078) prereq ${prereq} secured — yielding so next ${item} pass can consume it`);
+            } else {
+                prog(`${tag}★PIVOT(T-0078) ${item}: prereq ${prereq} pivot on cooldown (${Math.ceil((60000 - (now - last.ts)) / 1000)}s) — not thrashing`);
+            }
+        }
+    } catch (e) { prog(`${tag}★PIVOT(T-0078) prereq resolution err: ${e.message}`); }
 
     prog(`${tag}NO KNOWN WAY to obtain ${item}`);
     return false;

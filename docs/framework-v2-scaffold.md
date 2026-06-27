@@ -94,6 +94,23 @@ register(instinct) / list() / evaluate(world, bot)
 - v2 第一阶段，本能**主要是现有 modes 的清单 + 一层 adapter**（modes 已经实现了 test/act 的本质）。`instinct.js` 先做**注册表 + 文档化契约**，逐步把 modes 迁过来。
 - 反射执行体若是"动作"（移动/挖/放），**必须走工具泳道**（§3.3），不可裸调 skills（保证不可中断 + 互斥）。
 
+**★EXECUTE-FIRST / ASK-LLM / VETO-SUPPRESS-CYCLE 机制（C331，用户定调的本能控制流）**：
+> 用户原话："本能总是**先触发执行**，再在执行过程中**询问 LLM**，如果 LLM 否决了，那么**本次周期内不再触发**。"
+
+这纠正了 kernel 的 `propose→decide(LLM)→execute` 顺序——本能是**执行优先**，不等 LLM。`instinct.js` 实现：
+```
+runInstinct(bot, instinct, world, ctx)
+  1. test 成立 → EXECUTE-FIRST：launch act（不 await，乐观执行；安全/有用的反射不等 LLM round-trip）
+  2. 并发 askLLM(world,bot,ctx)（每 cycle 一次，不阻塞 act）→ 返回 {veto, reason}
+  3. veto → vetoInstinct() 压制本 cycle + ctx.interrupt() 打断在飞的 act
+isVetoed(bot, name) / vetoInstinct(bot, name, reason)
+"cycle" = 一个连续触发段：test 首次成立时开始，test 转 false（触发消失，如天亮）即结束 re-arm。
+in-flight 守卫：act 不 await + 调用方每 ~2s tick → 不叠加，一个 act 跑完再启下一个。
+```
+- **askLLM 在 "纯本能/LLM全程不出声"(s4先不管) 期间 DORMANT**：notify 写**静默日志**（`instinct.log`，不 openChat、不真调 LLM），本能照常 execute-first；`!vetoInstinct(name)` 命令已备好，待 S4 LLM live 时把 notify 路由到 kernel/prompter 即闭环。
+- **首个实例**：`go_to_bed_sleep`（modes.js world_model mode 注册 + runInstinct 驱动）：dusk/night + 安全 + 已知床/村庄（C328 landmark 记忆）→ 导航去睡。prepNether C327 在 instinct episode engaged 时 defer，退为 fallback。
+- 睡觉等"是本能"的行为走**本条机制**（执行优先），**不是** kernel proposeTasks 的 proposal（那是 idle 任务派发，不同层）。
+
 ### 3.3 工具独占泳道（`tool_lanes.js`）
 
 **职责**：把"落地水/垫方块/瞬堡垒/翻地形"这类**本应万无一失**的脚本化原子操作，跑在**不可中断的互斥泳道**上。
@@ -179,8 +196,8 @@ Kernel = {
 
 - **S1（骨架）✅C274**：建 `framework/` 五模块 + 契约 + 文档；flag 默认关；`node --check` 全过；接进 agent.update() 但 tick 内若 flag 关则 no-op。**零行为变更。**
 - **S2（工具泳道实现）✅C275**：建 `framework/tools/`（lava_guard / survival_mlg[clutchWater 含永远收水+防岩浆] / bridging[generous] / bunker / index[TOOL_CATALOG]），各自获取泳道、不可中断、只被更高优先互斥泳道抢占。`node --check` + 10 项 mock 单测全过（防岩浆拒挖/拒水、落地水永远收水、岩浆上空不放水）。**未接 live 调用方，零行为变更。**
-- **S2b（接线，影子先行）待做**：把坠落本能（→clutchWater）、挖矿守卫（→safeToDigDown）、夜间封顶（→sealBunker）、垫方块调用方接上 tools；先影子记日志验不误抢占，再生效。in-game 放水时机对真服调。
-- **S3（proposeTasks 拆解）**：把 missionNether 的开局决策逐块抽进 `proposeTasks`，先**只记录"我会提议什么"对照 missionNether 实际行为**，验证一致再切。
+- **S2b（接线，影子先行）部分完成 C329（2026-06-21）**：核对真实代码后修正——③ 挖矿守卫**已无需接** `safeToDigDown`：`skills.js digDown` 已有逐格岩浆+水+侧向含水层守卫（比框架谓词更全）。① 坠落本能**只缺岩浆守卫**：内联 MLG clutch 的落点扫描按 boundingBox 判定会漏判岩浆（岩浆 boundingBox='empty'），已 surgical 接 `canClutchWater` 谓词当否决门（保留久经考验的内联落水 timing，全量换 clutchWater 工具因落水时机无法 dev-trigger 验、有回归风险→暂缓）。③ 夜间封顶 `sealBunker`（挖三填一）vs 现役 `sealCurrentRoof`（C308 stepped-roof）是**不同策略**（前者假设脚下可挖 3 格，wooded_badlands 常在台地挖不下；后者已 live 验+集成 C322 setBed）→ **不盲替**，留待 shadow 对照后定。垫方块调用方未接。
+- **S3（proposeTasks 拆解）shadow 进行中 C330（2026-06-21）**：proposeTasks 已写全（bootstrap 阶梯/食物/床/migrate/下矿/睡觉），映射现有 skills。已上线 **shadow-observe**（kernel `observe` 标志，节流 10s 纯读对比 `proposer top` vs `bot._currentSkill`，append `framework-shadow.log`，零行为变更、不开决策循环）。首数据：bootstrap 态 `proposer=BOOTSTRAP_KIT/prepNether` 与 missionNether 实派 `prepNether` **agree=Y**。**S3-live（kernel 接管派发）gated 在 shadow parity 确认 + 边角态（nether portal/contained-mine/escape）补进 proposeTasks 之后**，纯 proposer+commitGoal 驱动（无 LLM，正合"纯本能"）。
 - **S4（LLM 拍板回归）**：kernel 决策循环接 LLM judge；survival 下 idle 才问 LLM；改 prompter 占位符。
 - **S5（模式切换 + companion）**：玩家消息切 companion；退役 self_prompter（确认 supervised 路径无回归后删）。
 - **S6（全层收敛）**：本能/工具/skill 统一读 `getWorld()`，删各层重算。

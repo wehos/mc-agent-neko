@@ -16,9 +16,12 @@
  * commit without dispatching) until decideAndDispatch is turned live.
  */
 
+import fs from 'fs';
 import { AGENT_MODE, FRAMEWORK_ENABLED_DEFAULT } from './contracts.js';
 import { getWorld, mentalState, proposeTasks, commitGoal } from './world_model.js';
 import { pending as pendingInstincts } from './instinct.js';
+
+const SHADOW_LOG = 'bots/_supervisor/framework-shadow.log';
 
 export class Kernel {
     /**
@@ -35,17 +38,28 @@ export class Kernel {
         const envFlag = (typeof process !== 'undefined' && process.env && process.env.MC_FRAMEWORK_V2 === '1');
         this.enabled = opts.enabled ?? (envFlag || FRAMEWORK_ENABLED_DEFAULT);
         this.shadow = opts.shadow ?? true;          // safe default: don't act yet
+        // S3-shadow (scaffold §6): observe + LOG what the proposer WOULD dispatch vs
+        // what missionNether is actually running, even while the decision loop stays
+        // gated OFF. Pure read + append to SHADOW_LOG — ZERO behavior change. This is
+        // the parity data we need before flipping the kernel live as the dispatcher.
+        this.observe = opts.observe ?? false;
         this.log = opts.log || ((m) => { try { console.log(m); } catch (e) {} });
         this._lastDecideAt = 0;
         this._decideEveryMs = 2000;                  // don't spam the LLM
         this._companionUntil = 0;                    // companion-mode sticky window after a player msg
         this._lastShadowLog = '';
+        this._lastObserveAt = 0;
+        this._lastObserveLine = '';
         if (this.bot) this.bot._agent = agent;       // let world_model read agent state defensively
     }
 
     /** Called from agent.update(delta). Cheap + guarded; no-op when disabled. */
     async tick(delta) {
-        if (!this.enabled || !this.bot || !this.bot.entity) return;
+        if (!this.bot || !this.bot.entity) return;
+        // S3-shadow observation runs INDEPENDENTLY of the decision-loop flag: it only
+        // reads the world + proposeTasks and appends a line — it never dispatches.
+        if (this.observe) { try { this._shadowObserve(); } catch (e) {} }
+        if (!this.enabled) return;
 
         // Companion window decays back to survival.
         if (this._companionUntil && Date.now() > this._companionUntil) {
@@ -65,6 +79,46 @@ export class Kernel {
     onPlayerMessage(/* source, msg */) {
         this.mode = AGENT_MODE.COMPANION;
         this._companionUntil = Date.now() + 60_000; // stay companion ~60s after last player msg
+    }
+
+    // ── S3 shadow observation ────────────────────────────────────────────────
+    /**
+     * Throttled (10s) pure-read comparison: what the proposer WOULD pick vs what
+     * skill is actually running. Appends one line to SHADOW_LOG when the picture
+     * changes. No bot mutation, no dispatch — this is the migration-discipline step
+     * (scaffold §6 S3): collect parity data before the kernel ever drives dispatch.
+     */
+    _shadowObserve() {
+        const now = Date.now();
+        if (now - this._lastObserveAt < 10_000) return;
+        this._lastObserveAt = now;
+        const world = getWorld(this.bot);
+        const proposals = proposeTasks(world, this.bot);
+        const top = proposals[0];
+        const ms = mentalState(this.bot);
+        const live = this.bot._currentSkill || ms.skill || '(none)';
+        const topStr = top ? `${top.kind}/${top.skill || '-'}@${top.priority}` : 'none';
+        const alt = proposals.slice(1, 3).map(p => `${p.kind}@${p.priority}`).join(',') || '-';
+        const agree = top && (top.skill === live);
+        // ── task-queue (Phase A/B) PARITY: shadow queue head must == commitGoal's commitment in
+        //    Phase A (no opportunistic). qparity=N in Phase B is EXPECTED where an opp/backlog task
+        //    outranks (informational, not a failure). qlen exposes the backlog depth. ──
+        let qstr = '';
+        try {
+            const q = this.bot._taskQueue;
+            if (Array.isArray(q) && q.length) {
+                const qh = q[0];
+                const cmt = this.bot._commitment;
+                const par = (qh && cmt && qh.kind === cmt.kind) ? 'Y' : 'N';
+                qstr = ` qhead=${qh ? qh.kind : '-'} qparity=${par} qlen=${q.length}`;
+            }
+        } catch (e) {}
+        const line = `proposer=${topStr} live=${live} busy=${ms.busy} agree=${agree?'Y':'N'} alts=[${alt}]${qstr}`;
+        if (line === this._lastObserveLine) return;     // only log on change
+        this._lastObserveLine = line;
+        try {
+            fs.appendFileSync(SHADOW_LOG, `[${new Date().toISOString()}] ${line}\n`);
+        } catch (e) {}
     }
 
     // ── survival ───────────────────────────────────────────────────────────

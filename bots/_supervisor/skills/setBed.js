@@ -65,12 +65,19 @@ export default async function setBed(bot, ctx) {
                     if (bdef) logsPos.push(...(bot.findBlocks({ matching: bdef.id, maxDistance: 64, count: 40 }) || []));
                 }
             } catch (e) {}
+            // ★C322-A (T-0059, 用户实证 lake-edge 死循环 deaths 0→1→2): 旧选址只 -deathsNear*10+trees,
+            // 完全不避水 → 选了湖边(树多+死少但在水边)→ 反复溺水+封顶失败(水边无干井位)死循环。加避水:
+            // 候选 6b 内有水重罚 -100,绝不在湖/河边安家。findBlocks 只覆盖加载区,远候选水探不到=尽力而为,
+            // 但近湖边候选(已加载)必被否,把床推向干地→溺水+封顶失败两大死因从根消除。
+            let waterPos = [];
+            try { const wdef = bot.registry.blocksByName['water']; if (wdef) waterPos = bot.findBlocks({ matching: wdef.id, maxDistance: 64, count: 300 }) || []; } catch (e) {}
             let best = null, bestScore = -1e9;
             for (const [cx, cz] of cands) {
                 const dn = deathsNear(cx, cz, 24);
                 const trees = logsPos.filter(p => Math.hypot(p.x - cx, p.z - cz) < 24).length;
-                const score = -dn * 10 + Math.min(trees, 6);   // 安全权重 >> 资源权重
-                if (score > bestScore) { bestScore = score; best = { cx, cz, dn, trees }; }
+                const waterNear = waterPos.filter(p => Math.hypot(p.x - cx, p.z - cz) < 6).length;
+                const score = -dn * 10 + Math.min(trees, 6) - (waterNear > 0 ? 100 : 0);   // ★避水: 6b内有水重罚,绝不湖边安家
+                if (score > bestScore) { bestScore = score; best = { cx, cz, dn, trees, water: waterNear }; }
             }
             if (best) {
                 const hy = Math.max(60, Math.min(95, Math.floor(me.y)));

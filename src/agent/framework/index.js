@@ -12,7 +12,12 @@ import { Kernel } from './kernel.js';
 import { getLaneManager } from './tool_lanes.js';
 import { FRAMEWORK_ENABLED_DEFAULT } from './contracts.js';
 
-export { getWorld, mentalState, proposeTasks, commitGoal, isGoalDone, registerResourceNode, markDepleted, nearestNode, ingestScan } from './world_model.js';
+export { getWorld, mentalState, proposeTasks, commitGoal, isGoalDone, computeTier, registerResourceNode, markDepleted, nearestNode, ingestScan } from './world_model.js';
+// ── task-queue (framework-v2 Phase A/B) ──
+export { commitQueue, spliceOpportunistic, reevaluateHead, stillValid, dynamicBreadTarget, pickTierSatisfies } from './world_model.js';
+export * as taskQueue from './task_queue.js';
+export * as triggers from './triggers.js';
+export { llmGate, llmGateEnabled, wireLlm } from './llm_gate.js';
 export { ToolLaneManager, getLaneManager, preempts, LanePreempted } from './tool_lanes.js';
 export * as instinct from './instinct.js';
 export * as contracts from './contracts.js';

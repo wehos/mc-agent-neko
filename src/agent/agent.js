@@ -188,6 +188,110 @@ export class Agent {
         convoManager.endAllConversations();
     }
 
+    // ★C344 (T-0071): assert /gamerule keepInventory true AND VERIFY it actually took, instead of the
+    // old "send it and assume success" self-deception (实锤 06-25 死后掉光物品 ⇒ 命令被静默拒, keepInv
+    // 仍 OFF)。mineflayer 不暴露 gamerule 当前值, 所以唯一可靠的运行时校验 = 监听服务器对该命令的回应:
+    //   • 成功 → translate key commands.gamerule.set, 文本含 "Game rule …" / "has been updated" / 中文
+    //     "游戏规则 … 更新"。记一行确认。
+    //   • 拒绝 → commands.help.failed / "do not have permission" / "Unknown or incomplete command"。立即
+    //     写 events.log 告警。
+    //   • 静默拒 (LAN 未开 allow-cheats 的典型) → 一条回应都没有 → 6s 超时后写同样告警。
+    // 告警行带明确"用户世界层操作"指引, 监工/用户据此处置。幂等: 旧探针未结束就先拆掉再挂新的。
+    _assertKeepInventory() {
+        const b = this.bot;
+        if (!b) return;
+        const evt = (line) => { try { fs.appendFileSync('bots/_supervisor/events.log', `[${new Date().toISOString()}] ${line}\n`); } catch (_e) {} };
+        // tear down any prior probe (e.g. a reconnect before the previous one timed out)
+        if (this._keepInvProbe) { try { b.removeListener('messagestr', this._keepInvProbe.onMsg); } catch (_e) {} try { clearTimeout(this._keepInvProbe.timer); } catch (_e) {} this._keepInvProbe = null; }
+        const probe = { settled: false, onMsg: null, timer: null };
+        const settle = (ok, why) => {
+            if (probe.settled) return;
+            probe.settled = true;
+            try { b.removeListener('messagestr', probe.onMsg); } catch (_e) {}
+            try { clearTimeout(probe.timer); } catch (_e) {}
+            this._keepInvProbe = null;
+            if (ok) {
+                console.log('★C344 keepInventory VERIFIED ON (T-0071):', why);
+                evt(`KEEPINV OK — /gamerule keepInventory true verified ON (${why})`);
+            } else {
+                console.warn('★C344 keepInventory NO-OP (T-0071):', why);
+                evt(`KEEPINV NO-OP — /gamerule keepInventory true did NOT take (${why}). Bot likely lacks op / LAN cheats OFF → every death drops the whole kit (iron→stone relapse). NEEDS WORLD-LEVEL ACTION: re-open the world to LAN with "Allow Cheats: ON" (or /op the bot, or set keepInventory at world creation).`);
+            }
+        };
+        probe.onMsg = (message, _pos, jsonMsg) => {
+            try {
+                const txt = (message || '').toString();
+                const key = (jsonMsg && jsonMsg.translate) || '';
+                // only react to messages about THIS gamerule (avoid latching onto an unrelated /gamerule)
+                const aboutKeepInv = /keepInventory/i.test(txt) || /keepInventory/i.test(JSON.stringify(jsonMsg && jsonMsg.with || ''));
+                // success: vanilla "commands.gamerule.set" / EN "has been updated to true" / 中文 "更新为 true"
+                if (key === 'commands.gamerule.set' || (aboutKeepInv && /(has been updated|updated to true|更新为|已更新|已将.*更新)/i.test(txt))) {
+                    settle(true, key || txt.slice(0, 80));
+                    return;
+                }
+                // explicit rejection
+                if (key === 'commands.help.failed' || /(do not have permission|don't have permission|没有.*权限|无权)/i.test(txt)
+                    || /(Unknown or incomplete command|Unknown command|未知.*命令|命令.*无效)/i.test(txt)) {
+                    settle(false, `rejected: ${(key || txt.slice(0, 80))}`);
+                    return;
+                }
+            } catch (_e) {}
+        };
+        b.on('messagestr', probe.onMsg);
+        // 6s silent-rejection timeout (LAN allow-cheats OFF ⇒ no response at all)
+        probe.timer = setTimeout(() => settle(false, 'no server response in 6s (silent reject — allow-cheats likely OFF)'), 6000);
+        this._keepInvProbe = probe;
+        try { b.chat('/gamerule keepInventory true'); console.log('★C344 sent /gamerule keepInventory true, awaiting server ack (T-0071)'); }
+        catch (e) { settle(false, `chat() threw: ${e && e.message}`); }
+    }
+
+    // ★C333 (T-0065): see the call site in the spawn handler for the full rationale. One centralized
+    // chokepoint (用户: 门要加公共入口不是单个调用方) so EVERY death_log consumer (chopWood/migrate/
+    // prepNether/achieve死区, botwatch hotspot…) sees a clean log on a new world without per-reader
+    // edits. Pure-additive, swallow all errors — a miss just leaves the old behavior, never worse.
+    async _archiveStaleWorldStateOnSwitch() {
+        const b = this.bot;
+        const dir = 'bots/_supervisor/';
+        const isNaked = () => {
+            const items = (b.inventory ? b.inventory.items() : []) || [];
+            const armorN = b.inventory ? [5, 6, 7, 8].filter(s => b.inventory.slots[s]).length : 0;
+            const hasTool = items.some(i => /_pickaxe$|_axe$|_sword$|_shovel$|_hoe$/.test(i.name));
+            const hasShield = items.some(i => i.name === 'shield') || (b.inventory && b.inventory.slots[45] && b.inventory.slots[45].name === 'shield');
+            const totalItems = items.reduce((s, i) => s + (i.count || 0), 0);
+            // fresh character: no armor worn, no tool/weapon/shield, only a tiny scrap of starter blocks
+            return armorN === 0 && !hasTool && !hasShield && totalItems <= 16;
+        };
+        if (!isNaked()) return;                                  // has gear → same-world reconnect, never reset
+        // (a) defeat inventory LOAD-LAG: a real fresh char is still naked after 5s; lag has resolved by then.
+        await new Promise((r) => setTimeout(r, 5000));
+        if (!isNaked()) return;                                  // gear loaded in → was just lag, not a new world
+        // read newest death to apply guard (b)
+        let recent = null;
+        try {
+            const lines = fs.readFileSync(dir + 'death_log.jsonl', 'utf8').trim().split('\n').filter(Boolean);
+            if (lines.length) {
+                const last = JSON.parse(lines[lines.length - 1]);
+                const ageMin = (Date.now() - new Date(last.ts).getTime()) / 60000;
+                const p = b.entity && b.entity.position;
+                const near = !!(p && typeof last.x === 'number' && Math.hypot(last.x - p.x, last.z - p.z) < 24);
+                recent = { ageMin, near, n: lines.length };
+            }
+        } catch (e) { recent = null; }
+        if (!recent || recent.n < 1) return;                    // nothing to contaminate
+        // (b) same-world bot that died naked moments ago → its log is still relevant, keep it.
+        if (recent.ageMin < 10 && recent.near) return;
+        const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+        const archived = [];
+        for (const f of ['death_log.jsonl', 'landmarks.json', 'bed.json']) {
+            try { if (fs.existsSync(dir + f)) { fs.renameSync(dir + f, `${dir}${f}.${ts}.oldworld`); archived.push(f); } } catch (e) {}
+        }
+        try {
+            fs.appendFileSync(dir + 'progress.txt',
+                `[${new Date().toISOString()}] [world-scope] ★C333 NEW-WORLD detected (naked fresh char, armor=0/tools=0; newest death ${recent.ageMin.toFixed(0)}min ago near=${recent.near}) → archived ${archived.join(',') || 'none'} (phantom-hazard reset)\n`);
+        } catch (e) {}
+        console.log(`🌍 C333 world-switch: archived stale coordinate state [${archived.join(',')}] — naked fresh character, old log won't poison death-zones`);
+    }
+
     async initBot() {
         this.bot = initBot(this.name);
         this._disconnectHandled = false;
@@ -237,7 +341,39 @@ export class Agent {
                 
                 console.log(`${this.name} spawned.`);
                 this.clearBotLogs();
-                
+
+                // ★C332-A / C344 (T-0071): keepInventory 必须【可靠常 ON】,不能只在 devGive 救援路径临时设。
+                // 新开的世界默认 keepInventory OFF → 每次死亡掉光 iron kit → tier relapse(把 T-0068 夜死
+                // 耦合进 T-0060 reset-loop 的放大器)。devGive(skills/devGive.js:48)只在"救援"时设,而 bot
+                // 一旦 bootstrap 越过救援触发就再不设 → keepInv 仍关。giveKit 也没设。整个"死亡成本≈0"
+                // 策略 + 远征廉价(C269)都建立在 keepInv ON 上。故在【每次 spawn】(世界加载/重连/进程重启)
+                // 断言一次,幂等,中途换世界也会重新断言。需开 cheats(蓝图: Normal+keepInventory+cheats)。
+                //
+                // ★C344 (T-0071 决定性验收): 旧码"发了就当成功"是自欺 — 实锤 06-25 死后掉光物品 (只剩
+                // kelp+sand) 证明 keepInventory 当时仍 OFF, 即 /gamerule 被服务器静默拒 (bot 无 op 权 /
+                // LAN 未勾 allow-cheats)。mineflayer 不暴露 gamerule 当前值, 唯一可靠的运行时校验 = 监听
+                // 服务器对该命令的【回应消息】: 成功广播 commands.gamerule.set ("Game rule … updated"),
+                // 拒绝回 commands.help.failed / "You do not have permission" / "Unknown … command", 静默拒
+                // 则一条回应都没有。所以这里发命令后挂一次性 messagestr 探针: 收到成功→记确认; 收到拒绝
+                // 或 6s 超时无回应→写 events.log 告警 (KEEPINV NO-OP), 监工/用户据此判定"必须在 MC 世界层
+                // 开 cheats / 给 bot op"。绝不再"发了就当成功"。
+                try { this._assertKeepInventory(); } catch (e) { console.warn('keepInventory assert failed:', e && e.message); }
+
+                // ★C333 (T-0065): WORLD-SWITCH coordinate-state reset. death_log deaths / landmarks /
+                // bed anchor are world-LOCAL but persisted GLOBALLY — on a fresh world they poison
+                // death-zone & site-scoring with PHANTOM hazards from the previous world (用户实证: 新
+                // 世界开局乱挖+横跳, 129 旧死有 54 条落在新生点 16 格内 → chopWood 死区误判 → 无限背撤).
+                // No world seed is exposed (this mineflayer's game.js sets no hashedSeed) and this LAN
+                // server pins bot.spawnPoint to (0,0), so neither seed nor spawn-coord identifies the
+                // world. The robust available signal: a SAME-world process reconnect PRESERVES the
+                // inventory (the world save persists player data — confirmed live: a reboot reconnect
+                // kept full iron armor), so a NAKED fresh character at startup ⇒ new world / new char.
+                // Two false-positive guards: (a) inventory LOAD-LAG — re-confirm naked after 5s (lag
+                // resolves in <5s; a real fresh char stays naked); (b) SAME-world bot that died naked
+                // right before restart — skip reset when the newest death is fresh(<10min)+near(<24b),
+                // that log is still relevant. Archive (rename .oldworld), don't delete — forensics.
+                try { await this._archiveStaleWorldStateOnSwitch(); } catch (e) { console.warn('world-scope reset failed:', e && e.message); }
+
                 // Start WebSocket server and connect this agent
                 if (this.count_id === 0) { // Only start server for the first agent
                     wsServer.start();
@@ -859,7 +995,9 @@ export class Agent {
             // Framework v2 kernel (survival/companion decision loop). Feature-flagged
             // OFF by default — when disabled tick() is a no-op and the existing
             // missionNether path is untouched. See docs/framework-v2-scaffold.md.
-            try { this.framework = createFramework(this); } catch (e) { console.warn('framework init failed:', e && e.message); }
+            // observe:true turns on S3-shadow logging (proposer vs live skill → framework-shadow.log)
+            // WITHOUT enabling the decision loop — gathers parity data before any live cutover.
+            try { this.framework = createFramework(this, { observe: true }); } catch (e) { console.warn('framework init failed:', e && e.message); }
             // Mineflayer-layer vine-trap unstick (recurring terrain trap, user-flagged).
             try { installVineUnstick(this.bot, (m) => { try { console.log(m); } catch (e) {} }); } catch (e) { console.warn('vine_unstick init failed:', e && e.message); }
 

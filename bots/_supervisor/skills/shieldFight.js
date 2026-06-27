@@ -31,11 +31,39 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
 
     const startT = Date.now();
     let e;
+    // ★C353 (T-0063, worker-combat 06-27): UNREACHABLE-RANGED bailout. When the bot is boxed in a
+    // closed pocket, a skeleton on the far side of the wall sits at a FIXED distance the bot can never
+    // change — it can't close (path blocked → goToPosition returns instantly) AND can't damage it
+    // (every swing hits the wall). The loop spins whiffing forever, the mob's HP never drops, and
+    // self_defense.active starves mobility's POCKET escape → the three-way interlock the overseer
+    // traced (06-27: skeleton d=0.4 @wall, 'Fighting skeleton!' ×10/3s, hp5 food0). Detect a ranged
+    // target whose HP we're NOT bringing down: sample its health each loop; if a ranged mob survives
+    // ≥4s of engagement with no HP loss (and we never killed/swapped it), it's unreachable behind a
+    // wall — break and release the body so mobility's dig-out + the kernel's GET_FOOD take over.
+    // Reachable skeletons die (HP drops → reset) or get replaced (new target → reset); melee mobs are
+    // untouched (kind !== 'ranged'). Falls back to distance-stall when HP isn't exposed.
+    let rangedSince = 0, rangedId = null, rangedHp0 = null, prevD = Infinity, stalls = 0;
     while ((e = enemy()) && Date.now() - startT < maxMs) {
         if (bot.interrupt_code) break;
         if (bot.health <= 6) break; // critical — let self_preservation flee/seal
         const kind = kindOf(e);
         const d = bot.entity.position.distanceTo(e.position);
+        if (kind === 'ranged') {
+            const eh = (typeof e.health === 'number') ? e.health : null;
+            if (e.id !== rangedId) { rangedId = e.id; rangedSince = Date.now(); rangedHp0 = eh; prevD = d; stalls = 0; }
+            else {
+                // HP-based: same ranged mob, no HP drop for ≥4s ⇒ we're not hurting it (wall in the way).
+                const hpStuck = (eh !== null && rangedHp0 !== null) ? (eh >= rangedHp0 - 0.01) : true;
+                if (!hpStuck) { rangedHp0 = eh; rangedSince = Date.now(); }      // landed a hit → reset clock
+                // distance fallback (HP unexposed): can't close the gap either.
+                if (d >= prevD - 0.5) stalls++; else { stalls = 0; }
+                prevD = d;
+                if (Date.now() - rangedSince > 4000 && (hpStuck || stalls >= 6)) {
+                    log(bot, `shieldFight: ranged target unreachable (d=${d.toFixed(1)} hpStuck=${hpStuck}) — disengaging, yield to escape/food.`);
+                    break;
+                }
+            }
+        } else { rangedId = null; rangedSince = 0; rangedHp0 = null; prevD = Infinity; stalls = 0; }
 
         // RANGED FIRST: if we have a bow + arrows and the threat is at distance,
         // SHOOT it. This is the clean kill for a creeper (drop it before it can ever

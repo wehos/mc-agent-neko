@@ -40,6 +40,25 @@ const LAND_HUNT = ['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'mooshroom', 'goa
 export default async function forageExplore(bot, ctx, opts = {}) {
     const { log, skills, mc } = ctx;
     const log_ = (m) => log(bot, `[forageExplore] ${m}`);
+    // ★C301 (T-0014) activate migrate's DEAD desert-detector. migrate's shouldMigrate gates a
+    // cross-continent relocation on `noAnimalStreak>=4` — but that counter was declared/read/reset
+    // and NEVER incremented anywhere, so a LAND food-desert (badlands/desert/savanna with no animals,
+    // not ocean) was invisible: desert=false → migrate always declined → bot foraged short legs forever
+    // and could only relocate AFTER dying (diedHere). The result: food8 catch-22, starve-in-place. As
+    // the food-desert detector, forageExplore is the right owner: a completed daylight search that found
+    // NO land animals is the streak++ signal; finding food resets it. migrate reads it + still self-gates
+    // (daylight + hp>=14 + 20min cooldown), so this only ENABLES escape, it doesn't force thrashing.
+    const _bumpDesert = async (found) => {
+        try {
+            const fs = (await import('fs')).default; const path = (await import('path')).default;
+            const f = path.resolve(process.cwd(), 'bots', '_supervisor', 'migrate_state.json');
+            let st = {}; try { st = JSON.parse(fs.readFileSync(f, 'utf8').replace(/^﻿/, '')) || {}; } catch (e) { st = {}; }
+            const prev = st.noAnimalStreak || 0;
+            st.noAnimalStreak = found ? 0 : Math.min(prev + 1, 8);
+            fs.writeFileSync(f, JSON.stringify(st));
+            log_(`★C301 ${found ? 'FOUND food → noAnimalStreak reset 0' : `no-animal search → noAnimalStreak ${prev}→${st.noAnimalStreak}`} (migrate desert-gate fires at ≥4)`);
+        } catch (e) { log_(`★C301 streak update fail: ${String(e.message).slice(0, 50)}`); }
+    };
     // ── S4.3 COMMITMENT SUPPRESS: don't wander-forage while committed to BOOTSTRAP_KIT
     //    and food isn't critical — finish the kit in place (user #1/#3). Emergency
     //    food (<=4) preempts the commitment to GET_FOOD upstream, so this is safe. ──
@@ -83,6 +102,7 @@ export default async function forageExplore(bot, ctx, opts = {}) {
         if (a && a.d <= 40) {
             log_(`land animal ${a.e.name} at d=${a.d.toFixed(1)} (leg ${i}) — handoff to forage`);
             const r = await skills.customSkill(bot, 'forage', { targetFood: opts.targetFood ?? 16 });
+            await _bumpDesert(true);   // ★C301 found land animals here — not a desert, clear the streak
             return { explored: true, found: true, forageResult: r, endY: Math.round(bot.entity.position.y) };
         }
 
@@ -99,6 +119,7 @@ export default async function forageExplore(bot, ctx, opts = {}) {
     }
 
     const end = bot.entity.position;
+    await _bumpDesert(false);   // ★C301 completed a daylight search with no land animals → desert evidence
     const r = { explored: true, found: false, movedBlocks: Math.round(Math.hypot(end.x - start.x, end.z - start.z)), hp: Math.round(bot.health), food: bot.food, reason: 'no land animals found within range' };
     log_(`DONE ${JSON.stringify(r)}`);
     return r;

@@ -17,15 +17,15 @@ node bots/_supervisor/ticket.mjs claim T-0007 --as <你的唯一tag>   # 领一�
 |---|---|---|
 | `main.js` | bot 本体（agent + WS server） | 48909 |
 | `bridge.mjs` | 写 vitals.json/events.log/frame.jpg + 滚动帧黑匣子 frames/ | — |
-| `botwatch.mjs` | 自动探测异常 → 建工单 | — |
+| `botwatch.mjs` | **sentinel**：读全知态(world_model+vitals)探测异常→建工单+自动复验，写 `sentinel.json` | — |
 | `ticket-server.mjs` | 工单单写者 + 网页 UI | 48920 |
-| `overseer.mjs` | 风险引擎 → advisory.json | — |
 
-## 2. 取证（诊断靠"录好的证据"，不靠盯实机）
+## 2. 取证（主动求证全知态，不被动读单行日志）
 
-- `bots/_supervisor/vitals.json`（pos/hp/food/skill，~15s 刷新）、`events.log`（死亡/告急/日志）、`progress.txt`（skill 逐步心电图）
-- **黑匣子回放**：`node bots/_supervisor/frame-at.mjs 04:52`（UTC 时间→最近帧路径，Read 出来看）。`--window 90` 列窗口帧。只从黑匣子启用时刻起有帧。
-- **判健康必须多信号交叉**：看一行乐观日志就下结论会出大错（死亡藏在 events.log）。
+- **先读 `bots/_supervisor/sentinel.json`**（每 15s 刷新）：world_model+vitals+活跃探测器+最新帧 的**单文件全知摘要**——pos/hp/food/mobility/picks/commitment/threat/成果向量(staleMin)/activeDetectors。一眼看清"现在真实状态 + 卡在哪"。
+- 原始源：`world_model.json`（mobility.state/kit.picks/commitment——bot 自己算好的全知态）、`vitals.json`（pos/hp/food/**inv**）、`events.log`（死亡/告急/自报卡死）、`progress.txt`（skill 心电图）。
+- **黑匣子回放**：`node bots/_supervisor/frame-at.mjs 04:52`（UTC→最近帧路径，Read 出来**用视觉信号核对**）。`--window 90` 列窗口帧。
+- **铁律：主动求证 + 多信号交叉 + 视觉核对**。①别信单行乐观日志（死亡/卡死藏在别处）；②"有动静"≠"有进展"——missionNether 自踢重启会刷日志/微抖位置制造假活，**只有成果向量(镐/台/木/食/矿/甲)推进才算进展**；③下"她没事/在干活"结论前，必读 sentinel.json + events.log `阵亡|告急` + 看一帧。
 
 ## 3. 三层架构（遇问题先想该改哪层）
 
@@ -47,3 +47,4 @@ node bots/_supervisor/ticket.mjs claim T-0007 --as <你的唯一tag>   # 领一�
 - **功能必须游戏内验收**，验不了就请用户手动触发检查。
 - **任何 bug 第二次发生=当场沉淀成代码改动 + CHANGELOG**（带可证伪预测）。
 - **高自主**：能决定就自己决定，随便重启折腾；但**绝不自动重开世界**（不可逆）。
+- **★Autonomous 工单契约（不空转）**：同一时刻只"真正在改"≤1 张单；首次修完+部署+冒烟 → 转 `verifying`（=**观察中**，挂 Monitor 盯复发、不主动死盯）→ **立刻 `claim next` 接下一张**。`verifying`/观察中的**不算**占用，不阻塞接新单。复发（botwatch 同 dedupKey 再命中）→ reopen，由**原认领者返工**；观察够久没复发+游戏内验证过才 `closed`。详见 [parallel-tickets.md](parallel-tickets.md) 的「Autonomous 工作契约」。
