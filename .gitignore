@@ -49,3 +49,4 @@ watchdog.stop
 bots/_supervisor/*
 !bots/_supervisor/bb-readers.mjs
 !bots/_supervisor/overseer-snapshot.mjs
+!bots/_supervisor/bot-medic.mjs
