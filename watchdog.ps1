@@ -11,6 +11,35 @@ $ErrorActionPreference = 'SilentlyContinue'
 $proj = 'C:\Users\wehos\Project\mc-agent-upstream-sync'
 Set-Location $proj
 $log = Join-Path $proj 'watchdog.log'
+
+# ★T-0095 ATOMIC SINGLETON — replaces the scan-and-kill TOCTOU race below. Two watchdogs spawned
+# near-simultaneously (concurrent SessionStart ensure-stack hooks / a session recycle) each scanned
+# the process table BEFORE the other had registered → neither killed the other → 2 watchdogs
+# survived ("每1-2min冒一个,稳定徘徊2个"), and on a brief 48909 gap BOTH could fire Restart-Agent →
+# double `node main.js` = a corrupted world. A named OS mutex closes the check-then-act window:
+# only ONE process can ever hold 'Global\NekoWatchdogSingleton'. We keep $wdMutex referenced for the
+# whole (infinite-loop) lifetime so it is never GC-released early; the OS auto-releases it the
+# instant we exit/die, so a replacement watchdog can acquire it once we're gone. The legacy
+# scan-and-kill is KEPT below as belt-and-suspenders: the mutex owner sweeps any pre-mutex /
+# orphaned watchdog (e.g. one started before this guard existed) so the transition self-heals.
+$wdMutex = $null
+try {
+    $createdNew = $false
+    $wdMutex = New-Object System.Threading.Mutex($true, 'Global\NekoWatchdogSingleton', [ref]$createdNew)
+    $owns = $createdNew
+    if (-not $owns) {
+        try { $owns = $wdMutex.WaitOne(0) }
+        catch [System.Threading.AbandonedMutexException] { $owns = $true }   # prior owner died holding it → adopt
+    }
+    if (-not $owns) {
+        Add-Content $log "[$(Get-Date -Format o)] singleton mutex held by another watchdog — exiting (pid $PID)"
+        exit 0
+    }
+    Add-Content $log "[$(Get-Date -Format o)] singleton mutex acquired (pid $PID)"
+} catch {
+    # Global mutex namespace unavailable (rare) — fall through to the legacy scan-and-kill best-effort guard.
+    $wdMutex = $null
+}
 try {
     $self = $PID
     $watchdogPath = Join-Path $proj 'watchdog.ps1'
@@ -119,12 +148,23 @@ while ($true) {
     # death heat-map -> advisory.json, with LLM tactical escalation). The strategy layer
     # reads advisory.json every loop; if the overseer dies the bot silently loses its
     # early-warning sense, so keep it alive alongside the bridge.
-    $overseerAlive = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*overseer.mjs*' }
-    if (-not $overseerAlive) {
-        Start-Process -FilePath 'node' -ArgumentList 'overseer.mjs' -WorkingDirectory (Join-Path $proj 'bots\_supervisor') `
-            -RedirectStandardOutput (Join-Path $proj 'bots\_supervisor\overseer.out') `
-            -RedirectStandardError (Join-Path $proj 'bots\_supervisor\overseer.err') -WindowStyle Hidden
-        Add-Content $log "[$(Get-Date -Format o)] started overseer.mjs (risk engine)"
+    # ★T-0109: overseer.mjs (the advisory-writing risk engine) was removed/lost (not in git, not on
+    # disk). Launching a missing file crash-looped node every ~1min (8.5d of overseer.err 'Cannot find
+    # module overseer.mjs') and never wrote advisory.json → modes.js read 8.5d-stale old-world
+    # dzone/surfaceGate (false inDeathZone). Only launch if the file actually exists; warn ONCE so the
+    # absence stays visible without spamming the log each loop. (Restoring the risk engine = separate work.)
+    $overseerScript = Join-Path $proj 'bots\_supervisor\overseer.mjs'
+    if (Test-Path $overseerScript) {
+        $overseerAlive = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*overseer.mjs*' }
+        if (-not $overseerAlive) {
+            Start-Process -FilePath 'node' -ArgumentList 'overseer.mjs' -WorkingDirectory (Join-Path $proj 'bots\_supervisor') `
+                -RedirectStandardOutput (Join-Path $proj 'bots\_supervisor\overseer.out') `
+                -RedirectStandardError (Join-Path $proj 'bots\_supervisor\overseer.err') -WindowStyle Hidden
+            Add-Content $log "[$(Get-Date -Format o)] started overseer.mjs (risk engine)"
+        }
+    } elseif (-not $script:overseerMissingLogged) {
+        $script:overseerMissingLogged = $true
+        Add-Content $log "[$(Get-Date -Format o)] ★T-0109 overseer.mjs absent — risk engine NOT launched (no crash-loop); advisory.json needs a new writer or stays neutralized"
     }
     # TICKET-SERVER KEEP-ALIVE: the resident single-writer ticket store (:48920) that makes the
     # one MC session parallel-fixable (auto+manual tickets, cross-session claim sync, human web

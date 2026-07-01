@@ -364,8 +364,8 @@ export function proposeTasks(world, bot) {
     }
 
     // 3) Bed (mandatory respawn anchor) — once kit exists.
-    if (kit.picks >= 1 && !bedKnown(bot)) {
-        push({ kind: PROPOSAL_KIND.GET_BED, priority: 50, skill: 'prepNether',
+    if (kit.picks >= 1 && !bedKnown(bot) && !(hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < DIAMOND_FLOOR)) {   // ★T-0092 completion (worker-sync): GET_BED@50 was an UNFULFILLABLE wool-errand (no wool→no bed→bedKnown永false) that OUTRANKED GET_DIAMOND@46, so an iron-tooled+armored bot never descended for diamond. Yield GET_BED exactly when the bot is diamond-ready (mirror the GET_DIAMOND gate) so GET_DIAMOND wins → mineDiamonds descends. Safe: pure re-prioritize, does NOT gate pick/bed-MAKING (keepInventory ON so a delayed respawn-anchor loses nothing).
+        push({ kind: PROPOSAL_KIND.GET_BED, priority: 50, skill: 'prepNether',   // ★T-0060 (worker-sync 0701): TRIED @44 (below GO_UNDERGROUND@45) to break the ~1h wool-wander stagnation — REVERTED. Live result: @44 correctly re-routed the commitment GET_BED→GO_UNDERGROUND/mineDown, but mineDown then NO-OP-spun (couldn't descend at the spawn-area spot -15,71) → bot HARD-PINNED ~14min, WORSE than @50's wool-wander (which at least moved + was transition-bounded). ROOT is NOT the GET_BED priority — it's the bot STUCK at a bad spot (unmineable AND wool-less) with the stuck-relocate (migration.stuckTerrain) NOT firing after 77min stall. The real fix is migrate-away-from-stuck-spot + mineDown-relocate-on-no-dig (both decision-layer, attended). Keeping @50 baseline.
                rationale: 'no bed yet — secure wool→bed as respawn anchor (mandatory, blueprint §D.3)' });
     }
 
@@ -417,7 +417,7 @@ export function proposeTasks(world, bot) {
         //   Requires armor>=4 (GET_ARMOR@68 closes that first) so the bot never strip-mines the
         //   deep diamond band unarmored. @46: above GO_UNDERGROUND@45 so a kitted iron bot heads for
         //   the diamond band on purpose instead of the open-ended shallow descent.
-        if (hasIronTierPick(w) && (vitals.armor || 0) >= 4 && diamondsOnHand(bot) < DIAMOND_FLOOR && hpSafeForUnderground) {
+        if (hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < DIAMOND_FLOOR && hpSafeForUnderground) {   // ★T-0092 (worker-sync): armor>=4(full set=24 iron, unreachable since GET_ARMOR yields at <4) → armor>=1(reachable from one craftArmor pass) so an iron-tooled+lightly-armored bot actually commits GET_DIAMOND → mineDiamonds descends to y-52. Still gated on iron pick + hpSafe + mineDiamonds' own pickaxe-guard (can't send a pickless/bare bot deep). NOT >=0.
             // Dispatch the DEDICATED mineDiamonds skill: it water-aware-descends to the diamond band,
             // x-ray finds + vein-follows diamonds, banks each haul, and LOOPS until count is reached —
             // exactly the "在该层定向循环直到挖到目标矿" T-0092 asks for. (Generic mineDown only
@@ -449,13 +449,26 @@ export function proposeTasks(world, bot) {
         // would VETO a plain relocate. Pass force:true ONLY for this trigger so the relocate actually
         // happens (the gate still self-protects: migrate.js surfaces first, marches with abort-hp).
         // We keep the maxBlocks short — this is a LOCAL hop to fresh ground, not a cross-continent flee.
-        const args = migration.stuckTerrain && !migration.badBiome && !migration.inDeathZone
-            ? [{ force: true, maxBlocks: 96, cooldownMin: 8, settleScore: 8 }]
+        // ★T-0102: woodBarren (pickless + no wood in a tree-sparse but "livable" biome) needs the SAME
+        // force:true bypass as stuckTerrain — beach/desert pass badBiome=false so migrate.js's start-gate
+        // ("no unlivable evidence") would veto a plain relocate, stranding the bot wood-deadlocked. Use a
+        // slightly larger hop for woodBarren (trees can be further than the local stuck-terrain hop).
+        // force ONLY when a decision-layer-only trigger (stuck/woodBarren) fires in a biome migrate.js
+        // wouldn't independently flee (badBiome=false, not inDeathZone). force bypasses migrate.js's
+        // start-gate INCLUDING its night gate, so it must NOT be widened to inDeathZone/badBiome cases
+        // (those have their own evidence and a sticky one could night-march). The cooldown-no-op-spin is
+        // closed upstream in modes.js (migration.recommend gates non-force triggers on !migrateOnCooldown
+        // and is false at dusk/night), so MIGRATE is only ever proposed when it can actually run.
+        const forceRelocate = (migration.stuckTerrain || migration.woodBarren) && !migration.badBiome && !migration.inDeathZone;
+        const args = forceRelocate
+            ? [{ force: true, maxBlocks: migration.woodBarren ? 128 : 96, cooldownMin: 8, settleScore: 8 }]
             : [];
         push({ kind: PROPOSAL_KIND.MIGRATE, priority: 60, skill: 'migrate', args,
-               rationale: migration.stuckTerrain
-                   ? `stuck-terrain: net mining progress ≈0 + high unstick-thrash in '${migration.biome}' — hop to fresh ground`
-                   : `biome '${migration.biome}' unlivable/death-zone — relocate to a temperate biome with animals` });
+               rationale: migration.woodBarren
+                   ? `wood-barren: pickless + no wood in tree-sparse '${migration.biome}' — relocate to find trees (first-order bootstrap unlock)`
+                   : migration.stuckTerrain
+                       ? `stuck-terrain: net mining progress ≈0 + high unstick-thrash in '${migration.biome}' — hop to fresh ground`
+                       : `biome '${migration.biome}' unlivable/death-zone — relocate to a temperate biome with animals` });
     }
 
     // ── ★T-0069 STARVING-NEXT-TO-VILLAGE WAIVER: the OPENING block below is gated on
@@ -618,7 +631,7 @@ export function isGoalDone(kind, world, bot) {
         case PROPOSAL_KIND.GET_IRON_TOOLS:   return hasIronTierPick(w);
         // ★T-0097 NIGHT_SMELT_IRON done = same target (an iron-tier pick exists) — holds the night
         // commitment sticky across the smelt→craft hand-off until the iron pickaxe is actually crafted.
-        case TASK.NIGHT_SMELT_IRON:          return hasIronTierPick(w);
+        case TASK.NIGHT_SMELT_IRON:          return hasIronTierPick(w) || (invCount(bot, /^raw_iron$/) === 0 && invCount(bot, /^iron_ingot$/) < 3);   // ★FIX (worker-sync 0630 frozen-alive): the sticky NIGHT_SMELT_IRON deadlocked into a smeltSafe no-op spin — chosen at dusk w/ raw_iron≥3, but once the iron was smelted+consumed WITHOUT reaching hasIronTierPick (ingots banked/used, no lasting iron pick), it stayed sticky dispatching smeltSafe('raw_iron',N) at raw_iron=0 → no-op every 1.5s, frozen until watchdog (live: pinned 9min @54,58 mob=FREE/ENC). Release when there's nothing left to smelt OR craft → re-evaluate → mine more iron. Does NOT gate pick-making.
         // GET_IRON_ARMOR_SET done = fully armored OR no iron left to make a piece (mirrors GET_ARMOR).
         case PROPOSAL_KIND.GET_IRON_ARMOR_SET: return (w.vitals.armor || 0) >= 4 || ironForArmor(bot) < 4;
         // ★T-0092 GET_DIAMOND done = banked the DIAMOND_FLOOR buffer (≥1 diamond pick + spare worth).

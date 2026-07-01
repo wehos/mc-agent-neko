@@ -1242,6 +1242,21 @@ const modes_list = [
                 }
             }
             if (feetWater || headWater) {
+                // ★封顶水牢让位 mobility ENTOMBED (worker-death 06-28 实锤 drowning@y48 coveredAbove=2):
+                //   bot 在封顶水牢(enc+水+头顶实心石), mobility ENTOMBED dig-out 挖穿干侧是唯一有效解,但
+                //   self_preservation(优先级>mobility)的 drowning branch 'heading for air'(游上找 air——封顶
+                //   水牢头顶是石头,游上撞顶无效)先抢控制互绞~26s(events 03:37:54→03:38:20)才轮到 mobility
+                //   ENTOMBED dig → 挖出时间被吃掉 → 淹死. 修: 封顶水牢+正在drowning(氧气≤14=真困,非受控深潜)
+                //   时 self_preservation SWIM/drowning 全让位(return),让 mobility ENTOMBED dig 早独占不被抢.
+                //   跟 T-0100/T-0101 反射互绞让位同构. 边界: 开放水体头顶water/air(_headCapped=false)不让位、
+                //   正常 SWIM 游岸/游上; 深潜氧气足不 drowning,不让位.
+                try {
+                    const _drownSub = bot.oxygenLevel !== undefined && bot.oxygenLevel <= 14;
+                    const _subEnc = !!(bot._mobility && bot._mobility.enclosed);
+                    const _hCap = bot.blockAt(bot.entity.position.offset(0, 2, 0));
+                    const _headCapped = _hCap && _hCap.boundingBox === 'block' && !/water|lava/.test(_hCap.name || '');
+                    if (_drownSub && _subEnc && _headCapped) return;   // 封顶水牢溺水: 让 mobility ENTOMBED dig 独占
+                } catch (e) {}
                 // ===== SWIMMING INSTINCT (hardcoded reflex, not a skill) ==========
                 // The bot is in water. Three regimes, by situation:
                 // ★Trigger EARLY (≤14, not ≤8). y51 deep-water deaths kept recurring (the death-
@@ -1638,15 +1653,24 @@ const modes_list = [
                         });
                         return;
                     }
-                    // 白天 hold >90s → 打破停滞,记录一次,fall through 到下方 creeper backoff(sprint away)
+                    // 白天 hold >90s → 打破停滞. ★改进(worker-death 06-28,实战教训: bot 困死锁2.7天,
+                    //   mobility 191min没update,最后靠被骷髅杀死重生才解,我原修的 backoff fall-through 没救成):
+                    //   不再 fall-through 到 backoff(sprint away),而是 RETURN 让出 ModeController. 根因——
+                    //   hunger hold 的 execute{wait} 让 self_preservation 永久 active → 独占 ModeController
+                    //   (注释自证:breaks loop when ANY mode active) → mobility 永不评估 → 脱困反射(ENTOMBED
+                    //   dig-out)失效. backoff sprint 同样是 execute(active),enclosed 困死时撞墙不动 →
+                    //   self_preservation 仍独占 → mobility 还是不恢复. 唯一真解 = self_preservation RETURN
+                    //   (本拍不 active),ModeController 才能评估 mobility(困则 ENTOMBED dig-out 挖出) + 之后
+                    //   kernelDriver(FREE 则派 feedUp 求食). creeper 远(>5.5,本分支前置条件)时让位安全;
+                    //   每拍 return,mobility 每拍有机会恢复脱困. 夜间(!isDay)不进此打破(上方 hold 等天亮避夜怪).
                     if (Date.now() - (this._creeperHungerHoldBreakAt || 0) > 30000) {
                         this._creeperHungerHoldBreakAt = Date.now();
                         try {
                             fs.appendFileSync('bots/_supervisor/progress.txt',
-                                `[${new Date().toISOString()}] [self_preservation] ★creeper hunger hold 打破(白天停滞${Math.round((Date.now() - this._creeperHungerHoldSince) / 1000)}s): food=${bot.food} hp=${Math.round(bot.health)} cdist=${cr0Dist.toFixed(1)} — food=0永不回血,弃hold,backoff离开停滞点+让kernelDriver派feedUp求食\n`);
+                                `[${new Date().toISOString()}] [self_preservation] ★creeper hunger hold 打破(白天停滞${Math.round((Date.now() - this._creeperHungerHoldSince) / 1000)}s): food=${bot.food} hp=${Math.round(bot.health)} cdist=${cr0Dist.toFixed(1)} — RETURN 让出 ModeController → mobility 恢复脱困 + kernelDriver 派 feedUp 求食\n`);
                         } catch (e) {}
                     }
-                    // fall through ↓ (不 return → 进入下方 backoff sprint-away)
+                    return;   // ★让出 ModeController(不 hold 不 backoff,本拍 self_preservation 不 active): mobility 困则 dig-out / kernelDriver 派 feedUp
                 }
                 const tableHold = tableRecoveryHold(bot);
                 if (tableHold && cr0Dist > 5.5) {
@@ -4746,7 +4770,14 @@ const modes_list = [
                     // Latch for ~5min once tripped so the MIGRATE commitment isn't yanked away mid-walk
                     // by the rolling window briefly dipping under threshold (migrate.js needs a stable
                     // recommend to finish the relocate); cleared when it actually reaches a fresh spot.
-                    const rawTrip = recentStuck >= 12 && stalledMs >= 480000 && !reachedDeep && y >= 30;
+                    // ★T-0060 (worker-sync 0701): the unstick-thrash gate (recentStuck>=12) MISSED the bot's
+                    // DOMINANT stuck — wool-wander/mineDown-no-op at a spawn-area bad spot freezes NET progress
+                    // for HOURS with LOW unstick-thrash (live: 2h stall @-15,71 y72, recentStuck<12 → stuckTerrain
+                    // stayed false → never relocated → soft-permanent spawn-anchor, even watchdog restarts returned
+                    // it). Add a PURE net-progress-stall trigger orthogonal to thrash: 30min flat proxy (no iron
+                    // mined, not descended) on the surface/shallow = genuinely stuck → relocate. Mirrors the
+                    // monitor's NO-NET-PROGRESS@30min. Latch+movedClear (below) bound it to one ~32b hop.
+                    const rawTrip = ((recentStuck >= 12 && stalledMs >= 480000) || stalledMs >= 900000) && !reachedDeep && y >= 30;   // pure-stall threshold 15min (NOT 30/20): the watchdog STUCK detection ALERTs at 40 ticks=20min + restarts ~25min, resetting bot._netProg (the stall clock is per-process). Must fire+migrate (the walk takes ~2min) BELOW the watchdog's 20min alert. 15min gives ~5min margin so stuckTerrain→MIGRATE→movedClear completes before the watchdog acts.
                     if (rawTrip && now - (bot._stuckTerrainLatchAt || 0) > 300000) {
                         bot._stuckTerrainLatchAt = now;
                         bot._stuckTerrainOrigin = { x: Math.round(p.x), z: Math.round(p.z) };
@@ -4763,7 +4794,76 @@ const modes_list = [
                         }
                     }
                 } catch (e) {}
-                const migration = { biome, badBiome, inDeathZone, stuckTerrain, recommend: badBiome || inDeathZone || stuckTerrain };
+                // ★T-0102 WOOD-BARREN RELOCATE (first-order bootstrap unlock): a biome that passes
+                // badBiome=false (beach/desert/savanna) can still be TREE-SPARSE — the bot runs out of
+                // wood, can't craft sticks→pickaxe/table, and HARD-deadlocks pickless while
+                // badBiome/inDeathZone/stuckTerrain all stay false (live 06-28: beach @102,49,140,
+                // pickless, 0 planks/0 logs/0 sticks, only a 63h-STALE wood landmark, migrate.recommend
+                // stayed false → perpetual pickless churn, net progress 0). This is THE first-order root —
+                // every tier fix above it is空中楼阁 until the bot can get wood. Orthogonal trigger (mirror
+                // stuckTerrain): PICKLESS + effectively no wood in pack (can't even make 2 sticks for one
+                // pick), SUSTAINED ~5min → the local terrain can't bootstrap a pickaxe; relocate to find
+                // trees. Latched 5min so MIGRATE finishes the walk (recommendation/proposal are day-gated,
+                // so the latch rides through the night and fires the relocate at dawn); cleared the moment
+                // a pickaxe is back (recovered locally → no need to move) or we've travelled clear (>48b).
+                let woodBarren = false;
+                try {
+                    const sticksN = counts['stick'] || 0;
+                    const planksN = Object.entries(counts).reduce((s, [n, v]) => s + (n.endsWith('_planks') ? v : 0), 0);
+                    const logsN = Object.entries(counts).reduce((s, [n, v]) => s + (/_(log|stem|hyphae|wood)$/.test(n) ? v : 0), 0);
+                    const woodlessForPick = picks < 1 && (planksN + logsN * 4 + sticksN) < 2;   // can't even make 2 sticks for a pick
+                    if (woodlessForPick) { if (!bot._woodBarrenSince) bot._woodBarrenSince = now; }
+                    else { bot._woodBarrenSince = 0; }                                          // has a pick or has wood → not barren-deadlocked
+                    const barrenMs = bot._woodBarrenSince ? now - bot._woodBarrenSince : 0;
+                    if (barrenMs >= 300000 && now - (bot._woodBarrenLatchAt || 0) > 300000) {
+                        bot._woodBarrenLatchAt = now;
+                        bot._woodBarrenOrigin = { x: Math.round(p.x), z: Math.round(p.z) };
+                    }
+                    if (bot._woodBarrenLatchAt && now - bot._woodBarrenLatchAt < 300000) {
+                        const o = bot._woodBarrenOrigin;
+                        const movedClear = o && Math.hypot(p.x - o.x, p.z - o.z) > 48;
+                        if (movedClear || picks >= 1) { bot._woodBarrenLatchAt = 0; bot._woodBarrenSince = 0; }   // recovered or relocated
+                        else woodBarren = true;
+                    }
+                } catch (e) {}
+                // ★T-0106 MIGRATE-COOLDOWN NO-OP-SPIN FIX (06-30 live, root-caused from migrate.log):
+                //   the badBiome/inDeathZone triggers dispatch migrate with NO force, so migrate.js's
+                //   start-gate REFUSES every call within its 20-min post-migrate cooldown ("migrated
+                //   Nmin ago < cooldown") → instant no-op return. But the decision layer was BLIND to
+                //   that cooldown: inDeathZone never clears while standing in the dzone → recommend
+                //   stayed true → MIGRATE stayed the sticky+emergency commitment nothing could preempt
+                //   (isGoalDone(MIGRATE)=!recommend; the only emergency was MIGRATE itself, excluded by
+                //   p.kind!==c.kind) → kernelDriver re-dispatched migrate every 1.5s for the WHOLE
+                //   cooldown: frozen-alive, net progress 0, never bootstrapping (live: pickless in
+                //   dzone@6,-8 spinning, would have spun ~20min). FIX: while migrate is within its
+                //   cooldown, the NON-FORCE triggers (badBiome/inDeathZone) literally CAN'T act, so they
+                //   must not drive recommend. recommend then drops → MIGRATE proposal not pushed +
+                //   isGoalDone(MIGRATE)=!recommend releases the sticky commitment → the decision layer
+                //   falls to BOOTSTRAP_KIT@90 (chop wood / make tools) during the daytime-safe cooldown,
+                //   and MIGRATE re-enables the instant the cooldown lifts. The FORCE triggers
+                //   (stuckTerrain/woodBarren) bypass migrate's cooldown by design (shouldMigrate returns
+                //   go:true on force BEFORE the cooldown check), so they are deliberately left UNGATED.
+                let migrateOnCooldown = false;
+                try {
+                    const _ms = JSON.parse(fs.readFileSync('bots/_supervisor/migrate_state.json', 'utf8'));
+                    // non-force dispatch (args=[]) uses migrate.js's default cooldownMin=20 → mirror it.
+                    migrateOnCooldown = (now - (_ms.lastMigrateAt || 0)) < 1200000;
+                } catch (e) {}
+                // force dispatch (bypasses migrate.js's conservative start-gate, incl. its 20min cooldown
+                // AND night gate) ONLY for decision-layer-only triggers (stuck/woodBarren) in a biome
+                // migrate.js wouldn't independently flee (mirror world_model forceRelocate). A NON-force
+                // migrate respects the cooldown → on cooldown it no-ops every dispatch (the live frozen-alive
+                // spin: woodBarren+inDeathZone went NON-force, hit cooldown, no-op'd, and MIGRATE+inDeathZone
+                // re-preempted BOOTSTRAP every tick). So a NON-force trigger only recommends OFF cooldown.
+                // Day-gate recommend (mirror the proposal's time.phase==='day'): at dusk/night migrate is
+                // never the move (night=shelter), and gating recommend=false there releases any stale MIGRATE
+                // commitment (isGoalDone(MIGRATE)=!recommend) so the night plan takes over instead of the bot
+                // no-op-spinning migrate against the night gate. woodBarren/stuckTerrain LATCHES still ride
+                // through the night and re-fire at dawn (the latch is a separate timestamp, not recommend).
+                const _forceRelocate = (stuckTerrain || woodBarren) && !badBiome && !inDeathZone;
+                const _anyTrigger = badBiome || inDeathZone || stuckTerrain || woodBarren;
+                const migration = { biome, badBiome, inDeathZone, stuckTerrain, woodBarren, migrateOnCooldown,
+                    recommend: (phase === 'day') && (_forceRelocate || (_anyTrigger && !migrateOnCooldown)) };
                 // --- surfaceGate (AUTO; supervisor override read from advisory.surfaceGate) ---
                 let gateMode = 'free', gateReason = 'safe day', decidedBy = 'auto', gateUntil = 0;
                 try {
@@ -4917,7 +5017,13 @@ const modes_list = [
                 // never in a gravity column; never below y16 (deep — DIG_ONE is a shallow night-shelter).
                 let _floorBareDig = false;
                 try { const fb = bot.blockAt(m.offset(0, -1, 0)); _floorBareDig = !!(fb && /^(dirt|coarse_dirt|grass_block|gravel|sand|red_sand)$/.test(fb.name || '')); } catch (e) {}
-                const digOneViable = (picks >= 1 || _floorBareDig) && !_gravityPitTrap() && y > 16;
+                // ★T-0107 (06-30 live root): DIG_ONE_CAP 是"挖矿型庇护"(往下挖+封顶)。原 `|| _floorBareDig`
+                //   (脚下 dirt/草/沙徒手可挖)让一个 PICKLESS bot 夜里也判 dig_one viable → 往下挖软土把自己
+                //   埋到地表树下面(实机: 出生森林@y66 → dig_one 到 y62+capped → 天亮森林树全变"抬高+4不可达"
+                //   → chopWood 全 blacklist → wood=0 bootstrap 死锁)。pickless 不能挖矿,dig_one 对它只剩
+                //   "埋自己"的恶果; SEAL_FORT(原地封顶不下挖)同样安全(keepInv + 天亮树仍可达),严格更优。
+                //   故 dig_one 现在要求真镐; pickless 落 SEAL_FORT。(_floorBareDig 仍用于上方 gravity-pit 语义。)
+                const digOneViable = picks >= 1 && !_gravityPitTrap() && y > 16;
                 // landmark navigation costs (manhattan-ish straight-line; bedReachCost surfaced for skills)
                 const _bedLm = _nearLm('bed');
                 const _bedReachCost = _bedLm ? _bedLm.dist : null;
@@ -5245,7 +5351,24 @@ const modes_list = [
             const c = {};
             for (const it of bot.inventory.items()) c[it.name] = (c[it.name] || 0) + it.count;
             const stone = (c.cobblestone || 0) + (c.cobbled_deepslate || 0) + (c.blackstone || 0);
-            if (stone >= 3 && (c.stick || 0) >= 2) {
+            // ★T-0097-persist (iron→stone tier-regression fix, 06-28 live): tool_keeper used to ALWAYS
+            // recraft a STONE spare. When the worn pick is IRON, that DOWNGRADES the bot to stone the
+            // moment the iron pick snaps → tier regresses iron→stone (observed: reached iron r3, iron
+            // pick wore to 100%, fell back to a stone spare → r2). If we hold an iron-tier pick AND have
+            // ≥3 ready iron INGOTS (smelting raw_iron is too slow for a tick-reflex), recraft IRON to HOLD
+            // the tier; else fall back to a stone spare (recoverable — the tier chain re-smelts to iron).
+            const heldIronTier = /^(iron|diamond|netherite)_/.test(held.name || '');
+            const ironIngots = c.iron_ingot || 0;
+            // ★T-0060 iron-drain plug (worker-sync, safe-compound-fix): recraft a cheap STONE spare for
+            // ROUTINE pick wear; recraft IRON only when no stone is makeable (last-pick fallback). Stops the
+            // 0↔12 iron oscillation (routine tunneling was burning 3 iron per recraft). The iron pick STAYS
+            // in the bag as the reserved ore-pick (tier reads best-owned, no regression). Strictly downstream
+            // of the unchanged sticks>=2 guard → cannot starve picks (anti-石棺: stone-preferred only RAISES
+            // iron availability for the last-pick iron fallback).
+            const canMakeStoneSpare = stone >= 3 && (c.stick || 0) >= 2;
+            const makeIron = heldIronTier && ironIngots >= 3 && (c.stick || 0) >= 2 && !canMakeStoneSpare;
+            const spareTier = makeIron ? 'iron' : 'stone';
+            if ((makeIron || stone >= 3) && (c.stick || 0) >= 2) {
                 const planks = Object.entries(c).reduce((s, [n, v]) => s + (n.endsWith('_planks') ? v : 0), 0);
                 const logs = Object.entries(c).reduce((s, [n, v]) => s + (/_log$/.test(n) ? v : 0), 0);
                 let tableNearby = false; try { tableNearby = !!world.getNearestBlock(bot, 'crafting_table', 4); } catch (e) {}
@@ -5283,7 +5406,9 @@ const modes_list = [
                         // being stranded at each mining face → the next deep recraft still has a table →
                         // breaks the perpetual-pickless wood-relapse churn (keystone). Falls back to a nearby
                         // table if one's in reach; only the table WE placed from carry is reclaimed.
-                        await skills.craftRecipeLocal(bot, 'stone_' + cls, 1);
+                        // ★spareTier: 'iron' when we hold an iron pick + have ≥3 ingots (hold the tier),
+                        // else 'stone' — never downgrade an iron bot to stone when iron is affordable.
+                        await skills.craftRecipeLocal(bot, spareTier + '_' + cls, 1);
                     } catch (e) {}
                     // ★verify, don't assume: a swallowed craft error used to read as success. If the spare
                     // count didn't rise, say so plainly so the pick-drain isn't masked by a hopeful log.
