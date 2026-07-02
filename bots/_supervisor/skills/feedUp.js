@@ -1386,7 +1386,11 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     const rationsCount = () => { try { return bot.inventory.items().filter(i => RATION_RE2.test(i.name)).reduce((s, i) => s + i.count, 0); } catch (e) { return 0; } };
     const rationsAtEntry = rationsCount();
     let surfaceTriedThisRun = false; // ★famine surface-first: at most one climb per dispatch
-    while ((bot.food < targetFood || bot.health < 18) && tries++ < 10) {
+    // ★ration-hunt entry (the last link 11:11Z: GET_FOOD proposes on rations<2 at FULL
+    // hunger, but this loop keyed on hunger alone — the body never ran, feedUp honestly
+    // returned false, and the takeaway buffer could never fill. Hunt also when carrying
+    // fewer than 2 rations; every in-loop guard (night, hostiles, hp) applies unchanged.)
+    while ((bot.food < targetFood || bot.health < 18 || rationsCount() < 2) && tries++ < 10) {
         if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
         // Low HP alone must NOT block hunting: passive animals (cow/sheep/chicken) can't
         // fight back, and at food=0 hunting is the ONLY path back to regen — a blanket
