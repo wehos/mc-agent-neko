@@ -1444,6 +1444,19 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         if (bot.food < 18) {
             const wheatCt = (world.getInventoryCounts(bot).wheat || 0);
             if (wheatCt >= 3) {
+                // C350b (22:43Z: first C350 rounds failed 3x — craftArmor had placed the carried
+                // table away at 73,59,229 and the bot migrated out of craftRecipe's reach): if no
+                // table is at arm's length but one stands within 24b, WALK to it first. A 20s
+                // walk for 8 bread is the best trade on the board at food<18.
+                try {
+                    if (!world.getNearestBlock(bot, 'crafting_table', 4)) {
+                        const farTable = bot.findBlock({ matching: (b) => b && b.name === 'crafting_table', maxDistance: 24 });
+                        if (farTable) {
+                            prog(`feedUp: C350b walking to table @${farTable.position.x},${farTable.position.z} (${Math.round(bot.entity.position.distanceTo(farTable.position))}b) to bake ${wheatCt} wheat`);
+                            try { await skills.goToPosition(bot, farTable.position.x, farTable.position.y, farTable.position.z, 2); } catch (e) {}
+                        }
+                    }
+                } catch (e) {}
                 const breadBefore = world.getInventoryCounts(bot).bread || 0;
                 try { await skills.craftRecipe(bot, 'bread', Math.min(Math.floor(wheatCt / 3), 6)); } catch (e) {}
                 const baked = (world.getInventoryCounts(bot).bread || 0) - breadBefore;
