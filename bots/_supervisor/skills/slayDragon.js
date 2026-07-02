@@ -545,9 +545,16 @@ export default async function slayDragon(bot, ctx, opts = {}) {
         sawDragon = true;
         goneStreak = 0;
 
-        // progress = dragon HP dropping (crystals may re-heal it — only count drops)
+        // progress = dragon HP dropping (crystals may re-heal it — only count drops).
+        // First in-loop sighting (lastHp===null: the pre-loop read missed it — dragon
+        // circling outside tracking range at phase-C entry, or health not yet exposed)
+        // PRIMES the tracker + stall clock but is NOT progress: nothing in the world
+        // moved, and claiming it let bail()'s budget-expiry return yield {progress:true}
+        // on a zero-progress dispatch (crystals long down, no arrows, dragon never in
+        // reach), resetting the kernel's 3-strike counter (return-contract audit 2026-07-02).
         if (typeof d.health === 'number') {
-            if (lastHp === null || d.health < lastHp - 0.01) { lastProgressAt = Date.now(); madeProgress = true; stallStrikes = 0; }
+            if (lastHp === null) { lastProgressAt = Date.now(); }
+            else if (d.health < lastHp - 0.01) { lastProgressAt = Date.now(); madeProgress = true; stallStrikes = 0; }
             lastHp = d.health;
         }
         if (Date.now() - lastProgressAt > 180000) {

@@ -31,7 +31,15 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     // caller (achieve diamond branch) re-acquires a pickaxe before re-diving. Never mine the
     // diamond layer pickaxe-less.
     const hasIronPick = () => { const c = world.getInventoryCounts(bot); return Object.keys(c).some(n => /^(iron|diamond|netherite)_pickaxe$/.test(n) && c[n] > 0); };
-    if (!hasIronPick()) { log(bot, '⛏️ mineDiamonds ABORT — no iron+ pickaxe (lost it?). Can\'t harvest diamond; returning so achieve re-acquires.'); return dia(); }
+    // ★Zero-progress exit MUST be false (kernel-contract audit 2026-07-02). This guard used to
+    // `return dia()` — the stale held stock. On the kernel path (GET_DIAMOND commits, then the
+    // lone pick breaks) the commitment survives the closed hasIronTierPick proposal gate via the
+    // '(holding commitment)' fallback, so the guard re-fired every ~2s and the truthy (or 0 —
+    // kernel counts failure only on `=== false`) return reset the dispatch-failure counter:
+    // unbreakable hot livelock, the 3-strike cooldown never tripped. The "achieve re-acquires"
+    // assumption only holds on the sub-skill path (achieve ignores our return anyway); the
+    // kernel needs a strike here so the cooldown releases the kind for pick re-acquisition.
+    if (!hasIronPick()) { log(bot, '⛏️ mineDiamonds ABORT — no iron+ pickaxe (lost it?). Can\'t harvest diamond; failing dispatch so the kind cools down and a pick gets re-acquired.'); return false; }
 
     // ★PICK-RUNWAY GUARD (shared predicate skills.pickRunway — see skills.js). hasIronPick above
     // is the AFTER-the-fact check (pick already gone/lost); this is the BEFORE check: the LAST
@@ -232,6 +240,15 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     }
     // Pull out enough to actually craft the pickaxe.
     if (banked >= count && dia() < count) await skills.customSkill(bot, 'diamondBank', 'withdraw', count).catch(() => {});
-    log(bot, `mineDiamonds done. diamond=${dia()} banked=${banked} y=${yNow()} hp=${Math.round(bot.health)}`);
-    return dia();
+    // ★Gain-gate the final return (kernel-contract audit 2026-07-02), same idiom as the
+    // pickRunway exits above. Raw `return dia()` here leaked the stale entry stock on three
+    // zero-progress routes that bypass the gated exits: (a) hasIronPick() break mid-dive,
+    // (b) g2 exhausting 10 rounds with no diamond in x-ray range and branchMine gaining none,
+    // (c) the 7-strike drown-abandon mining a diamond-less shallow y — each reset the kernel
+    // failure counter while GET_DIAMOND stayed committed (diamondsOnHand<floor), spinning hot.
+    // `dia() >= count` keeps the withdraw-only run truthy (bank→hand transfer completes the
+    // goal; isGoalDone releases next tick); every no-gain exit strikes the dispatch cooldown.
+    const gained = (banked + dia()) - (bankedAtEntry + diaAtEntry);
+    log(bot, `mineDiamonds done. diamond=${dia()} banked=${banked} gained=${gained} y=${yNow()} hp=${Math.round(bot.health)}`);
+    return (gained > 0 || dia() >= count) ? (dia() || gained) : false;
 }

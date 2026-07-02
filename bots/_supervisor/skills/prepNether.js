@@ -899,6 +899,26 @@ export default async function prepNether(bot, ctx) {
     ];
 
     prog(`==== prepNether START | inv diamonds=${has('diamond')} ====`);
+    // ★kernel-return-contract audit 2026-07-02: ENTRY SNAPSHOT for the final return (bottom of
+    // this function). The old `return goals.every(...)` was a pure STALE STOCK COUNT — a fully
+    // kitted bot dispatched for something ELSE (BOOTSTRAP_KIT@66's wood buffer, GET_BED@50,
+    // DUSK_GO_BED@93, HOLD@95 all route skill:'prepNether', world_model.js:488/507/545/797/851)
+    // did zero work yet returned true, resetting kernel._dispatchFails every ~2s (kernel.js:296/
+    // 319-321) so the 3-strike/5-min kind cooldown could NEVER trip while commitGoal held the
+    // kind = unbreakable hot livelock. Snapshot taken HERE — before corpseRun/bankRecover/
+    // dirt-stock/water-prep — so gear/wood gained by ANY phase of this dispatch counts as real
+    // progress. woodEqNow()/planksEqHeld()/homeSet() are const-declared far below (TDZ at this
+    // point in the body) → duplicate the planks+4*logs expression under a snapshot-local name.
+    const woodEqSnapshot = () => {
+        try {
+            const c = world.getInventoryCounts(bot);
+            return Object.keys(c).filter(k => k.endsWith('_planks')).reduce((s, k) => s + c[k], 0)
+                + Object.keys(c).filter(k => k.endsWith('_log')).reduce((s, k) => s + c[k], 0) * 4;
+        } catch (e) { return 0; }
+    };
+    const entryGoalsDone = goals.every(g => has(g.item) >= g.count);
+    const entryWoodEq = woodEqSnapshot();
+    const entryBedKnown = (() => { try { return typeof JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'bed.json'), 'utf8')).x === 'number'; } catch (e) { return false; } })();
     const stationaryKitOnly = () => Number(bot._prepStationaryKitOnlyUntil || 0) > Date.now();
     const stationaryKitOpportunity = () => {
         try {
@@ -2695,7 +2715,29 @@ export default async function prepNether(bot, ctx) {
     }
     await equipArmor();
     const summary = goals.map(g => `${g.item}=${has(g.item)}`).join(' ');
+    // ★kernel-return-contract audit 2026-07-02: truthy = REAL PROGRESS THIS DISPATCH, never a
+    // stale stock count. kernel.js:296-297 treats any non-false/non-failed:true return as
+    // success and resets _dispatchFails (kernel.js:319-321), so the old unconditional
+    // `return goals.every(...)` made the 3-strike/5-min cooldown unreachable whenever the bot
+    // ENTERED with all 14 goals already held — e.g. portal-ready but wood<WOOD_BUFFER
+    // (BOOTSTRAP_KIT@66 committed, keepKit's optionalWoodSafe gate skipping the only wood path),
+    // bedless with no wool (GET_BED@50, tryHome throttled no-op), or undergroundSafe at night
+    // (DUSK_GO_BED@93, night-hold loop broken out of) — each re-dispatch ~2s, forever. Progress
+    // here = newly crossed full-kit completion (entryGoalsDone=false → doneNow=true), OR wood
+    // gained toward the wood buffer, OR the bed newly planted (bed.json — GET_BED/DUSK_GO_BED's
+    // actual goal). A run that entered complete and gained none of those did NOTHING its
+    // committed kind wanted: fail it so 3 such runs trip the kind cooldown (kernel.js:304-317)
+    // and release the commitment for re-ranking. Incomplete kits return false exactly as
+    // before; missionNether's customSkill call sites ignore the return, so the object shape is
+    // kernel-only. (Partial progress mid-kit still exits via the loop's false-yield gates —
+    // acceptable: false on real progress delays, never livelocks.)
+    const doneNow = goals.every(g => has(g.item) >= g.count);
+    const bedNewlySet = !entryBedKnown && homeSet();
+    if (doneNow && entryGoalsDone && woodEqSnapshot() <= entryWoodEq && !bedNewlySet) {
+        prog(`==== prepNether NO-OP | all goals held at entry, woodEq ${entryWoodEq}→${woodEqSnapshot()}, bed±0 — zero-progress dispatch → failed for kernel cooldown | ${summary} ====`);
+        return { failed: true, reason: 'all prep goals already held and no wood/bed gained this dispatch — committed kind (wood buffer / bed / night) needs work prepNether did not perform' };
+    }
     prog(`==== prepNether DONE | ${summary} ====`);
     log(bot, `prepNether done. ${summary}`);
-    return goals.every(g => has(g.item) >= g.count);
+    return doneNow;
 }

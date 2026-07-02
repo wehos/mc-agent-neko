@@ -97,9 +97,22 @@ export default async function bankGear(bot, ctx) {
     let banked = [];
     for (const [n, count] of plan) {
         if (bot.interrupt_code) break;
-        try { await skills.putInChest(bot, n, count); banked.push(`${n}x${count === -1 ? 'all' : count}`); } catch (e) { prog(`bankGear: put ${n} err ${e.message}`); }
+        // ★kernel-contract audit 2026-07-02: putInChest returns false WITHOUT throwing (item
+        // lookup miss, no chest) and THROWS on a full chest (container.deposit) — only count a
+        // deposit when it reports true, so `banked` is a real progress record, not a wish list.
+        try { const ok = await skills.putInChest(bot, n, count); if (ok) banked.push(`${n}x${count === -1 ? 'all' : count}`); } catch (e) { prog(`bankGear: put ${n} err ${e.message}`); }
     }
     prog(`bankGear: deposited [${banked.join(' ')}] @home(${src})`);
     log(bot, `Banked valuables at home: ${banked.join(', ')}`);
-    return true;
+    // ★kernel-contract audit 2026-07-02: a bare `return true` here was reachable with ZERO
+    // deposits (full home chest → every put throws & is swallowed above; or interrupt before
+    // the first put). Kernel counts FAILED iff threw/false/{failed:true} (kernel.js ~296), and
+    // isGoalDone(BANK_GEAR) = diamondsOnHand<1 || !packNearlyFull (world_model.js ~1010) stays
+    // false while the diamonds never leave the full pack — so the stale truthy reset the
+    // 3-strike counter every ~2s and BANK_GEAR@58 hot-livelocked above GET_BED@50 / tier@45-47 /
+    // endgame@52-53. Truthy ONLY when THIS dispatch moved items into the chest; a futile run
+    // fails so 3 strikes trip the 5-min kind cooldown and release the commitment, and an
+    // interrupt-before-first-put unwinds as non-success (kernel's cancel window exempts it
+    // from striking).
+    return banked.length > 0 ? true : { failed: true, reason: 'bank run deposited nothing (chest full / puts failed / interrupted)' };
 }

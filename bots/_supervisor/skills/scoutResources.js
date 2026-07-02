@@ -19,7 +19,9 @@
 //   need overrides bot._world.opening.need (default 'both').
 //
 // ctx = { log, skills, world, mc, Vec3 }
-// returns { scouted, need, treeCost, villageCost, best, pursued, reason? }
+// returns { scouted:true, need, treeCost, villageCost, best, pursued, reason? } on REAL progress
+// (net travel / new landmark); { scouted:false, failed:true, reason } on zero-progress runs and on
+// the low-hp / hostile-close defers, so the kernel dispatch-cooldown can trip (kernel contract).
 
 const LOG_TYPES = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
 const VILLAGE_BLOCKS = ['bell', 'hay_block', 'farmland', 'composter'];
@@ -58,12 +60,26 @@ export default async function scoutResources(bot, ctx, opts = {}) {
 
     // ── HARD SURVIVAL GATE: scouting is a healthy-daylight activity; hand night / low-hp / point-blank
     //    hostile to the survival layer rather than walk out into a deadly window. ──
+    // ★kernel return contract (audit 2026-07-02): the low-hp and hostile-close defers were truthy
+    //   ({deferred:true}) — kernel-success, strike counter reset — but NOTHING dethrones the committed
+    //   OPENING_SCOUT in those states: the proposal gate has no hp term, isGoalDone needs BOTH
+    //   lm.wood && lm.village (never true for a bare bot), HOLD@95 needs actionable>0 && hp<10, and
+    //   GET_FOOD's emergency needs food<=4 — so a hp<=6 bot (or one with a sealed/unreachable hostile
+    //   <6b that never engages) re-dispatched this instant no-op every ~2s ALL DAY (same family as the
+    //   craftChain/feedUp/migrate livelocks). failed:true lets 3 strikes trip the kernel's 5-min
+    //   dispatch-cooldown, releasing the body to GET_FOOD@88/BOOTSTRAP_KIT@90/combat while the blocker
+    //   persists. NIGHT stays a truthy defer BY DESIGN: at night the SCOUT proposal isn't pushed, so
+    //   commitGoal's livePri falls to 50 and any night plan @91+ provably dethrones — it cannot loop.
     if (isNight()) { log_('defer: night — shelter, do not scout'); return { scouted: false, deferred: true, reason: 'night' }; }
-    if (Math.round(bot.health) <= 6) { log_(`defer: hp=${Math.round(bot.health)}<=6 — too fragile to scout`); return { scouted: false, deferred: true, reason: 'low-hp' }; }
-    if (closeActionable()) { log_('defer: actionable hostile close — handle threat first'); return { scouted: false, deferred: true, reason: 'hostile-close' }; }
+    if (Math.round(bot.health) <= 6) { log_(`defer: hp=${Math.round(bot.health)}<=6 — too fragile to scout`); return { scouted: false, failed: true, reason: 'low-hp' }; }
+    if (closeActionable()) { log_('defer: actionable hostile close — handle threat first'); return { scouted: false, failed: true, reason: 'hostile-close' }; }
 
     const need = opts.need || (bot._world && bot._world.opening && bot._world.opening.need) || 'both';
     const start = bot.entity.position.clone();
+    // Entry landmark snapshot — "a NEW landmark appeared during this run" counts as progress for the
+    // kernel return contract even when net travel was short (audit 2026-07-02).
+    const lm0 = (bot._world && bot._world.landmarks) || {};
+    const hadWood = !!lm0.wood, hadVillage = !!lm0.village;
     log_(`★SCOUT need=${need} @${Math.round(start.x)},${Math.round(start.z)} maxBlocks=${maxBlocks}`);
 
     // We are the deliberate mover — clear a stale MAROONED flag so goToPosition isn't silently
@@ -180,6 +196,24 @@ export default async function scoutResources(bot, ctx, opts = {}) {
         log_(`hop-march done adv=${Math.round(adv)}b pursued=${pursued || 'none'}`);
     }
 
+    // ★kernel return contract (audit 2026-07-02): this tail was UNCONDITIONALLY scouted:true — a
+    // boxed-in bot (all 8 sweep rays NoPath'd, moved≈0, nothing found) or an unreachable pursued
+    // target (goTo swallows nav errors; the same tree across a ravine re-picked every run) returned
+    // kernel-success forever, resetting the strike counter so the 3-strike/5-min cooldown never
+    // tripped while isGoalDone (lm.wood && lm.village) kept OPENING_SCOUT committed — an unbreakable
+    // ~2s hot livelock that also starved the MIGRATE/woodBarren escape (it only runs once the
+    // cooldown suppresses this kind) and re-cleared MAROONED via takeMovement() each pass, resetting
+    // the mobility system's own escalation. Truthy now REQUIRES real progress this dispatch: genuine
+    // travel (net displacement >= 12b ≈ 1.5 hops) or a NEW landmark the C328 scanner persisted
+    // during the run. Zero-progress runs return failed:true so the kernel cooldown engages.
+    const lmNow = (bot._world && bot._world.landmarks) || {};
+    const newLandmark = (!hadWood && !!lmNow.wood) || (!hadVillage && !!lmNow.village);
+    const movedNet = bot.entity.position.distanceTo(start);
+    if (!newLandmark && movedNet < 12) {
+        log_(`zero-progress run (moved=${Math.round(movedNet)}b, pursued=${pursued || 'none'}, no new landmark) → failed for kernel cooldown`);
+        return { scouted: false, failed: true, need, treeCost, villageCost, pursued,
+                 reason: 'zero-progress: no movement and no new landmark (boxed in / target unreachable)' };
+    }
     const r = {
         scouted: true,
         need,

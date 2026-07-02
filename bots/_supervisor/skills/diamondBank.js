@@ -35,7 +35,13 @@ export default async function diamondBank(bot, ctx, action = 'count', n = 0) {
             if (chest) writePos({ x: chest.position.x, y: chest.position.y, z: chest.position.z });
         }
     }
-    if (!chest) { log(bot, 'diamondBank: no chest available'); return action === 'count' ? has('diamond') : false; }
+    // ★'count' = CHEST-ONLY (kernel-contract audit 2026-07-02): the happy path below returns
+    // inChest(), and the sole caller (mineDiamonds) adds dia() itself everywhere (`banked+dia()`,
+    // `banked>=count` withdraw guard, gained baseline). Returning has('diamond') here DOUBLE-
+    // COUNTED held diamonds when the chest was missing/unreachable: phantom-skipped the mining
+    // loop and corrupted mineDiamonds' gain gate in both directions (deflation → false on a real
+    // descent pickup; transient inflation → truthy on zero progress). No chest = 0 banked.
+    if (!chest) { log(bot, 'diamondBank: no chest available'); return action === 'count' ? 0 : false; }
 
     try {
         const c = await bot.openChest(chest);
@@ -53,6 +59,6 @@ export default async function diamondBank(bot, ctx, action = 'count', n = 0) {
         return action === 'count' ? total : true;
     } catch (e) {
         log(bot, `diamondBank open err: ${e.message}`);
-        return action === 'count' ? has('diamond') : false;
+        return action === 'count' ? 0 : false;   // ★chest-only semantics, same as the no-chest exit above
     }
 }

@@ -72,6 +72,18 @@ export default async function mineDown(bot, ctx, opts = {}) {
     const pickAboutToBreak = () => skills.pickRunway(bot).aboutToBreak;
     const canCraftPick = () => skills.pickRunway(bot).canFieldCraftPick;
 
+    // ★KERNEL-CONTRACT entry snapshot (return-contract audit 2026-07-02): the final return judges
+    // REAL progress this dispatch against these — y actually descended, or net ore units gained.
+    // Hoisted from the at-depth loop so both the loop's stall judge and the return judge read one
+    // definition. Do NOT trust `dug` for this: it historically counted air no-ops. Widened with
+    // coal|emerald (branchMine's set has them; the old set missed the ITEM drops of coal_ore,
+    // which IS in ORE above — a coal-only productive run must not judge as zero-progress).
+    const oreUnits = () => invCount(/^raw_iron$/) + invCount(/^raw_copper$/) + invCount(/^raw_gold$/)
+        + invCount(/^(iron_ore|deepslate_iron_ore|gold_ore|deepslate_gold_ore|redstone|lapis_lazuli|diamond|coal|emerald)$/)
+        + invCount(/_ore$/);
+    const entryY = Math.round(bot.entity.position.y);
+    const oreUnitsAtEntry = oreUnits();
+
     for (let i = 0; i < steps; i++) {
         const cur = bot.entity.position;
         const cy = Math.round(cur.y);
@@ -88,9 +100,7 @@ export default async function mineDown(bot, ctx, opts = {}) {
             //   return so a fresh dispatch starts a new heading/depth), (b) the pack is full (go bank),
             //   or (c) the pick is about to snap with no recraft (don't strand deep). This makes
             //   descend-then-MINE-OUT the productive unit instead of descend-then-touch-and-leave.
-            const oreUnits = () => invCount(/^raw_iron$/) + invCount(/^raw_copper$/) + invCount(/^raw_gold$/)
-                + invCount(/^(iron_ore|deepslate_iron_ore|gold_ore|deepslate_gold_ore|redstone|lapis_lazuli|diamond)$/)
-                + invCount(/_ore$/);
+            // (oreUnits hoisted to function entry — return-contract audit 2026-07-02.)
             let lastUnits = oreUnits(), stallRounds = 0, rounds = 0;
             log_(`reached targetY=${targetY} at step ${i} — branch-mining loop for ore (oreUnits=${lastUnits})`);
             while (rounds++ < 8) {
@@ -146,7 +156,11 @@ export default async function mineDown(bot, ctx, opts = {}) {
             const r2 = await skills.breakBlockAt(bot, fx, cy, fz);       // new head
             const r3 = await skills.breakBlockAt(bot, fx, cy - 1, fz);   // new feet (one down-forward)
             if (i < 3) log_(`DIAG step${i} breakResults head+1=${r1} head=${r2} feet=${r3}`);
-            dug += 3;
+            // ★return-contract audit 2026-07-02: was `dug += 3` UNCONDITIONALLY — a re-dispatched
+            // wedged bot no-op'ing on already-air cells returned {dug:6} "progress" with zero world
+            // change (the -22,82,10 pin family). breakBlockAt returns strict true only when a block
+            // was actually removed, so count only those.
+            dug += [r1, r2, r3].filter(v => v === true).length;
             // opportunistic ore around the dug column (one ring)
             for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, 1, 0]]) {
                 const ox = fx + dx, oy = cy + dy, oz = fz + dz;
@@ -188,6 +202,19 @@ export default async function mineDown(bot, ctx, opts = {}) {
 
     let inv = {}; try { for (const it of bot.inventory.items()) inv[it.name] = (inv[it.name] || 0) + it.count; } catch (e) {}
     const r = { endY: Math.round(bot.entity.position.y), dug, oreVeins: ore, hp: Math.round(bot.health), food: bot.food, abort, raw_iron: inv.raw_iron || 0, iron_ore: 0 };
+    // ★KERNEL-CONTRACT FIX (return-contract audit 2026-07-02): this is the file's ONLY return and
+    // it was always truthy with no failed key, so every ZERO-PROGRESS exit reset the kernel's
+    // dispatch-failure counter (kernel.js failed-sniff = threw / ===false / ok===false /
+    // failed===true) and the committed kind re-dispatched the identical abort every ~2s forever:
+    // step-0 aborts (fluid near stair cell / no floor support / pick-runway) against static world
+    // blocks on a deterministic +x heading, at-depth mined-out-seam exits, and wedged air-no-op
+    // re-digs. GO_UNDERGROUND stays committed until iron pick/buffer, DUSK_MINE_NIGHT ALL NIGHT —
+    // unbreakable hot livelock, the 3-strike/5-min cooldown could never trip. Judge REAL progress
+    // this dispatch against the entry snapshot (descended >=1 block OR net ore units gained);
+    // zero progress marks failed:true so the cooldown engages and the commitment is released.
+    // Shape keeps all fields (kernel is the only consumer; no other caller reads this object).
+    const progressed = (entryY - r.endY) >= 1 || oreUnits() > oreUnitsAtEntry;
+    if (!progressed) r.failed = true;
     log_(`DONE ${JSON.stringify(r)}`);
     return r;
 }

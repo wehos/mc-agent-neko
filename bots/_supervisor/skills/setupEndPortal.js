@@ -23,10 +23,13 @@
 // eye is INCONCLUSIVE, never "we are above it"); 3 zero-evidence dig searches
 // wipe strongholdKnown/Est so PHASE 1 re-triangulates; 3 activate dispatches
 // with no framesEmpty drop wipe portalRoom and return false (kernel cooldown).
-// Return discipline: `false` ONLY when the skill cannot act (no eyes / search
-// dead-ends) so the kernel's dispatch cooldown works; otherwise a truthy
-// progress object — all cross-call state lives in bot._endgame + endgame.json,
-// never module scope (hot-reload safe).
+// Return discipline (tightened, kernel-return audit 2026-07-02): truthy ONLY when
+// REAL progress happened THIS dispatch — actual displacement, a frame filled, or a
+// genuinely NEW persisted milestone. Every zero-progress exit (wedged travel, stale
+// re-arrival, zero-fill activate pass, re-finding the room the breaker just wiped)
+// returns false so the kernel's 3-strike/5-min cooldown can actually engage — all
+// cross-call state lives in bot._endgame + endgame.json, never module scope
+// (hot-reload safe).
 // Invoked via: {"skill":"setupEndPortal","args":[{"maxMs":480000}]}
 // ctx = { skills, world, mc, Vec3, log }
 import fs from 'fs';
@@ -55,7 +58,13 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
     const stop = () => !!bot.interrupt_code || bot.health <= 0;
     const dimNow = () => { try { return String(bot.game.dimension || ''); } catch (e) { return ''; } };
     const inEnd = () => /end/.test(dimNow());
-    const isNight = () => { try { const t = bot.time.timeOfDay % 24000; return t >= 13000 && t < 23500; } catch (e) { return false; } };
+    // ★DAWN ALIGN (kernel-return audit 2026-07-02): upper bound was 23500, but modes.js
+    // flips phase to 'dawn' at tod>=23000 and computeNightPlan returns NONE for dawn — so
+    // NO night plan exists to dethrone committed GO_END, and every {night:true} yield in
+    // [23000,23500) was a hot zero-progress truthy re-dispatch loop (~25s each dawn) that
+    // also reset the kernel failure counter. Match the proposer's boundary: dawn is
+    // actionable day — throw/travel instead of yielding to a proposer with nothing to say.
+    const isNight = () => { try { const t = bot.time.timeOfDay % 24000; return t >= 13000 && t < 23000; } catch (e) { return false; } };
 
     // ── endgame.json state: the ONE shared store (skills.egRead/egPatch — BOM-safe
     //    read, file∪cache∪patch merge, atomic tmp+rename write). Local copies removed:
@@ -198,6 +207,11 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
                 if (r1 === 'interrupted') return { phase: 'locate', interrupted: true };
                 if (r1 === 'night') { prog('night during locate — yield to the night chain'); return { phase: 'locate', night: true }; }
                 if (r1 === 'water' || r1 === 'vitals') return false; // ocean route / survival bail → kernel cooldown
+                // Wedged mid-triangulation: throwing B from (almost) the same spot yields a
+                // near-parallel bearing → the retry walk wedges again → up to ~7 eyes torched
+                // in ONE dispatch before the single-bearing loop's wedge bail fired. Same
+                // treatment as there: false → kernel cooldown (kernel-return audit 2026-07-02).
+                if (r1 === 'stuck') { prog('triangulation travel A wedged 3x — false → kernel cooldown'); return false; }
                 if (r1 === 'budget') break;
                 if (stop()) return { phase: 'locate', interrupted: true };
                 if (has('ender_eye') <= EYE_THROW_FLOOR) break;
@@ -213,6 +227,7 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
                     if (r2 === 'interrupted') return { phase: 'locate', interrupted: true };
                     if (r2 === 'night') return { phase: 'locate', night: true };
                     if (r2 === 'water' || r2 === 'vitals') return false;
+                    if (r2 === 'stuck') { prog('near-parallel retry walk wedged 3x — false → kernel cooldown'); return false; } // see r1 (audit 2026-07-02)
                     continue;
                 }
                 const t = ((B.x - A.x) * B.dz - (B.z - A.z) * B.dx) / denom;
@@ -224,6 +239,7 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
                     if (r3 === 'interrupted') return { phase: 'locate', interrupted: true };
                     if (r3 === 'night') return { phase: 'locate', night: true };
                     if (r3 === 'water' || r3 === 'vitals') return false;
+                    if (r3 === 'stuck') { prog('rejected-triangulation retry walk wedged 3x — false → kernel cooldown'); return false; } // see r1 (audit 2026-07-02)
                     continue;
                 }
                 egPatch({ strongholdEst: est });
@@ -247,7 +263,14 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
             if (r === 'interrupted') return { phase: 'locate', interrupted: true };
             if (r === 'night') return { phase: 'locate', night: true };
             if (r === 'water' || r === 'vitals') return false; // ocean route / survival bail → kernel cooldown
-            if (r === 'stuck') { prog('single-bearing travel stuck 3x — will retry from a fresh dispatch'); return { phase: 'locate', stuck: true }; }
+            // ★WEDGE = FAILURE (kernel-return audit 2026-07-02): {phase:'locate',stuck:true}
+            // was truthy, so a physically wedged bot (3 legs <2 blocks) reset the kernel's
+            // failure counter on every ~2s re-dispatch — and each re-dispatch burned one ender
+            // eye from the SAME spot (throwing needs no movement, the drop is unreachable,
+            // nothing persisted) until the EYE_THROW_FLOOR finally starved it. A wedge won't
+            // clear in 2s: return false like 'water'/'vitals' so the 3-strike/5-min cooldown
+            // spaces the retries and frees the body for the unstuck/survival chains.
+            if (r === 'stuck') { prog('single-bearing travel stuck 3x — wedged, false → kernel cooldown'); return false; }
             if (r === 'budget') break;
         }
         eg = egRead();
@@ -287,6 +310,12 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
                 if (r === 'interrupted') return { phase: 'verify', interrupted: true };
                 if (r === 'night') return { phase: 'verify', night: true };
                 if (r === 'water' || r === 'vitals') return false; // ocean route / survival bail → kernel cooldown
+                // Fourth leg of the wedged-travel family (kernel-return audit 2026-07-02, same as
+                // r1/r2/r3 + single-bearing): unhandled 'stuck' fell through to the next hop, which
+                // re-threw from the SAME wedged spot (same bearing, no hover) — up to 6 eyes per
+                // dispatch (this loop has no THROW_FLOOR, only <1) and a truthy return via the
+                // throw's progressed=true. Wedge = failure → kernel cooldown.
+                if (r === 'stuck') { prog('verify hop travel wedged 3x — false → kernel cooldown'); return false; }
             }
             if (!egRead().strongholdKnown) return progressed ? { phase: 'verify', budget: !budget() } : false;
         }
@@ -323,9 +352,18 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
             const f = bot.findBlock({ matching: (b) => b && b.name === 'end_portal_frame', maxDistance: 100 });
             if (f) {
                 sawEvidence = true;
-                egPatch({ portalRoom: { x: f.position.x, y: f.position.y, z: f.position.z }, strongholdDigFails: 0 });
-                progressed = true;
-                prog(`★ PORTAL ROOM found — frame at ${f.position.x},${f.position.y},${f.position.z}`);
+                // ★RE-FIND ≠ PROGRESS (kernel-return audit 2026-07-02): after the unfillable-
+                // frame breaker wiped portalRoom, this findBlock instantly re-found the SAME
+                // room the bot was still standing in and the unconditional progressed=true made
+                // the re-record a truthy "milestone" every cycle — one leg of the 3-truthy/
+                // 1-false livelock that kept the kernel cooldown unreachable. Re-finding a frame
+                // of the room the breaker just wiped (xz<=16, |dy|<=8 — a stronghold has ONE
+                // portal room) is stale state, not progress; a genuinely NEW room clears the marker.
+                const w = egRead().portalRoomWiped;
+                const sameWiped = !!w && Math.hypot(w.x - f.position.x, w.z - f.position.z) <= 16 && Math.abs(w.y - f.position.y) <= 8;
+                egPatch({ portalRoom: { x: f.position.x, y: f.position.y, z: f.position.z }, strongholdDigFails: 0, ...(sameWiped ? {} : { portalRoomWiped: null }) });
+                if (!sameWiped) progressed = true;
+                prog(`★ PORTAL ROOM ${sameWiped ? 're-found (same room the no-fill breaker wiped — NOT progress)' : 'found'} — frame at ${f.position.x},${f.position.y},${f.position.z}`);
                 log(bot, `End portal frames found at ${f.position.x},${f.position.y},${f.position.z}!`);
                 break;
             }
@@ -379,12 +417,20 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
     };
 
     if (eg.portalRoom && !eg.endPortalReady) {
+        // ★ARRIVAL ≠ PROGRESS (kernel-return audit 2026-07-02): progressed=true used to be
+        // set unconditionally on 'arrived', but gotoRoom's distanceTo<=6 check passes with
+        // ZERO movement on every re-dispatch while standing in the room — the canonical
+        // stale-state truthy that fed the zero-fill return below and kept the kernel
+        // failure counter at 0 forever. Progress = actual displacement this dispatch
+        // (entry snapshot; travelTo already flags its own real legs — the snapshot also
+        // catches gotoRoom's internal goToPosition/mineDown movement travelTo can't see).
+        const roomP0 = bot.entity.position.clone();
         const gr = await gotoRoom(eg.portalRoom);
+        if (bot.entity.position.distanceTo(roomP0) > 8) progressed = true;
         if (gr === 'interrupted') return progressed ? { phase: 'activate', interrupted: true } : false;
         if (gr === 'night') return { phase: 'activate', night: true };
         if (gr === 'water' || gr === 'vitals') return false; // ocean route / survival bail → kernel cooldown
         if (gr !== 'arrived') return progressed ? { phase: 'activate', approach: gr } : false;
-        progressed = true;
         if (stop()) return { phase: 'activate', interrupted: true };
 
         // Kill the silverfish spawner first — filling frames in a swarm is a death loop.
@@ -407,7 +453,10 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
                 return false;
             }
             prog(`portalRoom recorded but no frames within 16 — rescanning next dispatch (strike ${bot._epfNoFrames}/5)`);
-            return { phase: 'activate', framesNotLoaded: true };
+            // Same family as the zero-fill return below: standing at the room with no frames
+            // and no movement is a zero-progress exit — false unless real travel happened this
+            // dispatch (kernel-return audit 2026-07-02). The 5-strike wipe above still runs.
+            return progressed ? { phase: 'activate', framesNotLoaded: true } : false;
         }
         bot._epfNoFrames = 0;
         const cx = frames.reduce((s, p) => s + p.x, 0) / frames.length;
@@ -458,23 +507,29 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
             const emptyRec = emptyLeft > 0 ? emptyLeft : Math.max(1, 12 - frames.length);
             egPatch({ framesEmpty: emptyRec });
             prog(`portal NOT complete: seen=${frames.length} emptyLeft=${emptyLeft} eyes=${has('ender_eye')}`);
-            // ★UNFILLABLE-FRAME BREAKER: 'arrived at the room' set progressed=true, so this
-            // branch returned truthy every ~2s dispatch even when ZERO frames were filled — an
-            // unreachable frame (blocked outside-approach cell over the lava pool) livelocked
-            // GO_END with no kernel cooldown, and the frames.length===0 strike counter never
-            // covered it. Strike consecutive activate dispatches whose empty count did not DROP;
-            // at NO_FILL_MAX wipe portalRoom (forces a fresh room scan + approach geometry) and
-            // return false so the cooldown engages. Any real fill (emptyRec drop) resets it.
+            // ★UNFILLABLE-FRAME BREAKER: strike consecutive activate dispatches whose empty
+            // count did not DROP; at NO_FILL_MAX wipe portalRoom (forces a fresh room scan +
+            // approach geometry) and return false. Any real fill (emptyRec drop) resets it.
+            // (kernel-return audit 2026-07-02: this breaker alone could NEVER engage the kernel
+            // cooldown — 'arrived' forced progressed=true so strikes 0-2 returned truthy, and
+            // the wipe let the next dispatch's search findBlock instantly re-find the same room
+            // the bot was standing in with strikes reset via prev=null: a permanent 3-truthy/
+            // 1-false cycle vs the kernel's 3-CONSECUTIVE-failure limit. Fixed at both ends:
+            // progressed is now displacement/fill-gated above, and the wiped coords persist in
+            // endgame.json so the search-phase re-find is not counted as progress.)
             const prev = bot._epfNoFill; // {left, strikes} — bot._* survives hot-reload, wiped on restart (fine)
             const strikes = (prev && emptyRec >= prev.left) ? prev.strikes + 1 : 0;
             bot._epfNoFill = { left: emptyRec, strikes };
             if (strikes >= NO_FILL_MAX) {
                 bot._epfNoFill = null;
-                egPatch({ portalRoom: null });
-                prog(`framesEmpty stuck at ${emptyRec} for ${strikes} activate dispatches — wiping portalRoom, rescanning after cooldown`);
+                egPatch({ portalRoom: null, portalRoomWiped: { x: eg.portalRoom.x, y: eg.portalRoom.y, z: eg.portalRoom.z } });
+                prog(`framesEmpty stuck at ${emptyRec} for ${strikes} activate dispatches — wiping portalRoom (coords persisted so the re-find is not "progress"), rescanning after cooldown`);
                 log(bot, 'setupEndPortal: frames will not fill from here — cooling off and re-scanning the room.');
                 return false;
             }
+            // Truthy now requires REAL progress this dispatch (a frame filled, real approach
+            // travel, or a genuinely NEW room found upstream) — a standing-still zero-fill
+            // dispatch returns false so the kernel's 3-strike/5-min cooldown finally works.
             return progressed ? { phase: 'activate', framesEmpty: emptyLeft } : false;
         }
     }

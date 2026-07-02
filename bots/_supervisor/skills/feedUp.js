@@ -64,9 +64,21 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         if (!junk) return false;
         log(bot, `feedUp: ${reason} — eating ${junk.name} at hp=${Math.round(bot.health)} food=${bot.food}`);
         prog(`feedUp: ${reason} — eating ${junk.name} at hp=${Math.round(bot.health)} food=${bot.food}`);
-        try { await skills.consume(bot, junk.name); } catch (e) { return false; }
+        // ★kernel return contract (audit 2026-07-02, same family as the :1560 fix): skills.consume
+        // reports failure by RETURNING false WITHOUT throwing (item missing / equipConfirmed
+        // {ok:false} on equip desync), so "didn't throw" ≠ "ate". Discarding the boolean let the
+        // ':71 no-regen start' short-circuit return truthy to the kernel with ZERO food gained —
+        // GET_FOOD stays committed (isGoalDone needs food>=16), re-dispatches every ~2s, the
+        // failure counter resets on each truthy return, and the 3-strike/5-min cooldown never
+        // trips: unbreakable hot livelock while starving at no-regen hp. Truthy here = consume's
+        // own success boolean AND food actually rose this call; a dry run returns false so feedUp
+        // falls through to the main hunt loop and its delta-gated final return.
+        const f0 = bot.food;
+        let ok = false;
+        try { ok = await skills.consume(bot, junk.name); } catch (e) { return false; }
+        if (!ok) return false;
         try { await skills.wait(bot, 600); } catch (e) {}
-        return true;
+        return bot.food > f0;
     };
     if (await emergencyJunk('no-regen start')) return true;
 
