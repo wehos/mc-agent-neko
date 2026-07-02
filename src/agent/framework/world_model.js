@@ -992,6 +992,11 @@ export function proposeTasks(world, bot) {
             // !threat.actionable, and at @47 it only wins ticks the night chain (91-94) isn't
             // claiming. A pick crafted in a cooldown gap is exactly what keeps dawn productive.
             for (let i = out.length - 1; i >= 0; i--) if (DAY_ERRANDS.has(out[i].kind)) out.splice(i, 1);
+            // ★release a held day-errand commitment too (12:56Z live: the strip blocks NEW
+            // proposals but a commitment held from before dusk keeps re-dispatching its skill
+            // into the night refusal — 3 wasted strikes + cooldown every dusk. Releasing here
+            // hands the night chain the body immediately; the kind re-proposes at dawn.)
+            try { if (bot._commitment && DAY_ERRANDS.has(bot._commitment.kind)) bot._commitment = null; } catch (e) {}
         }
     } catch (e) {}
 
