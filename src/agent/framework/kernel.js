@@ -332,6 +332,13 @@ export class Kernel {
         // next tick's ms.busy guard blocks re-dispatch until this run settles.
         (async () => {
             let res, threw = false;
+            // ★OUTPUT FLUSH (checkpoint #13): skills.log() only appends to bot.output, and the
+            // kernel dispatch path never surfaced it anywhere — goBedSleep 3-struck twice with
+            // zero visible diagnostics while dutifully logging into the void. Mark the buffer
+            // length now, flush the delta to progress.txt after settle. Concurrent mode actions
+            // share bot.output (they clear it at action start), so a shrunk buffer → flush from
+            // 0; occasional interleave is cosmetic, invisibility was not.
+            const outMark = (typeof this.bot.output === 'string') ? this.bot.output.length : 0;
             try {
                 res = await skills.customSkill(this.bot, p.skill, ...(p.args || []));
             } catch (e) {
@@ -340,6 +347,12 @@ export class Kernel {
             } finally {
                 if (this.agent.supervised_skill === 'kernel') this.agent.supervised_skill = false;
             }
+            try {
+                const buf = (typeof this.bot.output === 'string') ? this.bot.output : '';
+                const out = buf.slice(outMark <= buf.length ? outMark : 0).trim();
+                if (out) fs.appendFileSync('bots/_supervisor/progress.txt',
+                    `[${new Date().toISOString()}] [kernel-out ${p.skill}] ${out.replace(/\s*\n+\s*/g, ' | ').slice(0, 1500)}\n`);
+            } catch (e) {}
             try { this._settleDispatch(p, snap, res, threw); } catch (e) { this.log(`[kernel] settle error: ${e && e.message || e}`); }
         })();
     }

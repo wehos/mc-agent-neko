@@ -12,8 +12,24 @@
 // vanilla sleep, sleep throws) so the kernel's 3-strike cooldown falls through to the
 // NIGHT_DIG_ONE/NIGHT_SEAL shelter fallbacks. No module-level state.
 // Invoked via: {"skill":"goBedSleep"}  ctx = { skills, world, mc, Vec3, log }
+import fs from 'fs';
+import path from 'path';
+const PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
+
 export default async function goBedSleep(bot, ctx) {
-    const { skills, world, Vec3, log } = ctx;
+    const { skills, world, Vec3 } = ctx;
+    // ctx.log only appends to bot.output, which NOTHING flushes on the kernel dispatch path —
+    // checkpoint #13 postmortem: this skill 3-struck twice with literally zero visible lines
+    // (looked like a silent bail; was actually diagnostics falling into the void). Write to
+    // progress.txt like every other supervisor skill, and keep bot.output as a bonus.
+    const log = (b, m) => {
+        try { ctx.log(b, m); } catch (e) {}
+        try { fs.appendFileSync(PROG, `[${new Date().toISOString()}] ${m}\n`); } catch (e) {}
+    };
+    try {
+        const p = bot.entity.position;
+        log(bot, `goBedSleep: START pos=${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)} food=${bot.food} hp=${Math.round(bot.health)}`);
+    } catch (e) {}
     const isNightish = () => { try { const t = bot.time.timeOfDay; return t >= 12000 && t <= 23458; } catch (e) { return false; } };
     const hostileNear = (r) => { try { return Object.values(bot.entities || {}).some(e => e && e !== bot.entity && e.position && ctx.mc.isHostile(e) && e.position.distanceTo(bot.entity.position) < r); } catch (e) { return false; } };
 

@@ -524,7 +524,16 @@ export function proposeTasks(world, bot) {
     //    away without code. Now low carried rations alone re-arms GET_FOOD at modest priority,
     //    and hunting kills naturally bank the raw meat that counts as rations.)
     const rationsNow = carriedRations(bot);
-    if (overworld && (vitals.food < FOOD_STOCK || !kit.foodSufficient || rationsNow < 2)) {
+    // ★night mirror (checkpoint #13 storm): feedUp's own roam guard refuses to hunt at
+    // night/dusk BY DESIGN (`isNight() || hostileNear()` → honest false), so proposing
+    // GET_FOOD on the exposed surface then = 3 strikes + 5-min cooldown every expiry, all
+    // night (observed 12:26Z: food=8, rations=0, 'guard stop night=true' x3). At night only
+    // propose when feedUp CAN act in place: a carried ration to eat (real progress) —
+    // otherwise nightShelter's raw-meat fallback owns night hunger (food<8 eats raw meat).
+    const nightExposed = (time.phase === 'night' || time.phase === 'dusk') && overworld && Math.round(bot.entity.position.y) >= 50;
+    const canEatInPlace = rationsNow >= 1 && vitals.food < 20;
+    if (overworld && (vitals.food < FOOD_STOCK || !kit.foodSufficient || rationsNow < 2)
+        && (!nightExposed || canEatInPlace)) {
         const pri = vitals.food <= 6 ? 88 : (vitals.food < 12 ? 55 : 35);
         push({ kind: PROPOSAL_KIND.GET_FOOD, priority: pri, skill: 'feedUp',
                rationale: vitals.food <= 6 ? 'food critical — hunt/forage now'
@@ -961,7 +970,13 @@ export function proposeTasks(world, bot) {
     //    night chain (DUSK_*/NIGHT_*) + HOLD + GET_FOOD own that state. Underground bots (y<50)
     //    keep the errands: sealed night mining/crafting is real work the early-returns don't block. ──
     try {
-        if (time.phase === 'night' && overworld && Math.round(bot.entity.position.y) >= 50) {
+        // ★phase-boundary interlock (checkpoint #13 dusk storm): the night-chain selector at
+        // :827 engages at `phase !== 'day'` (dusk included) but this strip only fired at
+        // strict 'night' — in the dusk window BOOTSTRAP_KIT/GET_BED were proposed while their
+        // executors' own night checks (timeOfDay-based, dusk counts as night) refused BY
+        // DESIGN → 3 quick strikes each, every single dusk. dawn intentionally NOT included:
+        // errands there predate this gate and dawn is the recovery window.
+        if ((time.phase === 'night' || time.phase === 'dusk') && overworld && Math.round(bot.entity.position.y) >= 50) {
             const DAY_ERRANDS = new Set([
                 PROPOSAL_KIND.BOOTSTRAP_KIT, PROPOSAL_KIND.GET_BED, PROPOSAL_KIND.GET_ARMOR,
                 PROPOSAL_KIND.GET_IRON_TOOLS, PROPOSAL_KIND.GET_IRON_ARMOR_SET,
