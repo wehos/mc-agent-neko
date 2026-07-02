@@ -49,7 +49,30 @@ export default async function goBedSleep(bot, ctx) {
         if (bot.interrupt_code || bot.health <= 0) { log(bot, `goBedSleep: ${bot.health <= 0 ? 'died' : 'reflex interrupt'} mid-walk to bed landmark — yielding.`); return false; }
         bedBlock = bot.findBlock({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 8 });
     }
-    if (!bedBlock) { log(bot, 'goBedSleep: no bed within reach (landmark stale or none) — false, shelter chain takes over.'); return false; }
+    if (!bedBlock) {
+        // ★stale-landmark hygiene (2026-07-02 12:52Z live: bot STANDING at the remembered bed
+        // spot, chunks loaded, no bed within 8b — creeper'd village bed. bed landmarks are
+        // "persistent kind" with no freshness check, so the ghost re-selected GO_BED every
+        // dusk → 3 strikes + 5-min cooldown, forever). An on-site disproof is the strongest
+        // negative evidence there is: drop the landmark; the C328 scan re-adds it the moment
+        // a real bed is actually seen.
+        try {
+            const me = bot.entity.position;
+            if (tgt && Math.hypot(tgt.x - me.x, tgt.y - me.y, tgt.z - me.z) <= 10 && bot._landmarks) {
+                let dropped = 0;
+                for (const k of Object.keys(bot._landmarks)) {
+                    const n = bot._landmarks[k];
+                    if (n && n.kind === 'bed' && Math.hypot(n.x - tgt.x, n.y - tgt.y, n.z - tgt.z) <= 8) { delete bot._landmarks[k]; dropped++; }
+                }
+                if (dropped) {
+                    try { fs.writeFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'landmarks.json'), JSON.stringify(bot._landmarks)); } catch (e) {}
+                    log(bot, `goBedSleep: on-site disproof — dropped ${dropped} ghost bed landmark(s) near ${Math.round(tgt.x)},${Math.round(tgt.z)}; GO_BED yields until a real bed is seen.`);
+                }
+            }
+        } catch (e) {}
+        log(bot, 'goBedSleep: no bed within reach (landmark stale or none) — false, shelter chain takes over.');
+        return false;
+    }
 
     // 2) Close to interaction range.
     if (bot.entity.position.distanceTo(bedBlock.position) > 2.6) {
