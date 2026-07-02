@@ -513,6 +513,16 @@ export default async function migrate(bot, ctx, opts = {}) {
     } catch (e) {}
 
     const movedTotal = Math.round(bot.entity.position.distanceTo(pos0));
+    // ★kernel return contract (live 2026-07-02 04:03: force=true last-resort gate re-ran
+    // every ~10s, each run aborted at leg 1 on food=0 with movedBlocks=0, and the
+    // unconditional migrated:true kept resetting the kernel failure counter — a hot
+    // MIGRATE livelock the 3-strike cooldown could never break). Zero real movement +
+    // not settled = this dispatch achieved nothing → return false; the kind cools down
+    // and GET_FOOD/BOOTSTRAP rotate in (the site scan often shows food/trees right here).
+    if (movedTotal < 8 && !reachedGood) {
+        log_(`zero-progress run (moved=${movedTotal}b, abort=${abort || 'none'}) → false for kernel cooldown`);
+        return false;
+    }
     const r = {
         migrated: true, settled: reachedGood, bedOk,
         movedBlocks: movedTotal, end: { x: target.x, y: Math.round(bot.entity.position.y), z: target.z },
