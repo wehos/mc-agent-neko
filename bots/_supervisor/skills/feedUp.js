@@ -26,7 +26,13 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     //    GET_FOOD when food<=4, so this only fires when it's safe to keep bootstrapping. ──
     try {
         const c = bot._commitment;
-        if (c && c.kind === 'BOOTSTRAP_KIT' && (bot.food || 0) > 6) {
+        // ★circular-deference fix (checkpoint #16, 14:38Z live): prepNether's HUNGER gate
+        // invokes feedUp — which then deferred BECAUSE BOOTSTRAP_KIT (prepNether's own
+        // dispatcher) was committed; prepNether read the defer as 'no food found' and the
+        // kind 3-struck into cooldown. A nested hunger-gate hunt IS the sanctioned hunt —
+        // the committed skill itself asked for it. Call sites stamp bot._hungerGateHunt.
+        const nestedHunt = bot._hungerGateHunt && Date.now() - bot._hungerGateHunt < 30000;
+        if (c && c.kind === 'BOOTSTRAP_KIT' && (bot.food || 0) > 6 && !nestedHunt) {
             log(bot, `feedUp: ★defer — committed BOOTSTRAP_KIT, food=${bot.food}>6 (suppress hunt, finish kit first)`);
             return { deferred: true, reason: 'bootstrap-commitment' };
         }

@@ -2058,7 +2058,7 @@ async function prepNetherInner(bot, ctx) {
                 bot._prepOakApplePulseBackoffUntil = Date.now() + 90000;
                 bot._prepOakApplePulseBackoffTarget = oakSignal.target;
                 prog(`prepNether: bounded oak/apple forage — ${oakSignal.target}; direct feedUp pulse, no surfaceUp blind climb (food=${bot.food} hp=${Math.round(bot.health)})`);
-                try { await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: oak/apple feedUp err ${e.message}`); }
+                try { bot._hungerGateHunt = Date.now(); await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: oak/apple feedUp err ${e.message}`); }
                 const sweep = bot._feedUpLastLeafSweep && Date.now() - bot._feedUpLastLeafSweep.at < 10000 ? bot._feedUpLastLeafSweep : null;
                 if (sweep && (!sweep.reachable || !sweep.broken)) {
                     const decayKick = !!sweep.decayKick;
@@ -2105,7 +2105,7 @@ async function prepNetherInner(bot, ctx) {
                     const surfTarget = Math.max(63, Math.floor(bot.entity.position.y) + 6);
                     prog(`prepNether: boosted oak climb probe — ate emergency junk, ${oakSignal.target} still unreachable/backoff; surfaceUp target=${surfTarget} then one feedUp pulse`);
                     try { await skills.customSkill(bot, 'surfaceUp', surfTarget); } catch (e) { prog(`prepNether: boosted oak climb surfaceUp err ${e.message}`); }
-                    try { await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: boosted oak climb feedUp err ${e.message}`); }
+                    try { bot._hungerGateHunt = Date.now(); await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: boosted oak climb feedUp err ${e.message}`); }
                     if (edibleNow() || bot.food >= 18 || bot.health >= 14) return true;
                     prog(`prepNether: boosted oak climb probe found no recovery (food=${bot.food} hp=${Math.round(bot.health)}); resume hold`);
                     bot._prepLowHpNoFoodUntil = Date.now() + 60000;
@@ -2152,7 +2152,7 @@ async function prepNetherInner(bot, ctx) {
                 bot._prepOakApplePulseBackoffUntil = Date.now() + 45000;
                 bot._prepOakApplePulseBackoffTarget = localOak.target;
                 prog(`prepNether: CRITICAL local oak forage — ${localOak.target}; bounded feedUp only, no surfaceUp/no long cave-climb backoff (food=${bot.food} hp=${Math.round(bot.health)})`);
-                try { await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: critical local oak feedUp err ${e.message}`); }
+                try { bot._hungerGateHunt = Date.now(); await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: critical local oak feedUp err ${e.message}`); }
                 const sweep = bot._feedUpLastLeafSweep && Date.now() - bot._feedUpLastLeafSweep.at < 10000 ? bot._feedUpLastLeafSweep : null;
                 if (sweep) {
                     const decayKick = !!sweep.decayKick;
@@ -2217,7 +2217,7 @@ async function prepNetherInner(bot, ctx) {
             }
         } catch (e) { prog(`prepNether: surfaceUp err ${e.message}`); }
         const foodBeforeHunt = bot.food;
-        try { await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: feedUp err ${e.message}`); }
+        try { bot._hungerGateHunt = Date.now(); await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: feedUp err ${e.message}`); }
         prog(`prepNether: hunt done — food=${bot.food} hp=${Math.round(bot.health)}`);
         if (bot.food <= 2 && bot.health <= 6 && woodEqNow() < 2) {
             prog(`prepNether: FAMINE forage — feedUp found no food; trying nearby wood/apples once before holding`);
