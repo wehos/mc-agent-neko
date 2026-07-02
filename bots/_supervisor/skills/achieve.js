@@ -11,6 +11,18 @@ const prog = (s) => { try { fs.appendFileSync(PROG, `[${new Date().toISOString()
 
 const TOOL_TIER = ['wooden', 'stone', 'iron', 'diamond', 'netherite'];
 const FOOD_RE = /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|^cod$|^salmon$|melon_slice|sweet_berries|_stew|^rabbit$|baked_/;
+// CHANCE-DROP SOURCES (2026-07-02, flint task): minecraft-data's block.drops lists
+// only the GUARANTEED drop — gravel.drops=[gravel], verified 1.21.1 — so
+// mc.getItemBlockSources('flint') returns [] and COLLECT dead-ended at "NO KNOWN
+// WAY to obtain flint", which killed flint_and_steel (iron_ingot+flint, the only
+// recipe) and with it lighting the nether portal. Vanilla: gravel drops flint
+// INSTEAD of itself 10% of the time (no Fortune), so repeatedly digging the
+// carrier block IS the legal route. Map item -> {block, rate}: COLLECT mines
+// `block` and over-requests ceil(deficit/rate) per pass to compensate for the
+// sub-1.0 yield. Frozen const = hot-reload safe (no mutable module state).
+const CHANCE_DROPS = Object.freeze({
+    flint: Object.freeze({ block: 'gravel', rate: 0.10 }),
+});
 
 // ── STATION REGISTRY (用户实拍怒斥: 满地没收的工作台 — "找不到台子→铺新的→旧的扔原地"
 // 的状态管理缺失). stations.json 状态池: 每次放置必登记,造新前必查池(32格内有登记台子
@@ -684,6 +696,13 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
     // ---- 3. COLLECT (x-ray, mine the source BLOCK) ----
     let sources = mc.getItemBlockSources(item);
     if ((!sources || !sources.length) && item.endsWith('_ore')) sources = [item];
+    // Chance-drop fallback (flint<-gravel, see CHANCE_DROPS): items that only ever
+    // REPLACE a block's own drop never appear in block.drops, so the drops-derived
+    // scan above is structurally blind to them — mine the carrier block instead.
+    // gravel needs no tool (harvestTools undefined; a shovel merely speeds it up),
+    // so ★NOPICK/getBlockTool below stay correct without a shovel sub-goal.
+    const chanceDrop = (!sources || !sources.length) ? (CHANCE_DROPS[item] || null) : null;
+    if (chanceDrop) sources = [chanceDrop.block];
     if (sources && sources.length) {
         let block = sources.find(s => !/deepslate/.test(s)) || sources[0];
         // STONE-TIER DEPTH FIX: cobblestone's only source is 'stone', but at deepslate depth
@@ -861,8 +880,16 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
             // whole run for 13 min stuck at "collect iron_ore [0/1]" with zero progress,
             // since the loop never got to the digDown that would expose fresh ground.
             // On timeout, stop the pathfinder and fall through to digDown to relocate.
+            // Chance drops: 1 dug block != 1 item (gravel->flint ~10%), so asking for
+            // `deficit` blocks (=1 for flint) gave ~8 digs across the whole 8-pass loop
+            // — a coin flip per dispatch. Request ceil(deficit/rate) instead, capped at
+            // 12 to stay inside the 25s timebox (bare-hand gravel ~0.9s/block + pathing);
+            // the loop's have() check ends the grind as soon as enough dropped, and the
+            // surplus gravel picked up along the way is harmless ballast.
+            const deficit = need - have();
+            const wantBlocks = chanceDrop ? Math.min(12, Math.ceil(deficit / chanceDrop.rate)) : deficit;
             await step(`collect ${block} (xray) [${have()}/${need}]`, () => Promise.race([
-                skills.collectBlock(bot, block, need - have()),
+                skills.collectBlock(bot, block, wantBlocks),
                 new Promise((_, rej) => setTimeout(() => rej(new Error('collect-timeout')), 25000)),
             ]).catch(e => { try { bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} throw e; }));
             if (have() >= need) break;
