@@ -113,8 +113,13 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
         }
         lastHp = bot.health;
         if (bot.food != null && bot.food < 12) {
-            const f = bot.inventory.items().find(i =>
+            let f = bot.inventory.items().find(i =>
                 /^(cooked_|bread$|apple$|baked_|carrot$|potato$)/.test(i.name) || /cooked_/.test(i.name));
+            // ★night-ration fallback (task #9, food=9-pinned-all-night death 06:34Z): raw RED
+            // meat is effect-free in vanilla — a famine night in the pocket eats raw
+            // beef/porkchop/mutton/rabbit rather than sitting at no-regen hunger. Raw
+            // chicken / rotten_flesh stay excluded (Hunger effect mid-night is worse).
+            if (!f && bot.food < 8) f = bot.inventory.items().find(i => /^(beef|porkchop|mutton|rabbit)$/.test(i.name));
             if (f) await skills.consume(bot, f.name).catch(() => {});
         }
         await skills.wait(bot, 2000);

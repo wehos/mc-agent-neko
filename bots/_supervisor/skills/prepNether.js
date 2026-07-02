@@ -1394,18 +1394,28 @@ export default async function prepNether(bot, ctx) {
         // by bankGear/withdrawals) proves iron is actually banked; night keeps the tight 16b
         // (no exposure marches for metal in the dark). manifest -1 = none written yet (legacy
         // bank) → allow the try; 0 = provably ironless chest → never waste the trip.
-        const _manifestIron = (() => {
-            try {
-                const m = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'bank_manifest.json'), 'utf8'));
-                return m && m.items ? ((m.items.iron_ingot || 0) + (m.items.raw_iron || 0)) : -1;
-            } catch (e) { return -1; }
+        const _manifest = (() => {
+            try { return JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'bank_manifest.json'), 'utf8')); } catch (e) { return null; }
         })();
+        const _mCount = (re) => (!_manifest || !_manifest.items) ? -1
+            : Object.entries(_manifest.items).filter(([n]) => re.test(n)).reduce((s, [, c]) => s + c, 0);
+        const _manifestIron = _mCount(/^(iron_ingot|raw_iron)$/);
         const _dayNow = (() => { try { const t = bot.time.timeOfDay; return t < 12800 || t > 23000; } catch (e) { return true; } })();
+        const _topupFresh = !(bot._bankIronTopupAt && Date.now() - bot._bankIronTopupAt < 600000);
         const _ironTopup = _ironPoor && _manifestIron !== 0
-            && _bankDistNow <= (_dayNow ? 48 : 16)
-            && !(bot._bankIronTopupAt && Date.now() - bot._bankIronTopupAt < 600000);
-        if (haveSword() && haveAnyArmor() && bot.health >= 14 && !_ironTopup) { prog('bankRecover: already armed (sword+armor, hp ok) — skip'); return; }
-        if (_ironTopup) { bot._bankIronTopupAt = Date.now(); prog(`bankRecover: iron top-up — inv iron ${has('iron_ingot')}+${has('raw_iron')}<3, no iron pick, bank ${Math.round(_bankDistNow)}b away → withdraw banked iron`); }
+            && _bankDistNow <= (_dayNow ? 48 : 16) && _topupFresh;
+        // ★food top-up (task #9, food=9-pinned-all-night death 06:34Z): same opportunistic
+        // withdraw for RATIONS — hungry, nothing edible held, bank provably has food, and
+        // it's CLOSE (16b even by day: no long famine marches for a snack; the WANT list
+        // below already pulls food x8). Shares the 10-min throttle with the iron trigger.
+        const _foodPoor = bot.food != null && bot.food <= 10 && !hasEdible();
+        const _manifestFood = _mCount(/^(cooked_\w+|bread|apple|baked_potato|beef|porkchop|mutton)$/);
+        const _foodTopup = _foodPoor && _manifestFood !== 0 && _bankDistNow <= 16 && _topupFresh;
+        if (haveSword() && haveAnyArmor() && bot.health >= 14 && !_ironTopup && !_foodTopup) { prog('bankRecover: already armed (sword+armor, hp ok) — skip'); return; }
+        if (_ironTopup || _foodTopup) {
+            bot._bankIronTopupAt = Date.now();
+            prog(`bankRecover: ${_ironTopup ? 'iron' : 'food'} top-up — ${_ironTopup ? `inv iron ${has('iron_ingot')}+${has('raw_iron')}<3, no iron pick` : `food=${bot.food} nothing edible held`}, bank ${Math.round(_bankDistNow)}b away → withdraw`);
+        }
         const tableHold = tableRecoveryBlocked('bucket') || tableRecoveryBlocked('crafting_table');
         if (tableHold && containedMobilityNow()) {
             if (!bot._lastBankTableRecoveryGateAt || Date.now() - bot._lastBankTableRecoveryGateAt > 30000) {
