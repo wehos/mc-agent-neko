@@ -3268,6 +3268,57 @@ const modes_list = [
                                 fs.appendFileSync('bots/_supervisor/progress.txt',
                                     `[${new Date().toISOString()}] [reflex_watchdog] ★PERSISTENT PIN — ${kicks} kicks ineffective, pinned ${pinMin}min hp=${Math.round(bot.health || 0)} food=${bot.food} skill=${bot._currentSkill || '-'} mob=${bot._mobility ? bot._mobility.state : '-'} — kick alone won't break it; escalate: dispatch a relocating recovery (forageExplore/escapePlan)\n`);
                             } catch (e) {}
+                            // ★C349 ESCALATION EXECUTOR (checkpoint#19 2026-07-02 18:39): the line above
+                            // ASKED for a relocating recovery but NO layer ever dispatched one — overseer/
+                            // supervisor have no dispatch path — so the swim loop ran 26+min more at
+                            // (22,62,110), hp20→13 food11→4. The watchdog now dispatches it ITSELF through
+                            // the kernel's supervised contract (kernel.js:337): sync owner-tagged lock
+                            // ('watchdog') → detached IIFE → customSkill → finally releases OWN tag only.
+                            // escapePlan(execute) is the planner-gated relocation; if it declines ("no
+                            // paralysis") while we ARE pinned, forageExplore is the generic leg-walking
+                            // venture. 10-min self-cooldown so the escalation can't become its own storm;
+                            // every failure path degrades to the old log-only behavior — never throws.
+                            if (now >= (bot._watchdogEscalateAt || 0)) {
+                                bot._watchdogEscalateAt = now + 10 * 60000;
+                                const wasBusy = !!(agent.supervised_skill || (agent.actions && agent.actions.executing) || bot._currentSkill);
+                                (async () => {
+                                    try {
+                                        // Sleep past this tick in ALL cases: the shared kick lines just below
+                                        // (outside this else) set bot.interrupt_code=true synchronously right
+                                        // after this IIFE parks — clearing it before they run would be undone
+                                        // and the fresh dispatch would abort at its first stop() poll.
+                                        if (wasBusy) { try { bot.interrupt_code = true; } catch (e) {} }
+                                        await new Promise(r => setTimeout(r, wasBusy ? 2000 : 800));
+                                        const prevOwner = agent.supervised_skill;
+                                        agent.supervised_skill = 'watchdog'; // sync set → ms.busy blocks kernel/ws re-dispatch
+                                        try {
+                                            // Let the recovery own the body: silence the kick's interrupt, drop
+                                            // pathfinder/controls so the swim reflex's holds yield.
+                                            try { bot.interrupt_code = false; } catch (e) {}
+                                            try { bot.pathfinder.stop(); } catch (e) {}
+                                            try { bot.pathfinder.setGoal(null); } catch (e) {}
+                                            try { bot.clearControlStates(); } catch (e) {}
+                                            try { bot._recoveryVentureUntil = Date.now() + 5 * 60000; } catch (e) {}
+                                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                                `[${new Date().toISOString()}] [reflex_watchdog] ★ESCALATION EXECUTE: dispatching escapePlan(execute) as 'watchdog'${prevOwner ? ` (lock '${prevOwner}' didn't release in 2s — taking over; owner-tag keeps releases safe)` : ''}\n`);
+                                            const res = await skills.customSkill(bot, 'escapePlan', { execute: true });
+                                            const relocated = !!(res && res.plan && res.plan.action === 'relocate_surface' && (res.movedTotal == null || res.movedTotal >= 8));
+                                            if (!relocated && !bot.interrupt_code) {
+                                                await skills.customSkill(bot, 'forageExplore', {});
+                                            }
+                                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                                `[${new Date().toISOString()}] [reflex_watchdog] escalation settled: escapePlan ${relocated ? 'relocated' : 'declined/short → forageExplore fallback ran'} pos=${(() => { try { const q = bot.entity.position; return `${Math.round(q.x)},${Math.round(q.y)},${Math.round(q.z)}`; } catch (e) { return '?'; } })()}\n`);
+                                        } finally {
+                                            if (agent.supervised_skill === 'watchdog') agent.supervised_skill = false;
+                                        }
+                                    } catch (e) {
+                                        try {
+                                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                                `[${new Date().toISOString()}] [reflex_watchdog] escalation error (degraded to log-only): ${e && e.message || e}\n`);
+                                        } catch (e2) {}
+                                    }
+                                })();
+                            }
                         }
                         try { bot.interrupt_code = true; } catch (e) {}
                         try { bot._chopGen = (bot._chopGen || 0) + 1; } catch (e) {}
