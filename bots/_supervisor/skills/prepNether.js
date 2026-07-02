@@ -2508,7 +2508,7 @@ async function prepNetherInner(bot, ctx) {
         // toss is instantly re-grabbed by item_collecting, declutterInv.js:30). Keep a working buffer of each.
         try {
             const ic = world.getInventoryCounts(bot);
-            const CAPS = { cobblestone: 64, cobbled_deepslate: 64, stone: 0, dirt: 16, coal: 64, sand: 0, red_sand: 0, sandstone: 0, red_sandstone: 0, smooth_sandstone: 0, gravel: 0, granite: 0, andesite: 0, diorite: 0, tuff: 0, flint: 0, raw_copper: 0, terracotta: 0, white_terracotta: 0, orange_terracotta: 0, yellow_terracotta: 0, red_terracotta: 0, brown_terracotta: 0, light_gray_terracotta: 0, gray_terracotta: 0, cyan_terracotta: 0, rabbit_hide: 0, sugar_cane: 0 };
+            const CAPS = { cobblestone: 64, cobbled_deepslate: 64, stone: 0, dirt: 16, coal: 64, sand: 0, red_sand: 0, sandstone: 0, red_sandstone: 0, smooth_sandstone: 0, gravel: 0, granite: 0, andesite: 0, diorite: 0, tuff: 0, flint: 2 /* ★ed6a204 flint是flint_and_steel(endgame点火)材料 — COLLECT刚学会从gravel收flint, 清零=拆台 */, raw_copper: 0, terracotta: 0, white_terracotta: 0, orange_terracotta: 0, yellow_terracotta: 0, red_terracotta: 0, brown_terracotta: 0, light_gray_terracotta: 0, gray_terracotta: 0, cyan_terracotta: 0, rabbit_hide: 0, sugar_cane: 0 };
             let emptySlots = 36; try { emptySlots = bot.inventory.emptySlotCount(); } catch (e) {}
             let cleared = 0;
             for (const [name, cap] of Object.entries(CAPS)) {
