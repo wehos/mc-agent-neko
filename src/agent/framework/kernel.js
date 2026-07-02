@@ -56,6 +56,16 @@ const NO_DELTA_EXEMPT = /^(NIGHT_|DUSK_GO_BED$|HOLD$|SLEEP$|FREE_PLAY$)/;
 //    kernel HOLDS dispatch while the window is live, and a failure that lands inside it
 //    (cancel arrived mid-run) is NOT counted as a strike. ──
 const SUPERVISOR_CANCEL_WINDOW_MS = 30000;   // MUST mirror the skills' cancelRequested() TTL
+// ★INTERRUPT-UNWIND (checkpoint #13, goBedSleep postmortem 2026-07-02): a reflex raising
+//    bot.interrupt_code makes any well-behaved skill bail with false BY DESIGN (the stop()
+//    contract) — same shape as cancel-unwind, and counting those as strikes is how DUSK_GO_BED
+//    burned 3 strikes in 16s (self_preservation fired mid-approach to a bed 2.5b away) and the
+//    bot slept through ZERO nights. Not a strike; but bounded — a reflex firing every single
+//    attempt means it is CHRONIC at this task's location, and without a valve the kind would
+//    livelock (dispatch→interrupt→re-dispatch forever). After each unwind, dispatch pauses
+//    INTERRUPT_HOLD_MS so the reflex finishes instead of being re-dispatched into.
+const INTERRUPT_UNWIND_LIMIT = 8;      // consecutive unwinds of one kind → cooldown anyway
+const INTERRUPT_HOLD_MS = 4000;        // post-unwind dispatch pause (reflex settle time)
 
 // ── ★BUSY-STUCK WATCHDOG: how long bot._currentSkill may sit set with NO supervised
 //    skill and NO executing action before the kernel declares it an orphan and clears it.
@@ -89,6 +99,8 @@ export class Kernel {
         this._dispatchFails = Object.create(null);   // kind -> consecutive dispatch-failure count (★cooldown)
         this._noDeltaRuns = Object.create(null);     // kind -> consecutive truthy-but-zero-world-delta runs (★no-delta override)
         this._cancelHoldAt = 0;                      // last _supervisorCancelAt we logged a dispatch-hold for
+        this._interruptUnwinds = Object.create(null); // kind -> consecutive interrupt-unwind count (★valve)
+        this._interruptHoldUntil = 0;                // dispatch pause after an interrupt-unwind (reflex settle)
         this._companionUntil = 0;                    // companion-mode sticky window after a player msg
         this._lastShadowLog = '';
         this._lastObserveAt = 0;
@@ -269,6 +281,10 @@ export class Kernel {
             }
             return;
         }
+        // ★INTERRUPT-UNWIND HOLD: the previous dispatch just bailed on a live reflex interrupt —
+        // re-dispatching immediately lands in the same interrupt (goBedSleep: 3 strikes in 16s).
+        // Silent skip (≤13 ticks at 300ms); the unwind itself was logged in _settleDispatch.
+        if (this._interruptHoldUntil && Date.now() < this._interruptHoldUntil) return;
         this.log(line);
         // ★HEARTBEAT (non-shadow only, before dispatch): prepNether.js:102 reads
         // bot._kernelDriverActive (fresh ≤10s) to yield its legacy night fallback exactly
@@ -345,8 +361,29 @@ export class Kernel {
         // (neither strike nor reset) when the failure arrives inside a live cancel window.
         const cancelUnwind = failed && this.bot._supervisorCancelAt
             && Date.now() - this.bot._supervisorCancelAt < SUPERVISOR_CANCEL_WINDOW_MS;
-        if (failed && !cancelUnwind) {
+        // ★INTERRUPT-UNWIND is not a strike either (see constants above): the flag is still set
+        // at settle time — nothing clears it between the skill's stop()-poll bail and here
+        // (_commit's stale-interrupt hygiene clears it on the NEXT dispatch). `threw` included:
+        // a reflex grabbing the pathfinder mid-goToPosition surfaces as GoalChanged in skills
+        // that don't catch it — same unwind, different shape.
+        const interruptUnwind = failed && !cancelUnwind && this.bot.interrupt_code;
+        if (failed && interruptUnwind) {
             const k = p.kind;
+            this._interruptHoldUntil = Date.now() + INTERRUPT_HOLD_MS;
+            this._interruptUnwinds[k] = (this._interruptUnwinds[k] || 0) + 1;
+            if (this._interruptUnwinds[k] >= INTERRUPT_UNWIND_LIMIT) {
+                this._interruptUnwinds[k] = 0;
+                if (!this.bot._kindCooldownUntil) this.bot._kindCooldownUntil = {};
+                this.bot._kindCooldownUntil[k] = Date.now() + DISPATCH_COOLDOWN_MS;
+                if (this.bot._commitment && this.bot._commitment.kind === k) this.bot._commitment = null;
+                this.log(`[kernel] interrupt-unwind valve: ${k}/${p.skill} interrupted ${INTERRUPT_UNWIND_LIMIT}x consecutively — a reflex is chronic at this task; cooldown + release`);
+                try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [kernel] ★interrupt-unwind valve ${k} via ${p.skill}\n`); } catch (e) {}
+            } else {
+                this.log(`[kernel] interrupt-unwind: ${k}/${p.skill} bailed on a live reflex interrupt (${this._interruptUnwinds[k]}x) — not a strike; holding dispatch ${Math.round(INTERRUPT_HOLD_MS / 1000)}s`);
+            }
+        } else if (failed && !cancelUnwind) {
+            const k = p.kind;
+            this._interruptUnwinds[k] = 0;   // genuine failure breaks the "consecutive" chain
             this._dispatchFails[k] = (this._dispatchFails[k] || 0) + 1;
             if (this._dispatchFails[k] >= DISPATCH_FAIL_LIMIT) {
                 this._dispatchFails[k] = 0;
@@ -362,6 +399,7 @@ export class Kernel {
             }
         } else if (!failed) {
             this._dispatchFails[p.kind] = 0;
+            this._interruptUnwinds[p.kind] = 0;
             // ★NO-DELTA OVERRIDE measurement: a truthy (or undefined) return claims progress —
             // check the world actually changed. Exempt idle-by-design kinds and cancel windows.
             if (snap && !NO_DELTA_EXEMPT.test(p.kind) && !(this.bot._supervisorCancelAt

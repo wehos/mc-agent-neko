@@ -965,10 +965,17 @@ export function proposeTasks(world, bot) {
             const DAY_ERRANDS = new Set([
                 PROPOSAL_KIND.BOOTSTRAP_KIT, PROPOSAL_KIND.GET_BED, PROPOSAL_KIND.GET_ARMOR,
                 PROPOSAL_KIND.GET_IRON_TOOLS, PROPOSAL_KIND.GET_IRON_ARMOR_SET,
-                PROPOSAL_KIND.GET_DIAMOND_GEAR, PROPOSAL_KIND.TOOL_UPKEEP, PROPOSAL_KIND.BUILD_HOME,
+                PROPOSAL_KIND.GET_DIAMOND_GEAR, PROPOSAL_KIND.BUILD_HOME,
                 PROPOSAL_KIND.OPENING_SCOUT, PROPOSAL_KIND.OPENING_VILLAGE,
                 PROPOSAL_KIND.OPP_WHEAT_FARM, PROPOSAL_KIND.OPP_SEIZE_VILLAGE, PROPOSAL_KIND.MIGRATE,
             ]);
+            // ★TOOL_UPKEEP is NOT a day errand (checkpoint #13, 2026-07-02 night: pick wore to 82%
+            // at dusk, the gate stripped the restock proposal, the spare-pick craft later FAILED
+            // 'no reachable table', the pick died, and BOOTSTRAP_KIT spun on 'no usable pickaxe'
+            // all night). This gate exists for skills that early-return at night — craftChain has
+            // no night early-return (crafts in place in seconds), its own gate already requires
+            // !threat.actionable, and at @47 it only wins ticks the night chain (91-94) isn't
+            // claiming. A pick crafted in a cooldown gap is exactly what keeps dawn productive.
             for (let i = out.length - 1; i >= 0; i--) if (DAY_ERRANDS.has(out[i].kind)) out.splice(i, 1);
         }
     } catch (e) {}

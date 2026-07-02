@@ -27,7 +27,10 @@ export default async function goBedSleep(bot, ctx) {
         // Walk toward the landmark (bounded — a bed 2.5b away was being ignored all night;
         // one long-ish walk is still cheaper than a night of kiting).
         try { await skills.goToPosition(bot, tgt.x, tgt.y, tgt.z, 2); } catch (e) {}
-        if (bot.interrupt_code || bot.health <= 0) return false;
+        // Checkpoint #13: these bails were SILENT — 3 strikes in 16s with zero log lines while
+        // self_preservation kept interrupting the walk. Say so; the kernel's interrupt-unwind
+        // settle (not a strike) is what keeps this from cooling the kind down.
+        if (bot.interrupt_code || bot.health <= 0) { log(bot, `goBedSleep: ${bot.health <= 0 ? 'died' : 'reflex interrupt'} mid-walk to bed landmark — yielding.`); return false; }
         bedBlock = bot.findBlock({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 8 });
     }
     if (!bedBlock) { log(bot, 'goBedSleep: no bed within reach (landmark stale or none) — false, shelter chain takes over.'); return false; }
@@ -35,7 +38,7 @@ export default async function goBedSleep(bot, ctx) {
     // 2) Close to interaction range.
     if (bot.entity.position.distanceTo(bedBlock.position) > 2.6) {
         try { await skills.goToPosition(bot, bedBlock.position.x, bedBlock.position.y, bedBlock.position.z, 2); } catch (e) {}
-        if (bot.interrupt_code || bot.health <= 0) return false;
+        if (bot.interrupt_code || bot.health <= 0) { log(bot, `goBedSleep: ${bot.health <= 0 ? 'died' : 'reflex interrupt'} mid-approach to bed — yielding.`); return false; }
     }
     if (bot.entity.position.distanceTo(bedBlock.position) > 3.2) {
         log(bot, 'goBedSleep: bed unreachable (pathing stopped short) — false.');
