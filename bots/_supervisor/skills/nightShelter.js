@@ -87,8 +87,31 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
     }
 
     // ── PHASE 2: hold until day (EVERY iteration checks interrupt + death, red line) ──
-    while (!isDay() && Date.now() - t0 < maxMs) {
+    // ★hold-loop escape hatches (postmortem 2026-07-02 05:41 death: while this loop held,
+    // a detached go_to_bed_sleep instinct DRAGGED the bot out of the freshly sealed pocket
+    // onto the night surface next to two zombies, and — with the kernel's inline dispatch
+    // starving every mode — the bot stood in this silent wait loop taking hits until
+    // health<=0 was the only exit that fired. The loop now also exits on: (a) position
+    // drift >2b (the pocket no longer contains us — whatever moved us, re-decide), (b) a
+    // fresh hit or a hostile within 4b (holding still while being punched is not shelter),
+    // (c) isDay read DIRECTLY from bot.time (bot._world is refreshed by the same mode loop
+    // an inline kernel dispatch starves — trusting it here could hold past dawn forever).
+    const holdAnchor = bot.entity.position.clone();
+    const hpAtHold = bot.health;
+    const isDayDirect = () => { try { const t = bot.time.timeOfDay; return t < 12800 || t > 23000; } catch (e) { return isDay(); } };
+    const hostileClose = (r) => { try { return Object.values(bot.entities || {}).some(e => e && e !== bot.entity && e.position && ctx.mc.isHostile(e) && e.position.distanceTo(bot.entity.position) < r); } catch (e) { return false; } };
+    let lastHp = hpAtHold;
+    while (!isDay() && !isDayDirect() && Date.now() - t0 < maxMs) {
         if (bot.interrupt_code || bot.health <= 0) break;
+        if (bot.entity.position.distanceTo(holdAnchor) > 2) {
+            log(bot, 'nightShelter: dragged >2b out of the sealed pocket (instinct/knockback) — shelter void, re-decide.');
+            return false;
+        }
+        if (bot.health < lastHp - 0.5 || hostileClose(4)) {
+            log(bot, `nightShelter: taking hits in the "shelter" (hp ${Math.round(bot.health)}/${Math.round(lastHp)}, hostile<4=${hostileClose(4)}) — seal failed, re-decide.`);
+            return false;
+        }
+        lastHp = bot.health;
         if (bot.food != null && bot.food < 12) {
             const f = bot.inventory.items().find(i =>
                 /^(cooked_|bread$|apple$|baked_|carrot$|potato$)/.test(i.name) || /cooked_/.test(i.name));
