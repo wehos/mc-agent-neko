@@ -42,6 +42,13 @@ if ($Framework) {
     Remove-Item Env:MC_FRAMEWORK_SHADOW -ErrorAction SilentlyContinue
 }
 
+# In-proc vision kill switch ON by default (2026-07-02 task#12): the lazy Camera path is
+# BROKEN — prismarine-viewer's entity meshes need global.THREE which nothing sets in-proc,
+# so every vision call floods 'ReferenceError: THREE is not defined' + per-entity mesh
+# failures (observed ~19:25, console unusable). A broken feature is safer disabled; remove
+# this once vision_interpreter injects globalThis.THREE (task #12).
+$env:NEKO_DISABLE_INPROC_VISION = '1'
+
 if ($ScreenshotMs -gt 0) {
     $env:NEKO_AGENT_SCREENSHOT_INTERVAL_MS = "$ScreenshotMs"
     Write-Host "Periodic POV camera feed ENABLED: every ${ScreenshotMs}ms"
