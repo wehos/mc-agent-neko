@@ -53,6 +53,21 @@ export default async function mineDown(bot, ctx, opts = {}) {
         }
         if (nearest && nd < 24) { const dx = p.x - nearest.position.x, dz = p.z - nearest.position.z; if (Math.abs(dx) >= Math.abs(dz)) { sx = Math.sign(dx) || 1; sz = 0; } else { sx = 0; sz = Math.sign(dz) || 1; } }
     } catch (e) {}
+    // ★fluid-abort heading rotation (2026-07-02 13:07Z: 3 dispatches from the same cell all
+    // aborted on the SAME flooded stair (44,61,160) — the heading is deterministic (+x when no
+    // hostile), so every retry was identical and the kind burned into cooldown. Remember
+    // fluid-aborted headings near this spot (TTL 10min, bot-object state per HANDOFF red line)
+    // and start with the first cardinal that hasn't failed here yet.)
+    try {
+        const p0 = bot.entity.position;
+        bot._mineDownFluidAvoid = (bot._mineDownFluidAvoid || []).filter(a => Date.now() - a.at < 600000);
+        const avoid = bot._mineDownFluidAvoid.filter(a => Math.hypot(a.x - p0.x, a.z - p0.z) < 8);
+        if (avoid.some(a => a.sx === sx && a.sz === sz)) {
+            const clean = [[1, 0], [0, 1], [-1, 0], [0, -1]].find(([cx, cz]) => !avoid.some(a => a.sx === cx && a.sz === cz));
+            if (clean) { sx = clean[0]; sz = clean[1]; log_(`heading rotated to ${sx},${sz} — ${avoid.length} fluid-aborted heading(s) remembered near here`); }
+            else { log_('all 4 headings fluid-aborted near here — refusing, higher layer should relocate first'); return { failed: true, abort: 'all headings flooded nearby' }; }
+        }
+    } catch (e) {}
 
     log_(`START pos=${Math.round(bot.entity.position.x)},${Math.round(bot.entity.position.y)},${Math.round(bot.entity.position.z)} hp=${Math.round(bot.health)} food=${bot.food} heading=${sx},${sz} targetY=${targetY}`);
     let dug = 0, ore = 0, abort = null, noProg = 0;
@@ -146,7 +161,14 @@ export default async function mineDown(bot, ctx, opts = {}) {
             if (/lava|water/.test(nm(bn(fx + dx, cy - 1 + dy, fz + dz)))) { fluidNear = true; break; }
         }
         const safe = stairSafety({ feet: nm(newFeet), head: nm(newHead), floor: nm(support), fluidNear });
-        if (!safe.safe) { abort = `unsafe at ${fx},${cy - 1},${fz}: ${safe.reason}`; break; }
+        if (!safe.safe) {
+            abort = `unsafe at ${fx},${cy - 1},${fz}: ${safe.reason}`;
+            // feed the heading-rotation memory (see START) so the next dispatch tries a different way
+            if (/fluid/.test(safe.reason || '')) {
+                try { (bot._mineDownFluidAvoid = bot._mineDownFluidAvoid || []).push({ x: bot.entity.position.x, z: bot.entity.position.z, sx, sz, at: Date.now() }); } catch (e) {}
+            }
+            break;
+        }
         // No solid support under the new feet (cliff/cave) => don't blind-drop; stop.
         if (/^(air|cave_air|void_air|water|flowing_water)$/.test(nm(support))) { abort = `no floor support under ${fx},${cy - 2},${fz} (${nm(support)}) — stop, don't free-fall`; break; }
 
