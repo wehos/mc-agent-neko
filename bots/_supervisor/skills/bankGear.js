@@ -104,6 +104,19 @@ export default async function bankGear(bot, ctx) {
     }
     prog(`bankGear: deposited [${banked.join(' ')}] @home(${src})`);
     log(bot, `Banked valuables at home: ${banked.join(', ')}`);
+    // ★bank manifest (checkpoint #3, 2026-07-02: 13 banked ingots stranded across three
+    // checkpoints — bankRecover's opportunistic top-up can't know WHAT is banked, so its
+    // fetch radius had to stay tiny and never fired). Snapshot the chest contents after
+    // every deposit; the recover side reads it to justify a longer fetch only when the
+    // manifest PROVES the metal is there. Best-effort (one extra open at the chest).
+    try {
+        const c2 = await bot.openContainer(chest);
+        const items = {};
+        for (const it of c2.containerItems()) if (it && it.name) items[it.name] = (items[it.name] || 0) + it.count;
+        try { await c2.close(); } catch (e) {}
+        fs.writeFileSync(path.join(SUP, 'bank_manifest.json'),
+            JSON.stringify({ x: chest.position.x, y: chest.position.y, z: chest.position.z, t: Date.now(), items }, null, 2));
+    } catch (e) {}
     // ★kernel-contract audit 2026-07-02: a bare `return true` here was reachable with ZERO
     // deposits (full home chest → every put throws & is swallowed above; or interrupt before
     // the first put). Kernel counts FAILED iff threw/false/{failed:true} (kernel.js ~296), and

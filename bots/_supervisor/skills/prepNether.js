@@ -1388,7 +1388,21 @@ export default async function prepNether(bot, ctx) {
         // Throttled 10min so a fruitless open doesn't repeat every ~2s dispatch.
         const _ironPoor = (has('iron_ingot') + has('raw_iron')) < 3 && has('iron_pickaxe') < 1;
         const _bankDistNow = (() => { try { const me = bot.entity.position; return Math.hypot(me.x - bank.x, me.y - bank.y, me.z - bank.z); } catch (e) { return Infinity; } })();
-        const _ironTopup = _ironPoor && _bankDistNow <= 16
+        // ★second cut (checkpoint #3: the 16b window NEVER fired live — respawn lands 4b from
+        // the chest but corpseRun runs first, and by the time bankRecover gets the body the
+        // bot is 23b out). Day trips up to 48b are justified WHEN the bank manifest (written
+        // by bankGear/withdrawals) proves iron is actually banked; night keeps the tight 16b
+        // (no exposure marches for metal in the dark). manifest -1 = none written yet (legacy
+        // bank) → allow the try; 0 = provably ironless chest → never waste the trip.
+        const _manifestIron = (() => {
+            try {
+                const m = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'bank_manifest.json'), 'utf8'));
+                return m && m.items ? ((m.items.iron_ingot || 0) + (m.items.raw_iron || 0)) : -1;
+            } catch (e) { return -1; }
+        })();
+        const _dayNow = (() => { try { const t = bot.time.timeOfDay; return t < 12800 || t > 23000; } catch (e) { return true; } })();
+        const _ironTopup = _ironPoor && _manifestIron !== 0
+            && _bankDistNow <= (_dayNow ? 48 : 16)
             && !(bot._bankIronTopupAt && Date.now() - bot._bankIronTopupAt < 600000);
         if (haveSword() && haveAnyArmor() && bot.health >= 14 && !_ironTopup) { prog('bankRecover: already armed (sword+armor, hp ok) — skip'); return; }
         if (_ironTopup) { bot._bankIronTopupAt = Date.now(); prog(`bankRecover: iron top-up — inv iron ${has('iron_ingot')}+${has('raw_iron')}<3, no iron pick, bank ${Math.round(_bankDistNow)}b away → withdraw banked iron`); }
@@ -1471,6 +1485,15 @@ export default async function prepNether(bot, ctx) {
                 }
             }
         } catch (e) { prog(`bankRecover: withdraw loop err ${e.message}`); }
+        // ★keep the bank manifest honest after withdrawals (bankGear writes it on deposit;
+        // the top-up trigger above trusts it — a stale 'iron banked' entry would send the
+        // bot on 48b day trips to an emptied chest).
+        try {
+            const _items = {};
+            for (const it of container.containerItems()) if (it && it.name) _items[it.name] = (_items[it.name] || 0) + it.count;
+            fs.writeFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'bank_manifest.json'),
+                JSON.stringify({ x: chest.position.x, y: chest.position.y, z: chest.position.z, t: Date.now(), items: _items }, null, 2));
+        } catch (e) {}
         try { await container.close(); } catch (e) {}
         // 6) Re-arm: equip the best weapon we now have, then armor.
         try { const c = world.getInventoryCounts(bot); const sword = Object.keys(c).find(n => /_sword$/.test(n) && c[n] > 0); if (sword) await skills.equip(bot, sword); } catch (e) {}
