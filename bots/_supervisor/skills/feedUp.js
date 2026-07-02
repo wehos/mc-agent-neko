@@ -1437,6 +1437,22 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         // No held food. PlanC short fetch FIRST (低险快进快出,守卫前放行——烧怪掉落
         // 5分钟 despawn,等不起), then the roam guard.
         if (await fetchFoodDrop()) { await eat(); await skills.wait(bot, 600); continue; }
+        // ★C350 wheat→bread (checkpoint #21, 22:25Z live deadlock: 26 wheat in the bag while
+        // food=10/hp=7 no-regen locked EVERY work gate — no code path anywhere baked wheat.
+        // 3 wheat = 1 bread at any table; craftRecipe finds a placed table in reach or places
+        // a carried one). Try BEFORE flesh/roam: it's free food already in the bag.
+        if (bot.food < 18) {
+            const wheatCt = (world.getInventoryCounts(bot).wheat || 0);
+            if (wheatCt >= 3) {
+                const breadBefore = world.getInventoryCounts(bot).bread || 0;
+                try { await skills.craftRecipe(bot, 'bread', Math.min(Math.floor(wheatCt / 3), 6)); } catch (e) {}
+                const baked = (world.getInventoryCounts(bot).bread || 0) - breadBefore;
+                if (baked > 0) {
+                    prog(`feedUp: C350 baked wheat→bread x${baked} (had ${wheatCt} wheat idle in the bag)`);
+                    await eat(); await skills.wait(bot, 400); continue;
+                }
+            }
+        }
         // ★famine flesh (2026-07-02 food-desert live): eat() skips rotten_flesh BY DESIGN, but
         // at food<=6 with nothing better HELD, poison flesh (4 pts, 80% hunger-poison) beats
         // starving the march/dive gates shut. fetchFoodDrop already eats it post-fetch (:459);
