@@ -1239,8 +1239,18 @@ export async function pickupNearbyItems(bot) {
         const horiz = Math.hypot(dx, dz);
         return d <= 2.2 || (horiz <= 4.2 && dy <= 1.2 && dy >= -3.2);
     };
+    // ★unreachable-drop blacklist (live 2026-07-02 02:41-02:45: ONE item wedged in a
+    // 1-gap cell ate 876 GoalFollow/step-edge events and froze branchMine at y=67 for
+    // 5 straight minutes — every dig iteration re-called this function, and the give-up
+    // below had no memory across calls, so the same doomed chase restarted until the
+    // item DESPAWNED). Cross-call memory on bot._* (hot-reload red line), 120s TTL:
+    // two more chances before the 5-min despawn, zero chance of a per-item spin.
+    const UNREACHABLE_TTL = 120000;
+    const blacklist = bot._pickupUnreachable || (bot._pickupUnreachable = {});
+    for (const k of Object.keys(blacklist)) if (Date.now() - blacklist[k] > UNREACHABLE_TTL) delete blacklist[k];
     const getNearestItem = bot => bot.nearestEntity(entity => {
         if (!entity || entity.name !== 'item' || !entity.position) return false;
+        if (blacklist[entity.id]) return false;
         const d = bot.entity.position.distanceTo(entity.position);
         if (d >= distance) return false;
         if (miningPickup() && !cheapMiningPickup(entity) && !FOOD_ITEM_RE.test(droppedName(entity))) return false;
@@ -1302,23 +1312,25 @@ export async function pickupNearbyItems(bot) {
                 )
             ]);
         } catch (error) {
-            if (error.message === 'Pathfind timeout') {
-                log(bot, `⚠️ Failed to reach item (timeout), skipping.`);
-                consecutiveFailures++;
-                if (consecutiveFailures >= 3) {
-                    log(bot, `Too many consecutive failures, stopping item pickup.`);
-                    break;
-                }
+            // Count EVERY failed leg (path-failed/NoPath/goal-changed too, not just the
+            // timeout — untyped rejections previously slipped through uncounted).
+            log(bot, `⚠️ Failed to reach item (${error.message}), skipping.`);
+            consecutiveFailures++;
+            if (consecutiveFailures >= 3) {
+                blacklist[nearestItem.id] = Date.now();   // ★don't re-chase next call
+                log(bot, `Too many consecutive failures, stopping item pickup.`);
+                break;
             }
         }
-        
+
         await new Promise(resolve => setTimeout(resolve, 200));
         let prev = nearestItem;
         nearestItem = getNearestItem(bot);
         if (prev === nearestItem) {
             consecutiveFailures++;
             if (consecutiveFailures >= 2) {
-                log(bot, `Unable to reach item at ${prev.position}, giving up.`);
+                blacklist[prev.id] = Date.now();          // ★don't re-chase next call
+                log(bot, `Unable to reach item at ${prev.position}, giving up (blacklisted 120s).`);
                 break;
             }
         } else {
