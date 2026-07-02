@@ -1539,6 +1539,19 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                 if (await criticalOakAppleForage()) { await skills.wait(bot, 600); continue; }
                 if (bot.food <= 1 && !edibleHeld() && await desperationRoam({ concreteOnly: true })) { await skills.wait(bot, 600); continue; }
                 if (await criticalMicroScout()) { await skills.wait(bot, 600); continue; }
+                // ★critical-branch surface-first (live 2026-07-02 08:59: hp4/food7 sealed at
+                // y=-29 — the guard relaxation let dispatches REACH this branch, but every
+                // local probe is dry 90 blocks below daylight and this break fired before the
+                // main-flow surface-first could ever run at hp<=8. Same rule as below: one
+                // sealed-staircase climb per dispatch when nothing is in punch range.)
+                if (!surfaceTriedThisRun && bot.entity.position.y < 60 && !hostileNear(8)) {
+                    surfaceTriedThisRun = true;
+                    prog(`feedUp: critical surface-first — hp=${Math.round(bot.health)} food=${bot.food} y=${Math.round(bot.entity.position.y)}, climbing to daylight food`);
+                    let up = false;
+                    try { up = await skills.customSkill(bot, 'surfaceUp', 63); } catch (e) { prog(`feedUp: surfaceUp threw ${e && e.message || e}`); }
+                    if (bot.interrupt_code || bot.health <= 0) break;
+                    if (up || bot.entity.position.y >= 60) { await skills.wait(bot, 400); continue; }
+                }
                 prog(`feedUp: critical local-only stop hp=${Math.round(bot.health)} food=${bot.food} — no long roam`);
                 break;
             }
