@@ -1451,9 +1451,16 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         // Getting more means roaming to hunt — do NOT do that at night or
         // with a hostile nearby (that's exactly how it walked into a 5-HP death). Bail
         // and let the dive/shelter logic proceed at whatever HP we have.
-        if (isNight() || hostileNear()) {
+        // ★C349 (checkpoint #18 handoff #1, 17:16Z live: food 20→5 while GET_FOOD 3-struck
+        // every expiry — 2 skeletons at d6-16 kept tripping the default 10b guard in broad
+        // DAYLIGHT with iron_sword+shield in hand). Starving beats a distant skeleton:
+        // at famine (food<=6, armed, daytime) only a PUNCH-RANGE hostile stops the forage;
+        // normal times keep the cautious 10b guard.
+        const _famineArmed = bot.food <= 6 && !isNight()
+            && bot.inventory.items().some(i => /_sword$/.test(i.name || ''));
+        if (isNight() || hostileNear(_famineArmed ? 5 : 10)) {
             log(bot, 'feedUp: night or hostile nearby — not roam-hunting; stopping.');
-            prog(`feedUp: guard stop night=${isNight()} hostile=${hostileNear()} food=${bot.food} hp=${Math.round(bot.health)}`);
+            prog(`feedUp: guard stop night=${isNight()} hostile=${hostileNear(_famineArmed ? 5 : 10)} famineArmed=${_famineArmed} food=${bot.food} hp=${Math.round(bot.health)}`);
             break;
         }
         const animal = world.getNearestEntityWhere(bot, e => mc.isHuntable(e) && !failedIds.has(e.id), 32);
