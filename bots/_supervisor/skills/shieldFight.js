@@ -3,6 +3,8 @@
 //   • creeper  -> NEVER melee (it explodes). Keep distance / back away. Quick
 //                 hit-and-retreat only if it's already point-blank.
 //   • skeleton -> close the gap with the shield RAISED (blocks arrows), then strike.
+//   • witch    -> RUSH with shield DOWN (splash potions ignore shields; raising one
+//                 halves move speed) + stop-loss: hp<10 → sprint out to >20b.
 //   • zombie/spider/other -> approach and melee, shield up between swings.
 //   • enderman -> disengage (don't provoke; looking at it aggroes — just move off).
 // Invoked via: {"skill":"shieldFight",[range]}  ctx = { skills, world, mc, Vec3, log }
@@ -24,6 +26,7 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
     const kindOf = (e) => {
         const n = (e && e.name || '').toLowerCase();
         if (n.includes('creeper')) return 'creeper';
+        if (n.includes('witch')) return 'witch';
         if (n.includes('skeleton') || n.includes('stray') || n.includes('pillager')) return 'ranged';
         if (n.includes('enderman')) return 'enderman';
         return 'melee';
@@ -42,12 +45,43 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
     // wall — break and release the body so mobility's dig-out + the kernel's GET_FOOD take over.
     // Reachable skeletons die (HP drops → reset) or get replaced (new target → reset); melee mobs are
     // untouched (kind !== 'ranged'). Falls back to distance-stall when HP isn't exposed.
-    let rangedSince = 0, rangedId = null, rangedHp0 = null, prevD = Infinity, stalls = 0;
+    let rangedSince = 0, rangedId = null, rangedHp0 = null, prevD = Infinity, stalls = 0, fledWitch = false;
     while ((e = enemy()) && Date.now() - startT < maxMs) {
         if (bot.interrupt_code) break;
-        if (bot.health <= 6) break; // critical — let self_preservation flee/seal
         const kind = kindOf(e);
         const d = bot.entity.position.distanceTo(e.position);
+        // ★WITCH (2026-07-02 16:15-16:19Z 三连死, 同一只 id 349335): 盾挡不住喷溅药水的
+        // 范围效果, 举盾走路还减速50% → 旧 melee 分支半速蹭近被风筝 (d 全程 1.8~5.4 震荡
+        // 47s 无输出, 女巫瞬回II把偶尔一刀全洗回来), 毒tick 1dmg/1.25s 磨穿血线; hp<=6
+        // break 后 mode 层 pointBlank 例外又立刻 re-engage → ENGAGE/DISENGAGE 空转至死。
+        // 新打法: (a) 血线止损 hp<10 → sprint 拉到 >20b (女巫索敌16b不远追), 等毒效过掉,
+        // flee 加 8s race 上界保 10s stop 预算 (仿 C347); (b) 贴脸压制: 全程不举盾保机动,
+        // d>3 全速关距离, 贴身按剑冷却连打 (女巫换喝回血药有硬直窗口, 持续 dps 压得过瞬回)。
+        if (kind === 'witch') {
+            lower();
+            if (bot.health < 10) {
+                log(bot, `shieldFight: witch stop-loss (hp=${Math.round(bot.health)} d=${d.toFixed(1)}) — sprint out of throw range, let potions wear off.`);
+                try { bot.setControlState('sprint', true); } catch (_) {}
+                try {
+                    await Promise.race([
+                        skills.moveAwayFromEntity(bot, e, 24),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('witch-flee-timeout')), 8000)),
+                    ]);
+                } catch (_) { try { bot.pathfinder.stop(); } catch (e2) {} }
+                try { bot.setControlState('sprint', false); } catch (_) {}
+                fledWitch = true;   // don't walk back for drops — the witch is standing on them
+                break;
+            }
+            try { await bot.lookAt(e.position.offset(0, (e.height || 1.9) * 0.85, 0)); } catch (_) {}
+            if (d > 3) {
+                try { bot.setControlState('sprint', true); await skills.goToPosition(bot, e.position.x, e.position.y, e.position.z, 2); } catch (_) {}
+            } else {
+                try { await bot.attack(e); } catch (_) {}
+                await skills.wait(bot, 550);   // sword cooldown; shield STAYS down — chase the backpedal at full speed
+            }
+            continue;
+        }
+        if (bot.health <= 6) break; // critical — let self_preservation flee/seal
         if (kind === 'ranged') {
             const eh = (typeof e.health === 'number') ? e.health : null;
             if (e.id !== rangedId) { rangedId = e.id; rangedSince = Date.now(); rangedHp0 = eh; prevD = d; stalls = 0; }
@@ -123,9 +157,11 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
         }
     }
     lower();
+    try { bot.setControlState('sprint', false); } catch (_) {}
     // Grab the spoils (skeletons drop bows + arrows, which feed our ranged combat;
     // also bones/etc). This is how the bot bootstraps a bow without a supply chain.
-    try { await skills.pickupNearbyItems(bot); } catch (e) {}
+    // (Skipped after a witch stop-loss flee — walking back to the drops = walking back into throw range.)
+    if (!fledWitch) { try { await skills.pickupNearbyItems(bot); } catch (e) {} }
     log(bot, `shieldFight done. hp=${Math.round(bot.health)} bow=${has('bow')} arrows=${has('arrow')}`);
     return true;
 }
