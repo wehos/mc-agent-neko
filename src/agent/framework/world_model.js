@@ -925,6 +925,27 @@ export function proposeTasks(world, bot) {
     push({ kind: PROPOSAL_KIND.FREE_PLAY, priority: 1, skill: '',
            rationale: 'no pressing survival need — open to improvisation' });
 
+    // ── ★NIGHT-ERRAND GATE (checkpoint #2, 2026-07-02: two cooldown storms in 20min — GET_BED/
+    //    BOOTSTRAP_KIT/OPENING_VILLAGE/OPP_WHEAT_FARM/MIGRATE dispatched at night each yield/no-op
+    //    BY DESIGN (prepNether's decision-layer night early-return, villageHarvest/wheatFarm night
+    //    defers, migrate's night gate), each burned 3 strikes → the kernel rotated SIX kinds into
+    //    5-min cooldowns and idled in the roulette, with the cooldowns bleeding into dawn recovery.
+    //    If the skills won't act at night on the exposed surface, don't PROPOSE them there — the
+    //    night chain (DUSK_*/NIGHT_*) + HOLD + GET_FOOD own that state. Underground bots (y<50)
+    //    keep the errands: sealed night mining/crafting is real work the early-returns don't block. ──
+    try {
+        if (time.phase === 'night' && overworld && Math.round(bot.entity.position.y) >= 50) {
+            const DAY_ERRANDS = new Set([
+                PROPOSAL_KIND.BOOTSTRAP_KIT, PROPOSAL_KIND.GET_BED, PROPOSAL_KIND.GET_ARMOR,
+                PROPOSAL_KIND.GET_IRON_TOOLS, PROPOSAL_KIND.GET_IRON_ARMOR_SET,
+                PROPOSAL_KIND.GET_DIAMOND_GEAR, PROPOSAL_KIND.TOOL_UPKEEP, PROPOSAL_KIND.BUILD_HOME,
+                PROPOSAL_KIND.OPENING_SCOUT, PROPOSAL_KIND.OPENING_VILLAGE,
+                PROPOSAL_KIND.OPP_WHEAT_FARM, PROPOSAL_KIND.OPP_SEIZE_VILLAGE, PROPOSAL_KIND.MIGRATE,
+            ]);
+            for (let i = out.length - 1; i >= 0; i--) if (DAY_ERRANDS.has(out[i].kind)) out.splice(i, 1);
+        }
+    } catch (e) {}
+
     // ── ★KERNEL DISPATCH-FAILURE COOLDOWN filter: kernel._commit stamps bot._kindCooldownUntil[kind]
     //    after DISPATCH_FAIL_LIMIT consecutive customSkill failures (missing skill file / hard false),
     //    and nulls the livelocked bot._commitment. Filtering the kind HERE (the shared proposal source
