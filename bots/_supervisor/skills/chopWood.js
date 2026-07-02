@@ -853,8 +853,11 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
     const _gen = bot._chopGen;
     // ★走格子扫荡 (用户实拍×2: 挖了树不捡 — item_collecting 模式在 achieve 期间是被禁用的,
     // 所以掉落必须由我们显式走过去踩格子捡): walk onto each dropped item entity within r.
+    // (e.objectType dropped 2026-07-02: prismarine-entity deprecated it and every access
+    // printed a full Trace — thousands of console lines per chop session drowned real
+    // errors. name/displayName cover the same entities.)
     const _isDropEntity = (e) => e && e.position && (
-        e.name === 'item' || e.objectType === 'Item' || e.displayName === 'Item' || /item/i.test(e.name || '')
+        e.name === 'item' || e.displayName === 'Item' || /item/i.test(e.name || '')
     );
     // ★C299 THE wood-famine root cause (live 2026-06-20): inventory was 36/36 FULL of mesa junk
     // (red_sand×474=8 slots, terracotta×100s, sand) → the server CANNOT deposit a picked-up log into
