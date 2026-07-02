@@ -1668,7 +1668,32 @@ const modes_list = [
                                     // to work around walls / out of a cove. This escapes any water-lock
                                     // with ZERO blocks — the instinct must not depend on carried filler.
                                     exploreTicks++;
-                                    if (exploreTicks % 6 === 0) { exploreYaw += Math.PI / 2.5; stall = 0; lastDist = 1e9; }
+                                    // ★C348 (checkpoint #17 live: bot floated ALL NIGHT in a cold ocean
+                                    // 50b from a KNOWN wood landmark + a new village): the blind heading
+                                    // swims great circles while the map already knows where land is.
+                                    // Aim at the nearest persistent landmark (wood/village/bed/chest —
+                                    // they only exist on land); re-aim every 12 ticks, blind 72° rotation
+                                    // stays as the stall/no-landmark behavior so coves still get escaped.
+                                    if (exploreTicks === 1 || exploreTicks % 12 === 0) {
+                                        let aimed = false;
+                                        try {
+                                            const p9 = bot.entity.position;
+                                            let best9 = null, bd9 = Infinity;
+                                            for (const k9 in (bot._landmarks || {})) {
+                                                const n9 = bot._landmarks[k9];
+                                                if (!n9 || !/^(wood|village|bed|chest)$/.test(n9.kind || '')) continue;
+                                                const d9 = Math.hypot(n9.x - p9.x, n9.z - p9.z);
+                                                if (d9 >= 4 && d9 < bd9) { bd9 = d9; best9 = n9; }
+                                            }
+                                            if (best9) {
+                                                await bot.lookAt(p9.offset(best9.x - p9.x, 0, best9.z - p9.z), true);
+                                                exploreYaw = bot.entity.yaw; aimed = true;
+                                                stall = 0; lastDist = 1e9;
+                                                if (exploreTicks === 1) _tr(`explore aiming at ${best9.kind} landmark ${Math.round(best9.x)},${Math.round(best9.z)} (${Math.round(bd9)}b)`);
+                                            }
+                                        } catch (e) {}
+                                        if (!aimed && exploreTicks % 6 === 0) { exploreYaw += Math.PI / 2.5; stall = 0; lastDist = 1e9; }
+                                    } else if (exploreTicks % 6 === 0) { exploreYaw += Math.PI / 2.5; stall = 0; lastDist = 1e9; }
                                     try { await bot.look(exploreYaw, -0.05, true); } catch (e) {}
                                     bot.setControlState('forward', true);
                                     bot.setControlState('sprint', true);
