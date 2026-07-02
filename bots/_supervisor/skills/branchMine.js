@@ -253,7 +253,9 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             try { await bot.lookAt(fresh.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
             try {
                 await Promise.race([
-                    bot.dig(fresh, true),
+                    // gazeHold keeps the head on the block for the dig's whole duration (cosmetic
+                    // "digs behind its back" fix — fail-open while the shared helper isn't loaded).
+                    (skills.gazeHold ? skills.gazeHold(bot, fresh, bot.dig(fresh, true)) : bot.dig(fresh, true)),
                     new Promise((_, rej) => setTimeout(() => rej(new Error('dig-timeout')), maxMs)),
                 ]);
                 log(bot, `branchMine ${label}: dug ${fresh.name}@${fresh.position.x},${fresh.position.y},${fresh.position.z}`);

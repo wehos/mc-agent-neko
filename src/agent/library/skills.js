@@ -852,7 +852,7 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
         let _sdIv = null;
         try {
             await Promise.race([
-                bot.dig(cur),
+                gazeHold(bot, cur, bot.dig(cur)),
                 new Promise((_, rej) => setTimeout(() => rej(new Error('dig-timeout')), _digMs)),
                 new Promise((_, rej) => { _sdIv = setInterval(() => { try { if (bot.interrupt_code) rej(new Error('interrupted')); } catch (e) {} }, 200); }),
             ]);
@@ -1485,7 +1485,7 @@ export async function breakBlockAt(bot, x, y, z) {
         
         // Add timeout to prevent infinite hanging
         const digTimeout = 60000; // 60 seconds max
-        const digPromise = bot.dig(block, true);
+        const digPromise = gazeHold(bot, block, bot.dig(block, true));
         const timeoutPromise = new Promise((_, reject) =>
             setTimeout(() => reject(new Error('Dig timeout')), digTimeout)
         );
@@ -2386,7 +2386,7 @@ export async function stepEdgeAssist(bot, opts = {}) {
                 try { if (bot.tool && bot.tool.equipForBlock) await bot.tool.equipForBlock(ownAbove0); } catch (e) {}
                 try { await bot.lookAt(ownAbove0.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
                 await Promise.race([
-                    bot.dig(ownAbove0, true),
+                    gazeHold(bot, ownAbove0, bot.dig(ownAbove0, true)),
                     new Promise((_, reject) => setTimeout(() => reject(new Error('own-above-notch-timeout')), 4800)),
                 ]);
                 await new Promise(r => setTimeout(r, 120));
@@ -2521,7 +2521,7 @@ export async function stepEdgeAssist(bot, opts = {}) {
                     try { if (bot.tool && bot.tool.equipForBlock) await bot.tool.equipForBlock(fresh); } catch (e) {}
                     try { await bot.lookAt(fresh.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
                     await Promise.race([
-                        bot.dig(fresh, true),
+                        gazeHold(bot, fresh, bot.dig(fresh, true)),
                         new Promise((_, reject) => setTimeout(() => reject(new Error('wall-dig-timeout')), 5200)),
                     ]);
                     await new Promise(r => setTimeout(r, 120));
@@ -4620,6 +4620,21 @@ export function pickRunway(bot) {
         // ≤6 uses ≈ 2 more staircase steps (3 blocks/step) — enough to climb back out.
         aboutToBreak: total === 0 || (total === 1 && bestUsesLeft <= 6),
     };
+}
+
+// ── gazeHold ─────────────────────────────────────────────────────────────────
+// Keep the head ON the block being dug for the dig's whole duration. bot.dig's
+// forceLook (and the one-shot lookAt the call sites do) aims the head only at dig
+// START; a tick later vein scans / pathfinder steps re-aim it while the server
+// keeps breaking the block regardless of facing — on screen the bot "digs the ore
+// behind its back" (user-reported, 2026-07-02). Purely cosmetic held gaze: re-look
+// every 250ms until the dig promise settles. Returns a promise that settles exactly
+// like the passed dig promise (safe inside Promise.race).
+export function gazeHold(bot, block, digPromise) {
+    const at = block && block.position && block.position.offset(0.5, 0.5, 0.5);
+    if (!at) return digPromise;
+    const iv = setInterval(() => { try { bot.lookAt(at, true); } catch (e) {} }, 250);
+    return Promise.resolve(digPromise).finally(() => clearInterval(iv));
 }
 
 // ── eatPreferred ─────────────────────────────────────────────────────────────
