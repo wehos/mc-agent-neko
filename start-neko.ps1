@@ -53,6 +53,17 @@ if ($ScreenshotMs -gt 0) {
 }
 
 Set-Location -Path $PSScriptRoot
+# Rotate runaway diagnostic logs at boot (mine_motion.jsonl hit 76MB in one day of
+# supervision — appendFileSync cost grows and post-mortem greps crawl; one .old
+# generation is enough history for any postmortem that matters).
+foreach ($lg in @('bots\_supervisor\mine_motion.jsonl', 'bots\_supervisor\act_trace.jsonl', 'bots\_supervisor\combat_log.jsonl')) {
+    try {
+        if ((Test-Path $lg) -and ((Get-Item $lg).Length -gt 50MB)) {
+            Move-Item -Force $lg "$lg.old"
+            Write-Host "rotated $lg (>50MB) -> .old"
+        }
+    } catch {}
+}
 Write-Host "node: $(node --version)  (repo: $PSScriptRoot)"
 # --max-old-space-size / --expose-gc mirror package.json's "start" script.
 node --max-old-space-size=8192 --expose-gc main.js
