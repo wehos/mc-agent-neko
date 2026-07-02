@@ -207,6 +207,45 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             prog(`feedUp: safe ${label} failed (${error.message}) from ${Math.round(start.x)},${Math.round(start.y)},${Math.round(start.z)} to ${Math.round(x)},${Math.round(y)},${Math.round(z)}`);
             return false;
         }
+        // ★famine dig-escape (live 2026-07-02 01:22 pit-spin): goto can resolve in ~60ms with
+        // moved=0 and NO error when A* has zero expandable nodes — the bot standing in a dug
+        // 1-wide pocket (dirt on all sides, solid block over the one open cell) that this
+        // function's deliberately conservative Movements (canDig=false, no towers) cannot
+        // leave. mobility said FREE (an open cell exists) so the unstuck layer never fired,
+        // and a starving full-hp bot spun the GET_FOOD dispatch for minutes with a cow 45b
+        // away. ONE retry with digging+towers enabled, famine-gated (food<=10 or explicit
+        // opts.digEscape) — hunger outranks the roam conservatism; still time-capped.
+        if (!ok && moved < 1 && !opts._digRetry && (bot.food <= 10 || opts.digEscape)) {
+            prog(`feedUp: safe ${label} no-path-from-pocket (moved=0) — dig-escape retry food=${bot.food}`);
+            const dm = new Movements(bot);            // canDig stays default TRUE on purpose
+            dm.allowParkour = false;
+            dm.allow1by1towers = true;                 // climb out of the pocket
+            dm.maxDropDown = bot.health <= 10 ? 1 : 2;
+            dm.liquids.add(mc.getBlockId('water'));
+            dm.liquids.add(mc.getBlockId('flowing_water'));
+            dm.liquids.add(mc.getBlockId('lava'));
+            dm.liquids.add(mc.getBlockId('flowing_lava'));
+            let err2 = null;
+            try {
+                bot.pathfinder.setMovements(dm);
+                await Promise.race([
+                    bot.pathfinder.goto(new goals.GoalNear(Math.round(x), Math.round(y), Math.round(z), range)),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('safe-roam-timeout')), timeoutMs)),
+                ]);
+            } catch (e2) {
+                err2 = e2;
+                try { bot.pathfinder.stop(); } catch (_) {}
+            } finally {
+                try { bot.pathfinder.setGoal(null); } catch (_) {}
+                try { bot.clearControlStates(); } catch (_) {}
+            }
+            const end2 = bot.entity.position;
+            const moved2 = start.distanceTo(end2);
+            const targetDist2 = end2.distanceTo({ x, y, z });
+            motion('feedUp.safe_roam.dig_escape', { seq, label, error: err2 ? err2.message : null, moved: +moved2.toFixed(3), targetDist: +targetDist2.toFixed(3) });
+            prog(`feedUp: dig-escape ${label} moved=${moved2.toFixed(1)} targetDist=${Math.round(targetDist2)}${err2 ? ` err=${err2.message}` : ''}`);
+            return targetDist2 <= range + 2;
+        }
         if (hurt >= 1) log(bot, `feedUp: safe ${label} still hurt ${hurt.toFixed(1)}hp, ${Math.round(start.x)},${Math.round(start.y)},${Math.round(start.z)} -> ${Math.round(end.x)},${Math.round(end.y)},${Math.round(end.z)}`);
         if (hurt >= 1) prog(`feedUp: safe ${label} hurt ${hurt.toFixed(1)}hp ${Math.round(start.x)},${Math.round(start.y)},${Math.round(start.z)} -> ${Math.round(end.x)},${Math.round(end.y)},${Math.round(end.z)}`);
         return ok;
@@ -1277,6 +1316,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     let tries = 0;
     const failedDropIds = new Set();
     prog(`feedUp: START target=${targetFood} food=${bot.food} hp=${Math.round(bot.health)} pos=${Math.round(bot.entity.position.x)},${Math.round(bot.entity.position.y)},${Math.round(bot.entity.position.z)}`);
+    const foodAtEntry = bot.food;   // ★kernel return contract: progress = food gained THIS dispatch
     while ((bot.food < targetFood || bot.health < 18) && tries++ < 10) {
         if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
         // Low HP alone must NOT block hunting: passive animals (cow/sheep/chicken) can't
@@ -1480,5 +1520,12 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         await skills.wait(bot, 600);
     }
     log(bot, `feedUp done: hp=${Math.round(bot.health)} food=${bot.food}`);
-    return bot.food >= targetFood || bot.health >= 18;
+    // ★kernel return contract (live 2026-07-02 01:21 famine spin): the old
+    // `|| bot.health >= 18` disjunct made a FULL-HP starving bot return truthy on ZERO
+    // food progress, so the kernel's failure counter reset every ~2s and GET_FOOD
+    // re-dispatched the identical no-food-reachable run forever (12+ commits/2min live).
+    // Truthy = target reached OR food actually gained this dispatch; a dry run returns
+    // false so 3 strikes hand GET_FOOD a cooldown and the chain rotates to other work
+    // (feedUp's own 60s dry-cooldown + the village/forage kinds own the retry cadence).
+    return bot.food >= targetFood || bot.food > foodAtEntry;
 }
