@@ -410,7 +410,14 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     // 与 roam-hunt 风险不同级,单独放行。
     const fetchFoodDrop = async () => {
         try {
-            const drop = world.getNearestEntityWhere(bot, e => isFoodDrop(e), 16);
+            // ★doomed-drop memo (checkpoint #10 famine root: 97 'pickup attempted' no-ops today
+            // at 1.6Hz — this function returned TRUE without verifying the pickup, while
+            // pickupNearbyItems silently skipped the drop it had just blacklisted as
+            // unreachable (6811eb9). The caller loop re-selected the same doomed drop forever
+            // and the whole daylight food window burned on it.)
+            const skip = bot._feedUpDropSkip || (bot._feedUpDropSkip = {});
+            for (const k of Object.keys(skip)) if (Date.now() - skip[k] > 60000) delete skip[k];
+            const drop = world.getNearestEntityWhere(bot, e => isFoodDrop(e) && !(e && skip[e.id]), 16);
             if (!drop || !drop.position) {
                 const anyDrop = world.getNearestEntityWhere(bot, e => e && e.name === 'item', 4);
                 if (anyDrop && anyDrop.position && (!bot._feedUpNonFoodDropLogAt || Date.now() - bot._feedUpNonFoodDropLogAt > 5000)) {
@@ -425,9 +432,30 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                 return false;
             }
             log(bot, `feedUp: PlanC — food drop ${Math.round(drop.position.distanceTo(bot.entity.position))}b away, fetching`);
+            const foodCount = () => bot.inventory.items().filter(i => FOOD_RE.test(i.name) || /rotten_flesh/.test(i.name)).reduce((s, i) => s + i.count, 0);
+            const before = foodCount();
+            // Full pack = the server CANNOT deposit the pickup (the C299 wood-famine class,
+            // food edition). During a food errand, one junk stack is worth less than a meal.
+            try {
+                if (bot.inventory.emptySlotCount() === 0) {
+                    const junk = bot.inventory.items().find(i => /^(cobblestone|cobbled_deepslate|dirt|granite|diorite|andesite|tuff|gravel|sand|netherrack)$/.test(i.name));
+                    if (junk) { await bot.toss(junk.type, null, Math.min(junk.count, 32)); await skills.wait(bot, 250); }
+                }
+            } catch (e) {}
             if (dist > 1.6 && !(await safeRoamTo(drop.position.x, drop.position.y, drop.position.z, 2, 'food-drop'))) return false;
             try { await skills.pickupNearbyItems(bot); } catch (e) {}
-            prog(`feedUp: PlanC food drop pickup attempted ${droppedItemName(drop)}@${Math.round(dist)} held=${bot.inventory.items().map(i => i.name).filter(n => FOOD_RE.test(n) || /rotten_flesh|spider_eye/.test(n)).join(',') || 'none'}`);
+            if (foodCount() <= before) {
+                // GoalNear r=2 stops BESIDE the drop; vanilla pickup needs cell overlap —
+                // finish with a direct walk-ONTO before judging the drop doomed.
+                try { await skills.goToPosition(bot, drop.position.x, drop.position.y, drop.position.z, 0); } catch (e) {}
+                await skills.wait(bot, 350);
+            }
+            const gained = foodCount() - before;
+            prog(`feedUp: PlanC food drop ${droppedItemName(drop)}@${Math.round(dist)} gained=${gained} held=${bot.inventory.items().map(i => i.name).filter(n => FOOD_RE.test(n) || /rotten_flesh|spider_eye/.test(n)).join(',') || 'none'}`);
+            if (gained <= 0) {
+                if (drop.id != null) skip[drop.id] = Date.now();   // don't re-court a doomed drop for 60s
+                return false;                                       // honest: nothing was fetched
+            }
             if (bot.food <= 6) {
                 const junk = bot.inventory.items().find(i => /rotten_flesh|^beef$|^porkchop$|^chicken$|^mutton$/.test(i.name));
                 if (junk) { try { await skills.consume(bot, junk.name); } catch (e) {} }
