@@ -19,7 +19,32 @@ const writeOakAppleBackoff = (rec) => {
     try { fs.writeFileSync(OAK_APPLE_BACKOFF, JSON.stringify(rec)); } catch (e) {}
 };
 
+// ★progress-aware wrapper (2026-07-02 12:35Z live: ONE dispatch chopped 4 logs, crafted planks
+// and TWO stone pickaxes, then hit a hunger-hold gate and returned false — the kernel counted
+// the whole run as strike #3 and cooled BOOTSTRAP_KIT 5min right as bootstrap was landing.
+// Return contract: real progress this dispatch ⇒ truthy, even when a later gate stops the run.
+// Only UPGRADES a false from the many hold/gate exits; throws and honest truthy pass through.)
+const KIT_SIG = ['wooden_pickaxe', 'stone_pickaxe', 'iron_pickaxe', 'diamond_pickaxe',
+    'crafting_table', 'furnace', 'stick', 'oak_planks', 'spruce_planks', 'birch_planks',
+    'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'oak_log', 'spruce_log', 'birch_log',
+    'jungle_log', 'acacia_log', 'dark_oak_log', 'stone_axe', 'stone_sword', 'stone_shovel',
+    'iron_ingot', 'raw_iron', 'iron_sword', 'shield', 'iron_helmet', 'iron_chestplate',
+    'iron_leggings', 'iron_boots'];
 export default async function prepNether(bot, ctx) {
+    const counts = () => { try { const c = ctx.world.getInventoryCounts(bot); return KIT_SIG.map(n => c[n] || 0); } catch (e) { return null; } };
+    const before = counts();
+    const res = await prepNetherInner(bot, ctx);
+    if (res === false && before) {
+        const after = counts();
+        if (after && after.some((v, i) => v > before[i])) {
+            prog(`prepNether: gated exit BUT kit progressed this run (${KIT_SIG.filter((n, i) => after[i] > before[i]).join('+')}) — returning progress, no strike`);
+            return { progress: true, gated: true };
+        }
+    }
+    return res;
+}
+
+async function prepNetherInner(bot, ctx) {
     const { skills, world, mc, log, Vec3 } = ctx;
     const has = (n) => world.getInventoryCounts(bot)[n] || 0;
     const equipArmor = async () => { if (bot.armorManager) { try { await bot.armorManager.equipAll(); } catch (e) {} } };

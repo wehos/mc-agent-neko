@@ -417,7 +417,11 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             // and the whole daylight food window burned on it.)
             const skip = bot._feedUpDropSkip || (bot._feedUpDropSkip = {});
             for (const k of Object.keys(skip)) if (Date.now() - skip[k] > 60000) delete skip[k];
-            const drop = world.getNearestEntityWhere(bot, e => isFoodDrop(e) && !(e && skip[e.id]), 16);
+            // Famine widens the net: 16b missed a rotten_flesh drop sitting at 32b while the
+            // bot starved at food=6 in a food desert (2026-07-02 12:35Z live). Poison flesh
+            // beats an empty hunger bar; the doomed-drop memo below bounds wasted trips.
+            const dropR = bot.food <= 6 ? 32 : 16;
+            const drop = world.getNearestEntityWhere(bot, e => isFoodDrop(e) && !(e && skip[e.id]), dropR);
             if (!drop || !drop.position) {
                 const anyDrop = world.getNearestEntityWhere(bot, e => e && e.name === 'item', 4);
                 if (anyDrop && anyDrop.position && (!bot._feedUpNonFoodDropLogAt || Date.now() - bot._feedUpNonFoodDropLogAt > 5000)) {
@@ -442,7 +446,12 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                     if (junk) { await bot.toss(junk.type, null, Math.min(junk.count, 32)); await skills.wait(bot, 250); }
                 }
             } catch (e) {}
-            if (dist > 1.6 && !(await safeRoamTo(drop.position.x, drop.position.y, drop.position.z, 2, 'food-drop'))) return false;
+            if (dist > 1.6 && !(await safeRoamTo(drop.position.x, drop.position.y, drop.position.z, 2, 'food-drop'))) {
+                // Path-doomed counts as doomed too: without the memo an unreachable far drop
+                // gets re-courted every loop pass (same shape as the checkpoint #10 1.6Hz spin).
+                if (drop.id != null) skip[drop.id] = Date.now();
+                return false;
+            }
             try { await skills.pickupNearbyItems(bot); } catch (e) {}
             if (foodCount() <= before) {
                 // GoalNear r=2 stops BESIDE the drop; vanilla pickup needs cell overlap —
@@ -1422,6 +1431,17 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         // No held food. PlanC short fetch FIRST (低险快进快出,守卫前放行——烧怪掉落
         // 5分钟 despawn,等不起), then the roam guard.
         if (await fetchFoodDrop()) { await eat(); await skills.wait(bot, 600); continue; }
+        // ★famine flesh (2026-07-02 food-desert live): eat() skips rotten_flesh BY DESIGN, but
+        // at food<=6 with nothing better HELD, poison flesh (4 pts, 80% hunger-poison) beats
+        // starving the march/dive gates shut. fetchFoodDrop already eats it post-fetch (:459);
+        // this covers flesh that entered the bag any other way (kills, earlier pickups).
+        if (bot.food <= 6 && !edibleHeld()) {
+            const flesh = bot.inventory.items().find(i => i.name === 'rotten_flesh');
+            if (flesh) {
+                prog(`feedUp: famine flesh — eating rotten_flesh x1 (food=${bot.food}, nothing better held)`);
+                try { await skills.consume(bot, 'rotten_flesh'); await skills.wait(bot, 400); continue; } catch (e) {}
+            }
+        }
         // Getting more means roaming to hunt — do NOT do that at night or
         // with a hostile nearby (that's exactly how it walked into a 5-HP death). Bail
         // and let the dive/shelter logic proceed at whatever HP we have.
