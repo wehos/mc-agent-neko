@@ -1619,10 +1619,40 @@ const modes_list = [
                                     } catch (e) { return false; }
                                 })();
                                 if (_deepBelow) {
-                                    try { await bot.look(bot.entity.yaw, -1.45, false); } catch (e) {}
-                                    bot.setControlState('forward', false);
-                                    bot.setControlState('jump', true);   // buoyancy ON — surface first, pillar when standable
-                                    await new Promise(r => setTimeout(r, 300));
+                                    // ★C348b (16:00 live orbit: 14min pinned at -49,324 while 'Reflex
+                                    // wedged' kicks fired): C345's look-up float is only right while
+                                    // SUBMERGED. At the surface over deep water it parks the bot in a
+                                    // stable bobbing orbit — the i>=30 forced-pillar branch swallows
+                                    // every iteration so the C348 landmark-aiming explore never runs.
+                                    // Surface + air fine ⇒ SWIM: at the shore target if any, else at
+                                    // the nearest persistent land landmark.
+                                    const _submerged = bot.oxygenLevel !== undefined && bot.oxygenLevel < 15;
+                                    let aimP = _submerged ? null : target;
+                                    if (!_submerged && !aimP) {
+                                        try {
+                                            const pA = bot.entity.position;
+                                            let bestA = null, bdA = Infinity;
+                                            for (const kA in (bot._landmarks || {})) {
+                                                const nA = bot._landmarks[kA];
+                                                if (!nA || !/^(wood|village|bed|chest)$/.test(nA.kind || '')) continue;
+                                                const dA = Math.hypot(nA.x - pA.x, nA.z - pA.z);
+                                                if (dA >= 4 && dA < bdA) { bdA = dA; bestA = nA; }
+                                            }
+                                            if (bestA) aimP = pA.floored().offset(bestA.x - pA.x, 0, bestA.z - pA.z);
+                                        } catch (e) {}
+                                    }
+                                    if (aimP) {
+                                        try { await bot.lookAt(aimP.offset(0.5, 0, 0.5), true); } catch (e) {}
+                                        bot.setControlState('forward', true);
+                                        bot.setControlState('sprint', true);
+                                        bot.setControlState('jump', true);
+                                        await new Promise(r => setTimeout(r, 300));
+                                    } else {
+                                        try { await bot.look(bot.entity.yaw, -1.45, false); } catch (e) {}
+                                        bot.setControlState('forward', false);
+                                        bot.setControlState('jump', true);   // buoyancy ON — surface first
+                                        await new Promise(r => setTimeout(r, 300));
+                                    }
                                 } else {
                                     bot.setControlState('forward', false);
                                     try { await skills.placeBlockUnderFeet(bot, f, { retries: 1, settleMs: 160 }); } catch (e) { try { bot.setControlState('jump', true); } catch (e2) {} }
