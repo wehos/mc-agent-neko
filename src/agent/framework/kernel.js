@@ -33,6 +33,20 @@ const SHADOW_LOG = 'bots/_supervisor/framework-shadow.log';
 const DISPATCH_FAIL_LIMIT = 3;
 const DISPATCH_COOLDOWN_MS = 300000;   // 5 min — the kind naturally re-proposes on expiry
 
+// ── ★NO-DELTA OVERRIDE (mechanism over discipline, 2026-07-02): the return contract says
+//    truthy = real progress THIS dispatch, but 25 violations were found in one day (8 live
+//    incidents + 17 in the 51-agent audit) — trusting the skill's self-report alone is
+//    structurally fragile, and every NEW skill re-inherits the risk. The kernel now measures
+//    its OWN progress signal: a world snapshot (position / inventory counts / dimension)
+//    before each dispatch, compared after. A truthy return with NO observable world delta
+//    NO_DELTA_LIMIT times in a row is treated like a failure streak (cooldown + release).
+//    Idle-by-design kinds are exempt — sitting still IS their job. This does not replace
+//    the contract (honest false returns are still faster: 3 strikes vs 4) — it is the
+//    backstop that turns future violations from unbreakable livelocks into 4-run blips.
+const NO_DELTA_LIMIT = 4;              // one more chance than DISPATCH_FAIL_LIMIT — it's a heuristic
+const NO_DELTA_MOVE_BLOCKS = 6;        // below this, movement is jitter/knockback, not travel
+const NO_DELTA_EXEMPT = /^(NIGHT_|DUSK_GO_BED$|HOLD$|SLEEP$|FREE_PLAY$)/;
+
 // ── ★SUPERVISOR-CANCEL WINDOW: ws cancel_skill / modes watchdog kicks stamp
 //    bot._supervisorCancelAt; skills poll cancelRequested() with this same 30s TTL
 //    (prepNether.js:26, missionNether.js:381) and bail with `false` the moment they start.
@@ -73,6 +87,7 @@ export class Kernel {
         this._lastDecideAt = 0;
         this._decideEveryMs = 2000;                  // don't spam the LLM
         this._dispatchFails = Object.create(null);   // kind -> consecutive dispatch-failure count (★cooldown)
+        this._noDeltaRuns = Object.create(null);     // kind -> consecutive truthy-but-zero-world-delta runs (★no-delta override)
         this._cancelHoldAt = 0;                      // last _supervisorCancelAt we logged a dispatch-hold for
         this._companionUntil = 0;                    // companion-mode sticky window after a player msg
         this._lastShadowLog = '';
@@ -260,6 +275,8 @@ export class Kernel {
             this.log(`[kernel] clearing stale interrupt_code before ${p.skill} dispatch`);
             this.bot.interrupt_code = false;
         }
+        // ★NO-DELTA: pre-dispatch world snapshot (position / inventory counts / dimension).
+        const snap = this._worldSnap();
         let res, threw = false;
         try {
             // Dispatch through the same supervised path the bridge uses, so the
@@ -318,9 +335,43 @@ export class Kernel {
             }
         } else if (!failed) {
             this._dispatchFails[p.kind] = 0;
+            // ★NO-DELTA OVERRIDE measurement: a truthy (or undefined) return claims progress —
+            // check the world actually changed. Exempt idle-by-design kinds and cancel windows.
+            if (snap && !NO_DELTA_EXEMPT.test(p.kind) && !(this.bot._supervisorCancelAt
+                && Date.now() - this.bot._supervisorCancelAt < SUPERVISOR_CANCEL_WINDOW_MS)) {
+                const now = this._worldSnap();
+                const moved = (now && now.pos && snap.pos) ? now.pos.distanceTo(snap.pos) : Infinity;
+                const delta = !now || moved >= NO_DELTA_MOVE_BLOCKS || now.inv !== snap.inv || now.dim !== snap.dim;
+                if (delta) {
+                    this._noDeltaRuns[p.kind] = 0;
+                } else {
+                    this._noDeltaRuns[p.kind] = (this._noDeltaRuns[p.kind] || 0) + 1;
+                    if (this._noDeltaRuns[p.kind] >= NO_DELTA_LIMIT) {
+                        this._noDeltaRuns[p.kind] = 0;
+                        if (!this.bot._kindCooldownUntil) this.bot._kindCooldownUntil = {};
+                        this.bot._kindCooldownUntil[p.kind] = Date.now() + DISPATCH_COOLDOWN_MS;
+                        if (this.bot._commitment && this.bot._commitment.kind === p.kind) this.bot._commitment = null;
+                        this.log(`[kernel] no-delta override: ${p.kind}/${p.skill} returned truthy ${NO_DELTA_LIMIT}x with zero world delta — cooldown + release (return-contract violation suspected)`);
+                        try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [kernel] ★no-delta override ${p.kind} via ${p.skill}\n`); } catch (e) {}
+                    }
+                }
+            }
         }
         // (failed && cancelUnwind falls through: counter untouched — a cancel neither proves
         //  the kind broken nor that it works.)
+    }
+
+    // ── ★NO-DELTA world snapshot: cheap in-memory reads only (no block scans). ──
+    _worldSnap() {
+        try {
+            const counts = {};
+            for (const it of this.bot.inventory.items()) counts[it.name] = (counts[it.name] || 0) + it.count;
+            return {
+                pos: this.bot.entity.position.clone(),
+                inv: JSON.stringify(Object.entries(counts).sort()),
+                dim: String((this.bot.game && this.bot.game.dimension) || ''),
+            };
+        } catch (e) { return null; }
     }
 
     // ── companion ──────────────────────────────────────────────────────────
