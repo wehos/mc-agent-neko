@@ -2219,7 +2219,11 @@ async function prepNetherInner(bot, ctx) {
         const foodBeforeHunt = bot.food;
         try { bot._hungerGateHunt = Date.now(); await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: feedUp err ${e.message}`); }
         prog(`prepNether: hunt done — food=${bot.food} hp=${Math.round(bot.health)}`);
-        if (bot.food <= 2 && bot.health <= 6 && woodEqNow() < 2) {
+        // ★C339 死区实锤 2026-07-02 17:21-17:36: hp=8 food=0 地表白天,饥饿damage在easy难度
+        // 到floor后hp永久钉在8 — C285要hp>=10+sapling+0planks,这里原来要hp<=6,7-9之间
+        // 两个逃生口都不开,feedUp又空手 → "stop prep work"→false→5min冷却→永动僵局。
+        // 放宽到hp<=9补上死区(仅famine+零木+feedUp已失败后,chopWood自带威胁处理/树黑名单)。
+        if (bot.food <= 2 && bot.health <= 9 && woodEqNow() < 2) {
             prog(`prepNether: FAMINE forage — feedUp found no food; trying nearby wood/apples once before holding`);
             try { await skills.customSkill(bot, 'chopWood', 2, { allowCriticalForage: true }); } catch (e) { prog(`prepNether: famine chopWood err ${e.message}`); }
         }
@@ -2227,6 +2231,13 @@ async function prepNetherInner(bot, ctx) {
         if (edibleAfter) {
             prog(`prepNether: famine recovery food item ${edibleAfter.name} — eat before resuming`);
             try { await skills.consume(bot, edibleAfter.name); } catch (e) {}
+        }
+        // ★C339: 饥荒斫木见了木 → 无镐时放行,别再"stop prep work"把刚到手的木头晾着 —
+        // 木→台→石镐全程零食耗(C291同理),famineStaticKit/keepKit接手就地链;
+        // 否则run N拿木、gate拦停,run N+1又因woodEq>=2跳过斫木,自举永远差一步。
+        if (!hasAnyHeldPick() && woodEqNow() >= 4) {
+            prog(`prepNether: ★C339 FAMINE forage got wood (woodEq=${woodEqNow()}) — pickless零食耗就地链放行 (table→pick)`);
+            return true;
         }
         if ((bot.food < 12 || (bot.health < 14 && bot.food < 18)) && !edibleNow() && bot.food <= foodBeforeHunt) {
             prog(`prepNether: HUNGER/LOWHP gate — feedUp found no edible food and food did not improve (${foodBeforeHunt}->${bot.food}, hp=${Math.round(bot.health)}); stop prep work`);
@@ -2311,6 +2322,25 @@ async function prepNetherInner(bot, ctx) {
         if (has('crafting_table') < 1 && !world.getNearestBlock(bot, 'crafting_table', 4) && planksEqHeld() >= 4) {
             try { helped = (await skills.craftRecipeLocal(bot, 'crafting_table', 1)) || helped; }
             catch (e) { prog(`prepNether: ${staticReason} static table err ${e.message}`); }
+        }
+        // ★C339: 静态石镐 — kit自举的最后一环。饥荒预算下keepKit跳过roaming kit,原来静态链
+        // 只造台/铁镐(要铁锭)/剑,cobble=192+stick=6+木在手却永远不出石镐 → 无镐=无矿无掩体。
+        // 纯本地craft零食耗零移动,镜像下方iron_pickaxe静态块。
+        if (!bot.inventory.items().some(i => /_pickaxe$/.test(i.name || '')) && has('cobblestone') >= 3
+            && (has('stick') >= 2 || planksEqHeld() >= 2)) {
+            const tp = await localStation('crafting_table');
+            if (tp) {
+                try {
+                    if (has('stick') < 2) await skills.craftRecipeLocal(bot, 'stick', 4);
+                    const before = has('stone_pickaxe');
+                    if (await skills.craftRecipeLocal(bot, 'stone_pickaxe', 1)) {
+                        helped = true;
+                        if (has('stone_pickaxe') > before) prog(`prepNether: ${staticReason} static stone_pickaxe crafted pick=${has('stone_pickaxe')}`);
+                    }
+                } catch (e) { prog(`prepNether: ${staticReason} static stone_pickaxe err ${e.message}`); }
+            } else {
+                prog(`prepNether: ${staticReason} static stone_pickaxe — no reachable crafting table spot, no movement`);
+            }
         }
         if (has('iron_pickaxe') < 1 && has('iron_ingot') >= 3 && has('stick') >= 2) {
             const t = await localStation('crafting_table');
