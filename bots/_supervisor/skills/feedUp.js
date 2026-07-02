@@ -1317,6 +1317,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     const failedDropIds = new Set();
     prog(`feedUp: START target=${targetFood} food=${bot.food} hp=${Math.round(bot.health)} pos=${Math.round(bot.entity.position.x)},${Math.round(bot.entity.position.y)},${Math.round(bot.entity.position.z)}`);
     const foodAtEntry = bot.food;   // ★kernel return contract: progress = food gained THIS dispatch
+    let surfaceTriedThisRun = false; // ★famine surface-first: at most one climb per dispatch
     while ((bot.food < targetFood || bot.health < 18) && tries++ < 10) {
         if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
         // Low HP alone must NOT block hunting: passive animals (cow/sheep/chicken) can't
@@ -1494,6 +1495,21 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                 if (await criticalMicroScout()) { await skills.wait(bot, 600); continue; }
                 prog(`feedUp: critical local-only stop hp=${Math.round(bot.health)} food=${bot.food} — no long roam`);
                 break;
+            }
+            // ★famine surface-first (live 2026-07-02 01:54: food=0 hp=10 FAMINE freeze @y47):
+            // every local probe is dry UNDERGROUND while the only food (animals/berries) lives
+            // on the surface — desperationRoam skips it as dy-too-costly and the old code just
+            // stopped here, freezing the body at food=0 with GET_FOOD cooldown-suppressed.
+            // Surfacing IS the food move: one surfaceUp (the hardened sealed-staircase climb)
+            // per dispatch, then rescan from daylight. FORAGE_SURFACE has no proposer push, so
+            // nothing above this layer owns the climb.
+            if (!surfaceTriedThisRun && bot.food <= 11 && bot.entity.position.y < 60 && !hostileNear(8)) {
+                surfaceTriedThisRun = true;
+                prog(`feedUp: famine surface-first — underground y=${Math.round(bot.entity.position.y)} with dry local scan, climbing before giving up`);
+                let up = false;
+                try { up = await skills.customSkill(bot, 'surfaceUp', 63); } catch (e) { prog(`feedUp: surfaceUp threw ${e && e.message || e}`); }
+                if (bot.interrupt_code || bot.health <= 0) break;
+                if (up || bot.entity.position.y >= 60) { await skills.wait(bot, 400); continue; }   // rescan from the surface
             }
             if (bot.food <= 6 && !edibleHeld()) {
                 // Calorie floor: a 24-block "maybe food elsewhere" relocate costs the
