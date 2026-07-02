@@ -1675,7 +1675,7 @@ async function prepNetherInner(bot, ctx) {
         }
         return true;
     };
-    const reachableWoodTarget = () => {
+    const reachableWoodTarget = (maxDist = 12, maxDy = 3) => {
         const logTypes = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
         let blocks = [];
         try { blocks = world.getNearestBlocks(bot, logTypes, 18, 16) || []; } catch (e) {}
@@ -1686,19 +1686,27 @@ async function prepNetherInner(bot, ctx) {
             const dist = b.position.distanceTo(me);
             const dy = b.position.y - me.y;
             if (!high || dist < high.dist) high = { block: b, dist, dy };
-            if (dist <= 12 && Math.abs(dy) <= 3 && dist < best) { nearest = { block: b, dist, dy }; best = dist; }
+            if (dist <= maxDist && Math.abs(dy) <= maxDy && dist < best) { nearest = { block: b, dist, dy }; best = dist; }
         }
         if (nearest) return { ok: true, target: `${nearest.block.name}@${nearest.dist.toFixed(1)}b dy=${nearest.dy.toFixed(1)}` };
         if (high) return { ok: false, reason: `nearest tree ${high.block.name}@${high.dist.toFixed(1)}b dy=${high.dy.toFixed(1)} would require climb/stair` };
         return { ok: false, reason: 'no cheap tree within 18b' };
     };
     const optionalWoodSafe = () => {
-        if (!openSurfaceNow()) return { ok: false, reason: `not true surface y=${Math.floor(bot.entity.position.y)} enclosed=${!!(bot._mobility && bot._mobility.enclosed)}` };
+        // ★C340 (2026-07-02 17:56-18:03 实锤, food=20 无镐形态): "optional"木对无镐 bot 是生死木 —
+        // hostiles24=4(17-24b 不可交战的远怪)、"not true surface y=62"(恰站在目标树冠正下方!)、
+        // dy<=3(附近橡树在 dy≈6 的坡上, chopWood C323 本就会爬)三道门把唯一取木路摁死 →
+        // KIT 空转→TABLE gate→冷却永动。bootstrap-critical(无镐且 woodEq<4)时按 chopWood 真实
+        // 能力放行: 树冠下算地表(y>=55 非封闭), 威胁用 12 格可交战判定, 树允许 16b/dy<=8。
+        const critical = !hasAnyHeldPick() && woodEqNow() < 4;
+        if (!openSurfaceNow() && !(critical && bot.entity.position.y >= 55 && !(bot._mobility && bot._mobility.enclosed)))
+            return { ok: false, reason: `not true surface y=${Math.floor(bot.entity.position.y)} enclosed=${!!(bot._mobility && bot._mobility.enclosed)}` };
         if (isNightNow()) return { ok: false, reason: 'night' };
-        if (hostilesNear(24) > 0) return { ok: false, reason: `hostiles24=${hostilesNear(24)}` };
-        if (bot.health <= 14) return { ok: false, reason: `hp=${Math.round(bot.health)}` };
-        if (bot.food <= 14 && !edibleNow()) return { ok: false, reason: `food=${bot.food} no edible held` };
-        return reachableWoodTarget();
+        const hostileBlock = critical ? noRegenActionableThreats(12).actionable : hostilesNear(24);
+        if (hostileBlock > 0) return { ok: false, reason: critical ? `actionable12=${hostileBlock}` : `hostiles24=${hostileBlock}` };
+        if (bot.health <= (critical ? 8 : 14)) return { ok: false, reason: `hp=${Math.round(bot.health)}` };
+        if (!critical && bot.food <= 14 && !edibleNow()) return { ok: false, reason: `food=${bot.food} no edible held` };
+        return critical ? reachableWoodTarget(16, 8) : reachableWoodTarget();
     };
     const foodSignalBeforeSurface = () => {
         try {
@@ -2593,8 +2601,17 @@ async function prepNetherInner(bot, ctx) {
                 // one craft short of the pickaxe (and the retry loop pillared the bot 56 blocks into
                 // the sky burning cobble). Place the held table first — mirrors the static-weapon path
                 // (~L191) that works — so craftRecipe finds a placed table within reach.
-                if (!world.getNearestBlock(bot, 'crafting_table', 3) && cnt('crafting_table') > 0) {
-                    try { await skills.placeBlockNearby(bot, 'crafting_table', 2); } catch (e) { prog(`prepNether: spare-pick table place err ${e.message}`); }
+                if (!world.getNearestBlock(bot, 'crafting_table', 3)) {
+                    // ★C340 就地链: craftRecipe 会自己走向 16 格内"real 但 unreachable"的注册台
+                    // (117,59,144), windowOpen 20s 超时×3 烧光整个 KIT 窗口(17:57 实锤)。臂展内
+                    // 无台 → 2x2 先造(要 4 板)再落; 没木造不了 → break 交给下面 wood buffer 取木,
+                    // 决不喂 craftRecipe 幽灵台。
+                    if (cnt('crafting_table') === 0 && planksEq() >= 4) { try { await skills.craftRecipeLocal(bot, 'crafting_table', 1); } catch (e2) {} }
+                    if (cnt('crafting_table') > 0) { try { await skills.placeBlockNearby(bot, 'crafting_table', 2); } catch (e2) { prog(`prepNether: spare-pick table place err ${e2.message}`); } }
+                    if (!world.getNearestBlock(bot, 'crafting_table', 4)) {
+                        prog(`prepNether: KIT — no reachable table in arm's reach (tableInv=${cnt('crafting_table')} planksEq=${planksEq()}) → skip ghost-table walk, wood first`);
+                        break;
+                    }
                 }
                 await skills.craftRecipe(bot, 'stone_pickaxe', 1);
             } catch (e) { prog(`prepNether: spare pick err ${e.message}`); break; }
