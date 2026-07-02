@@ -1382,6 +1382,9 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     const failedDropIds = new Set();
     prog(`feedUp: START target=${targetFood} food=${bot.food} hp=${Math.round(bot.health)} pos=${Math.round(bot.entity.position.x)},${Math.round(bot.entity.position.y)},${Math.round(bot.entity.position.z)}`);
     const foodAtEntry = bot.food;   // ★kernel return contract: progress = food gained THIS dispatch
+    const RATION_RE2 = /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/;
+    const rationsCount = () => { try { return bot.inventory.items().filter(i => RATION_RE2.test(i.name)).reduce((s, i) => s + i.count, 0); } catch (e) { return 0; } };
+    const rationsAtEntry = rationsCount();
     let surfaceTriedThisRun = false; // ★famine surface-first: at most one climb per dispatch
     while ((bot.food < targetFood || bot.health < 18) && tries++ < 10) {
         if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
@@ -1630,5 +1633,12 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     // Truthy = target reached OR food actually gained this dispatch; a dry run returns
     // false so 3 strikes hand GET_FOOD a cooldown and the chain rotates to other work
     // (feedUp's own 60s dry-cooldown + the village/forage kinds own the retry cadence).
-    return bot.food >= targetFood || bot.food > foodAtEntry;
+    // ★ration-aware return (the no-delta override's FIRST live trigger, 11:06Z, caught this
+    // — and the bug was ours: bc8a152 made isGoalDone demand >=2 carried rations, but this
+    // return still said food>=target ⇒ truthy, so a full-hunger zero-ration bot with no
+    // animals in range returned truthy every ~2s with zero world delta. Progress = hunger
+    // gained OR rations gained; the fully-satisfied end state stays truthy so the final
+    // successful run never strikes.)
+    return (bot.food >= targetFood && rationsCount() >= 2)
+        || bot.food > foodAtEntry || rationsCount() > rationsAtEntry;
 }

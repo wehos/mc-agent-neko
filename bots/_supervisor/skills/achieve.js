@@ -312,9 +312,28 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
     };
     const craftNow = async (count) => {
         const id = mc.getItemId(item); if (id == null) return false;
-        const table = findTable();
+        let table = findTable();
         let rs = bot.recipesFor(id, null, 1, table) || [];
         if (rs.length === 0) rs = bot.recipesFor(id, null, 1, null) || [];
+        if (rs.length === 0 && !table) {
+            // ★BUCKET-TABLE retry (2026-07-02 task#7): bot.recipesFor is BOTH affordability-
+            // filtered and table-arg-filtered — with no table inside findTable's 5b radius it
+            // returns [] for every 3x3-only recipe (bucket = 3 iron_ingot in a 3-wide V) even
+            // with all ingredients in pocket, and the craftRecipeLocal fallback below ALSO
+            // demands a reachable table → "NO KNOWN WAY to obtain bucket" while holding
+            // 4 iron_ingot (progress.txt 2026-07-02T04:48:30Z, nearest table 14.1b away).
+            // EXISTENCE must come from recipesAll (inventory-independent): if no no-table
+            // recipe exists but a with-table one does, the only missing piece is a station —
+            // place/reuse one and re-query before falling through to the fallback/give-up.
+            try {
+                if ((bot.recipesAll(id, null, null) || []).length === 0
+                    && (bot.recipesAll(id, null, true) || []).length > 0
+                    && await placeTable()) {
+                    table = findTable();
+                    if (table) rs = bot.recipesFor(id, null, 1, table) || [];
+                }
+            } catch (e) {}
+        }
         if (rs.length === 0) {
             // bot.recipesFor can return [] for items that ARE craftable right now (seen
             // live: stick with 16 oak_planks held → instant "NO KNOWN WAY", which poisoned
@@ -614,7 +633,25 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
         const per = (meta && meta.craftedCount) || 1;
         const times = Math.max(1, Math.ceil((need - have()) / per));
         const total = Object.values(ing).reduce((a, b) => a + b, 0);
-        const needsTable = total > 4 || /pickaxe|sword|_axe|shovel|hoe|furnace|chest|bed|shield|bow|helmet|chestplate|leggings|boots/.test(item);
+        let needsTable = total > 4 || /pickaxe|sword|_axe|shovel|hoe|furnace|chest|bed|shield|bow|helmet|chestplate|leggings|boots/.test(item);
+        // ★BUCKET-TABLE root cause (2026-07-02 task#7): the count+name heuristic above
+        // misses SHAPED recipes with <=4 ingredients that still span the 3x3 grid —
+        // bucket is total=3 and its name isn't in the regex, so placeTable was skipped
+        // entirely, craftNow then saw recipesFor(id,null,1,null)=[] (bucket has no 2x2
+        // recipe) and the whole MLG-bucket kit step dead-ended at "NO KNOWN WAY" despite
+        // the NEED chain having expanded fine (log: "NEED 3x iron_ingot (have 4)").
+        // Decide from prismarine-recipe data instead: recipesAll ignores inventory, so
+        // "no no-table recipe exists but a with-table one does" is the exact requiresTable
+        // predicate (recipesFor-based checks misjudge existence whenever short on
+        // materials). Fail-open on error: keep the heuristic's verdict, don't block crafts.
+        if (!needsTable) {
+            try {
+                const _tid = mc.getItemId(item);
+                if (_tid != null && typeof bot.recipesAll === 'function'
+                    && (bot.recipesAll(_tid, null, null) || []).length === 0
+                    && (bot.recipesAll(_tid, null, true) || []).length > 0) needsTable = true;
+            } catch (e) {}
+        }
         // ENSURE THE TABLE FIRST, then gather the target's ingredients. Crafting a NEW
         // crafting_table consumes 4 planks; if we gather the target's ingredients
         // BEFORE placing the table, table-making eats those planks and the target
