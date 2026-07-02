@@ -2230,7 +2230,11 @@ async function prepNetherInner(bot, ctx) {
         // 放宽到hp<=9补上死区(仅famine+零木+feedUp已失败后,chopWood自带威胁处理/树黑名单)。
         if (bot.food <= 2 && bot.health <= 9 && woodEqNow() < 2) {
             prog(`prepNether: FAMINE forage — feedUp found no food; trying nearby wood/apples once before holding`);
+            // C228 venture 旗: famineBodyFreeze 在 food=0 且 _currentSkill='prepNether'(不在其
+            // allowlist)时每 tick 清 pathfinder/控制态 — 不举旗斫木寸步难行(17:21 实锤 freeze 日志)。
+            bot._recoveryVentureUntil = Date.now() + 150000;
             try { await skills.customSkill(bot, 'chopWood', 2, { allowCriticalForage: true }); } catch (e) { prog(`prepNether: famine chopWood err ${e.message}`); }
+            finally { bot._recoveryVentureUntil = 0; }
         }
         const edibleAfter = edibleNow();
         if (edibleAfter) {
