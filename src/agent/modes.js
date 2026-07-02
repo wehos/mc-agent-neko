@@ -5330,7 +5330,12 @@ const modes_list = [
                 // landmark navigation costs (manhattan-ish straight-line; bedReachCost surfaced for skills)
                 const _bedLm = _nearLm('bed');
                 const _bedReachCost = _bedLm ? _bedLm.dist : null;
-                const bedAffordable = !!_bedLm && _bedLm.dist <= cfg.bedReachDist && !inDeathZone && actionable === 0 && hp >= 10;
+                // ★deep-no-bed-climb (2026-07-02 13:25: a pickless bot at y=45 in a flooded cave
+                // was sent to a surface bed 25 blocks up — pathfinder flailed 30s and burned the
+                // kind into cooldown, three dispatches a night. A bot deep underground shelters
+                // in place (DIG_ONE/SEAL both work down there); beds are a surface-dweller's plan.
+                const bedAffordable = !!_bedLm && _bedLm.dist <= cfg.bedReachDist && !inDeathZone && actionable === 0 && hp >= 10
+                    && (y >= 50 || _bedLm.y <= y + 8);
                 // FIGHT (commitToFight): a melee-able, point-blank NON-creeper threat we can win — sword
                 // in hand, hp headroom, not boxed in (enclosed → can't kite, prefer seal). creeper is
                 // excluded (it suicides on contact → the defense reflex layer kites it, not us).
