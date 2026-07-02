@@ -277,33 +277,51 @@ export class Kernel {
         }
         // ★NO-DELTA: pre-dispatch world snapshot (position / inventory counts / dimension).
         const snap = this._worldSnap();
-        let res, threw = false;
-        try {
-            // Dispatch through the same supervised path the bridge uses, so the
-            // re-entry guard + supervised lock still apply (one skill at a time).
-            const skills = await import('../library/skills.js');
-            // ★WS-MUTEX: the tick's ms.busy check is stale by now — the awaits since then
-            // (decide, this import) are exactly where a ws run_skill can start. Re-check right
-            // before taking the lock; no awaits between this check and the assignment, so
-            // check-and-set is atomic on the JS thread. Skipping is not a strike.
-            if (mentalState(this.bot).busy) {
-                this.log(`[kernel] dispatch skip: a supervised skill is already running — not committing ${p.skill}`);
-                return;
-            }
-            // Owner-tagged lock (truthy string, same readers as the old `true`): ws_server.runSkill
-            // tags 'ws'. Each side releases ONLY its own tag — an unconditional clear here is how a
-            // finishing kernel dispatch used to clobber the flag mid-ws-skill, so the next tick saw
-            // busy=false and double-dispatched into the running ws probe (pathfinder tug-of-war).
-            this.agent.supervised_skill = 'kernel';
+        // Dispatch through the same supervised path the bridge uses, so the
+        // re-entry guard + supervised lock still apply (one skill at a time).
+        const skills = await import('../library/skills.js');
+        // ★WS-MUTEX: the tick's ms.busy check is stale by now — the awaits since then
+        // (decide, this import) are exactly where a ws run_skill can start. Re-check right
+        // before taking the lock; no awaits between this check and the assignment, so
+        // check-and-set is atomic on the JS thread. Skipping is not a strike.
+        if (mentalState(this.bot).busy) {
+            this.log(`[kernel] dispatch skip: a supervised skill is already running — not committing ${p.skill}`);
+            return;
+        }
+        // Owner-tagged lock (truthy string, same readers as the old `true`): ws_server.runSkill
+        // tags 'ws'. Each side releases ONLY its own tag — an unconditional clear here is how a
+        // finishing kernel dispatch used to clobber the flag mid-ws-skill, so the next tick saw
+        // busy=false and double-dispatched into the running ws probe (pathfinder tug-of-war).
+        this.agent.supervised_skill = 'kernel';
+        // ★DETACHED DISPATCH (postmortem 2026-07-02 05:41 — THE root of every geared death
+        // today): this await used to run INLINE in agent.update's serial 300ms loop, so ALL
+        // modes (self_defense, threat_radar, auto_eat, self_preservation, the works) were
+        // starved for the entire duration of any kernel-dispatched skill — a bot with iron
+        // sword+shield+full armor sat in nightShelter's hold loop and was punched to death
+        // by two zombies with ZERO response ("Tick modes still protect it" was only ever
+        // true for the ws path, which runs skills in a detached async context — ws_server.js
+        // :305 — and has for days). The kernel now uses the same contract: launch detached,
+        // return the tick immediately (modes keep breathing), settle the failure/no-delta
+        // accounting in the completion handler. Mutual exclusion is unchanged — the
+        // supervised lock above is set SYNCHRONOUSLY (mentalState.busy reads it), so the
+        // next tick's ms.busy guard blocks re-dispatch until this run settles.
+        (async () => {
+            let res, threw = false;
             try {
                 res = await skills.customSkill(this.bot, p.skill, ...(p.args || []));
+            } catch (e) {
+                threw = true;
+                this.log(`[kernel] commit error: ${e && e.message || e}`);
             } finally {
                 if (this.agent.supervised_skill === 'kernel') this.agent.supervised_skill = false;
             }
-        } catch (e) {
-            threw = true;
-            this.log(`[kernel] commit error: ${e && e.message || e}`);
-        }
+            try { this._settleDispatch(p, snap, res, threw); } catch (e) { this.log(`[kernel] settle error: ${e && e.message || e}`); }
+        })();
+    }
+
+    /** Post-dispatch accounting (failure strikes / cooldowns / no-delta override) — runs in
+     *  the detached dispatch context after the skill settles, NOT on the tick chain. */
+    _settleDispatch(p, snap, res, threw) {
         // ★DISPATCH-FAILURE COOLDOWN. Strict `res === false` (NOT falsy): customSkill returns
         // false on a missing file / no default export / invalid name; skills returning 0 (e.g.
         // mineDiamonds' dia() count) or undefined are NOT counted. Object returns fail ONLY via
