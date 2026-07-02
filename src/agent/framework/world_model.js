@@ -899,7 +899,13 @@ export function proposeTasks(world, bot) {
         const durableStonePlus = /stone|iron|diamond|netherite/.test(kit.pickTier || '');
         if (!durableStonePlus || kit.picks < 2) wants.push(['stone_pickaxe', 1]);
         const needsCobble = wants.some(([n]) => n === 'stone_pickaxe');
-        const materialsOk = (!needsCobble || cobbleCt >= 3) && woodUnits(bot) >= 2;
+        // Affordability must match the ACTUAL craft cost or the proposal burns an honest
+        // 3x/5min cooldown on an unaffordable craft (live 2026-07-02 01:48: woodUnits>=2
+        // passed with 2 planks while the wanted crafting_table alone costs 4 — craftChain
+        // rightly failed 3x). Sum the plank-equivalents of what's actually wanted:
+        // table=4 planks, stick craft=2 planks, pick handle covered by the stick want.
+        const woodNeed = wants.reduce((s, [n]) => s + (n === 'crafting_table' ? 4 : n === 'stick' ? 2 : 0), 0);
+        const materialsOk = (!needsCobble || cobbleCt >= 3) && woodUnits(bot) >= Math.max(2, woodNeed);
         if (wants.length && materialsOk) {
             push({ kind: PROPOSAL_KIND.TOOL_UPKEEP, priority: 47, skill: 'craftChain',
                    args: [wants],
