@@ -513,14 +513,16 @@ export default async function migrate(bot, ctx, opts = {}) {
     } catch (e) {}
 
     const movedTotal = Math.round(bot.entity.position.distanceTo(pos0));
-    // ★kernel return contract (live 2026-07-02 04:03: force=true last-resort gate re-ran
-    // every ~10s, each run aborted at leg 1 on food=0 with movedBlocks=0, and the
-    // unconditional migrated:true kept resetting the kernel failure counter — a hot
-    // MIGRATE livelock the 3-strike cooldown could never break). Zero real movement +
-    // not settled = this dispatch achieved nothing → return false; the kind cools down
-    // and GET_FOOD/BOOTSTRAP rotate in (the site scan often shows food/trees right here).
-    if (movedTotal < 8 && !reachedGood) {
-        log_(`zero-progress run (moved=${movedTotal}b, abort=${abort || 'none'}) → false for kernel cooldown`);
+    // ★kernel return contract (live 2026-07-02 04:03 + 04:10): force=true last-resort gates
+    // bypass migrate's own persisted cooldown, so any zero-movement outcome loops at the
+    // kernel's ~2s tick with nothing to break it — first as food=0 leg-1 aborts, then as
+    // "ARRIVED livable land" INSTANT settles when the proposer's stuck-terrain/wood-barren
+    // signal is stale and the bot already stands somewhere good (settled:true made the old
+    // !reachedGood guard wave the truthy through → 2s scan+setBed spin, bot visibly frozen).
+    // A zero-movement run is idempotent at best (anchor write survives) — return false
+    // UNCONDITIONALLY so 3 strikes cool the kind and BOOTSTRAP/GET_FOOD work the good land.
+    if (movedTotal < 8) {
+        log_(`zero-progress run (moved=${movedTotal}b, settled=${!!reachedGood}, abort=${abort || 'none'}) → false for kernel cooldown`);
         return false;
     }
     const r = {
