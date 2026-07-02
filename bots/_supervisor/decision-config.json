@@ -1,0 +1,4 @@
+{
+  "_comment": "2026-07-02 tuning: 3.5h live run crafted 4 iron picks + several stone picks and repeatedly burned the wood stock to zero in a tree-sparse plains — woodBuffer=8 plank-equivalents is under the tool economy's burn rate (each re-kit: table 4 + sticks 2-8). Double the buffer so one daytime chop session survives a full pick lifecycle; MIGRATE already owns the 'no trees at all' escape.",
+  "woodBuffer": 16
+}
