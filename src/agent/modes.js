@@ -5474,14 +5474,36 @@ const modes_list = [
                     if (this._fw && this._fw.instinct && this._fw.instinct.runInstinct) {
                         if (!this._goSleepInstinct) this._goSleepInstinct = {
                             name: 'go_to_bed_sleep', priority: 60,
-                            test: (w, b) => { try { const t = w && w.time; if (!t || (t.phase !== 'dusk' && t.phase !== 'night')) return false; if (w.threat && (w.threat.actionable | 0) > 0) return false; if (w.vitals && w.vitals.hp < 6) return false; const lm = w.landmarks || {}; return !!(lm.bed || lm.village); } catch (e) { return false; } },
+                            test: (w, b) => { try {
+                                const t = w && w.time; if (!t || (t.phase !== 'dusk' && t.phase !== 'night')) return false;
+                                if (w.threat && (w.threat.actionable | 0) > 0) return false;
+                                if (w.vitals && w.vitals.hp < 6) return false;
+                                // ★yield to a committed night plan (live 2026-07-02 07:12: this instinct
+                                // dragged the bot back to the bed the moment mineDown dug 3 blocks down —
+                                // GoalNear(bed) right after every descent — so DUSK_MINE_NIGHT 3-struck
+                                // into cooldown SEVEN times in one night and the diamond band was never
+                                // reached. computeNightPlan already chose MINE_THROUGH_NIGHT / a shelter
+                                // over sleeping; a priority-60 instinct must not overrule the plan.)
+                                if (b && b._commitment && /^(DUSK_MINE_NIGHT|NIGHT_DIG_ONE|NIGHT_SEAL)$/.test(b._commitment.kind || '')) return false;
+                                // ★bed-failure memo: a failed sleep (bed occupied/obstructed) within 3min
+                                // means walking back will fail again — don't ping-pong to it all night.
+                                if (b && b._bedSleepFailAt && Date.now() - b._bedSleepFailAt < 180000) return false;
+                                const lm = w.landmarks || {};
+                                return !!(lm.bed || lm.village);
+                            } catch (e) { return false; } },
                             act: async (w, b, c) => {
                                 const lm = (w && w.landmarks) || {}; const tgt = lm.bed || lm.village; if (!tgt) return;
                                 const hp = b.entity.position;
                                 if (Math.hypot(hp.x - tgt.x, hp.z - tgt.z) > 2.5 && !b.interrupt_code) { try { await c.skills.goToPosition(b, tgt.x, tgt.y, tgt.z, 2); } catch (e) {} }
                                 if (b.interrupt_code) return;
                                 const bed = b.findBlock({ matching: (bl) => bl && /_bed$/.test(bl.name || ''), maxDistance: 6 });
-                                if (bed && w.time && w.time.phase === 'night' && b.entity.position.distanceTo(bed.position) <= 2.6) { try { await b.sleep(bed); } catch (e) {} }
+                                if (bed && w.time && w.time.phase === 'night' && b.entity.position.distanceTo(bed.position) <= 2.6) {
+                                    try { await b.sleep(bed); } catch (e) { try { b._bedSleepFailAt = Date.now(); } catch (e2) {} }
+                                } else if (w.time && w.time.phase === 'night') {
+                                    // Walked there at night and no usable bed within reach — memo so the
+                                    // instinct doesn't re-drag the bot here every few seconds.
+                                    try { b._bedSleepFailAt = Date.now(); } catch (e2) {}
+                                }
                             },
                             askLLM: async (w, b, c) => { try { c.notify && c.notify('[本能] 去睡觉执行中:夜间往已知床/村庄睡(跳过危险夜)。如不该睡(关键作业中)请否决: !vetoInstinct("go_to_bed_sleep")'); } catch (e) {} return { veto: false }; },
                         };
