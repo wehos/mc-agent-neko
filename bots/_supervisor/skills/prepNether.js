@@ -2701,6 +2701,7 @@ async function prepNetherInner(bot, ctx) {
     // fire AT MOST ONCE per prepNether run (banked flag) — banking is a detour, so we don't
     // want it after every goal stalling the grind. bankGear self-guards (anchor/safe/has-spares).
     let banked = false;
+    let woodFirstTried = false;   // ★checkpoint#20 段序: wood-first 每 dispatch 只试一次 (局部 flag, 无模块级状态)
     const ironPlusPick = () => has('iron_pickaxe') > 0 || has('diamond_pickaxe') > 0 || has('netherite_pickaxe') > 0;
     const undergroundWorksite = () => {
         return tableRecoveryUndergroundWorksite();
@@ -2772,6 +2773,38 @@ async function prepNetherInner(bot, ctx) {
             const wait = Math.max(0, Math.ceil((probeBlockTop.until - Date.now()) / 1000));
             prog(`prepNether: iron probe cooldown ${probeBlockTop.key} (${probeBlockTop.reason}); yield ${wait}s before iron-dependent goal ${g.item}`);
             return false;
+        }
+        // ★checkpoint#20 段序修复 (2026-07-03 live 21:15Z 实锤): wood=0 时补木必须先于铁段。
+        // iron-tier bot(铁镐+3镐+raw_iron) 白天 ENTOMBED 地下挖铁, woodEq=0 → 每个铁段 goal 先撞
+        // 下面的 TABLE gate 'no local wood/table/logs' → yield 6s → BOOTSTRAP_KIT 提案-冷却循环;
+        // 唯一补木步 keepKit§3 被 onSurface 门跳过(人在地下), 且 keepKit 排在 TABLE gate 之后根本
+        // 到不了。修: planksEq<4(造台底线)且白天非饥荒时, 先 surfaceUp(在地下时)+chopWood 再进铁段。
+        // 成功获木 → tableRecoveryBlocked 见 logs>0 自动放行, 原流程继续; 失败 → 如实落回原路径。
+        if (!woodFirstTried && has(g.item) < g.count && needsCraftingTable(g.item)
+            && planksEqHeld() < 4 && !isNightNow() && !isDuskNow()
+            && !famineBudget() && bot.health >= 8 && !bot.interrupt_code) {
+            woodFirstTried = true;
+            const underground = bot.entity.position.y < 55;
+            prog(`prepNether: ★WOOD-FIRST before ${g.item} — planksEq=${planksEqHeld()}<4 (table floor), daytime → ${underground ? 'surfaceUp then ' : ''}chopWood before the iron segment`);
+            try {
+                if (underground) {
+                    await Promise.race([
+                        skills.customSkill(bot, 'surfaceUp', 63),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('wood-first-surfaceUp-timeout')), 60000)),
+                    ]);
+                }
+                if (!bot.interrupt_code && !isNightNow()) {
+                    await Promise.race([
+                        skills.customSkill(bot, 'chopWood', 3),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('wood-first-chop-timeout')), 90000)),
+                    ]);
+                }
+            } catch (e) {
+                try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
+                try { bot.clearControlStates(); } catch (_) {}
+                prog(`prepNether: WOOD-FIRST incomplete (${e.message}) — fall through to original ${g.item} path`);
+            }
+            prog(`prepNether: WOOD-FIRST result planksEq=${planksEqHeld()} y=${Math.round(bot.entity.position.y)}`);
         }
         if (await handleTableRecoveryBlocked(g.item)) return false;
         if (await holeUpAtNight() === false) return false;   // work by day, hide by night — don't grind exposed in the dark
