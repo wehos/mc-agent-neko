@@ -104,7 +104,7 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
     while (!isDay() && !isDayDirect() && Date.now() - t0 < maxMs) {
         if (bot.interrupt_code || bot.health <= 0) break;
         if (bot.entity.position.distanceTo(holdAnchor) > 2) {
-            log(bot, 'nightShelter: dragged >2b out of the sealed pocket (instinct/knockback) — shelter void, re-decide.');
+            log(bot, 'nightShelter: dragged >2b out of the sealed pocket (unstuck/instinct/knockback — motion log path.goal names the culprit) — shelter void, re-decide.');
             return false;
         }
         if (bot.health < lastHp - 0.5 || hostileClose(4)) {

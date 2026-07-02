@@ -2220,6 +2220,35 @@ const modes_list = [
                 }
                 return;
             }
+            // ★night-shelter hold (checkpoint #8, 2026-07-02: the stuck machinery treated the
+            // DELIBERATELY sealed night pocket as wedged — mob=ENTOMBED feeds the timer below —
+            // and every ~20s fired GoalInvert+destructive moveAway, digging the bot SIX blocks
+            // straight down out of its own shelter, three times in 95 seconds, until
+            // nightShelter's drift sentinel declared the shelter void. A sealed pocket under a
+            // committed shelter-night plan is the SUCCESS state, not a stall: suppress unstuck
+            // while that commitment holds; nightShelter's own exits (drift >2b, taking hits,
+            // hostile <4b, dawn-direct) own every way the state can actually go bad.)
+            const shelterCommit = (() => { try { return !!(bot._commitment && /^(NIGHT_DIG_ONE|NIGHT_SEAL)$/.test(bot._commitment.kind || '')); } catch (e) { return false; } })();
+            if (shelterCommit) {
+                try {
+                    bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null);
+                    bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop();
+                    bot.clearControlStates();
+                } catch (e) {}
+                this.prev_location = null;
+                this.stuck_time = 0;
+                this.prev_dig_block = null;
+                this.step_prev_location = null;
+                if (Date.now() - (bot._lastUnstuckShelterHoldAt || 0) > 30000) {
+                    bot._lastUnstuckShelterHoldAt = Date.now();
+                    const p = bot.entity.position.floored();
+                    try {
+                        fs.appendFileSync('bots/_supervisor/progress.txt',
+                            `[${new Date().toISOString()}] [unstuck] night-shelter hold: committed ${bot._commitment.kind} @ ${p.x},${p.y},${p.z} — sealed pocket is the success state, suppress moveAway/GoalInvert\n`);
+                    } catch (e) {}
+                }
+                return;
+            }
             const pathingNow = !!(bot && bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving());
             const mobilityWorkNow = !!(bot && bot._mobility && /MAROONED|POCKET|ENTOMBED/.test(bot._mobility.state || ''));
             if (agent.isIdle() && !pathingNow && !mobilityWorkNow) {
@@ -5230,7 +5259,11 @@ const modes_list = [
                     }
                 } catch (e) {}
                 const dirtCt = counts.dirt || 0;
-                const canMineWholeNight = picksBudget >= cfg.mineNightPickBudget && sufficientForUnderground && food >= cfg.mineNightFood && (cobble + dirtCt) >= 4;
+                // ★night-dive rations (checkpoint #8: DUSK_MINE_NIGHT bypassed d4b8d1d's day-dive
+                // ration gate and took the bot to y=-29 with ZERO carried food — hp4 famine at
+                // depth. Whole-night mining carries takeaway food like it carries picks.)
+                const rationsCt = Object.entries(counts).filter(([n]) => /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/.test(n)).reduce((s, [, c]) => s + c, 0);
+                const canMineWholeNight = picksBudget >= cfg.mineNightPickBudget && sufficientForUnderground && food >= cfg.mineNightFood && (cobble + dirtCt) >= 4 && rationsCt >= 2;
                 // gravity-pit trap (mirror prepNether C334): digging into a sand/red_sand/gravel column
                 // collapses onto the head → suffocation. Below dy-1/dy-2 (dug) + dy+2 (drops into head gap).
                 const _GRAV_DEC = /^(sand|red_sand|gravel|suspicious_sand|suspicious_gravel)$/;
