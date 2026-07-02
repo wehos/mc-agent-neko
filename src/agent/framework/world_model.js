@@ -861,9 +861,16 @@ export function proposeTasks(world, bot) {
             case 'GO_BED':
                 // Only a FALLBACK: if the go_to_bed_sleep instinct is already driving sleep,
                 // don't double-drive it from the proposer.
+                // ★checkpoint #12 rewiring: this used to dispatch prepNether, whose night
+                // decision-layer early-returns BY DESIGN — the kernel counted the yield as
+                // failure, 3-struck the kind into 5-min cooldowns all night, and with a
+                // village bed 2.5b away NOBODY actually slept (the bot kited zombies in the
+                // open — two deaths that night). goBedSleep is the dedicated executor:
+                // walk→hostile-check→sleep→hold; honest false falls through to the
+                // NIGHT_DIG_ONE/NIGHT_SEAL shelter fallbacks.
                 if (!sleepInstinctEngaged(bot)) {
-                    push({ kind: TASK.DUSK_GO_BED, priority: 93, skill: 'prepNether',
-                           rationale: 'known affordable bed in reach — go sleep through the night (instinct fallback)' });
+                    push({ kind: TASK.DUSK_GO_BED, priority: 93, skill: 'goBedSleep',
+                           rationale: 'known affordable bed in reach — go sleep through the night (skip to dawn)' });
                 }
                 break;
             case 'DIG_ONE_CAP':

@@ -5517,7 +5517,7 @@ const modes_list = [
                                 // into cooldown SEVEN times in one night and the diamond band was never
                                 // reached. computeNightPlan already chose MINE_THROUGH_NIGHT / a shelter
                                 // over sleeping; a priority-60 instinct must not overrule the plan.)
-                                if (b && b._commitment && /^(DUSK_MINE_NIGHT|NIGHT_DIG_ONE|NIGHT_SEAL)$/.test(b._commitment.kind || '')) return false;
+                                if (b && b._commitment && /^(DUSK_MINE_NIGHT|DUSK_GO_BED|NIGHT_DIG_ONE|NIGHT_SEAL)$/.test(b._commitment.kind || '')) return false; // DUSK_GO_BED added 2026-07-02: goBedSleep is the kernel-driven executor now — never double-handle the same bed
                                 // ★bed-failure memo: a failed sleep (bed occupied/obstructed) within 3min
                                 // means walking back will fail again — don't ping-pong to it all night.
                                 if (b && b._bedSleepFailAt && Date.now() - b._bedSleepFailAt < 180000) return false;
