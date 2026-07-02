@@ -5719,30 +5719,49 @@ const modes_list = [
                     }
                     return;
                 }
+                // ★C347 fail backoff (PROCESS-KILLER postmortem 2026-07-02 13:48: getNearestBlock
+                // ('crafting_table', 4) is pure DISTANCE — it saw a stranded table through solid
+                // stone, canGetTable read true, and craftRecipeLocal ground against the unreachable
+                // table every 5s: 81%→95% wear in a five-failure spam loop, until mobility tried to
+                // interrupt mid-craft, the craft didn't return within the action-manager's 10s stop
+                // budget, and the watchdog KILLED THE WHOLE PROCESS ('Code execution refused stop
+                // after 10 seconds' → exit 1 → mindserver restart — the ~30min transport-close
+                // restart disease). A failed recraft means the situation won't change in 5s; try
+                // again in 60s, and bound each attempt to 8s so a stuck path can never outlive the
+                // stop budget.)
+                if (Date.now() < (this._failBackoffUntil || 0)) return;
                 execute(this, agent, async () => {
                     const cnt = () => bot.inventory.items().filter(i => i.name.endsWith('_' + cls)).reduce((s, i) => s + i.count, 0);
                     const before = cnt();
                     say(agent, `${held.name} at ${Math.round(used / max * 100)}% wear — crafting a spare before it snaps.`);
                     // crafting needs a table: if none in the bag/nearby, build one from planks
                     // (and planks from logs) first — the mid-dig rebuild case after a death wipe.
+                    // ★T-0079: recraft via craftRecipeLocal (not craftRecipe) — it places the CARRIED
+                    // table at arm's reach (works in 1-wide shafts where craftRecipe's getNearestFreeSpace
+                    // fails) AND reclaims it after, so the carried table cycles WITH the bot instead of
+                    // being stranded at each mining face. ★spareTier: 'iron' when we hold an iron pick
+                    // + have ≥3 ingots (hold the tier), else 'stone'.
+                    // ★C347: the whole craft body races an 8s bound — a pathfinder wedge against a
+                    // through-wall 'nearby' table must never refuse the 10s stop budget again. A
+                    // raced-out craft keeps finishing detached (harmless — verify below is honest).
                     try {
-                        if (!c.crafting_table && !tableNearby) {
-                            if (planks < 4 && logs >= 1) { try { await skills.craftRecipe(bot, 'oak_planks', 1); } catch (e) {} }
-                            try { await skills.craftRecipe(bot, 'crafting_table', 1); } catch (e) {}
-                        }
-                        // ★T-0079: recraft via craftRecipeLocal (not craftRecipe) — it places the CARRIED
-                        // table at arm's reach (works in 1-wide shafts where craftRecipe's getNearestFreeSpace
-                        // fails) AND reclaims it after, so the carried table cycles WITH the bot instead of
-                        // being stranded at each mining face → the next deep recraft still has a table →
-                        // breaks the perpetual-pickless wood-relapse churn (keystone). Falls back to a nearby
-                        // table if one's in reach; only the table WE placed from carry is reclaimed.
-                        // ★spareTier: 'iron' when we hold an iron pick + have ≥3 ingots (hold the tier),
-                        // else 'stone' — never downgrade an iron bot to stone when iron is affordable.
-                        await skills.craftRecipeLocal(bot, spareTier + '_' + cls, 1);
+                        await Promise.race([
+                            (async () => {
+                                if (!c.crafting_table && !tableNearby) {
+                                    if (planks < 4 && logs >= 1) { try { await skills.craftRecipe(bot, 'oak_planks', 1); } catch (e) {} }
+                                    try { await skills.craftRecipe(bot, 'crafting_table', 1); } catch (e) {}
+                                }
+                                await skills.craftRecipeLocal(bot, spareTier + '_' + cls, 1);
+                            })(),
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('tool_keeper craft 8s bound')), 8000)),
+                        ]);
                     } catch (e) {}
                     // ★verify, don't assume: a swallowed craft error used to read as success. If the spare
-                    // count didn't rise, say so plainly so the pick-drain isn't masked by a hopeful log.
-                    if (cnt() <= before) say(agent, `spare ${cls} craft FAILED (still ${before}) — no reachable table; surface wood needed before the pick snaps.`);
+                    // count didn't rise, say so plainly AND back off 60s (C347) so the failure can't spam.
+                    if (cnt() <= before) {
+                        this._failBackoffUntil = Date.now() + 60000;
+                        say(agent, `spare ${cls} craft FAILED (still ${before}) — no reachable table; backing off 60s (surface wood needed before the pick snaps).`);
+                    }
                 });
             }
         }
