@@ -11,6 +11,10 @@ const PRESETS = {
                 ['stick', 2], ['wooden_pickaxe', 1], ['wooden_sword', 1], ['wooden_axe', 1]],
     stone_tier: [['stick', 2], ['stone_pickaxe', 1], ['stone_sword', 1], ['stone_axe', 1], ['furnace', 1]],
     iron_tier: [['stick', 2], ['iron_pickaxe', 1], ['iron_sword', 1], ['shield', 1]],
+    // Rank 3→4 bridge (GET_DIAMOND_GEAR): 3 banked diamonds + 2 sticks → diamond pickaxe
+    // (the obsidian unlock). Sword is opportunistic — craftSmart skips it gracefully when
+    // only DIAMOND_FLOOR diamonds are banked (no spare 2), without failing the chain.
+    diamond_tier: [['stick', 2], ['diamond_pickaxe', 1], ['diamond_sword', 1]],
     torches: [['stick', 2], ['torch', 16]],
 };
 
@@ -48,12 +52,21 @@ export default async function craftChain(bot, ctx, preset) {
         catch (e) { log(bot, `craft ${name} failed: ${e.message}`); return false; }
     }
 
+    // ★kernel failure contract (review world_model:934 root cause): count SUCCESSFUL work this
+    // dispatch. The old unconditional `return true` meant a bot with 3 banked diamonds but no
+    // sticks/planks re-dispatched the identical futile 'diamond_tier' run forever — isGoalDone
+    // never releases (diamonds intact, no pick) and the kernel's false-based 3x/5-min cooldown
+    // never trips. Zero progress ⇒ return false at the bottom; any real craft ⇒ truthy object.
+    let progressed = 0;
+
     // STEP 1: craft all planks first so we have materials for the table+tools.
-    for (const [name, count] of recipes) if (/_planks$/.test(name)) await craftSmart(name, count || 1);
+    for (const [name, count] of recipes) if (/_planks$/.test(name)) { if (await craftSmart(name, count || 1)) progressed++; }
 
     // STEP 2: if any recipe needs a table, ensure one is PLACED on the ground
     // (now that we have planks). craftRecipe's own placement fails under canopy.
-    const needsTable = recipes.some(([n]) => /pickaxe|sword|_axe|shovel|hoe|furnace|shield|bed|chest|bow/.test(n));
+    // helmet/leggings/boots added for craftArmor's array-preset calls — armor recipes are
+    // 3-wide so they NEED a placed table ('chestplate' already matched via 'chest').
+    const needsTable = recipes.some(([n]) => /pickaxe|sword|_axe|shovel|hoe|furnace|shield|bed|chest|bow|helmet|leggings|boots/.test(n));
     if (needsTable && !findTable()) {
         // Step to flatter open ground first — placeBlock times out
         // (blockUpdate never fires) when standing on uneven/leafy spots.
@@ -65,9 +78,9 @@ export default async function craftChain(bot, ctx, preset) {
             const planks = Object.keys(inv).filter(n => n.endsWith('_planks')).reduce((s, n) => s + inv[n], 0);
             if (planks < 4) {
                 const log = Object.keys(inv).find(n => n.endsWith('_log') || n.endsWith('_stem') || n.endsWith('_hyphae') || n.endsWith('_wood'));
-                if (log) await craftSmart(log.replace(/_(log|stem|hyphae|wood)$/, '_planks'), 4);
+                if (log && await craftSmart(log.replace(/_(log|stem|hyphae|wood)$/, '_planks'), 4)) progressed++;
             }
-            await craftSmart('crafting_table', 1);
+            if (await craftSmart('crafting_table', 1)) progressed++;
         }
         // Retry across several relocations — placeBlock intermittently times out
         // on bad footing, so don't give up after one spot.
@@ -83,14 +96,19 @@ export default async function craftChain(bot, ctx, preset) {
             }
         }
         const t = findTable();
+        if (t) progressed++;   // a freshly PLACED table is real progress (unblocks this/next dispatch's 3x3 crafts)
         log(bot, t ? `table placed at ${t.position.x},${t.position.y},${t.position.z}` : 'could not place table after retries');
     }
 
     // STEP 3: craft everything else (sticks + tools), skipping planks/table.
     for (const [name, count] of recipes) {
         if (/_planks$/.test(name) || name === 'crafting_table') continue;
-        await craftSmart(name, count || 1);
+        if (await craftSmart(name, count || 1)) progressed++;
     }
-    log(bot, `craftChain(${typeof preset === 'string' ? preset : 'custom'}) done. inv=${JSON.stringify(world.getInventoryCounts(bot))}`);
-    return true;
+    log(bot, `craftChain(${typeof preset === 'string' ? preset : 'custom'}) done. crafted=${progressed} inv=${JSON.stringify(world.getInventoryCounts(bot))}`);
+    // Zero successful crafts/placements this dispatch = a FAILED dispatch: return false so
+    // 3 consecutive futile runs trip the kernel's 5-min kind cooldown + commitment release
+    // (never a stale "have N" count — callers that want deltas measure inventory themselves:
+    // craftArmor .catch()es + diffs inventory, autoProgress's step() ignores returns).
+    return progressed > 0 ? { crafted: progressed } : false;
 }

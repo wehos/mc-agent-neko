@@ -81,6 +81,11 @@ const FOOD_STOCK = 16;     // food level considered "stocked" (not just survival
 //    decision-config loader can patch them later if needed. ──
 let IRON_BUFFER = 7;       // ironForArmor (raw_iron+ingot) to stock at the iron tier: 1 pick(3)+1 sword(2)+spares→armor next
 let DIAMOND_FLOOR = 3;     // diamonds to bank before GET_DIAMOND is "done" (≥1 diamond pickaxe + spare)
+// ── ★ENDGAME tunables (post-diamond → Ender Dragon chain, all legit). const→let so the
+//    decision-config loader can patch them like the survival buffers above. ──
+let OBSIDIAN_TARGET = 14;  // 10 frame minimum + 4 spare to rebuild a ghast-broken portal
+let EYE_TARGET_DEFAULT = 14; // eyes of ender to stock: 12 frames + throw-losses (~20% break) + triangulation throws
+let BLAZE_ROD_TARGET = 7;  // 7 rods = 14 blaze powder = 14 eyes (matches EYE_TARGET_DEFAULT)
 // ── ★T-0092 depth bands (区分采铁 vs 采钻 两个深度目标, 别让 mineDown 用默认 targetY=45 浅带). ──
 const IRON_TARGET_Y = 14;  // iron/coal band: y8..y16 sweet spot for iron (1.21 wide-distribution)
 const DIAMOND_TARGET_Y = -54; // diamond band: y-54..-59 peak; bedrock at y-64 (1.21) — stay above it
@@ -106,6 +111,9 @@ const DIAMOND_TARGET_Y = -54; // diamond band: y-54..-59 peak; bedrock at y-64 (
             if (Number.isFinite(cfg.mineNightFood)) MINE_NIGHT_FOOD = cfg.mineNightFood;
             if (Number.isFinite(cfg.bedReachDist)) BED_REACH_DIST = cfg.bedReachDist;
             if (Number.isFinite(cfg.woodReachDist)) WOOD_REACH_DIST = cfg.woodReachDist;
+            if (Number.isFinite(cfg.obsidianTarget)) OBSIDIAN_TARGET = cfg.obsidianTarget;
+            if (Number.isFinite(cfg.eyeTargetDefault)) EYE_TARGET_DEFAULT = cfg.eyeTargetDefault;
+            if (Number.isFinite(cfg.blazeRodTarget)) BLAZE_ROD_TARGET = cfg.blazeRodTarget;
         }
     } catch (e) {
         // Do NOT swallow: record the parse failure so a bad config is visible, not a silent death.
@@ -124,6 +132,20 @@ export function woodUnits(bot) { return invCount(bot, /_log$/) * 4 + invCount(bo
 // Smeltable+smelted iron on hand (ingot-equivalents). raw_iron smelts 1:1 → iron_ingot, so both
 // count toward what GET_ARMOR can turn into armor pieces (boots4 helmet5 leggings7 chestplate8).
 export function ironForArmor(bot) { return invCount(bot, /^raw_iron$/) + invCount(bot, /^iron_ingot$/); }
+// ★review craftArmor:60/:92 — GET_ARMOR/GET_IRON_ARMOR_SET gate+release on the cheapest MISSING
+// piece, not a flat 4. craftArmor crafts cheapest-first (boots 4 → helmet 5 → leggings 7 →
+// chestplate 8 ingots), so with k pieces owned the NEXT piece costs COST[k]; the old flat
+// `ironForArmor<4` left banked iron in [4, nextCost) holding the goal sticky against a craft
+// pass that can afford NOTHING — a hot 2s dispatch-spin above the whole tier/endgame chain.
+// vitals.armor already counts held+worn pieces (modes.js armor builder scans inventory AND
+// slots 5-8), which is the review-sanctioned approximation; mixed-order sets (e.g. looted
+// chestplate first) only make the release EARLIER, never sticky.
+const ARMOR_PIECE_COST = [4, 5, 7, 8];   // ingots for the k-th piece, cheapest-first
+function ironArmorGoalDone(world, bot) {
+    const pieces = Math.min(4, (world.vitals && world.vitals.armor) || 0);
+    if (pieces >= 4) return true;
+    return ironForArmor(bot) < ARMOR_PIECE_COST[pieces];
+}
 function hasStoneTierPick(world) { return /stone|iron|diamond|netherite/.test((world.kit && world.kit.pickTier) || ''); }
 function diamondsOnHand(bot) { return invCount(bot, /^diamond$/); }
 /** Pack is nearly full (≤4 free slots) → time to bank before drops are lost to a full inventory. */
@@ -147,6 +169,97 @@ function stoneKitReady(world, bot) {
 }
 /** True iff an iron+ pickaxe is in the pack (the GET_DIAMOND unlock gate — diamond ore needs iron+). */
 function hasIronTierPick(world) { return /iron|diamond|netherite/.test((world.kit && world.kit.pickTier) || ''); }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★ENDGAME helpers (post-diamond → Ender Dragon, all legit — no server commands).
+// ─────────────────────────────────────────────────────────────────────────────
+/** Which dimension is the bot in? Regex like realNetherPortal.js:23 — mineflayer may
+ *  report 'minecraft:the_nether' / 'the_nether' depending on version. Defensive: an
+ *  unreadable bot.game defaults to 'overworld' (the safe/identical-to-today branch). */
+export function dimOf(bot) {
+    const d = String((bot && bot.game && bot.game.dimension) || 'overworld');
+    return /nether/.test(d) ? 'the_nether' : /end/.test(d) ? 'the_end' : 'overworld';
+}
+/**
+ * Lazy-load bots/_supervisor/endgame.json ONCE onto bot._endgame and return it.
+ * Skills keep it fresh (they write BOTH the file and bot._endgame via the shared
+ * skills.egPatch); a watchdog restart re-loads from file so irreversible milestones
+ * (netherEntered/strongholdKnown/portalRoom/endPortalReady/dragonDead) survive restarts
+ * and deaths. BOM-safe read; missing file ⇒ {} (the expected fresh-world default).
+ * Per HANDOFF red line: state on the bot object + file, ZERO module-level mutables
+ * (hot-reload resets module scope). endEntered was dropped (written-never-read; derive
+ * the-End presence from bot.game.dimension instead — it can't drift after a respawn).
+ * Fields: {netherEntered, netherPortalOverworld:{x,y,z}, netherPortalNether:{x,y,z},
+ *          strongholdEst:{x,z}, strongholdKnown, portalRoom:{x,y,z}, framesEmpty,
+ *          strongholdDigFails, endPortalReady, dragonDead, ts}
+ */
+export function endgameState(bot) {
+    if (!bot) return {};
+    if (bot._endgame && typeof bot._endgame === 'object') return bot._endgame;
+    // eg stays null on a TRANSIENT failure (EBUSY/EPERM read error, torn/corrupt JSON mid-write):
+    // we must NOT memoize {} then — the early-return above would serve the empty cache for the
+    // whole process, hiding strongholdKnown/portalRoom/endPortalReady until a skill re-patches.
+    // Only a genuinely ABSENT file (ENOENT = fresh world) caches the {} default; anything else
+    // logs (throttled) and retries the read next call.
+    let eg = null;
+    const warn = (msg) => {
+        try {
+            if (bot._egReadWarnAt && Date.now() - bot._egReadWarnAt < 60000) return;   // throttle: uncached state retries every ~2s tick
+            bot._egReadWarnAt = Date.now();
+            appendFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../bots/_supervisor/progress.txt'),
+                `[${new Date().toISOString()}] world_model.js endgame.json ${msg}\n`);
+        } catch (e2) {}
+    };
+    try {
+        const p = resolve(dirname(fileURLToPath(import.meta.url)), '../../../bots/_supervisor/endgame.json');
+        let raw = null;
+        try { raw = readFileSync(p, 'utf8'); }
+        catch (e) {
+            if (e && e.code === 'ENOENT') eg = {};                         // missing file = fresh world (safe to cache)
+            else warn(`read FAILED (transient, will retry): ${e && e.message}`);
+        }
+        if (raw != null) {
+            if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);          // strip UTF-8 BOM (C251 lesson)
+            try {
+                const parsed = JSON.parse(raw);
+                if (parsed && typeof parsed === 'object') eg = parsed;
+            } catch (e) {
+                // A CORRUPT endgame.json must be visible, not a silent milestone wipe.
+                warn(`parse FAILED (not caching {}, will retry): ${e && e.message}`);
+            }
+        }
+    } catch (e) {}
+    if (eg != null) bot._endgame = eg;
+    return bot._endgame || eg || {};
+}
+/**
+ * Single source of truth for endgame item shortfalls — shared by computeTier, the
+ * proposeTasks gates, and isGoalDone (same idiom as isFamineStall: one predicate,
+ * three consumers, so proposer/completion never disagree).
+ */
+export function endgameNeeds(bot) {
+    // ★review :279 — computeTier + proposeTasks + isGoalDone all recompute this on the SAME ~2s
+    // decide tick (up to 4x, 7 invCount regex scans each). Memoize on the bot for 1s (state on
+    // bot._* per the HANDOFF red line — no module-level mutables): one compute per tick shared by
+    // every consumer; the TTL is well under the 2s tick so cross-tick reads always recompute.
+    const memo = bot && bot._egNeedsMemo;
+    if (memo && (Date.now() - memo.at) < 1000) return memo.v;
+    const eyes = invCount(bot, /^ender_eye$/), pearls = invCount(bot, /^ender_pearl$/),
+          powder = invCount(bot, /^blaze_powder$/), rods = invCount(bot, /^blaze_rod$/);
+    const eg = endgameState(bot);
+    // Portal already lit ⇒ no more eyes needed; frames counted ⇒ only fill the empties (+2 slack).
+    const eyeTarget = eg.endPortalReady ? 0
+        : (Number.isFinite(eg.framesEmpty) ? Math.min(EYE_TARGET_DEFAULT, eg.framesEmpty + 2) : EYE_TARGET_DEFAULT);
+    const eyesShort = Math.max(0, eyeTarget - eyes);
+    const craftable = Math.min(pearls, powder + rods * 2);                    // eyes we could craft right now
+    const blazeShort = Math.max(0, eyesShort - (powder + rods * 2));          // blaze-side shortfall (held eyes count via eyesShort)
+    const pearlsShort = Math.max(0, eyesShort - pearls);
+    const hasDiamondPick = invCount(bot, /^(diamond|netherite)_pickaxe$/) >= 1;
+    const obsOk = invCount(bot, /^obsidian$/) >= 10 && invCount(bot, /^flint_and_steel$/) >= 1;
+    const v = { eyes, pearls, powder, rods, eyeTarget, eyesShort, craftable, blazeShort, pearlsShort, hasDiamondPick, obsOk };
+    if (bot) bot._egNeedsMemo = { at: Date.now(), v };
+    return v;
+}
 
 // ★T-0101/T-0083 FROZEN-ALIVE 互锁破除 — 单一判据,proposeTasks/isGoalDone/isEmergency 三处复用。
 //   lethalThreat: 真·环境急症,HOLD 是对的(出洞=送死)——贴脸 creeper<4.5 / 正在挨打 / hp 极危<=4 /
@@ -202,7 +315,13 @@ export function computeTier(world, bot) {
     const ironBanked = ironForArmor(bot);
     const diamondBanked = diamondsOnHand(bot);
     const kitReady = stoneKitReady(w, bot);
+    // ★ENDGAME telemetry inputs (cheap invCounts; also drive the rank>=4 ladder below).
+    const n = endgameNeeds(bot);
+    const eg = endgameState(bot);
+    const dim = dimOf(bot);
+    const obsidian = invCount(bot, /^obsidian$/);
     let nextMilestone;
+    let outLevel = level, outRank = rank;
     if (rank <= 1) nextMilestone = 'stone tools (BOOTSTRAP_KIT)';
     else if (rank === 2) nextMilestone = kitReady
         ? `descend for iron (STONE_KIT_READY → GO_UNDERGROUND y${IRON_TARGET_Y}, iron ${ironBanked}/${IRON_BUFFER})`
@@ -211,9 +330,46 @@ export function computeTier(world, bot) {
         const armor = (w.vitals && w.vitals.armor) || 0;
         nextMilestone = armor < 4
             ? `iron armor set (GET_IRON_ARMOR_SET, iron ${ironBanked}/${IRON_BUFFER})`
-            : `diamonds (GET_DIAMOND, diamond ${diamondBanked}/${DIAMOND_FLOOR})`;
-    } else nextMilestone = `diamonds banked (${diamondBanked}/${DIAMOND_FLOOR}) — endgame`;
-    return { level, rank, nextMilestone, stoneKitReady: kitReady, progress: { ironBanked, diamondBanked, ironTarget: IRON_BUFFER, diamondTarget: DIAMOND_FLOOR } };
+            : `diamond pickaxe (GET_DIAMOND_GEAR, diamond ${diamondBanked}/${DIAMOND_FLOOR})`;
+    } else {
+        // ── ★ENDGAME first-match ladder (rank>=4). Checked top-down, HIGHEST first, so
+        //    consumed items can't silently regress past an irreversible eg flag. Ranks 10/11
+        //    ride irreversible endgame.json flags; ranks 5-9 are capability-derived and MAY
+        //    regress if items are lost — intended (losing your pick reopens lower rungs).
+        //    eg.strongholdKnown pins rank>=9 so thrown/broken eyes never bounce the bot back
+        //    to the nether unless eyesShort>0 reopens resupply via the proposal gates
+        //    (framesEmpty makes the reopened eyeTarget small). ──
+        if (eg.dragonDead) {
+            outRank = 11; outLevel = 'dragon_slain';
+            nextMilestone = 'ENDER DRAGON SLAIN — GG, free play';
+        } else if (dim === 'the_end') {
+            outRank = 10; outLevel = 'the_end';
+            nextMilestone = 'destroy end crystals then slay the dragon (SLAY_DRAGON)';
+        } else if (n.eyesShort === 0 || eg.strongholdKnown) {
+            outRank = 9; outLevel = 'eyes_ready';
+            nextMilestone = `locate stronghold + fill frames (GO_END, eyes ${n.eyes}/${n.eyeTarget})`;
+        } else if (n.blazeShort === 0 && n.pearlsShort === 0) {
+            outRank = 8; outLevel = 'pearls_done';
+            nextMilestone = `craft eyes of ender (CRAFT_EYES, ${n.eyes}/${n.eyeTarget})`;
+        } else if (n.blazeShort === 0) {
+            outRank = 7; outLevel = 'blaze_done';
+            nextMilestone = `night-hunt endermen for pearls (HUNT_PEARLS, short ${n.pearlsShort})`;
+        } else if (dim === 'the_nether') {
+            outRank = 6; outLevel = 'nether';
+            nextMilestone = `farm blaze rods (GET_BLAZE_RODS, rods ${n.rods}/${BLAZE_ROD_TARGET})`;
+        } else if (n.obsOk) {
+            outRank = 5; outLevel = 'nether_ready';
+            nextMilestone = 'build + enter the nether portal (ENTER_NETHER)';
+        } else {
+            outRank = 4; outLevel = 'diamond';
+            nextMilestone = `portal kit (GET_PORTAL_KIT, obsidian ${obsidian}/10, flint_and_steel ${invCount(bot, /^flint_and_steel$/)}/1)`;
+        }
+    }
+    return { level: outLevel, rank: outRank, nextMilestone, stoneKitReady: kitReady,
+             progress: { ironBanked, diamondBanked, ironTarget: IRON_BUFFER, diamondTarget: DIAMOND_FLOOR,
+                         // ★ENDGAME additive telemetry-only keys (extra keys optional in the typedef):
+                         rods: n.rods, powder: n.powder, pearls: n.pearls, eyes: n.eyes,
+                         eyeTarget: n.eyeTarget, obsidian, dim } };
 }
 
 /** The wood-buffer target (plank-equivalents) the opening flow stocks to. */
@@ -276,6 +432,16 @@ export function proposeTasks(world, bot) {
 
     const { vitals, threat, kit, time, migration, surfaceGate, mobility } = w;
 
+    // ── ★ENDGAME dimension guard: ALL overworld-semantic proposals (opening/night/bed/armor/
+    //    tier-chain/food/wheat/migrate/underground/bank) are ANDed with `overworld` so they are
+    //    suppressed in the nether/End (time.phase still ticks overworld time there; feedUp/landmark
+    //    logic flails off-overworld). In the overworld `overworld===true` → behavior byte-identical
+    //    to today. FREE_PLAY stays dimension-agnostic; HOLD@95 is ALSO overworld-gated (review
+    //    :441) — its TRIGGER is entity-derived but its dispatch skill prepNether is one of the
+    //    very overworld-semantic skills this guard exists to suppress. ──
+    const dim = dimOf(bot);
+    const overworld = dim === 'overworld';
+
     // ★危血禁下深矿 (T-0098续 / 06-25T12:31 实锤: hp8 food17 被 GO_UNDERGROUND@45 派 mineDown,
     //   从 y62 下潜 48 层到 y14,全程不回血(food<18=低于 MC 自然回血线),遇地下僵尸 dist1 裸甲一击死).
     //   下深矿要有血量 buffer 应对地下怪偷袭: hp<8 一律危险; hp 8-11 仅在能回血(food>=18,边下边回)放行;
@@ -313,7 +479,12 @@ export function proposeTasks(world, bot) {
     //   "封箱安全(无 LETHAL 威胁) + food=0 = 该去找食物,不是原地饿死" —— 用户核心指令。
     //   判据下沉到模块级 isFamineStall(w)/lethalEnvThreat(w),与 isGoalDone/isEmergency 共用单一真相。
     const famineStall = isFamineStall(w);
-    if (threat.actionable > 0 && vitals.hp < 10 && !famineStall) {
+    // ★review :441 — `overworld &&`: dispatching prepNether (bed/portal/surface semantics) in the
+    // nether/End at hp<10 flails off-dimension, and its 3x false returns would cool HOLD down for
+    // 5 minutes exactly mid-crisis. Off-overworld the dimension's primary skill (blazeRods /
+    // slayDragon) carries its own retreat/eat/bunker logic and the reflex modes still run between
+    // dispatches — suppressing the proposal is the smaller correct change vs inventing a new skill.
+    if (overworld && threat.actionable > 0 && vitals.hp < 10 && !famineStall) {
         push({ kind: PROPOSAL_KIND.HOLD, priority: 95, skill: 'prepNether',
                rationale: 'under reachable threat at low hp — defend/shelter before any venture' });
     } else if (famineStall) {
@@ -326,7 +497,12 @@ export function proposeTasks(world, bot) {
     // ── Fixed opening flow (blueprint §D): first unmet prerequisite dominates. ──
     // 1) Bootstrap kit: wood→planks→table→pickaxe→stone tools — AND a wood buffer
     //    (user #3: don't stop at 2 logs). Not "done" until pick + stone tier + buffer.
-    if (!isBootstrapDone(w, bot)) {
+    //    `overworld &&` (review :611/:441 follow-through): this push was the one opening proposal
+    //    MISSING the ★ENDGAME dimension gate its own comment above claims — a nether/End bot
+    //    whose wood dipped under the buffer re-proposed BOOTSTRAP_KIT@66 (skill=prepNether),
+    //    outranking GET_BLAZE_RODS/SLAY_DRAGON and flailing wood-gathering in a dimension with
+    //    no logs. Off-overworld the primary in-dimension skills need no wood/pick to proceed.
+    if (overworld && !isBootstrapDone(w, bot)) {
         const noPick = kit.picks < 1;
         push({ kind: PROPOSAL_KIND.BOOTSTRAP_KIT, priority: noPick ? 90 : 66, skill: 'prepNether',
                rationale: noPick
@@ -336,7 +512,8 @@ export function proposeTasks(world, bot) {
     }
 
     // 2) Food: stock to a BUFFER, not just survival (user #5: stockpile meat).
-    if (vitals.food < FOOD_STOCK || !kit.foodSufficient) {
+    //    (overworld-only: feedUp flails in the nether/End; the endgame skills self-feed there.)
+    if (overworld && (vitals.food < FOOD_STOCK || !kit.foodSufficient)) {
         const pri = vitals.food <= 6 ? 88 : (vitals.food < 12 ? 55 : 35);
         push({ kind: PROPOSAL_KIND.GET_FOOD, priority: pri, skill: 'feedUp',
                rationale: vitals.food <= 6 ? 'food critical — hunt/forage now'
@@ -356,15 +533,15 @@ export function proposeTasks(world, bot) {
     //     to a real bread deficit, so a fed bot with a full bread stock won't churn on it.
     const canFarmNow = (invCount(bot, /^wheat_seeds$/) > 0 || invCount(bot, /^wheat$/) >= 3);
     const breadDeficit = invCount(bot, /^bread$/) < dynamicBreadTarget(bot, w);
-    if (time.phase === 'day' && !(threat.actionable > 0) && vitals.food > 6 && canFarmNow && breadDeficit
+    if (overworld && time.phase === 'day' && !(threat.actionable > 0) && vitals.food > 6 && canFarmNow && breadDeficit
         && (!bot || Date.now() >= (bot._wheatFarmCooldownUntil || 0))) {
         push({ kind: PROPOSAL_KIND.OPP_WHEAT_FARM, priority: 50, skill: 'wheatFarm',
                args: [{ breadTarget: dynamicBreadTarget(bot, w) }],
                rationale: `sustainable food: harvest+bake wheat→bread (target ${dynamicBreadTarget(bot, w)}, have ${invCount(bot, /^bread$/)}) — stop relying on cheat-supply` });
     }
 
-    // 3) Bed (mandatory respawn anchor) — once kit exists.
-    if (kit.picks >= 1 && !bedKnown(bot) && !(hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < DIAMOND_FLOOR)) {   // ★T-0092 completion (worker-sync): GET_BED@50 was an UNFULFILLABLE wool-errand (no wool→no bed→bedKnown永false) that OUTRANKED GET_DIAMOND@46, so an iron-tooled+armored bot never descended for diamond. Yield GET_BED exactly when the bot is diamond-ready (mirror the GET_DIAMOND gate) so GET_DIAMOND wins → mineDiamonds descends. Safe: pure re-prioritize, does NOT gate pick/bed-MAKING (keepInventory ON so a delayed respawn-anchor loses nothing).
+    // 3) Bed (mandatory respawn anchor) — once kit exists. (overworld-only: no beds off-overworld — they explode.)
+    if (overworld && kit.picks >= 1 && !bedKnown(bot) && !(hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < DIAMOND_FLOOR)) {   // ★T-0092 completion (worker-sync): GET_BED@50 was an UNFULFILLABLE wool-errand (no wool→no bed→bedKnown永false) that OUTRANKED GET_DIAMOND@46, so an iron-tooled+armored bot never descended for diamond. Yield GET_BED exactly when the bot is diamond-ready (mirror the GET_DIAMOND gate) so GET_DIAMOND wins → mineDiamonds descends. Safe: pure re-prioritize, does NOT gate pick/bed-MAKING (keepInventory ON so a delayed respawn-anchor loses nothing).
         push({ kind: PROPOSAL_KIND.GET_BED, priority: 50, skill: 'prepNether',   // ★T-0060 (worker-sync 0701): TRIED @44 (below GO_UNDERGROUND@45) to break the ~1h wool-wander stagnation — REVERTED. Live result: @44 correctly re-routed the commitment GET_BED→GO_UNDERGROUND/mineDown, but mineDown then NO-OP-spun (couldn't descend at the spawn-area spot -15,71) → bot HARD-PINNED ~14min, WORSE than @50's wool-wander (which at least moved + was transition-bounded). ROOT is NOT the GET_BED priority — it's the bot STUCK at a bad spot (unmineable AND wool-less) with the stuck-relocate (migration.stuckTerrain) NOT firing after 77min stall. The real fix is migrate-away-from-stuck-spot + mineDown-relocate-on-no-dig (both decision-layer, attended). Keeping @50 baseline.
                rationale: 'no bed yet — secure wool→bed as respawn anchor (mandatory, blueprint §D.3)' });
     }
@@ -378,7 +555,11 @@ export function proposeTasks(world, bot) {
     //    but no armor, stuck deep where it can't reach wood, must armor up rather than deadlock forever
     //    on a wood buffer it can't fill underground. Still below noPick BOOTSTRAP_KIT (90) and critical
     //    food (88): get a pickaxe / don't starve first. Above migrate (60) / bed (50) / mining (45).
-    if (time.phase === 'day' && !(threat.actionable > 0) && (vitals.armor || 0) < 4 && ironForArmor(bot) >= 4) {
+    //    ★review craftArmor:60: gate on ironArmorGoalDone (cheapest-MISSING-piece affordability),
+    //    not a flat iron>=4 — proposing a craft pass that can't afford the next piece (boots
+    //    owned + 4 iron, helmet costs 5) just spun craftArmor at @68 above the whole chain.
+    //    Proposer gate and isGoalDone share the ONE predicate (the file's house idiom).
+    if (overworld && time.phase === 'day' && !(threat.actionable > 0) && !ironArmorGoalDone(w, bot)) {
         push({ kind: PROPOSAL_KIND.GET_ARMOR, priority: 68, skill: 'craftArmor',
                rationale: `unarmored (${vitals.armor || 0}/4 pieces) + ${ironForArmor(bot)} iron banked — smelt+craft+equip iron armor (creeper/stray insurance, save diamonds)` });
     }
@@ -392,7 +573,7 @@ export function proposeTasks(world, bot) {
     //     descent happens via mineDown with a tier-correct targetY).
     const tierReady = isBootstrapDone(w, bot) && time.phase === 'day' && !(threat.actionable > 0)
         && (vitals.food >= 8) && surfaceGate.mode !== 'hold';
-    if (tierReady) {
+    if (overworld && tierReady) {
         // RUNG 1: stone tier + enough banked iron, but no iron pick yet → smelt then craft iron tools.
         //   Two-state dispatch over EXISTING real skills (no假执行): if raw_iron isn't smelted yet,
         //   run smeltSafe (places furnace + smelts); once ingots are in hand, run craftChain('iron_tier')
@@ -417,7 +598,8 @@ export function proposeTasks(world, bot) {
         //   Requires armor>=4 (GET_ARMOR@68 closes that first) so the bot never strip-mines the
         //   deep diamond band unarmored. @46: above GO_UNDERGROUND@45 so a kitted iron bot heads for
         //   the diamond band on purpose instead of the open-ended shallow descent.
-        if (hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < DIAMOND_FLOOR && hpSafeForUnderground) {   // ★T-0092 (worker-sync): armor>=4(full set=24 iron, unreachable since GET_ARMOR yields at <4) → armor>=1(reachable from one craftArmor pass) so an iron-tooled+lightly-armored bot actually commits GET_DIAMOND → mineDiamonds descends to y-52. Still gated on iron pick + hpSafe + mineDiamonds' own pickaxe-guard (can't send a pickless/bare bot deep). NOT >=0.
+        if (hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < DIAMOND_FLOOR && hpSafeForUnderground
+            && kit.sufficientForUnderground) {   // ★T-0092 (worker-sync): armor>=4(full set=24 iron, unreachable since GET_ARMOR yields at <4) → armor>=1(reachable from one craftArmor pass) so an iron-tooled+lightly-armored bot actually commits GET_DIAMOND → mineDiamonds descends to y-52. NOT >=0. ★tool-budget: also gated on kit.sufficientForUnderground (spare-with-table or field-recraft kit) like GO_UNDERGROUND — the skill-side pick guard is the LAST line, not the plan; TOOL_UPKEEP@47 restores the invariant first.
             // Dispatch the DEDICATED mineDiamonds skill: it water-aware-descends to the diamond band,
             // x-ray finds + vein-follows diamonds, banks each haul, and LOOPS until count is reached —
             // exactly the "在该层定向循环直到挖到目标矿" T-0092 asks for. (Generic mineDown only
@@ -434,14 +616,126 @@ export function proposeTasks(world, bot) {
     //     MIGRATE@60? no — just below: a death-zone migrate still wins; but above GET_BED@50 and the
     //     tier chain): protecting banked diamonds outranks chasing more, but never a survival need.
     //     bankGear itself defers if there's no home anchor or it's unsafe, so this is cheap to propose.
-    if (time.phase === 'day' && !(threat.actionable > 0) && diamondsOnHand(bot) >= 1 && packNearlyFull(bot)) {
+    if (overworld && time.phase === 'day' && !(threat.actionable > 0) && diamondsOnHand(bot) >= 1 && packNearlyFull(bot)) {
         push({ kind: PROPOSAL_KIND.BANK_GEAR, priority: 58, skill: 'bankGear',
                rationale: `${diamondsOnHand(bot)} diamond(s) + pack nearly full — bank valuables at home before a death wipes them`,
                hints: { diamonds: diamondsOnHand(bot) } });
     }
 
+    // 3e) ── ★ENDGAME chain (post-diamond → Ender Dragon, all legit — docs/HANDOFF.md cold goal). ──
+    //     Rides the same endgameNeeds/endgameState/dimOf truth as computeTier + isGoalDone, so the
+    //     proposer, the tier ladder and completion can never disagree. All @52: above GET_BED@50 /
+    //     tier-chain@45-47, below BANK_GEAR@58 / MIGRATE@60 / GET_ARMOR@68 and ALL survival/night —
+    //     endgame progress never preempts staying alive. Stage exclusivity is gate-driven (obsOk /
+    //     blazeShort / eyesShort flip stages); push order breaks @52 ties in ladder order.
+    {
+        const eneeds = endgameNeeds(bot);
+        const eg = endgameState(bot);
+        const swords = invCount(bot, /^(iron|diamond|netherite)_sword$/);
+        const fillBlocks = invCount(bot, /^(cobblestone|cobbled_deepslate)$/);
+        // ★review :591 finish-vs-resupply: with the stronghold KNOWN and enough eyes in hand to
+        // plausibly fill the remaining frames (eg.framesEmpty once counted; else worst-case 12,
+        // capped by eyeTarget), FINISHING must outrank restocking — GET_PORTAL_KIT/ENTER_NETHER
+        // are pushed first and would win the stable-sort @52 tie, sending the bot on a full
+        // obsidian re-mine + nether roundtrip while 12 eyes sit in the pack (a normal state:
+        // ~20% throw breakage keeps blazeShort>0 until framesEmpty is measured). Priority
+        // ladder: GO_END 53 (finish now) > ENTER_NETHER 52.5 (reuse persisted portal) > @52
+        // resupply pushes — resupply stays proposed as the fallback when GO_END's gear gates
+        // (food/armor/sword/cobble) fail.
+        const framesNeed = Number.isFinite(eg.framesEmpty) ? eg.framesEmpty : 12;
+        const canFinishNow = !!eg.strongholdKnown && eneeds.eyes >= Math.min(framesNeed, eneeds.eyeTarget);
+        // GET_DIAMOND_GEAR — rank 3→4 bridge (banked diamonds → diamond pickaxe via craftChain).
+        //   Only fires once rank-3's GET_DIAMOND has banked its floor, so ranks 1-4 are undisturbed.
+        if (overworld && tierReady && hasIronTierPick(w) && diamondsOnHand(bot) >= DIAMOND_FLOOR && !eneeds.hasDiamondPick) {
+            push({ kind: PROPOSAL_KIND.GET_DIAMOND_GEAR, priority: 52, skill: 'craftChain',
+                   args: ['diamond_tier'],
+                   rationale: `${diamondsOnHand(bot)} diamonds banked + no diamond pickaxe — craft diamond pick(+sword) (obsidian needs a diamond pick)`,
+                   hints: { diamonds: diamondsOnHand(bot) } });
+        }
+        // GET_PORTAL_KIT — obsidian×OBSIDIAN_TARGET + flint_and_steel (gatherObsidian: lava pool +
+        //   water bucket, gravel→flint). hpSafeForUnderground: lava work at low hp is suicide.
+        //   Mutually exclusive with ENTER_NETHER via obsOk.
+        if (overworld && tierReady && eneeds.hasDiamondPick && eneeds.blazeShort > 0 && !eneeds.obsOk && hpSafeForUnderground) {
+            push({ kind: PROPOSAL_KIND.GET_PORTAL_KIT, priority: 52, skill: 'gatherObsidian',
+                   args: [{ obsidianTarget: OBSIDIAN_TARGET, maxMs: 480000 }],
+                   rationale: `portal kit: obsidian ${invCount(bot, /^obsidian$/)}/10 + flint_and_steel ${invCount(bot, /^flint_and_steel$/)}/1 — mine a lava pool with the diamond pick`,
+                   hints: { obsidian: invCount(bot, /^obsidian$/), target: OBSIDIAN_TARGET } });
+        }
+        // ENTER_NETHER — build/light/walk the legit portal (realNetherPortal). Gear gates
+        //   (food/armor/sword/bridging cobble) keep an underprepared bot out of the nether.
+        //   ★review :598/:600 — building consumed the 10 obsidian, so gating re-entry on obsOk
+        //   alone forced a full lava-pool re-mine after every nether death even though the lit
+        //   portal still stands. A persisted eg.netherPortalOverworld (stamped by realNetherPortal
+        //   on light/reuse) also opens the gate: the skill walks back to the anchor and re-enters
+        //   for free. @52.5 in that case so it outranks GET_PORTAL_KIT's earlier @52 push (else
+        //   the re-mine wins the tie anyway); a dead anchor fails failed:true → 3x kernel
+        //   cooldown suppresses ENTER_NETHER → GET_PORTAL_KIT takes over (self-healing).
+        if (overworld && tierReady && eneeds.hasDiamondPick && eneeds.blazeShort > 0
+            && (eneeds.obsOk || !!eg.netherPortalOverworld)
+            && vitals.food >= 12 && (vitals.armor || 0) >= 4 && swords >= 1 && fillBlocks >= 32) {
+            push({ kind: PROPOSAL_KIND.ENTER_NETHER, priority: (!eneeds.obsOk && eg.netherPortalOverworld) ? 52.5 : 52, skill: 'realNetherPortal',
+                   args: [],
+                   rationale: `portal kit ready (obsidian≥10 + flint_and_steel) + geared — build, light and walk the nether portal (blaze rods short ${eneeds.blazeShort})`,
+                   hints: { blazeShort: eneeds.blazeShort } });
+        }
+        // GET_BLAZE_RODS — in-nether: the ONLY live proposal there besides HOLD@95 (the overworld
+        //   guard suppresses every overworld-semantic kind). The skill's own phases flip farm→exit
+        //   once rods*2+powder+eyes >= eyeEquivTarget; done_when = back in the overworld (covers
+        //   both the success-exit walk-out AND a death-respawn).
+        if (dim === 'the_nether' && !eg.dragonDead) {
+            push({ kind: PROPOSAL_KIND.GET_BLAZE_RODS, priority: 52, skill: 'blazeRods',
+                   args: [{ rodTarget: BLAZE_ROD_TARGET, eyeEquivTarget: eneeds.eyeTarget, maxMs: 480000 }],
+                   rationale: `in the nether — find a fortress and farm blazes (rods ${eneeds.rods}/${BLAZE_ROD_TARGET}), then exit via the portal`,
+                   hints: { rods: eneeds.rods, rodTarget: BLAZE_ROD_TARGET } });
+        }
+        // HUNT_PEARLS — overworld NIGHT enderman hunt. @94.5 sits ABOVE the whole night chain
+        //   (91-94, else GO_BED@93 sleeps through every hunting night) and BELOW HOLD@95. It is a
+        //   first-class night plan (isNightPlan) so (a) it dethrones a stale daytime commitment at
+        //   dusk via the nightPre path and (b) once committed the !isNightPlan guard stops
+        //   GO_BED/SEAL from re-flipping it.
+        if (overworld && time.phase !== 'day' && eneeds.blazeShort === 0 && eneeds.pearlsShort > 0
+            && (vitals.armor || 0) >= 4 && vitals.food >= 12 && vitals.hp >= 14
+            && !(threat.actionable > 0 && vitals.hp < 10)) {
+            push({ kind: PROPOSAL_KIND.HUNT_PEARLS, priority: 94.5, skill: 'enderPearls',
+                   args: [{ pearlTarget: eneeds.pearlsShort + eneeds.pearls, maxMs: 360000 }],
+                   rationale: `night + blaze rods done — hunt endermen under 2-high cover for pearls (short ${eneeds.pearlsShort})`,
+                   hints: { pearls: eneeds.pearls, pearlsShort: eneeds.pearlsShort } });
+        }
+        // CRAFT_EYES — blaze_rod→blaze_powder→ender_eye batches. Day + safe (crafting is a
+        //   stand-still window). Releases to resupply stages when nothing is left to convert.
+        if (overworld && time.phase === 'day' && !(threat.actionable > 0) && eneeds.eyesShort > 0 && eneeds.craftable > 0) {
+            push({ kind: PROPOSAL_KIND.CRAFT_EYES, priority: 52, skill: 'craftEyes',
+                   args: [{ eyeTarget: eneeds.eyeTarget }],
+                   rationale: `craft eyes of ender ${eneeds.eyes}/${eneeds.eyeTarget} (can craft ${eneeds.craftable} now: pearls ${eneeds.pearls}, powder ${eneeds.powder}, rods ${eneeds.rods})`,
+                   hints: { eyes: eneeds.eyes, eyeTarget: eneeds.eyeTarget, craftable: eneeds.craftable } });
+        }
+        // GO_END — eye-throw triangulation → travel → dig to stronghold → fill frames → walk in.
+        //   One sticky commitment; setupEndPortal is phase-aware + resumable from persisted eg
+        //   state (strongholdKnown && eyes>0 lets a partially-stocked bot resume after eye losses).
+        if (overworld && tierReady && (eneeds.eyesShort === 0 || (eg.strongholdKnown && eneeds.eyes > 0))
+            && vitals.food >= 14 && (vitals.armor || 0) >= 4 && swords >= 1 && fillBlocks >= 64) {
+            // @53 when canFinishNow (see the :591 ladder above): finish with the eyes in hand
+            // instead of losing the @52 push-order tie to a resupply roundtrip.
+            push({ kind: PROPOSAL_KIND.GO_END, priority: canFinishNow ? 53 : 52, skill: 'setupEndPortal',
+                   args: [{ maxMs: 480000 }],
+                   rationale: eg.strongholdKnown
+                       ? `stronghold known — return, fill the frames (eyes ${eneeds.eyes}/${eneeds.eyeTarget}) and enter the End`
+                       : `eyes stocked ${eneeds.eyes}/${eneeds.eyeTarget} — triangulate the stronghold, activate the portal, enter the End`,
+                   hints: { eyes: eneeds.eyes, strongholdKnown: !!eg.strongholdKnown } });
+        }
+        // SLAY_DRAGON — effectively the sole proposal in the End besides HOLD@95; @60 keeps it
+        //   under HOLD@95 and crisis food@88 for safety symmetry.
+        if (dim === 'the_end' && !eg.dragonDead) {
+            push({ kind: PROPOSAL_KIND.SLAY_DRAGON, priority: 60, skill: 'slayDragon',
+                   args: [{ maxMs: 600000 }],
+                   rationale: 'in the End — destroy the end crystals (bow first, pillar the caged ones) then melee the perched dragon',
+                   hints: {} });
+        }
+    }
+
     // 4) Migration if the biome is structurally unlivable (no sheep → no bed → death-zone respawn loop).
-    if (migration.recommend && time.phase === 'day') {
+    //    (overworld-only: migration landmarks/biome logic is overworld-semantic.)
+    if (overworld && migration.recommend && time.phase === 'day') {
         // ★C347 (T-0096): STUCK-TERRAIN relocate. migration.stuckTerrain (set in modes.js) means the
         // bot is treading water in locally hostile terrain (aquifer / shattered shallow) — net mining
         // progress ≈0 while it thrashes ENTOMBED/SEALED for minutes. The biome here is LIVABLE
@@ -481,7 +775,7 @@ export function proposeTasks(world, bot) {
     //    crisis food@88). villageHarvest still hard-defers on hostiles>2 / hp<=4, so this never
     //    walks a one-hp bot into a mob; it only unblocks the village run a stray creeper was vetoing.
     const opening = w.opening || {};
-    if (opening.phase === 'VILLAGE_HARVEST' && vitals.food <= 6 && time.phase === 'day'
+    if (overworld && opening.phase === 'VILLAGE_HARVEST' && vitals.food <= 6 && time.phase === 'day'
         && w.landmarks && w.landmarks.village && Number(w.landmarks.village.dist) <= 28) {
         push({ kind: TASK.OPENING_VILLAGE, priority: 89, skill: 'villageHarvest',
                rationale: `STARVING (food=${vitals.food}) next to a known village @${Math.round(w.landmarks.village.dist)}b — harvest it for food now (only reachable food source; villageHarvest self-defers if truly unsafe)` });
@@ -490,7 +784,7 @@ export function proposeTasks(world, bot) {
     // ── OPENING flow (day, on the surface, nothing actionable): translate the
     //    derived w.opening.phase computed in modes.js into ranked tasks so a bare
     //    bot scouts/buffers/harvests instead of sleepwalking into generic prepNether. ──
-    if (time.phase === 'day' && w.pos && w.pos.depthBand === 'surface' && !(threat.actionable > 0)) {
+    if (overworld && time.phase === 'day' && w.pos && w.pos.depthBand === 'surface' && !(threat.actionable > 0)) {
         switch (opening.phase) {
             case 'SCOUT':
                 // ★用户spec: 开局无脑找树+村庄优先. SCOUT phase=冷开局(无已知可达wood/village) →
@@ -516,7 +810,7 @@ export function proposeTasks(world, bot) {
     // ── NIGHT flow (dusk/dawn/night): translate the dusk/night decision computed in
     //    modes.js (computeNightPlan) into ranked tasks. FIGHT/NONE emit nothing — the
     //    self_defense reflex owns combat; NONE means daytime/no night decision. ──
-    if (time.phase !== 'day') {
+    if (overworld && time.phase !== 'day') {
         // ★用户spec: "一到晚上就无脑seal/bootstrap"是错的——夜里夜间决策必须压过白天作业(BOOTSTRAP_KIT 90).
         // 夜间四选一全部 >90(在HOLD 95之下), 按用户序 下矿整晚94>去床93>挖三填一92>seal堡垒91. 只夜出.
         const np = w.nightPlan || {};
@@ -578,11 +872,40 @@ export function proposeTasks(world, bot) {
     //    stone/iron bot still stocking iron; the dedicated GET_DIAMOND@46 owns the diamond band) AND
     //    is bound to an OUTPUT goal in isGoalDone (stock IRON_BUFFER iron), so it stays committed
     //    underground until it has actually mined the iron it descended for — no下地→上浮→再下地 churn.
-    if (kit.sufficientForUnderground && surfaceGate.mode !== 'hold' && !threat.actionable && hpSafeForUnderground) {
+    if (overworld && kit.sufficientForUnderground && surfaceGate.mode !== 'hold' && !threat.actionable && hpSafeForUnderground) {
         push({ kind: PROPOSAL_KIND.GO_UNDERGROUND, priority: 45, skill: 'mineDown',
                args: [{ targetY: IRON_TARGET_Y }],
                rationale: `kitted + gate open — descend to the iron band (y${IRON_TARGET_Y}) and mine iron (have ${ironForArmor(bot)}/${IRON_BUFFER}), stay committed underground`,
                hints: { targetY: IRON_TARGET_Y, tier: tier.level, iron: ironForArmor(bot) } });
+    }
+
+    // 5b) ★TOOL-BUDGET UPKEEP (2026-07-02 断镐夜困 root fix): kit.sufficientForUnderground
+    //     (modes.js:4959 — spare-pick-with-carried-table OR field-recraft kit) used to be ONLY a
+    //     refusal gate: it blocked GO_UNDERGROUND/GET_DIAMOND but nothing ever RESTORED it, and
+    //     dig paths that bypass the gate (achieve xray staircases) ground the lone pick to dust.
+    //     This proposal is the restore half: while the invariant is broken and the materials are
+    //     on hand, craft exactly the missing pieces (spare stone pick / carried table / sticks)
+    //     via craftChain's array-preset form. @47: outranks the descents it protects
+    //     (GET_DIAMOND@46, GO_UNDERGROUND@45), yields to bed/food/night/armor. Zero materials →
+    //     not proposed (BOOTSTRAP_KIT's wood buffer + surface foraging own restocking); crafting
+    //     failure → craftChain returns false → normal 3x/5min cooldown, no livelock.
+    if (overworld && kit.picks >= 1 && !kit.sufficientForUnderground && !threat.actionable) {
+        const cobbleCt = invCount(bot, /^(cobblestone|cobbled_deepslate)$/);
+        const sticksCt = invCount(bot, /^stick$/);
+        const tableCarried = invCount(bot, /^crafting_table$/) >= 1;
+        const wants = [];
+        if (!tableCarried) wants.push(['crafting_table', 1]);
+        if (sticksCt < 4) wants.push(['stick', 1]);                       // 1 craft = 4 sticks
+        const durableStonePlus = /stone|iron|diamond|netherite/.test(kit.pickTier || '');
+        if (!durableStonePlus || kit.picks < 2) wants.push(['stone_pickaxe', 1]);
+        const needsCobble = wants.some(([n]) => n === 'stone_pickaxe');
+        const materialsOk = (!needsCobble || cobbleCt >= 3) && woodUnits(bot) >= 2;
+        if (wants.length && materialsOk) {
+            push({ kind: PROPOSAL_KIND.TOOL_UPKEEP, priority: 47, skill: 'craftChain',
+                   args: [wants],
+                   rationale: `tool budget broken (picks=${kit.picks} tier=${kit.pickTier} table=${tableCarried ? 'yes' : 'NO'}) — craft ${wants.map(w2 => w2[0]).join('+')} so a pick snapping deep never strands the bot`,
+                   hints: { picksBudget: kit.picksBudget, wants: wants.map(w2 => w2[0]) } });
+        }
     }
 
     // 6) Sleep is NOT proposed here. ★C331 (用户 architecture directive): "去村庄睡觉是本能"
@@ -595,6 +918,37 @@ export function proposeTasks(world, bot) {
     // ── Nothing pressing + idle → let the LLM free-play (§B). Lowest priority. ──
     push({ kind: PROPOSAL_KIND.FREE_PLAY, priority: 1, skill: '',
            rationale: 'no pressing survival need — open to improvisation' });
+
+    // ── ★KERNEL DISPATCH-FAILURE COOLDOWN filter: kernel._commit stamps bot._kindCooldownUntil[kind]
+    //    after DISPATCH_FAIL_LIMIT consecutive customSkill failures (missing skill file / hard false),
+    //    and nulls the livelocked bot._commitment. Filtering the kind HERE (the shared proposal source
+    //    for BOTH modes.js commitGoal and the kernel) is what makes the release stick — otherwise
+    //    modes.js:~5159 would re-commit the suppressed kind 2s later. FREE_PLAY never dispatches a
+    //    skill so it never gains a cooldown entry → the list can never go empty. Expired entries are
+    //    deleted so the kind naturally re-proposes. No bot._kindCooldownUntil (framework off / shadow /
+    //    never failed) → pure no-op. ──
+    try {
+        const cd = bot && bot._kindCooldownUntil;
+        if (cd) {
+            const now = Date.now();
+            // ★review :611 off-overworld cooldown cap: GET_BLAZE_RODS (nether) / SLAY_DRAGON (End)
+            // are each the SOLE dispatchable proposal in their dimension (the overworld guard
+            // suppresses everything else but FREE_PLAY, which maps to chosen:null), so the kernel's
+            // 5-min dispatch cooldown would park the bot completely idle in a hostile dimension
+            // with only reflex modes running. Clamp the primary kind's suppression to ≤60s there:
+            // retries stay spaced (no hot 2s spin) but never a 5-minute stand-down among ghasts/
+            // endermen. Clamping the stored value is idempotent and visible to modes.js's
+            // commitGoal pass too (both read the same bot._kindCooldownUntil).
+            const primaryKind = dim === 'the_nether' ? PROPOSAL_KIND.GET_BLAZE_RODS
+                              : dim === 'the_end' ? PROPOSAL_KIND.SLAY_DRAGON : null;
+            if (primaryKind && cd[primaryKind] && cd[primaryKind] > now + 60000) cd[primaryKind] = now + 60000;
+            for (let i = out.length - 1; i >= 0; i--) {
+                const u = cd[out[i].kind];
+                if (u && now < u) out.splice(i, 1);
+                else if (u) delete cd[out[i].kind];
+            }
+        }
+    } catch (e) {}
 
     out.sort((a, b) => b.priority - a.priority);
     return out;
@@ -621,10 +975,16 @@ export function isGoalDone(kind, world, bot) {
     switch (kind) {
         case PROPOSAL_KIND.BOOTSTRAP_KIT: return isBootstrapDone(w, bot);
         case PROPOSAL_KIND.GET_FOOD:      return (w.vitals.food >= FOOD_STOCK);
-        // Done when fully armored OR no more iron to turn into a piece (cheapest = boots, 4 ingots) —
-        // so it crafts all it can afford this pass, then yields to mining to accumulate more iron.
-        case PROPOSAL_KIND.GET_ARMOR:     return (w.vitals.armor || 0) >= 4 || ironForArmor(bot) < 4;
+        // Done when fully armored OR banked iron can't afford the cheapest MISSING piece (see
+        // ironArmorGoalDone — a flat `<4` livelocked at e.g. boots owned + 4 iron, helmet costs 5).
+        case PROPOSAL_KIND.GET_ARMOR:     return ironArmorGoalDone(w, bot);
         case PROPOSAL_KIND.GET_BED:       return bedKnown(bot);
+        // ★tool-budget: done when the descent invariant is restored; ALSO release when the
+        // materials ran out mid-craft (the gate stops proposing then — a held commitment
+        // would starve the chain waiting on cobble/wood that mining/foraging must supply).
+        case PROPOSAL_KIND.TOOL_UPKEEP:
+            return !!(w.kit && w.kit.sufficientForUnderground)
+                || invCount(bot, /^(cobblestone|cobbled_deepslate)$/) < 3 || woodUnits(bot) < 2;
         case PROPOSAL_KIND.MIGRATE:       return !w.migration.recommend;     // arrived at a livable biome
         // ── ★T-0093 tier chain completion. ──
         // GET_IRON_TOOLS done = an iron+ pickaxe is now in hand (the rung was about crafting it).
@@ -632,8 +992,8 @@ export function isGoalDone(kind, world, bot) {
         // ★T-0097 NIGHT_SMELT_IRON done = same target (an iron-tier pick exists) — holds the night
         // commitment sticky across the smelt→craft hand-off until the iron pickaxe is actually crafted.
         case TASK.NIGHT_SMELT_IRON:          return hasIronTierPick(w) || (invCount(bot, /^raw_iron$/) === 0 && invCount(bot, /^iron_ingot$/) < 3);   // ★FIX (worker-sync 0630 frozen-alive): the sticky NIGHT_SMELT_IRON deadlocked into a smeltSafe no-op spin — chosen at dusk w/ raw_iron≥3, but once the iron was smelted+consumed WITHOUT reaching hasIronTierPick (ingots banked/used, no lasting iron pick), it stayed sticky dispatching smeltSafe('raw_iron',N) at raw_iron=0 → no-op every 1.5s, frozen until watchdog (live: pinned 9min @54,58 mob=FREE/ENC). Release when there's nothing left to smelt OR craft → re-evaluate → mine more iron. Does NOT gate pick-making.
-        // GET_IRON_ARMOR_SET done = fully armored OR no iron left to make a piece (mirrors GET_ARMOR).
-        case PROPOSAL_KIND.GET_IRON_ARMOR_SET: return (w.vitals.armor || 0) >= 4 || ironForArmor(bot) < 4;
+        // GET_IRON_ARMOR_SET done = fully armored OR can't afford the next piece (mirrors GET_ARMOR).
+        case PROPOSAL_KIND.GET_IRON_ARMOR_SET: return ironArmorGoalDone(w, bot);
         // ★T-0092 GET_DIAMOND done = banked the DIAMOND_FLOOR buffer (≥1 diamond pick + spare worth).
         //   Stays committed deep until the floor is met → the diamond venture isn't abandoned after
         //   one ore. Survival (HOLD/food/night) still preempts via isEmergency/nightPre, so a deep
@@ -689,6 +1049,26 @@ export function isGoalDone(kind, world, bot) {
         //   to the same band. The surfaceGate + survival emergencies still own preemption/yo-yo limits.
         case PROPOSAL_KIND.GO_UNDERGROUND:
             return hasIronTierPick(w) || ironForArmor(bot) >= IRON_BUFFER;
+        // ── ★ENDGAME chain completion (one-liners over endgameNeeds/endgameState/dimOf — the
+        //    proposer gates and completion share one truth, so a released goal is never re-gated
+        //    open by a disagreeing predicate). ──
+        // Done = diamond pick in hand OR the materials were lost (material-lost release mirrors
+        // GET_ARMOR). Belt-and-braces with craftChain's zero-craft→false return (review :934):
+        // a fully futile dispatch now trips the kernel's 3x/5-min cooldown, and this release
+        // covers the diamonds-spent/lost path the cooldown can't see.
+        case PROPOSAL_KIND.GET_DIAMOND_GEAR: return invCount(bot, /^(diamond|netherite)_pickaxe$/) >= 1 || diamondsOnHand(bot) < DIAMOND_FLOOR;
+        case PROPOSAL_KIND.GET_PORTAL_KIT:   { const n = endgameNeeds(bot); return n.obsOk || dimOf(bot) !== 'overworld' || n.blazeShort === 0; }
+        case PROPOSAL_KIND.ENTER_NETHER:     return dimOf(bot) === 'the_nether';
+        // Success-exit AND death-respawn both land in the overworld; in-nether it holds sticky
+        // through the skill's internal farm→exit phases.
+        case PROPOSAL_KIND.GET_BLAZE_RODS:   return dimOf(bot) === 'overworld';
+        // Night over (daybreak) releases like the other night kinds.
+        case PROPOSAL_KIND.HUNT_PEARLS:      return endgameNeeds(bot).pearlsShort === 0 || w.time.phase === 'day';
+        // Nothing left to convert → release to the resupply stages (mirrors GET_ARMOR).
+        case PROPOSAL_KIND.CRAFT_EYES:       { const n = endgameNeeds(bot); return n.eyesShort === 0 || n.craftable === 0; }
+        case PROPOSAL_KIND.GO_END:           return dimOf(bot) === 'the_end' || !!endgameState(bot).dragonDead;
+        // Death→overworld respawn releases; GO_END then recommits re-entry via the persisted portalRoom.
+        case PROPOSAL_KIND.SLAY_DRAGON:      return !!endgameState(bot).dragonDead || dimOf(bot) !== 'the_end';
         // FORAGE_SURFACE / BUILD_HOME / FREE_PLAY are open-ended → re-decide each idle.
         default: return true;
     }
@@ -722,7 +1102,8 @@ function isEmergency(p, world) {
 function isNightPlan(kind) {
     return kind === PROPOSAL_KIND.DUSK_MINE_NIGHT || kind === PROPOSAL_KIND.DUSK_GO_BED
         || kind === PROPOSAL_KIND.NIGHT_DIG_ONE || kind === PROPOSAL_KIND.NIGHT_SEAL
-        || kind === TASK.NIGHT_SMELT_IRON;   // ★T-0097: night iron-conversion is a first-class night plan
+        || kind === TASK.NIGHT_SMELT_IRON    // ★T-0097: night iron-conversion is a first-class night plan
+        || kind === PROPOSAL_KIND.HUNT_PEARLS;   // ★ENDGAME: night enderman hunt @94.5 — dusk-dethrones a stale daytime commitment; once committed the !isNightPlan guard stops GO_BED/SEAL re-flips
 }
 
 /**

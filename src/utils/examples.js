@@ -48,9 +48,18 @@ export class Examples {
             return [];
 
         let turn_text = this.turnsToText(turns);
+        let embedding = null;
         if (this.model !== null) {
-            let embedding = await this.model.embed(turn_text);
-            this.examples.sort((a, b) => 
+            try {
+                embedding = await this.model.embed(turn_text);
+            } catch (err) {
+                // embed is time-bounded; a timeout/network failure here must not
+                // fail the whole prompt — degrade to word-overlap for this call.
+                console.warn('Embedding failed at runtime, using word-overlap for this query:', err.message);
+            }
+        }
+        if (embedding !== null) {
+            this.examples.sort((a, b) =>
                 cosineSimilarity(embedding, this.embeddings[this.turnsToText(b)]) -
                 cosineSimilarity(embedding, this.embeddings[this.turnsToText(a)])
             );

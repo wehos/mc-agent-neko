@@ -64,23 +64,13 @@ export default async function mineDown(bot, ctx, opts = {}) {
     // So each step: if the lone pick is about to break AND we can't craft a replacement, ABORT
     // now (still has a few uses to climb back; higher layer then surfaces for wood).
     const invCount = (re) => bot.inventory.items().filter(it => re.test(it.name || '')).reduce((s, it) => s + it.count, 0);
-    const pickAboutToBreak = () => {
-        const picks = bot.inventory.items().filter(it => /_pickaxe$/.test(it.name || ''));
-        if (!picks.length) return true;          // already pickless → stop digging
-        if (picks.length >= 2) return false;     // spare exists
-        const p = picks[0];
-        const max = p.maxDurability || 0;
-        const used = (typeof p.durabilityUsed === 'number') ? p.durabilityUsed : 0;
-        return max > 0 && (max - used) <= 6;     // ≤6 uses ≈ 2 more steps (3 blocks/step)
-    };
-    const canCraftPick = () => {
-        const planks = invCount(/_planks$/), logs = invCount(/_log$/);
-        const cobble = invCount(/^(cobblestone|cobbled_deepslate)$/), sticks = invCount(/^stick$/);
-        const haveTable = invCount(/^crafting_table$/) > 0 || planks >= 4 || logs >= 1;
-        const haveHead = cobble >= 3 || planks >= 3 || logs >= 1;
-        const haveSticks = sticks >= 2 || planks >= 2 || logs >= 1;
-        return haveTable && haveHead && haveSticks;
-    };
+    // The predicate math now lives in the shared skills.pickRunway (one tool-durability
+    // budget for the descent gate, TOOL_UPKEEP proposal, and every dig loop — the local
+    // copies here were the original but drifted from modes.js's kit variant; the shared
+    // canFieldCraftPick is stone-strict where the old local allowed a planks-head wooden
+    // fallback — stricter aborts a step earlier, the safe direction).
+    const pickAboutToBreak = () => skills.pickRunway(bot).aboutToBreak;
+    const canCraftPick = () => skills.pickRunway(bot).canFieldCraftPick;
 
     for (let i = 0; i < steps; i++) {
         const cur = bot.entity.position;

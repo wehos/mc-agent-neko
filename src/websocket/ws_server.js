@@ -1,10 +1,17 @@
 import { WebSocketServer } from 'ws';
 import { serverProxy } from '../agent/mindserver_proxy.js';
-import { Camera } from '../agent/vision/camera.js';
+// NOTE (local deploy): `Camera` (camera.js) import removed — it was never used here
+// (the screenshot path uses the lazily-loaded CameraProc), and statically importing
+// camera.js pulls in node-canvas-webgl + prismarine-viewer + headless-gl, whose
+// require/import mix crashes Node's ESM/CJS loader (ERR_INTERNAL_ASSERTION) at startup.
 // CameraProc runs the fragile headless-gl renderer in an ISOLATED child process so
 // its intermittent NATIVE crash (Windows exit -1 / 4294967295, uncatchable by JS)
 // kills only the renderer worker, not the agent. See camera_proc.js / render_worker.mjs.
-import { CameraProc } from '../agent/vision/camera_proc.js';
+// NOTE (local deploy): CameraProc is lazy-loaded (dynamic import) inside the
+// screenshot-enabled gate below, NOT statically imported here. Importing
+// camera_proc.js at module load pulls in prismarine-viewer + headless-gl, whose
+// require/import mix crashes Node's ESM/CJS loader (ERR_INTERNAL_ASSERTION) at
+// startup. With screenshots off (default) the chain is never loaded.
 
 class WSMessageServer {
     constructor(port = 48909) {
@@ -195,13 +202,19 @@ class WSMessageServer {
             // CameraProc isolates the GL renderer in a child process (crash-safe).
             // It exposes the same {.on('ready'), .capture() -> base64 jpeg} surface
             // we rely on below, so the rest of the screenshot loop is unchanged.
-            this.camera = new CameraProc(agent.bot, `./bots/${agent.name}/screenshots/`);
-            this.camera.on('ready', () => {
-                console.log('Camera initialized for WebSocket screenshots (forced initialization)');
-                // Wait a bit more for bot to be fully ready before starting screenshots
-                setTimeout(() => {
-                    this.startScreenshotTimer();
-                }, 5000); // Wait 5 seconds after camera is ready
+            // Lazy-loaded ONLY here (screenshots enabled) so the prismarine-viewer /
+            // headless-gl chain is never imported at startup.
+            import('../agent/vision/camera_proc.js').then(({ CameraProc }) => {
+                this.camera = new CameraProc(agent.bot, `./bots/${agent.name}/screenshots/`);
+                this.camera.on('ready', () => {
+                    console.log('Camera initialized for WebSocket screenshots (forced initialization)');
+                    // Wait a bit more for bot to be fully ready before starting screenshots
+                    setTimeout(() => {
+                        this.startScreenshotTimer();
+                    }, 5000); // Wait 5 seconds after camera is ready
+                });
+            }).catch((error) => {
+                console.error('Failed to lazy-load/initialize camera for WebSocket screenshots:', error);
             });
         } catch (error) {
             console.error('Failed to initialize camera for WebSocket screenshots:', error);
@@ -299,9 +312,15 @@ class WSMessageServer {
         // while one is already running — two loops then fight over the SAME bot.pathfinder,
         // each cancelling the other's goal ("goal was changed before it could be completed"),
         // which pinned the bot (couldn't climb/move). One supervised skill at a time.
-        if (this._skillRunning) {
-            console.log(`🛠️ run_skill ${skillName} REJECTED — '${this._skillRunningName}' already running`);
-            this.broadcast({ type: 'skill_result', skill: skillName, ok: false, error: `busy: ${this._skillRunningName} already running` });
+        // ★KERNEL-MUTEX: the framework kernel (kernel.js _commit) dispatches customSkill
+        // directly and never sets our _skillRunning — its lock is agent.supervised_skill
+        // (owner-tagged 'kernel'; we tag 'ws'). Check BOTH, or a run_skill landing mid-kernel-
+        // dispatch runs two supervised skills that fight over the same bot.pathfinder,
+        // exactly like the WS-blip double-achieveLoop case above.
+        if (this._skillRunning || this.agent.supervised_skill) {
+            const who = this._skillRunningName || 'kernel dispatch';
+            console.log(`🛠️ run_skill ${skillName} REJECTED — '${who}' already running`);
+            this.broadcast({ type: 'skill_result', skill: skillName, ok: false, error: `busy: ${who} already running` });
             return;
         }
         this._skillRunning = true; this._skillRunningName = skillName;
@@ -314,7 +333,7 @@ class WSMessageServer {
         // prompts, so the scripted skill isn't fought/interrupted by the LLM
         // issuing !goToBed/!moveAway on death/hurt (which preempts the skill AND
         // the survival modes -> bot thrashes and dies). Tick modes still protect it.
-        try { this.agent.supervised_skill = true; } catch (e) {}
+        try { this.agent.supervised_skill = 'ws'; } catch (e) {}   // owner-tagged (truthy, same readers)
         try { if (this.agent.self_prompter && this.agent.self_prompter.isActive()) this.agent.self_prompter.stop(false); } catch (e) {}
         try {
             const skills = await import('../agent/library/skills.js');
@@ -330,8 +349,10 @@ class WSMessageServer {
             this.broadcast({ type: 'skill_result', skill: skillName, ok: false, error: String(e && e.message || e) });
         } finally {
             // Release the supervised lock so the bot's autonomous brain resumes
-            // once the scripted skill is done (or threw).
-            try { this.agent.supervised_skill = false; } catch (e) {}
+            // once the scripted skill is done (or threw). Release ONLY our own tag —
+            // an unconditional clear here would clobber a kernel dispatch's lock and
+            // let the next run_skill/tick double-dispatch (the 23:58 concurrent-skill bug).
+            try { if (this.agent.supervised_skill === 'ws') this.agent.supervised_skill = false; } catch (e) {}
             this._skillRunning = false; this._skillRunningName = null;
         }
     }

@@ -42,29 +42,46 @@ export class SkillLibrary {
             message = '(no message)';
         let skill_doc_similarities = [];
 
+        // when the embedding model is unavailable (or fails below), fall back to
+        // word-overlap over the raw doc texts — skill_docs_embeddings may be
+        // empty or partial in that case, so it can't be used as the doc list.
+        const wordOverlapRank = () => (this.skill_docs || [])
+            .map(doc_key => ({
+                doc_key,
+                similarity_score: wordOverlapScore(message, doc_key)
+            }))
+            .sort((a, b) => b.similarity_score - a.similarity_score);
+
         if (select_num === -1) {
-            skill_doc_similarities = Object.keys(this.skill_docs_embeddings)
+            skill_doc_similarities = (this.skill_docs || [])
             .map(doc_key => ({
                 doc_key,
                 similarity_score: 0
             }));
         }
         else if (!this.embedding_model) {
-            skill_doc_similarities = Object.keys(this.skill_docs_embeddings)
-                .map(doc_key => ({
-                    doc_key,
-                    similarity_score: wordOverlapScore(message, this.skill_docs_embeddings[doc_key])
-                }))
-                .sort((a, b) => b.similarity_score - a.similarity_score);
+            skill_doc_similarities = wordOverlapRank();
         }
         else {
-            let latest_message_embedding = await this.embedding_model.embed(message);
-            skill_doc_similarities = Object.keys(this.skill_docs_embeddings)
-            .map(doc_key => ({
-                doc_key,
-                similarity_score: cosineSimilarity(latest_message_embedding, this.skill_docs_embeddings[doc_key])
-            }))
-            .sort((a, b) => b.similarity_score - a.similarity_score);
+            let latest_message_embedding = null;
+            try {
+                latest_message_embedding = await this.embedding_model.embed(message);
+            } catch (error) {
+                // embed is time-bounded; a timeout/network failure must not fail
+                // the prompt — degrade to word-overlap for this call.
+                console.warn('Embedding failed at runtime, using word-overlap for this query:', error.message);
+            }
+            if (latest_message_embedding === null) {
+                skill_doc_similarities = wordOverlapRank();
+            }
+            else {
+                skill_doc_similarities = Object.keys(this.skill_docs_embeddings)
+                .map(doc_key => ({
+                    doc_key,
+                    similarity_score: cosineSimilarity(latest_message_embedding, this.skill_docs_embeddings[doc_key])
+                }))
+                .sort((a, b) => b.similarity_score - a.similarity_score);
+            }
         }
 
         let length = skill_doc_similarities.length;

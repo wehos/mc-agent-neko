@@ -4241,7 +4241,7 @@ export async function pillarUp(bot, targetY = null) {
     // Only tower with full solid blocks we actually hold (no slabs/stairs/etc,
     // which don't make a reliable 1-high step).
     const SCAFFOLD = ['dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'deepslate',
-        'netherrack', 'granite', 'andesite', 'diorite', 'tuff', 'blackstone', 'gravel',
+        'netherrack', 'end_stone', 'granite', 'andesite', 'diorite', 'tuff', 'blackstone', 'gravel',
         'sand', 'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks',
         'acacia_planks', 'dark_oak_planks'];
     const held = new Set(bot.inventory.items().map(i => i.name));
@@ -4524,6 +4524,104 @@ export async function customSkill(bot, skillName, ...args) {
         bot._currentSkill = skillName;
         return await fn(bot, ctx, ...args);
     } finally {
-        bot._currentSkill = prevSkill;
+        // Restore ONLY while we are still the holder. A Promise.race-orphaned inner skill
+        // (achieve.js races customSkill vs timeouts; the loser keeps running detached) can
+        // finish LATE — after the outer skill already returned and cleared this — and its
+        // stale prevSkill would overwrite null/newer state. That poisons ms.busy forever
+        // and MUTES the kernel (live incident 2026-07-02 00:16→00:38: a raced-out inner
+        // skill restored 'prepNether' over null; bot stood idle 22 min).
+        if (bot._currentSkill === skillName) bot._currentSkill = prevSkill;
     }
+}
+
+// ── Endgame milestone store (bots/_supervisor/endgame.json) ─────────────────
+// ONE shared read/merge/write helper for the endgame chain. Skills used to carry
+// divergent copies (blazeRods/setupEndPortal/slayDragon + world_model's read-only
+// endgameState) whose merge orders could silently wipe or resurrect persisted
+// milestones — e.g. a cached bot._endgame={} after a transient read error made
+// setupEndPortal's cache-only patch erase strongholdKnown/portalRoom from disk.
+// Contract: egPatch re-reads the FILE every call and merges file ∪ bot cache ∪
+// patch, then writes atomically (tmp+rename) so a watchdog kill mid-write can
+// never leave torn JSON that erases the irreversible milestones on next parse.
+const EG_FILE = path.resolve(process.cwd(), 'bots', '_supervisor', 'endgame.json');
+export function egRead(bot) {
+    try {
+        let s = fs_dz.readFileSync(EG_FILE, 'utf8');
+        if (s.charCodeAt(0) === 0xFEFF) s = s.slice(1);            // BOM-safe
+        const j = JSON.parse(s);
+        return (j && typeof j === 'object') ? j : {};
+    } catch (e) { return (bot && bot._endgame) || {}; }
+}
+export function egPatch(bot, patch) {
+    try {
+        const cur = Object.assign({}, egRead(bot), (bot && bot._endgame) || {}, patch, { ts: Date.now() });
+        if (bot) bot._endgame = cur;                               // keep the world model's cache fresh
+        const tmp = EG_FILE + '.tmp';
+        fs_dz.writeFileSync(tmp, JSON.stringify(cur, null, 2));
+        fs_dz.renameSync(tmp, EG_FILE);
+        return cur;
+    } catch (e) { return (bot && bot._endgame) || {}; }
+}
+
+// ── pickRunway ───────────────────────────────────────────────────────────────
+// ONE shared read of the tool-durability budget — durability is the third budget
+// next to time (maxMs) and food/hp gates, and until now it lived in three divergent
+// fragments (modes.js kit 85%-worn effective picks, mineDown's pickAboutToBreak /
+// canCraftPick, MINE_NIGHT_PICK_BUDGET's summed uses). Live 2026-07-02: achieve's
+// xray iron staircase wore the lone stone pick to dust mid-descent (none of the
+// fragments guarded that path) → pickless underground at night → every kind
+// rotated through dispatch-cooldowns till dawn. All dig loops and the TOOL_UPKEEP
+// proposal consult THIS predicate so the numbers can never disagree.
+export function pickRunway(bot) {
+    let total = 0, effective = 0, bestTier = 0, bestUsesLeft = 0, sumUsesLeft = 0;
+    const tierRank = { wooden: 1, golden: 1, stone: 2, iron: 3, diamond: 4, netherite: 5 };
+    const tierName = ['none', 'wooden', 'stone', 'iron', 'diamond', 'netherite'];
+    const counts = {};
+    for (const it of bot.inventory.items()) {
+        counts[it.name] = (counts[it.name] || 0) + it.count;
+        if (!/_pickaxe$/.test(it.name || '')) continue;
+        total += it.count;
+        const max = it.maxDurability || 0;
+        const used = (typeof it.durabilityUsed === 'number') ? it.durabilityUsed : 0;
+        const left = max > 0 ? Math.max(0, max - used) : 999;   // unknown durability = don't panic
+        sumUsesLeft += left;
+        if (!max || (used / max) < 0.85) effective += it.count; // "effective" mirrors modes.js kit
+        if (left > bestUsesLeft) bestUsesLeft = left;
+        const t = tierRank[(it.name || '').split('_')[0]] || 0;
+        if (t > bestTier) bestTier = t;
+    }
+    // Field-recraft check mirrors mineDown's canCraftPick + modes.js canRecraftPick:
+    // a spare only protects you if you can MAKE the next one where you stand —
+    // cobble for the head, sticks (or planks for them), and a carried table (or
+    // planks to build one; a "nearby" table is a lie deep underground).
+    const planksMax = Math.max(0, ...Object.keys(counts).filter(k => k.endsWith('_planks')).map(k => counts[k]));
+    const logs = Object.keys(counts).filter(k => k.endsWith('_log')).reduce((s, k) => s + counts[k], 0);
+    const sticks = counts['stick'] || 0;
+    const cobble = (counts['cobblestone'] || 0) + (counts['cobbled_deepslate'] || 0);
+    const carriedTable = (counts['crafting_table'] || 0) > 0;
+    const woodForRecraft = planksMax + logs * 4;
+    const planksToRecraft = (carriedTable ? 0 : 4) + (sticks >= 2 ? 0 : 2);
+    const canFieldCraftPick = cobble >= 3 && woodForRecraft >= planksToRecraft;
+    return {
+        total, effective, bestTier: tierName[bestTier] || 'none', bestUsesLeft, sumUsesLeft,
+        carriedTable, canFieldCraftPick,
+        // ≤6 uses ≈ 2 more staircase steps (3 blocks/step) — enough to climb back out.
+        aboutToBreak: total === 0 || (total === 1 && bestUsesLeft <= 6),
+    };
+}
+
+// ── eatPreferred ─────────────────────────────────────────────────────────────
+// Shared "eat the best SAFE food" idiom (blazeRods/enderPearls carried copies;
+// slayDragon's first-FOOD_RE-match variant could lock onto carrot_on_a_stick /
+// poisonous_potato / raw chicken mid-dragon-fight and starve at low hp).
+const FOOD_PRIORITY = ['golden_apple', 'cooked_beef', 'cooked_porkchop', 'cooked_mutton',
+    'cooked_chicken', 'cooked_salmon', 'cooked_cod', 'cooked_rabbit', 'baked_potato',
+    'bread', 'apple', 'carrot', 'melon_slice', 'sweet_berries'];
+export async function eatPreferred(bot) {
+    const counts = {};
+    for (const it of bot.inventory.items()) counts[it.name] = (counts[it.name] || 0) + it.count;
+    let f = FOOD_PRIORITY.find(n => counts[n] > 0);
+    if (!f) { const it = bot.inventory.items().find(i => /^cooked_|^bread$|^baked_|_stew$/.test(i.name)); f = it && it.name; }
+    if (!f) return false;
+    try { await consume(bot, f); return true; } catch (e) { return false; }
 }

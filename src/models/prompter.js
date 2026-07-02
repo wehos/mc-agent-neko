@@ -9,6 +9,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { selectAPI, createModel } from './_model_map.js';
+import { withTimeout, EMBED_TIMEOUT_MS } from '../utils/timeout.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -89,6 +90,23 @@ export class Prompter {
         }
         else {
             this.embedding_model = createModel({api: chat_model_profile.api});
+        }
+
+        // Time-bound every embed call: on this network the embeddings endpoint
+        // can stall forever (DNS poisoning) without erroring, which used to hang
+        // initExamples() and block startup before MC login. A timeout turns the
+        // stall into a rejection that the callers' existing catch->word-overlap
+        // fallbacks handle. Startup embeds run in parallel, so total startup
+        // delay in the worst case is ~one EMBED_TIMEOUT_MS budget.
+        const raw_embedding_model = this.embedding_model;
+        if (raw_embedding_model && typeof raw_embedding_model.embed === 'function') {
+            this.embedding_model = {
+                embed: (text) => withTimeout(
+                    (async () => await raw_embedding_model.embed(text))(),
+                    EMBED_TIMEOUT_MS,
+                    'embedding request'
+                )
+            };
         }
 
         this.skill_libary = new SkillLibrary(agent, this.embedding_model);

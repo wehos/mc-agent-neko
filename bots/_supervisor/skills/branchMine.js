@@ -181,6 +181,31 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
         } catch (e) {}
         return null;
     };
+    // ★PICK-RUNWAY GUARD (shared predicate skills.pickRunway — one durability read for all dig
+    // loops, see skills.js). Durability is a budget like food/time. Live 2026-07-02: achieve's
+    // xray iron staircase ground the lone stone pick to dust mid-descent → pickless underground
+    // at night with no wood to recraft. So at every dig-step head: if the LAST pick is about to
+    // snap AND we can't field-craft a replacement (cobble+wood on hand), stop digging NOW — the
+    // few uses left are the climb-out budget, not more tunnel.
+    // Return contract on guard exit: truthy ONLY if THIS dispatch made real progress (ore gained /
+    // y descended / tunnel steps dug); zero progress returns false so the kernel dispatch-cooldown
+    // can engage instead of hot re-dispatching onto the same dying pick.
+    const pickRunwayStop = () => {
+        try {
+            if (typeof skills.pickRunway !== 'function') return null;   // predicate not deployed → fail open
+            const rw = skills.pickRunway(bot);
+            return (rw && rw.aboutToBreak && !rw.canFieldCraftPick)
+                ? `pick about to break (usesLeft=${rw.bestUsesLeft} tier=${rw.bestTier}) + no field recraft`
+                : null;
+        } catch (e) { return null; }   // a guard bug must never block mining → fail open
+    };
+    const oreUnits = () => bot.inventory.items()
+        .filter(it => /_ore$|^raw_(iron|copper|gold)$|^(coal|diamond|emerald|redstone|lapis_lazuli)$/.test(it.name || ''))
+        .reduce((s, it) => s + it.count, 0);
+    const entryY = Math.floor(bot.entity.position.y);
+    const oreAtEntry = oreUnits();
+    let tunnelStepsOk = 0;
+    const runProgress = () => oreUnits() > oreAtEntry || (entryY - Math.floor(bot.entity.position.y)) >= 1 || tunnelStepsOk > 0;
     const digBlock = async (block, label, maxMs = 9000) => {
         if (!block || open(block)) return 'gone';
         if (/lava|water|bedrock/.test(block.name || '')) return 'blocked';
@@ -575,6 +600,8 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             if (lowFoodStop) { log(bot, `branchMine stop ${lowFoodStop}; no more descent`); motion('branchMine.descent.stop', { reason: 'low-food-essential-stop', detail: lowFoodStop, y: Math.floor(bot.entity.position.y), targetY }); return false; }
             const stop = nightActionableStop('descent');
             if (stop) { log(bot, `branchMine stop ${stop}; no more descent`); motion('branchMine.descent.stop', { reason: 'night-actionable-hostile', detail: stop, y: Math.floor(bot.entity.position.y), targetY }); return false; }
+            const pickStop = pickRunwayStop();
+            if (pickStop) { log(bot, `branchMine stop descent: ${pickStop} — keep the last uses to climb out`); motion('branchMine.descent.stop', { reason: 'pick-about-to-break', detail: pickStop, y: Math.floor(bot.entity.position.y), targetY }); return runProgress(); }
             const b = bot.entity.position.floored();
             const targetFeet = new Vec3(b.x + dx, b.y - 1, b.z + dz);
             const cells = [
@@ -693,10 +720,12 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
         if (lowFoodStop) { log(bot, `branchMine stop ${lowFoodStop}; no more tunnel`); motion('branchMine.tunnel.stop', { reason: 'low-food-essential-stop', detail: lowFoodStop, step: i + 1, length }); return false; }
         const stop = nightActionableStop(`tunnel-step ${i + 1}/${length}`);
         if (stop) { log(bot, `branchMine stop ${stop}; no more tunnel`); motion('branchMine.tunnel.stop', { reason: 'night-actionable-hostile', detail: stop, step: i + 1, length }); return false; }
+        const pickStop = pickRunwayStop();
+        if (pickStop) { log(bot, `branchMine stop tunnel: ${pickStop} — keep the last uses to climb out`); motion('branchMine.tunnel.stop', { reason: 'pick-about-to-break', detail: pickStop, step: i + 1, length }); return runProgress(); }
         const p = bot.entity.position.floored();
         const beforePos = `${p.x},${p.z}`;
         const ok = await stepInto(new Vec3(p.x + dx, p.y, p.z + dz), dx, dz, `tunnel-step ${i + 1}/${length}`);
-        if (!ok) stale++;
+        if (!ok) stale++; else tunnelStepsOk++;
         if ((await mineNearby()) === false) return false;
         // Standard branch-mining rib: glance down both side walls periodically so flanking
         // seams get exposed/mined, not just the ore the spine happens to slice through.

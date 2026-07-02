@@ -42,11 +42,95 @@ export default async function realNetherPortal(bot, ctx) {
         prog('stood in portal but no dimension swap (yet)');
         return inNether();
     };
-    const existing = findPortal();
-    if (existing) { const ok = await enterPortal(existing); return { entered: ok, reused: true }; }
+    // Persist the lit-portal anchor to endgame.json (shared egPatch: file∪cache∪patch, atomic
+    // write) — building consumes the 10 obsidian, so without a persisted location ENTER_NETHER
+    // could never re-enter after a nether death and the chain re-mined a full lava-pool kit
+    // while the lit portal stood right there (review world_model:598/:600). Anchoring also
+    // clears the dead-anchor memo below: we KNOW a lit portal stands here now.
+    const anchorPortal = (pos) => {
+        try { skills.egPatch(bot, { netherPortalOverworld: { x: pos.x, y: pos.y, z: pos.z } }); } catch (e) {}
+        bot._portalAnchorMissAt = 0;
+    };
 
-    if (has('obsidian') < 10) { prog(`need obsidian 10, have ${has('obsidian')} — abort`); return { entered: false, reason: 'obsidian' }; }
-    if (has('flint_and_steel') < 1) { prog('no flint_and_steel — abort'); return { entered: false, reason: 'flint_and_steel' }; }
+    const existing = findPortal();
+    if (existing) {
+        anchorPortal(existing.position);
+        const ok = await enterPortal(existing);
+        return { entered: ok, reused: true, failed: !ok };
+    }
+
+    // ── Persisted anchor beyond the 32-block scan → walk back and reuse it (review :598/:600:
+    //    the in-file reuse only covered a portal within 32 blocks, so a far respawn/migration
+    //    forced the fresh-10-obsidian path even with a standing lit portal). ──
+    const anchor = (() => { try { return (skills.egRead(bot) || {}).netherPortalOverworld; } catch (e) { return null; } })();
+    if (anchor && Number.isFinite(anchor.x) && Number.isFinite(anchor.z)
+        && !(bot._portalAnchorMissAt && Date.now() - bot._portalAnchorMissAt < 600000)) {   // dead-anchor memo (bot._*, hot-reload safe): don't re-march to a portal we just found missing
+        const ay = Number.isFinite(anchor.y) ? anchor.y : bot.entity.position.y;
+        const dist = () => bot.entity.position.distanceTo(new Vec3(anchor.x, ay, anchor.z));
+        if (dist() > 24) {
+            prog(`persisted portal anchor @ ${anchor.x},${ay},${anchor.z} (${Math.round(dist())}b away) — walking back to reuse it`);
+            // Bounded legs, each raced against a 60s cap (goToPosition has no deadline of its own
+            // and a cross-country path can wedge); bail on interrupt/death or a no-headway leg.
+            // Worst case ~6min — still far cheaper than an 8-min lava re-mine + fresh build.
+            let lastD = dist();
+            for (let leg = 0; leg < 6 && dist() > 24; leg++) {
+                if (bot.interrupt_code || bot.health <= 0) break;
+                await Promise.race([
+                    skills.goToPosition(bot, anchor.x, ay, anchor.z, 8).catch(() => {}),
+                    skills.wait(bot, 60000),                       // interrupt-aware cap
+                ]);
+                try { bot.pathfinder.stop(); } catch (e) {}
+                await wait(300);                                   // let a raced-out goto settle before re-goaling
+                const d = dist();
+                if (lastD - d < 4) break;                          // no headway (wall/ocean) — stop burning budget
+                lastD = d;
+            }
+        }
+        const back = findPortal();
+        if (back) {
+            anchorPortal(back.position);                           // refresh — portal may sit a few blocks off the stale anchor
+            const ok = await enterPortal(back);
+            return { entered: ok, reused: true, failed: !ok };
+        }
+        // ── Frame stands but UNLIT (ghast broke the portal blocks; obsidian survives)?
+        //    A zero-cost flint_and_steel relight beats memo-miss → fresh 10-obsidian build
+        //    (which we usually can't afford — the first build consumed the kit). Mirror the
+        //    build path's lighting idiom: activate the top face of the block UNDER the
+        //    anchored interior cell. blazeRods carries the same branch for the nether side.
+        if (has('flint_and_steel') >= 1) {
+            const cell = new Vec3(Math.floor(anchor.x), Math.floor(ay), Math.floor(anchor.z));
+            const below = bot.blockAt(cell.offset(0, -1, 0));
+            const inCell = bot.blockAt(cell);
+            if (below && below.name === 'obsidian' && inCell && /^(air|cave_air|fire)$/.test(inCell.name)) {
+                prog(`anchor frame stands unlit — attempting flint_and_steel relight @ ${cell}`);
+                try { await skills.goToPosition(bot, cell.x, cell.y, cell.z, 3); } catch (e) {}
+                for (let t = 0; t < 2 && !bot.interrupt_code && bot.health > 0; t++) {
+                    try { await skills.equip(bot, 'flint_and_steel'); } catch (e) {}
+                    try { await bot.lookAt(below.position.offset(0.5, 1, 0.5), true); } catch (e) {}
+                    try { await bot.activateBlock(below); } catch (e) { prog(`relight activate err ${e.message}`); }
+                    await wait(1500);
+                    const relit = bot.blockAt(cell);
+                    if (relit && relit.name === 'nether_portal') {
+                        prog('★ anchor portal RELIT (flint_and_steel on the standing frame, zero obsidian spent)');
+                        anchorPortal(relit.position);
+                        const ok = await enterPortal(relit);
+                        return { entered: ok, reused: true, relit: true, failed: !ok };
+                    }
+                }
+                prog('relight failed — falling through to anchor-miss memo');
+            }
+        }
+        // Anchor is stale (frame gone / unloaded / relight failed): memo the miss for 10min so
+        // the kernel's 3 retry dispatches don't re-march here, then fall through to the build
+        // path — its obsidian/flint gates keep the failed:true shape the kernel cooldown counts.
+        bot._portalAnchorMissAt = Date.now();
+        prog(`anchor miss — no lit nether_portal within 32 of ${anchor.x},${ay},${anchor.z}; falling through to build path`);
+    }
+
+    // failed:true = explicit dispatch-failure key the kernel's cooldown counts (kernel.js
+    // no longer shape-sniffs entered===false — that collided with setupEndPortal's progress).
+    if (has('obsidian') < 10) { prog(`need obsidian 10, have ${has('obsidian')} — abort`); return { entered: false, failed: true, reason: 'obsidian' }; }
+    if (has('flint_and_steel') < 1) { prog('no flint_and_steel — abort'); return { entered: false, failed: true, reason: 'flint_and_steel' }; }
 
     // ── Site: 2 blocks in front (+z) of where we stand, on solid ground. ──
     const p = bot.entity.position.floored();
@@ -88,7 +172,7 @@ export default async function realNetherPortal(bot, ctx) {
     for (const [x, y, z] of [...interior, ...cells.left, ...cells.right, ...cells.top]) await digAt(x, y, z);
     for (const [x, , z] of [[x0 - 1, 0, z0], [x0 + 2, 0, z0]]) {
         if (!solidAt(x, gy, z)) {
-            if (has('cobblestone') < 1) { prog('no cobblestone for column support — abort'); return { entered: false, reason: 'cobble' }; }
+            if (has('cobblestone') < 1) { prog('no cobblestone for column support — abort'); return { entered: false, failed: true, reason: 'cobble' }; }
             await placeReal('cobblestone', x, gy, z);
         }
     }
@@ -104,12 +188,12 @@ export default async function realNetherPortal(bot, ctx) {
         return true;
     };
     for (const [x, y, z] of cells.bottom) await digAt(x, y, z);   // sink the bottom row
-    if (!await placeFrame(cells.bottom)) return { entered: false, reason: 'interrupted' };
-    if (!await placeFrame(cells.left)) return { entered: false, reason: 'interrupted' };
-    if (!await placeFrame(cells.right)) return { entered: false, reason: 'interrupted' };
+    if (!await placeFrame(cells.bottom)) return { entered: false, failed: true, reason: 'interrupted' };
+    if (!await placeFrame(cells.left)) return { entered: false, failed: true, reason: 'interrupted' };
+    if (!await placeFrame(cells.right)) return { entered: false, failed: true, reason: 'interrupted' };
     if (!solidAt(x0 - 1, gy + 4, z0)) await placeReal('cobblestone', x0 - 1, gy + 4, z0);  // temp support for top row
-    if (!await placeFrame(cells.top)) return { entered: false, reason: 'interrupted' };
-    if (failed.length) { prog(`frame INCOMPLETE, failed cells: ${failed.join(' | ')} — abort light`); return { entered: false, reason: 'frame', failed }; }
+    if (!await placeFrame(cells.top)) return { entered: false, failed: true, reason: 'interrupted' };
+    if (failed.length) { prog(`frame INCOMPLETE, failed cells: ${failed.join(' | ')} — abort light`); return { entered: false, failed: true, reason: 'frame', failedCells: failed }; }
     prog(`frame complete (${placed} obsidian placed)`);
 
     // ── Make sure the interior is clear, then light it. ──
@@ -129,12 +213,13 @@ export default async function realNetherPortal(bot, ctx) {
         const inb = bot.blockAt(new Vec3(x0, gy + 1, z0));
         if (inb && inb.name === 'nether_portal') { lit = true; break; }
     }
-    if (!lit) { prog('failed to light the portal — frame stands, will retry next pass'); return { entered: false, reason: 'light' }; }
+    if (!lit) { prog('failed to light the portal — frame stands, will retry next pass'); return { entered: false, failed: true, reason: 'light' }; }
     prog('★ portal LIT (real obsidian + flint_and_steel, no cheats)');
     log(bot, 'Nether portal built & lit — the real way.');
+    anchorPortal({ x: x0, y: gy + 1, z: z0 });   // persist the milestone BEFORE entering — survives the dimension swap/death
 
     // ── Walk in. ──
     const pb = bot.blockAt(new Vec3(x0, gy + 1, z0));
     const entered = pb ? await enterPortal(pb) : false;
-    return { entered, built: true };
+    return { entered, built: true, failed: !entered };
 }

@@ -33,6 +33,25 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     const hasIronPick = () => { const c = world.getInventoryCounts(bot); return Object.keys(c).some(n => /^(iron|diamond|netherite)_pickaxe$/.test(n) && c[n] > 0); };
     if (!hasIronPick()) { log(bot, '⛏️ mineDiamonds ABORT — no iron+ pickaxe (lost it?). Can\'t harvest diamond; returning so achieve re-acquires.'); return dia(); }
 
+    // ★PICK-RUNWAY GUARD (shared predicate skills.pickRunway — see skills.js). hasIronPick above
+    // is the AFTER-the-fact check (pick already gone/lost); this is the BEFORE check: the LAST
+    // pick is nearly dead and we can't field-craft a replacement (cobble+wood on hand), so digging
+    // deeper only strands us pickless at depth (live 2026-07-02: achieve's xray staircase ground
+    // the lone pick to dust underground at night). Checked at both dig-loop heads below.
+    // Return contract on guard exit: truthy (this file's diamond-count shape) ONLY when THIS
+    // dispatch actually gained diamonds (in hand or banked); zero progress returns false so the
+    // kernel dispatch-cooldown engages. NEVER the stale held/banked stock count.
+    const pickRunwayStop = () => {
+        try {
+            if (typeof skills.pickRunway !== 'function') return null;   // predicate not deployed → fail open
+            const rw = skills.pickRunway(bot);
+            return (rw && rw.aboutToBreak && !rw.canFieldCraftPick)
+                ? `pick about to break (usesLeft=${rw.bestUsesLeft} tier=${rw.bestTier}) + no field recraft`
+                : null;
+        } catch (e) { return null; }   // a guard bug must never block mining → fail open
+    };
+    const diaAtEntry = dia();
+
     // GET OUT OF WATER FIRST. In a jungle/lake biome the dive often STARTS in surface
     // water; the water-aware descent can't seat a dry shaft there, so digDown just floods
     // and the drowning-escape mode fires every tick, pinning the bot at the surface
@@ -128,6 +147,10 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     let guard = 0, stalls = 0, drownStrikes = 0;
     while (yNow() > TARGET_Y && guard++ < 250) {
         if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
+        // ★PICK-RUNWAY: never dig the shaft deeper on a dying lone pick — the remaining
+        // uses are the climb-out budget. Banking hasn't run yet, so in-hand delta is exact.
+        const pickStop = pickRunwayStop();
+        if (pickStop) { log(bot, `⛏️ ${pickStop} — stop descent at y=${yNow()}, keep the last uses to climb out`); return dia() > diaAtEntry ? dia() : false; }
         // DROWNING-AWARE DESCENT. In a water world the shaft punches into an aquifer and
         // water floods the bot's head faster than sealLevel can wall it; the
         // self_preservation mode then escapes us UP every tick while THIS loop digs back
@@ -180,11 +203,20 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     // withdraw enough to craft. (death drops only what we carry, not the chest.)
     let g2 = 0;
     let banked = await skills.customSkill(bot, 'diamondBank', 'count').catch(() => 0);
+    const bankedAtEntry = banked;
     while ((banked + dia()) < count && g2++ < 10) {
         if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} } // a mode acted — resume
         // ★Re-check the pickaxe mid-mining: it can break (durability) or be lost to a death+
         // respawn while this loop runs. Keep digging the diamond layer pickaxe-less = useless.
         if (!hasIronPick()) { log(bot, '⛏️ pickaxe gone mid-dive — stop mining (achieve re-acquires).'); break; }
+        // ★PICK-RUNWAY: same pre-emptive stop mid-mining (collectBlock/branchMine below grind the
+        // pick on stone too). Progress counts banked deposits from THIS dispatch, not the stock.
+        const pickStop = pickRunwayStop();
+        if (pickStop) {
+            log(bot, `⛏️ ${pickStop} — stop diamond mining at y=${yNow()} (achieve re-acquires)`);
+            const gained = (banked + dia()) - (bankedAtEntry + diaAtEntry);
+            return gained > 0 ? (dia() || gained) : false;
+        }
         await lightUp();
         const before = dia();
         await skills.collectBlock(bot, 'diamond', count).catch(e => log(bot, `collect diamond err: ${e.message}`));

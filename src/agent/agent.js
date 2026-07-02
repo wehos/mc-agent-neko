@@ -13,7 +13,10 @@ import { createFramework } from './framework/index.js';
 import { installVineUnstick } from './library/vine_unstick.js';
 import convoManager from './conversation.js';
 import { handleTranslation, handleEnglishTranslation } from '../utils/translator.js';
-import { addBrowserViewer } from './vision/browser_viewer.js';
+// NOTE (local deploy): addBrowserViewer import removed — it is HARD-DISABLED below
+// (its only call site is commented out) and statically importing browser_viewer.js
+// pulls in prismarine-viewer, whose require/import mix crashes Node's ESM/CJS loader
+// (ERR_INTERNAL_ASSERTION) at startup. Re-add after building headless-gl if you want it.
 import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 import settings from './settings.js';
 import { Task } from './tasks/tasks.js';
@@ -997,7 +1000,19 @@ export class Agent {
             // missionNether path is untouched. See docs/framework-v2-scaffold.md.
             // observe:true turns on S3-shadow logging (proposer vs live skill → framework-shadow.log)
             // WITHOUT enabling the decision loop — gathers parity data before any live cutover.
-            try { this.framework = createFramework(this, { observe: true }); } catch (e) { console.warn('framework init failed:', e && e.message); }
+            //
+            // ── P1 (speedrun): make the enable/shadow flags env-driven so the launcher can
+            //    drive the tier chain LIVE without a code edit, while the SAFE default (off /
+            //    shadow-only) is preserved when the env vars are unset:
+            //      MC_FRAMEWORK_V2=1        → enable the kernel decision loop (also read in kernel.js)
+            //      MC_FRAMEWORK_SHADOW=0    → let it actually DISPATCH skills (else it only shadow-logs)
+            //    So `MC_FRAMEWORK_V2=1 MC_FRAMEWORK_SHADOW=0` = live tier-chain driving.
+            const _fwEnabled = process.env.MC_FRAMEWORK_V2 === '1';
+            const _fwShadow = process.env.MC_FRAMEWORK_SHADOW !== '0'; // shadow ON unless explicitly disabled
+            try {
+                this.framework = createFramework(this, { observe: true, enabled: _fwEnabled, shadow: _fwShadow });
+                if (_fwEnabled) console.log(`🧠 framework-v2 kernel ENABLED (${_fwShadow ? 'SHADOW — logs only' : 'LIVE — driving skills'})`);
+            } catch (e) { console.warn('framework init failed:', e && e.message); }
             // Mineflayer-layer vine-trap unstick (recurring terrain trap, user-flagged).
             try { installVineUnstick(this.bot, (m) => { try { console.log(m); } catch (e) {} }); } catch (e) { console.warn('vine_unstick init failed:', e && e.message); }
 

@@ -23,6 +23,32 @@ import { pending as pendingInstincts } from './instinct.js';
 
 const SHADOW_LOG = 'bots/_supervisor/framework-shadow.log';
 
+// ── ★DISPATCH-FAILURE COOLDOWN (livelock closure): a committed goal whose skill file is
+//    missing / hard-fails means customSkill returns false and the 2s survival tick re-dispatches
+//    it forever (e.g. OPENING_VILLAGE→villageHarvest.js not written yet). After
+//    DISPATCH_FAIL_LIMIT consecutive failures of one kind, suppress that kind's proposals for
+//    DISPATCH_COOLDOWN_MS via bot._kindCooldownUntil (read by world_model.proposeTasks — shared
+//    through the bot object because modes.js commitGoal re-commits from the SAME proposal list
+//    every ~2s, so a kernel-private suppression would not stick) and release the commitment. ──
+const DISPATCH_FAIL_LIMIT = 3;
+const DISPATCH_COOLDOWN_MS = 300000;   // 5 min — the kind naturally re-proposes on expiry
+
+// ── ★SUPERVISOR-CANCEL WINDOW: ws cancel_skill / modes watchdog kicks stamp
+//    bot._supervisorCancelAt; skills poll cancelRequested() with this same 30s TTL
+//    (prepNether.js:26, missionNether.js:381) and bail with `false` the moment they start.
+//    A dispatch inside the window therefore CANNOT progress — it yields false in seconds,
+//    the idle kernel re-dispatches ~6s later, and 3 attempts fit easily in 30s → every
+//    cancel_skill handed the committed kind a pointless 5-min dispatch-cooldown. So the
+//    kernel HOLDS dispatch while the window is live, and a failure that lands inside it
+//    (cancel arrived mid-run) is NOT counted as a strike. ──
+const SUPERVISOR_CANCEL_WINDOW_MS = 30000;   // MUST mirror the skills' cancelRequested() TTL
+
+// ── ★BUSY-STUCK WATCHDOG: how long bot._currentSkill may sit set with NO supervised
+//    skill and NO executing action before the kernel declares it an orphan and clears it.
+//    No legitimate state holds that combination for minutes (kernel/ws dispatches set
+//    agent.supervised_skill; mode-invoked skills run inside actions.executing). ──
+const BUSY_STUCK_MS = 180000;   // 3 min — kernel skills run longer but are supervised
+
 export class Kernel {
     /**
      * @param {any} agent  the mindcraft Agent (has .bot, .prompter, .actions, .supervised_skill)
@@ -46,6 +72,8 @@ export class Kernel {
         this.log = opts.log || ((m) => { try { console.log(m); } catch (e) {} });
         this._lastDecideAt = 0;
         this._decideEveryMs = 2000;                  // don't spam the LLM
+        this._dispatchFails = Object.create(null);   // kind -> consecutive dispatch-failure count (★cooldown)
+        this._cancelHoldAt = 0;                      // last _supervisorCancelAt we logged a dispatch-hold for
         this._companionUntil = 0;                    // companion-mode sticky window after a player msg
         this._lastShadowLog = '';
         this._lastObserveAt = 0;
@@ -130,7 +158,8 @@ export class Kernel {
         if (reflexes.length && reflexes[0].priority >= 80) return;
 
         // 2) A committed task is running → don't disturb it (decision-speed: commit, don't yo-yo).
-        if (ms.busy) return;
+        if (ms.busy) { this._busyStuckWatchdog(); return; }
+        this._busyStuck = null;
 
         // 3) Idle → throttle, then propose + decide.
         const now = Date.now();
@@ -149,6 +178,28 @@ export class Kernel {
         if (!decision || !decision.chosen) return;
 
         await this._commit(decision);
+    }
+
+    // ── ★BUSY-STUCK WATCHDOG (orphaned-_currentSkill self-heal). Live incident 2026-07-02
+    //    00:16→00:38: achieve.js races customSkill(inner) vs timeouts; a raced-out inner
+    //    skill finished LATE and its finally restored prevSkill='prepNether' over the fresh
+    //    null — ms.busy stayed true with NOTHING running and the kernel sat muted 22 min
+    //    while the bot stood idle. customSkill now restore-guards (skills.js finally); this
+    //    is the belt-and-braces for any other way the name gets orphaned. Timer accrues per
+    //    held NAME (executing flickers from mode actions don't reset it), but it only FIRES
+    //    in an executing gap so a live mode-invoked skill is never yanked mid-action. ──
+    _busyStuckWatchdog() {
+        const name = this.bot._currentSkill;
+        const supervised = !!(this.agent && this.agent.supervised_skill);
+        if (!name || supervised) { this._busyStuck = null; return; }
+        if (!this._busyStuck || this._busyStuck.name !== name) this._busyStuck = { name, since: Date.now() };
+        const heldMs = Date.now() - this._busyStuck.since;
+        if (heldMs < BUSY_STUCK_MS) return;
+        if (this.agent && this.agent.actions && this.agent.actions.executing) return;
+        this.log(`[kernel] ★busy-stuck watchdog: bot._currentSkill='${name}' held ${Math.round(heldMs / 1000)}s with no supervised skill and no executing action — clearing the orphan (kernel unmutes)`);
+        try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [kernel] ★busy-stuck watchdog cleared orphaned _currentSkill='${name}' after ${Math.round(heldMs / 1000)}s\n`); } catch (e) {}
+        this.bot._currentSkill = null;
+        this._busyStuck = null;
     }
 
     /**
@@ -175,24 +226,101 @@ export class Kernel {
         const p = decision.chosen;
         const line = `[kernel] commit ${p.kind} via ${p.skill || '(free)'} — ${decision.reason}`;
         if (this.shadow) {
+            // Shadow-mode invariance: return BEFORE any dispatch/counting/heartbeat —
+            // observe/shadow behavior stays byte-identical (no bot._kindCooldownUntil writes).
             if (line !== this._lastShadowLog) { this.log(`[shadow] ${line}`); this._lastShadowLog = line; }
             return;
         }
         if (!p.skill) return;
+        // ★SUPERVISOR-CANCEL WINDOW → hold dispatch until it clears (see constant above).
+        // Checked HERE (after decide's await, right before we touch the bot) so a cancel
+        // arriving mid-tick still holds; it also keeps the stale-interrupt clear below from
+        // swallowing the live cancel's interrupt_code. Reflexes/modes are untouched — this
+        // only pauses task dispatch. Not a strike: nothing was dispatched.
+        if (this.bot._supervisorCancelAt && Date.now() - this.bot._supervisorCancelAt < SUPERVISOR_CANCEL_WINDOW_MS) {
+            if (this._cancelHoldAt !== this.bot._supervisorCancelAt) {
+                this._cancelHoldAt = this.bot._supervisorCancelAt;
+                const left = Math.ceil((this.bot._supervisorCancelAt + SUPERVISOR_CANCEL_WINDOW_MS - Date.now()) / 1000);
+                this.log(`[kernel] supervisor-cancel window — holding dispatch ~${left}s (not committing ${p.kind}/${p.skill})`);
+            }
+            return;
+        }
         this.log(line);
+        // ★HEARTBEAT (non-shadow only, before dispatch): prepNether.js:102 reads
+        // bot._kernelDriverActive (fresh ≤10s) to yield its legacy night fallback exactly
+        // when the framework is live-dispatching. Nobody wrote it until now.
+        try { this.bot._kernelDriverActive = Date.now(); } catch (e) {}
+        // ★STALE-INTERRUPT HYGIENE: skills no longer clear bot.interrupt_code at entry
+        // (setupEndPortal's entry-clear swallowed a live !stop raised just before an 8-min
+        // dispatch). A flag still set HERE is a leftover — update() only reaches _commit
+        // when ms.busy is false, i.e. no action is running that the flag could belong to —
+        // and left alone it would abort every dispatch at its first stop() poll (3x false
+        // → a pointless 5-min kind cooldown).
+        if (this.bot.interrupt_code) {
+            this.log(`[kernel] clearing stale interrupt_code before ${p.skill} dispatch`);
+            this.bot.interrupt_code = false;
+        }
+        let res, threw = false;
         try {
             // Dispatch through the same supervised path the bridge uses, so the
             // re-entry guard + supervised lock still apply (one skill at a time).
             const skills = await import('../library/skills.js');
-            this.agent.supervised_skill = true;
+            // ★WS-MUTEX: the tick's ms.busy check is stale by now — the awaits since then
+            // (decide, this import) are exactly where a ws run_skill can start. Re-check right
+            // before taking the lock; no awaits between this check and the assignment, so
+            // check-and-set is atomic on the JS thread. Skipping is not a strike.
+            if (mentalState(this.bot).busy) {
+                this.log(`[kernel] dispatch skip: a supervised skill is already running — not committing ${p.skill}`);
+                return;
+            }
+            // Owner-tagged lock (truthy string, same readers as the old `true`): ws_server.runSkill
+            // tags 'ws'. Each side releases ONLY its own tag — an unconditional clear here is how a
+            // finishing kernel dispatch used to clobber the flag mid-ws-skill, so the next tick saw
+            // busy=false and double-dispatched into the running ws probe (pathfinder tug-of-war).
+            this.agent.supervised_skill = 'kernel';
             try {
-                await skills.customSkill(this.bot, p.skill, ...(p.args || []));
+                res = await skills.customSkill(this.bot, p.skill, ...(p.args || []));
             } finally {
-                this.agent.supervised_skill = false;
+                if (this.agent.supervised_skill === 'kernel') this.agent.supervised_skill = false;
             }
         } catch (e) {
+            threw = true;
             this.log(`[kernel] commit error: ${e && e.message || e}`);
         }
+        // ★DISPATCH-FAILURE COOLDOWN. Strict `res === false` (NOT falsy): customSkill returns
+        // false on a missing file / no default export / invalid name; skills returning 0 (e.g.
+        // mineDiamonds' dia() count) or undefined are NOT counted. Object returns fail ONLY via
+        // the explicit `failed:true` key (realNetherPortal sets it) — a generic `entered===false`
+        // sniff also matched setupEndPortal's truthy PROGRESS return {phase:'enter',entered:false}
+        // and cooled GO_END down while the bot stood on a lit End portal.
+        const failed = threw || res === false
+            || (res && typeof res === 'object' && (res.ok === false || res.failed === true));
+        // ★CANCEL-UNWIND is not a strike: a supervisor cancel landing mid-run makes the skill
+        // return false BY DESIGN (cancelRequested() bail). Counting those was the other half of
+        // the "every cancel_skill → 5-min kind cooldown" livelock. Leave the counter untouched
+        // (neither strike nor reset) when the failure arrives inside a live cancel window.
+        const cancelUnwind = failed && this.bot._supervisorCancelAt
+            && Date.now() - this.bot._supervisorCancelAt < SUPERVISOR_CANCEL_WINDOW_MS;
+        if (failed && !cancelUnwind) {
+            const k = p.kind;
+            this._dispatchFails[k] = (this._dispatchFails[k] || 0) + 1;
+            if (this._dispatchFails[k] >= DISPATCH_FAIL_LIMIT) {
+                this._dispatchFails[k] = 0;
+                // Cooldown lives on the BOT object (HANDOFF red line: no module-level mutable
+                // state — survives skill hot-reload; and proposeTasks can only see the bot).
+                if (!this.bot._kindCooldownUntil) this.bot._kindCooldownUntil = {};
+                this.bot._kindCooldownUntil[k] = Date.now() + DISPATCH_COOLDOWN_MS;
+                // Release the livelocked commitment so modes.js's next commitGoal pass commits
+                // the next-ranked kind (the '(holding commitment)' fallback can't resurrect it).
+                if (this.bot._commitment && this.bot._commitment.kind === k) this.bot._commitment = null;
+                this.log(`[kernel] dispatch-cooldown: ${k}/${p.skill} failed ${DISPATCH_FAIL_LIMIT}x consecutively — suppressing ${k} proposals 5min + releasing commitment`);
+                try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [kernel] ★dispatch-cooldown ${k} via ${p.skill}\n`); } catch (e) {}
+            }
+        } else if (!failed) {
+            this._dispatchFails[p.kind] = 0;
+        }
+        // (failed && cancelUnwind falls through: counter untouched — a cancel neither proves
+        //  the kind broken nor that it works.)
     }
 
     // ── companion ──────────────────────────────────────────────────────────

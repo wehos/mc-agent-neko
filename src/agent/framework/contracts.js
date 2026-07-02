@@ -41,7 +41,7 @@ export const AGENT_MODE = Object.freeze({ SURVIVAL: 'survival', COMPANION: 'comp
  * @property {{bed:any,village:any,wood:any,crops:any,chest:any,animal:any,bedReachCost:number|null}} landmarks  C328 扫描器多 kind 输出
  * @property {{dirt:number,cobble:number,planks:number,log:number}} counts  关键物品计数 (夜间/开局派生用)
  * @property {{action:string,reason:string}} recommendation
- * @property {{level:'wood'|'stone'|'iron'|'diamond',rank:number,nextMilestone:string,progress:{ironBanked:number,diamondBanked:number,ironTarget:number,diamondTarget:number}}} tier  ★T-0093 北极星 tier 状态机 (world_model.proposeTasks 写, 喂遥测/LLM)
+ * @property {{level:'wood'|'stone'|'iron'|'diamond'|'nether_ready'|'nether'|'blaze_done'|'pearls_done'|'eyes_ready'|'the_end'|'dragon_slain',rank:number,nextMilestone:string,progress:{ironBanked:number,diamondBanked:number,ironTarget:number,diamondTarget:number,rods:number=,powder:number=,pearls:number=,eyes:number=,eyeTarget:number=,obsidian:number=,dim:string=}}} tier  ★T-0093 北极星 tier 状态机 (world_model.proposeTasks 写, 喂遥测/LLM); ★ENDGAME ranks 5-11 追加 (rods/powder/pearls/eyes/eyeTarget/obsidian/dim 为 telemetry-only 可选键 — EMPTY_WORLD 省略它们仍合法)
  */
 
 /** A safe empty World so consumers never crash before the world_model mode has run once. */
@@ -80,7 +80,7 @@ export const EMPTY_WORLD = Object.freeze({
  * High-level kinds of work the world model can propose. Kept coarse on purpose:
  * the LLM judges among these; exact coordinates/x-ray detail never appear here
  * (blueprint §C hard constraint — don't expose the cheat, don't overload the LLM).
- * @typedef {'BOOTSTRAP_KIT'|'GET_FOOD'|'GET_BED'|'GET_ARMOR'|'GET_IRON_TOOLS'|'GET_IRON_ARMOR_SET'|'GET_DIAMOND'|'BANK_GEAR'|'BUILD_HOME'|'GO_UNDERGROUND'|'MIGRATE'|'HOLD'|'FORAGE_SURFACE'|'SLEEP'|'FREE_PLAY'|'DUSK_MINE_NIGHT'|'DUSK_GO_BED'|'NIGHT_DIG_ONE'|'NIGHT_SEAL'|'OPENING_SCOUT'|'OPENING_VILLAGE'} ProposalKind
+ * @typedef {'BOOTSTRAP_KIT'|'GET_FOOD'|'GET_BED'|'GET_ARMOR'|'GET_IRON_TOOLS'|'GET_IRON_ARMOR_SET'|'GET_DIAMOND'|'BANK_GEAR'|'BUILD_HOME'|'GO_UNDERGROUND'|'TOOL_UPKEEP'|'MIGRATE'|'HOLD'|'FORAGE_SURFACE'|'SLEEP'|'FREE_PLAY'|'DUSK_MINE_NIGHT'|'DUSK_GO_BED'|'NIGHT_DIG_ONE'|'NIGHT_SEAL'|'OPENING_SCOUT'|'OPENING_VILLAGE'|'GET_DIAMOND_GEAR'|'GET_PORTAL_KIT'|'ENTER_NETHER'|'GET_BLAZE_RODS'|'HUNT_PEARLS'|'CRAFT_EYES'|'GO_END'|'SLAY_DRAGON'} ProposalKind
  */
 export const PROPOSAL_KIND = Object.freeze({
     BOOTSTRAP_KIT: 'BOOTSTRAP_KIT',   // wood→planks→table→pick→stone tools
@@ -95,6 +95,7 @@ export const PROPOSAL_KIND = Object.freeze({
     GET_DIAMOND: 'GET_DIAMOND',       // ★T-0092 深挖钻石带 (targetY≈-54) → 攒够 DIAMOND_FLOOR
     BANK_GEAR: 'BANK_GEAR',           // ★T-0092 背包有高价值矿且将满 → 回家入库 (bankGear, 死不丢投资)
     GO_UNDERGROUND: 'GO_UNDERGROUND', // gated by surfaceGate / committed venture
+    TOOL_UPKEEP: 'TOOL_UPKEEP',       // ★镐耐久预算: 备镐+随身补镐kit(台/棍/圆石) — 把 kit.sufficientForUnderground 从"拒绝下矿的门"升级为"主动修复的目标" (craftChain array preset)
     MIGRATE: 'MIGRATE',
     HOLD: 'HOLD',
     FORAGE_SURFACE: 'FORAGE_SURFACE',
@@ -115,6 +116,15 @@ export const PROPOSAL_KIND = Object.freeze({
     OPP_HUNT_ANIMAL: 'OPP_HUNT_ANIMAL',     // @30-72 动态 动物 → 成本/收益打分 (attackNearest)
     OPP_WHEAT_FARM: 'OPP_WHEAT_FARM',       // @40 有床后 → 种麦批量面包 动态停止 (wheatFarm)
     SURVIVAL_NIGHT: 'SURVIVAL_NIGHT',       // (Phase C+ 可选) 单夜保命 trigger 动态 resolve 成下地/床/挖三填一/seal
+    // ── ★ENDGAME chain (post-diamond → Ender Dragon, all LEGIT — zero server commands) ──
+    GET_DIAMOND_GEAR: 'GET_DIAMOND_GEAR', // banked diamonds → craft diamond pickaxe(+sword) (rank 3→4 bridge; craftChain 'diamond_tier')
+    GET_PORTAL_KIT: 'GET_PORTAL_KIT',     // obsidian×10(+spare) + flint_and_steel via gatherObsidian (lava pool + water bucket, gravel→flint)
+    ENTER_NETHER: 'ENTER_NETHER',         // build/light/walk the legit nether portal (realNetherPortal)
+    GET_BLAZE_RODS: 'GET_BLAZE_RODS',     // in-nether: find fortress → farm blazes to rod target → exit via portal (blazeRods)
+    HUNT_PEARLS: 'HUNT_PEARLS',           // overworld NIGHT enderman hunt under 2-high cover (night band @94.5; enderPearls)
+    CRAFT_EYES: 'CRAFT_EYES',             // blaze_rod→blaze_powder→ender_eye batches (craftEyes)
+    GO_END: 'GO_END',                     // eye triangulation → stronghold → fill frames → walk into the End (setupEndPortal)
+    SLAY_DRAGON: 'SLAY_DRAGON',           // destroy end crystals then perch-melee the dragon, fully legit (slayDragon)
 });
 
 /**

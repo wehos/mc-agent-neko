@@ -12,6 +12,14 @@ import { canClutchWater } from './framework/tools/lava_guard.js';
 
 const FAMINE_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_|rotten_flesh|spider_eye/;
 const NORMAL_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_/;
+// ONE shared "placeable filler block we carry" matcher for every wall/seal/interpose
+// consumer in this file (creeperInterpose + self_preservation's fillerOf). These used to
+// be two function-local copies that had ALREADY drifted (calcite/blackstone/basalt in one,
+// unanchored gravel/red_sand in the other) — the exact drift class ★C280 documents as a
+// past death loop (red_sand added to one FILL_RE but not the others → bot dug 163 red_sand
+// yet fillerOf()=undefined → couldn't seal → died 3×). This constant is the UNION of both
+// former copies; add new block families HERE only, never in a local copy.
+const FILL_RE = /cobblestone|cobbled|deepslate|^dirt$|andesite|diorite|granite|^stone$|tuff|gravel|^sand$|red_sand|sandstone|netherrack|_planks$|_log$|_wood$|^planks$|hyphae|^mud$|^clay$|terracotta|dirt_path|coarse_dirt|rooted_dirt|mossy|calcite|blackstone|basalt/;
 
 async function say(agent, message) {
     agent.bot.modes.behavior_log += message + '\n';
@@ -781,6 +789,154 @@ const modes_list = [
             const canWin = hasSword && hasShield && bot.health >= 8 && swarm < 3;
             return !canWin;
         },
+        // ★CREEPER PUNCH-BACK (P0 enclosed-pocket creeper death — proactive primitive #1).
+        // The ONE anti-creeper action that needs NOTHING in inventory (the observed death
+        // gear: no sword, no shield, no blocks, likely no pick). A melee hit — even a bare
+        // fist — knocks the creeper back ~1-1.5 blocks: fired while it is 3.0-3.4m out it
+        // keeps it OUTSIDE its ~3m ignition bubble (the fuse never starts); fired point-
+        // blank it converts a hugging blast (~49HP, lethal unarmored) into a distance-
+        // attenuated one (~8-16HP at 3.5-4.5m). Single use_entity packet — the codebase
+        // itself documents bot.attack as fire-and-forget (skills.js attackEntity) — so this
+        // adds ZERO blocking time to the flee loop: no await, no pathfinder, no dig, no
+        // place. The lookAt is fire-and-forget cosmetics (vanilla gates melee on distance,
+        // not facing). Punching does NOT ignite a creeper (ignition is proximity/flint
+        // only) and does not speed its fuse. Caller owns the >=550ms throttle (clears the
+        // 500ms hurt-invulnerability so every hit lands full knockback; a fist recharges
+        // in 250ms) and the per-encounter cap (no infinite same-action retry).
+        creeperPunchBack: function (agent, creeper) {
+            try {
+                const bot = agent.bot;
+                if (!bot || !bot.entity || !creeper || !creeper.position) return false;
+                if (creeper.isValid === false) return false;
+                if (creeper.position.distanceTo(bot.entity.position) > 3.4) return false;   // melee reach
+                try {
+                    const lk = bot.lookAt(creeper.position.offset(0, 1, 0), true);
+                    if (lk && lk.catch) lk.catch(() => {});
+                } catch (e) {}
+                const atk = bot.attack(creeper);
+                if (atk && atk.catch) atk.catch(() => {});
+                return true;
+            } catch (e) { return false; }
+        },
+        // ★RAW ONE-BLOCK INTERPOSE (proactive primitive #2) — place EXACTLY ONE solid block
+        // into the open cell between us and the creeper. A solid block between bot and
+        // blast genuinely attenuates explosion damage (exposure-ray obstruction) even when
+        // the creeper detonates anyway. This is NOT a "LOS break resets the fuse" claim —
+        // an ignited fuse only reverses at >7m or on a lost path target.
+        // HARD RULES (the round-1 rejection lessons, all enforced here):
+        //   • NEVER skills.placeBlock: its <1.1 too-close branch runs pathfinder GoalInvert
+        //     (multi-second stall) and its tickConfirm retries burn ~1.4-1.6s — both slower
+        //     than the ~1.5s fuse this must beat. Raw single bot.placeBlock only (the same
+        //     primitive the mobility MAROONED bridge already uses in this file).
+        //   • NEVER dig: bare-hand stone is ~7.5s / deepslate ~15s — no dig op exists in
+        //     this helper at all, so the no-pick stone-floor trap cannot fire.
+        //   • Target cell verified AIR-ish AND outside the bot's, the creeper's, and any
+        //     nearby mob's AABB BEFORE any network op (placing into an occupied cell throws
+        //     'entity in the way' and burns the fuse) — and RE-verified after the equip.
+        //   • Reference face must ALREADY be solid (floor-first — a stone cave floor is
+        //     exactly the observed terrain); no movement, no pathfinder ever.
+        //   • Every network op is raced: 150ms interrupt/health poll + hard timeout (equip
+        //     <=350ms, place <=550ms); promise handlers attached at race start so a late
+        //     server reply can never become an unhandled rejection.
+        //   • At most TWO place attempts per call, budget-gated so an op is never STARTED
+        //     that cannot finish inside budgetMs; then fast false → caller falls through
+        //     (strategy change, no retry loop). Pure-read fail paths (no filler / no open
+        //     cell / cell occupied) return in <5ms, so a point-blank call costs nothing.
+        creeperInterpose: async function (agent, creeper, budgetMs = 1200) {
+            const bot = agent.bot;
+            const t0 = Date.now();
+            try {
+                if (!bot || !bot.entity || !creeper || !creeper.position) return false;
+                if (bot.interrupt_code || bot.health <= 0) return false;
+                const OPEN_RE = /^(air|cave_air|void_air|grass|short_grass|tall_grass|fern|snow|dead_bush)$/;
+                // filler matcher: module-level FILL_RE (top of file) — one shared copy, C280 drift lesson.
+                const GRAVITY_RE = /^(sand|red_sand|gravel)$/;
+                const items = bot.inventory ? bot.inventory.items() : [];
+                const fillers = items.filter(i => i && i.name && FILL_RE.test(i.name));
+                const filler = fillers.find(i => !GRAVITY_RE.test(i.name)) || fillers[0];
+                if (!filler) return false;                       // naked → fast false (punch-back still covers us)
+                const raceOp = (fn, ms) => new Promise((resolve) => {
+                    let done = false, iv = null, tm = null;
+                    const finish = (v) => { if (done) return; done = true; clearInterval(iv); clearTimeout(tm); resolve(v); };
+                    iv = setInterval(() => { try { if (bot.interrupt_code || bot.health <= 0) finish(false); } catch (e) {} }, 150);
+                    tm = setTimeout(() => finish(false), ms);
+                    let p;
+                    try { p = Promise.resolve(fn()); } catch (e) { finish(false); return; }
+                    p.then(() => finish(true), () => finish(false));
+                });
+                const cellHitsEntity = (cx, cy, cz, ent, w, h) => {
+                    if (!ent || !ent.position) return false;
+                    const ep = ent.position;
+                    return ep.x + w > cx && ep.x - w < cx + 1
+                        && ep.y + h > cy && ep.y < cy + 1
+                        && ep.z + w > cz && ep.z - w < cz + 1;
+                };
+                const ETYPE_RE = /mob|player|animal|hostile|water_creature/i;
+                const cellUsable = (cx, cy, cz) => {
+                    const b = bot.blockAt(new Vec3(cx, cy, cz));
+                    if (!b || !OPEN_RE.test(b.name || '')) return null;
+                    if (cellHitsEntity(cx, cy, cz, bot.entity, 0.35, 1.85)) return null;    // our own AABB (0.3/1.8 + eps)
+                    if (cellHitsEntity(cx, cy, cz, creeper, 0.5, 1.85)) return null;        // creeper AABB (0.3/1.7 + travel margin)
+                    for (const e of Object.values(bot.entities || {})) {
+                        if (!e || e === bot.entity || e === creeper || !e.position) continue;
+                        if (e.type && !ETYPE_RE.test(String(e.type))) continue;             // items/orbs/arrows don't block placement
+                        if (e.position.distanceTo(bot.entity.position) > 6) continue;
+                        if (cellHitsEntity(cx, cy, cz, e, 0.5, 1.85)) return null;
+                    }
+                    for (const [ox, oy, oz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
+                        const nb = bot.blockAt(new Vec3(cx + ox, cy + oy, cz + oz));
+                        if (nb && nb.boundingBox === 'block') {
+                            return { cell: new Vec3(cx, cy, cz), ref: nb, face: new Vec3(-ox, -oy, -oz) };
+                        }
+                    }
+                    return null;
+                };
+                // Candidate cells: ONE step from our feet toward the creeper — dominant-axis
+                // column first, then the secondary axis; FEET level first (the floor under it
+                // is a guaranteed solid reference on the observed stone-pocket terrain, and a
+                // feet-level block stops the ground-level hug), then head level (a later call
+                // can build the head block off the placed feet block — a progressive seal).
+                const base = bot.entity.position.floored();
+                const dxr = creeper.position.x - bot.entity.position.x;
+                const dzr = creeper.position.z - bot.entity.position.z;
+                const stepX = dxr >= 0 ? 1 : -1, stepZ = dzr >= 0 ? 1 : -1;
+                const cols = Math.abs(dxr) >= Math.abs(dzr) ? [[stepX, 0], [0, stepZ]] : [[0, stepZ], [stepX, 0]];
+                const cands = [];
+                for (const [ox, oz] of cols) {
+                    cands.push([base.x + ox, base.y, base.z + oz]);
+                    cands.push([base.x + ox, base.y + 1, base.z + oz]);
+                }
+                let equipped = !!(bot.heldItem && bot.heldItem.name === filler.name);
+                let attempts = 0;
+                for (const [cx, cy, cz] of cands) {
+                    if (attempts >= 2) break;                                      // 2 strikes → change strategy (caller falls through)
+                    if (bot.interrupt_code || bot.health <= 0) return false;
+                    const needMs = equipped ? 560 : 920;                           // never START an op we can't afford to finish
+                    if (Date.now() - t0 + needMs > budgetMs) break;
+                    let spot = cellUsable(cx, cy, cz);
+                    if (!spot) continue;
+                    if (!equipped) {
+                        await raceOp(() => bot.equip(filler, 'hand'), 350);
+                        equipped = !!(bot.heldItem && bot.heldItem.name === filler.name);
+                        if (!equipped) return false;                               // can't even hold the block → give up fast, no retry
+                        spot = cellUsable(cx, cy, cz);                             // re-verify: the creeper moved during the equip
+                        if (!spot) continue;
+                    }
+                    attempts++;
+                    try { bot.clearControlStates(); } catch (e) {}
+                    await raceOp(() => bot.placeBlock(spot.ref, spot.face), 550);  // raw place: internal lookAt, NO pathfinder
+                    const after = bot.blockAt(spot.cell);                          // judge by WORLD STATE, not the promise
+                    if (after && after.boundingBox === 'block') {
+                        try {
+                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                `[${new Date().toISOString()}] [self_preservation] ★creeper interpose: ${filler.name} @${spot.cell.x},${spot.cell.y},${spot.cell.z} cdist=${creeper.position.distanceTo(bot.entity.position).toFixed(1)} hp=${Math.round(bot.health)} dt=${Date.now() - t0}ms\n`);
+                        } catch (e) {}
+                        return true;
+                    }
+                }
+            } catch (e) {}
+            return false;
+        },
         // EMERGENCY BUNKER (shared by night-shelter AND the outmatched-at-night flee):
         // dig DOWN into solid ground and seal, breaking all contact with a mob swarm.
         // In this mob-dense water world, surface-fleeing just runs into MORE mobs and
@@ -867,7 +1023,8 @@ const modes_list = [
             // ★C280: +red_sand|red_sandstone|sandstone — BADLANDS' abundant block. Without it
             // the bot dug 163 red_sand yet fillerOf()=undefined → couldn't seal → died 3× to
             // melee mobs in the open on one night (2026-06-20). terracotta was already in.
-            const FILL_RE = /cobblestone|cobbled|deepslate|^dirt$|andesite|diorite|granite|^stone$|tuff|gravel|^sand$|red_sand|sandstone|netherrack|_planks$|_log$|_wood$|^planks$|hyphae|^mud$|^clay$|terracotta|^dirt_path$|coarse_dirt|rooted_dirt|mossy/;
+            // filler matcher: module-level FILL_RE (top of file) — one shared copy so this
+            // list and creeperInterpose's can never drift apart again.
             // Gravity blocks (sand/red_sand/gravel) fall when capping over air → can drop on the
             // bot and suffocate. Prefer a non-gravity block for placement; gravity only as fallback.
             const GRAVITY_FILL = /^(sand|red_sand|gravel)$/;
@@ -1703,6 +1860,10 @@ const modes_list = [
                     let stuckRun = 0;
                     let sideFlip = 1;
                     let lastWedgeLog = 0;
+                    // ★enclosed-creeper defense state (P0): closure-locals — reset naturally per
+                    // backoff run, no module-level mutable state (hot-reload safe by construction).
+                    let lastCreeperPunchAt = 0;   // >=550ms spacing → full-charge knockback, clears 500ms hurt-invuln
+                    let creeperPunches = 0;       // hard per-encounter cap — no infinite same-action retry
                     for (let i = 0; i < 4000; i++) {
                         if (bot.interrupt_code || bot.health <= 0) break;
                         if (bot.oxygenLevel !== undefined && bot.oxygenLevel <= 6) break; // drowning → swim reflex
@@ -1733,8 +1894,76 @@ const modes_list = [
                                         `[${new Date().toISOString()}] [self_preservation] creeper backoff wedged: stuck=${stuckRun} pos=${Math.floor(me.x)},${Math.floor(me.y)},${Math.floor(me.z)} cdist=${c ? c.position.distanceTo(me).toFixed(1) : '-'} rotate=${dx.toFixed(2)},${dz.toFixed(2)}\n`);
                                 } catch (e) {}
                             }
+                            // ★PROACTIVE ENCLOSED-CREEPER DEFENSE (P0: 1-2 wide cave-pocket creeper
+                            // death @y47). stuckRun>=8 is ~1.3s of PROVEN blocked flee directions (8
+                            // iterations x 160ms moving <0.12 blocks despite sprint+jump+rotation) —
+                            // the enclosed-terrain signal, and exactly half-way to the old point-blank
+                            // wedge. Act NOW, while the creeper is still outside/at the edge of its
+                            // ~3m ignition bubble, so true point-blank ignition is never reached:
+                            //  (a) PUNCH-BACK — needs NOTHING in inventory (observed death gear: no
+                            //      sword/blocks/likely no pick). A full-charge hit knocks the creeper
+                            //      ~1-1.5 blocks back out of the ignition bubble. Zero blocking time
+                            //      (single fire-and-forget attack packet). Capped per encounter.
+                            //  (b) INTERPOSE — when a filler block IS carried, raw-place ONE block
+                            //      into the verified-open cell toward the creeper (solid obstruction
+                            //      genuinely attenuates blast damage even if it detonates — NOT a
+                            //      fuse-reset claim). Raw bot.placeBlock only; skills.placeBlock is
+                            //      BANNED here (pathfinder GoalInvert too-close branch + ~1.4-1.6s
+                            //      tickConfirm retries — the round-1 fuse-killers). Throttled repeat
+                            //      successes progressively seal the approach face without bunkerDown.
+                            if (c && typeof this.creeperPunchBack === 'function') {
+                                const cdNow = c.position.distanceTo(me);
+                                if (cdNow <= 3.4 && creeperPunches < 40 && Date.now() - lastCreeperPunchAt >= 550) {
+                                    lastCreeperPunchAt = Date.now();
+                                    creeperPunches++;
+                                    try { this.creeperPunchBack(agent, c); } catch (e) {}
+                                    if (creeperPunches === 1 || creeperPunches % 10 === 0) {
+                                        try {
+                                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                                `[${new Date().toISOString()}] [self_preservation] ★creeper punch-back #${creeperPunches}: cdist=${cdNow.toFixed(1)} stuck=${stuckRun} hp=${Math.round(bot.health)}\n`);
+                                        } catch (e) {}
+                                    }
+                                }
+                            }
+                            if (c && typeof this.creeperInterpose === 'function'
+                                && Date.now() - (this._creeperInterposeAt || 0) > 2500) {
+                                const cdNow = c.position.distanceTo(me);
+                                if (cdNow >= 2.0 && cdNow <= 5.5) {
+                                    this._creeperInterposeAt = Date.now();
+                                    try { bot.clearControlStates(); } catch (e) {}
+                                    let placed = false;
+                                    try { placed = await this.creeperInterpose(agent, c, 1200); } catch (e) {}
+                                    if (placed) {
+                                        // fresh geometry: keep defending from behind the block — hold
+                                        // stuckRun at the proactive threshold so defense stays armed but
+                                        // the pre-wall stall history alone can't trip the wedge branch.
+                                        stuckRun = Math.min(stuckRun, 8);
+                                    }
+                                }
+                            }
                             if (stuckRun >= 16 && c && c.position.distanceTo(me) < 5) {
                                 try { bot.clearControlStates(); } catch (e) {}
+                                // ★minimal point-blank hardening (bunkerDown stays the unchanged last
+                                // resort below): one instant punch — at <=3.4m it shoves even an
+                                // IGNITED creeper ~1-1.5 blocks out, and creeper blast damage falls
+                                // steeply with distance (~49HP hugging → ~8-16HP at 3.5-4.5m) — then a
+                                // 150ms settle so the knockback carries it clear of the target cell,
+                                // then ONE fast-fail raw interpose (budget 1000ms; pure-read false in
+                                // <5ms whenever it cannot help, e.g. naked inventory or the creeper
+                                // still occupying the cell). Worst case this delays bunkerDown ~1.1s —
+                                // bunkerDown could never finish inside the fuse anyway, and the
+                                // punch+block convert a lethal hug-blast into a survivable one.
+                                if (typeof this.creeperPunchBack === 'function' && Date.now() - lastCreeperPunchAt >= 550) {
+                                    lastCreeperPunchAt = Date.now();
+                                    let pbHit = false;
+                                    try { pbHit = this.creeperPunchBack(agent, c); } catch (e) {}
+                                    if (pbHit) await new Promise(r => setTimeout(r, 150));
+                                }
+                                if (typeof this.creeperInterpose === 'function' && !bot.interrupt_code && bot.health > 0
+                                    && Date.now() - (this._creeperInterposeAt || 0) > 1200) {
+                                    this._creeperInterposeAt = Date.now();
+                                    try { await this.creeperInterpose(agent, c, 1000); } catch (e) {}
+                                }
                                 try {
                                     fs.appendFileSync('bots/_supervisor/progress.txt',
                                         `[${new Date().toISOString()}] [self_preservation] creeper backoff failed point-blank — emergency bunker fallback\n`);

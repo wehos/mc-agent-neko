@@ -725,6 +725,33 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                 prog(`${tag}★NOPICK — collect ${block} drops nothing bare-handed; abandoning this branch (need a pickaxe first)`);
                 return false;
             }
+            // ★PICK-RUNWAY (pre-emptive twin of ★NOPICK above and of exposeMore's ★C229 gate):
+            // NOPICK is the AFTER-the-fact "already bare-handed" check, and C229 counts picks/
+            // wood but never DURABILITY — so a lone pick with a few uses left sailed through
+            // both, and the xray iron staircase ground it to dust at depth (live 2026-07-02:
+            // pickless underground at night, no wood in reach). If the LAST pick is about to
+            // snap and we can't field-craft a replacement (shared skills.pickRunway read), this
+            // collect route is about to strand us. Route it through the EXISTING probe-cooldown
+            // machinery as one more budget-exhausted reason (no new exit path): stamp the
+            // cooldown so re-dispatches hit the cooldown-yield at the loop head, and return
+            // false — a zero-progress dispatch must let the kernel dispatch-cooldown engage.
+            if (miningBlock && typeof skills.pickRunway === 'function') {
+                try {
+                    const rw = skills.pickRunway(bot);
+                    if (rw && rw.aboutToBreak && !rw.canFieldCraftPick) {
+                        bot._achieveProbeState = bot._achieveProbeState || {};
+                        const stP = bot._achieveProbeState[probeKey] || (bot._achieveProbeState[probeKey] = {});
+                        stP.blockedUntil = Date.now() + 30000;
+                        stP.cooldownReason = 'pick-about-to-break';
+                        stP.cooldownLogAt = Date.now();
+                        prog(`${tag}★PICK-RUNWAY — last pick nearly dead (usesLeft=${rw.bestUsesLeft} tier=${rw.bestTier}), no field recraft; stop ${block} route, cooldown 30s`);
+                        motion('achieve.probe.yield', { item, block, reason: 'pick-about-to-break', usesLeft: rw.bestUsesLeft, tier: rw.bestTier });
+                        try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+                        try { bot.clearControlStates(); } catch (e) {}
+                        return false;
+                    }
+                } catch (e) {}
+            }
             // ★死亡热图避区 MVP (236前夜: 蜂窝区11分钟3死,且锚点回落世界出生点后雷区恰在
             // 圈内,缰绳反而圈住它): death_log 近50条里,16格内有3+死亡=雷区;身处雷区采矿
             // → 背着死亡质心撤24格再继续。x/z字段(为此而加)的第一个自动化消费者。

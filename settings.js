@@ -1,7 +1,7 @@
 const settings = {
     "minecraft_version": "auto", // or specific version like "1.21.6"
     "host": "localhost", // or "localhost", "your.ip.address.here"
-    "port": 55916, // set to -1 to automatically scan for open ports (LAN port changes each time the world is reopened)
+    "port": -1, // auto-scan for the open LAN port (vanilla "Open to LAN" picks a random port each time)
     "auth": "offline", // or "microsoft"
     "player_username": "", // real in-game name of the human owner the bot follows/serves. empty = auto-detect LAN host / single-player owner at runtime
 
