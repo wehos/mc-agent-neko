@@ -422,6 +422,9 @@ export class Agent {
 
         this.bot.on('death', () => {
             console.log(`${this.name} died, stopping current actions...`);
+            // ★death stamp (read by kernel's busy-stuck watchdog post-death fast path —
+            // NOT by skills; the NOTE below about death-abort flags still governs those).
+            try { this.bot._diedAt = Date.now(); } catch (e) {}
             this.actions.cancelResume();
             this.actions.stop();
             // NOTE: do NOT set a death-abort flag here. An earlier attempt (bot.death_abort
@@ -540,7 +543,14 @@ export class Agent {
                         timeOfDay: t, isNight: t >= 13000 && t <= 23000,
                         hostileCount: hostiles.length, hostiles,
                         gear: { sword: sword ? sword.name : null, axe: axe ? axe.name : null, shield, armorCount },
+                        // ★attribution fix (postmortem audit 2026-07-02: a death mid-shieldFight —
+                        // 27 straight "Fighting zombie!" rounds — still recorded action:null because
+                        // currentActionLabel only covers the actions pipeline, not kernel-dispatched
+                        // skills or mode executions. 'action:null = never fought' misled a whole
+                        // death-class diagnosis for hours). Record the other live layers too.
                         action: (this.actions && this.actions.currentActionLabel) || null,
+                        skill: (b && b._currentSkill) || null,
+                        supervised: this.supervised_skill || null,
                     };
                     fs.appendFileSync('bots/_supervisor/death_log.jsonl', JSON.stringify(rec) + '\n');
                     console.log('💀 death snapshot recorded:', cause, `y=${y}`, `mobs=${hostiles.length}`, `gear=${rec.gear.sword ? 'sword' : 'no-sword'}/${shield ? 'shield' : 'no-shield'}`);

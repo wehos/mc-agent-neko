@@ -209,7 +209,14 @@ export class Kernel {
         if (!name || supervised) { this._busyStuck = null; return; }
         if (!this._busyStuck || this._busyStuck.name !== name) this._busyStuck = { name, since: Date.now() };
         const heldMs = Date.now() - this._busyStuck.since;
-        if (heldMs < BUSY_STUCK_MS) return;
+        // ★post-death fast path (checkpoint #4, 2026-07-02: every death wasted a flat 3min of
+        // kernel mute before this watchdog cleared the orphan — death 06:34:45, first
+        // re-dispatch 06:37:49). A death invalidates whatever context the held name had;
+        // 45s is plenty for a legitimately-running skill to notice health<=0 / respawn
+        // position and settle on its own (the deliberate skills-survive-respawn design,
+        // agent.js death handler NOTE, stays untouched — this only shortens the ORPHAN hold).
+        const diedDuringHold = !!(this.bot._diedAt && this.bot._diedAt >= this._busyStuck.since);
+        if (heldMs < (diedDuringHold ? 45000 : BUSY_STUCK_MS)) return;
         if (this.agent && this.agent.actions && this.agent.actions.executing) return;
         this.log(`[kernel] ★busy-stuck watchdog: bot._currentSkill='${name}' held ${Math.round(heldMs / 1000)}s with no supervised skill and no executing action — clearing the orphan (kernel unmutes)`);
         try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [kernel] ★busy-stuck watchdog cleared orphaned _currentSkill='${name}' after ${Math.round(heldMs / 1000)}s\n`); } catch (e) {}
