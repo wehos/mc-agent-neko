@@ -516,6 +516,18 @@ export function proposeTasks(world, bot) {
                hints: { hasTablePath: kit.hasTablePath, pickTier: kit.pickTier, wood: woodUnits(bot) } });
     }
 
+    // 1b) ★SARCOPHAGUS RESCUE (checkpoint #16, 14:20Z live): sealed deep with no pick AND no
+    //     wood — BOOTSTRAP_KIT@90's prepNether needs local wood/table that y<50 stone never has
+    //     (BOOTSTRAP_KIT/GET_BED/GET_FOOD 3-kind cooldown storm at y=42). surfaceUp owns the
+    //     pickless ascent (NO_PICK_BREACHABLE hand-breach + pillarUp + ensureEmergencyPick);
+    //     wood/food/table all live on the surface. Day/dawn only — a night ascent surfaces
+    //     into mobs, the night chain owns those hours (sealed waiting beats climbing blind).
+    if (overworld && Math.round(bot.entity.position.y) < 50 && kit.picks < 1
+        && woodUnits(bot) === 0 && time.phase !== 'night' && time.phase !== 'dusk') {
+        push({ kind: PROPOSAL_KIND.SURFACE_RESCUE, priority: 92, skill: 'surfaceUp', args: [63],
+               rationale: 'sarcophagus: y<50, no pick, no wood — hand-breach to the surface (wood/food/table all live up there)' });
+    }
+
     // 2) Food: stock to a BUFFER, not just survival (user #5: stockpile meat).
     //    (overworld-only: feedUp flails in the nether/End; the endgame skills self-feed there.)
     //    ★ration-aware (checkpoint #7 closed d4b8d1d's structural hole: the dive gate demands
@@ -1055,6 +1067,10 @@ export function isGoalDone(kind, world, bot) {
     const w = world || EMPTY_WORLD;
     switch (kind) {
         case PROPOSAL_KIND.BOOTSTRAP_KIT: return isBootstrapDone(w, bot);
+        // ★SARCOPHAGUS RESCUE done = surface band regained OR a usable pick appeared
+        // (either way BOOTSTRAP_KIT@90 takes over the kit chain from here).
+        case PROPOSAL_KIND.SURFACE_RESCUE:
+            return (bot ? Math.round(bot.entity.position.y) : 63) >= 55 || (w.kit && w.kit.picks >= 1);
         // ★ration-aware (checkpoint #7): done = hunger stocked AND >=2 takeaway rations
         // carried (the dive gate's requirement — hunting kills bank the raw meat that
         // counts). Food deserts stay bounded: dry feedUp runs return false → 3-strike

@@ -80,10 +80,11 @@ export const EMPTY_WORLD = Object.freeze({
  * High-level kinds of work the world model can propose. Kept coarse on purpose:
  * the LLM judges among these; exact coordinates/x-ray detail never appear here
  * (blueprint §C hard constraint — don't expose the cheat, don't overload the LLM).
- * @typedef {'BOOTSTRAP_KIT'|'GET_FOOD'|'GET_BED'|'GET_ARMOR'|'GET_IRON_TOOLS'|'GET_IRON_ARMOR_SET'|'GET_DIAMOND'|'BANK_GEAR'|'BUILD_HOME'|'GO_UNDERGROUND'|'TOOL_UPKEEP'|'MIGRATE'|'HOLD'|'FORAGE_SURFACE'|'SLEEP'|'FREE_PLAY'|'DUSK_MINE_NIGHT'|'DUSK_GO_BED'|'NIGHT_DIG_ONE'|'NIGHT_SEAL'|'OPENING_SCOUT'|'OPENING_VILLAGE'|'GET_DIAMOND_GEAR'|'GET_PORTAL_KIT'|'ENTER_NETHER'|'GET_BLAZE_RODS'|'HUNT_PEARLS'|'CRAFT_EYES'|'GO_END'|'SLAY_DRAGON'} ProposalKind
+ * @typedef {'BOOTSTRAP_KIT'|'SURFACE_RESCUE'|'GET_FOOD'|'GET_BED'|'GET_ARMOR'|'GET_IRON_TOOLS'|'GET_IRON_ARMOR_SET'|'GET_DIAMOND'|'BANK_GEAR'|'BUILD_HOME'|'GO_UNDERGROUND'|'TOOL_UPKEEP'|'MIGRATE'|'HOLD'|'FORAGE_SURFACE'|'SLEEP'|'FREE_PLAY'|'DUSK_MINE_NIGHT'|'DUSK_GO_BED'|'NIGHT_DIG_ONE'|'NIGHT_SEAL'|'OPENING_SCOUT'|'OPENING_VILLAGE'|'GET_DIAMOND_GEAR'|'GET_PORTAL_KIT'|'ENTER_NETHER'|'GET_BLAZE_RODS'|'HUNT_PEARLS'|'CRAFT_EYES'|'GO_END'|'SLAY_DRAGON'} ProposalKind
  */
 export const PROPOSAL_KIND = Object.freeze({
     BOOTSTRAP_KIT: 'BOOTSTRAP_KIT',   // wood→planks→table→pick→stone tools
+    SURFACE_RESCUE: 'SURFACE_RESCUE', // ★checkpoint#16 石棺修复kind: y<50无镐无木 → surfaceUp徒手破顶
     GET_FOOD: 'GET_FOOD',
     GET_ARMOR: 'GET_ARMOR',           // smelt iron → craft+equip iron armor (裸甲被秒, 留钻石)
     GET_BED: 'GET_BED',               // wool→bed (respawn anchor, mandatory)
