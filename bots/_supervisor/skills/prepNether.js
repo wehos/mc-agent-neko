@@ -90,10 +90,15 @@ async function prepNetherInner(bot, ctx) {
         const armor = Object.keys(c).filter(n => /_(helmet|chestplate|leggings|boots)$/.test(n) && c[n] > 0).length;
         return sword && shield && armor >= 1 && bot.health >= 10;
     };
+    // ★C339-C 伪食物假阳性 (实锤 2026-07-02 17:40 live query: 手持 beetroot_seeds×5, "beetroot"子串
+    // 命中 → hasEdible=true → famineBudget/noRegenDeadlock/forage window 全被"有食物"骗关,
+    // food=0 hp=8 却没有任何饥荒机制敢动 — TABLE gate 6s-wait 永动): 种子/兔皮/兔脚/钓竿/毒土豆
+    // 都不是嘴里的粮,排除之。
     const hasEdible = () => bot.inventory.items().some(i =>
         i && i.name &&
         /beef|porkchop|chicken|mutton|rabbit|cod|salmon|bread|apple|berries|potato|carrot|melon|cookie|pumpkin_pie|beetroot|mushroom_stew|rabbit_stew|suspicious_stew/i.test(i.name) &&
-        i.name !== 'rotten_flesh');
+        i.name !== 'rotten_flesh' &&
+        !/_seeds$|_hide$|_foot$|on_a_stick|poisonous_/.test(i.name));
     const snacklessCritical = () => !hasEdible() && (bot.food <= 8 || bot.health <= 10);
     const famineBudget = () => !hasEdible() && (bot.food <= 2 || (bot.food <= 6 && bot.health <= 10));
     const bodyBudgetBunkerHold = () => !hasEdible() && bot.food <= 6 && bot.health <= 8;
@@ -2322,6 +2327,19 @@ async function prepNetherInner(bot, ctx) {
         if (has('crafting_table') < 1 && !world.getNearestBlock(bot, 'crafting_table', 4) && planksEqHeld() >= 4) {
             try { helped = (await skills.craftRecipeLocal(bot, 'crafting_table', 1)) || helped; }
             catch (e) { prog(`prepNether: ${staticReason} static table err ${e.message}`); }
+        }
+        // ★C339-B: 静态面包 — 实锤 2026-07-02 17:40 live query: food=0 手里攥着 hay_block×2+wheat×3
+        // (=21麦=7面包), feedUp 只会打猎/捡苹果, 没人想起干草→小麦→面包(hay解包免台, 面包要台,
+        // craftRecipeLocal 会自落手持台)。这是饥荒僵局里唯一真实的食物来源。
+        if (!hasEdible() && bot.food <= 6 && (has('wheat') >= 3 || has('hay_block') > 0)) {
+            try {
+                if (has('hay_block') > 0) await skills.craftRecipeLocal(bot, 'wheat', has('hay_block'));
+                if (has('wheat') >= 3 && (await skills.craftRecipeLocal(bot, 'bread', Math.floor(has('wheat') / 3)))) {
+                    helped = true;
+                    prog(`prepNether: ${staticReason} static bread ×${has('bread')} from hay/wheat — eating`);
+                    try { await skills.consume(bot, 'bread'); } catch (e) {}
+                }
+            } catch (e) { prog(`prepNether: ${staticReason} static bread err ${e.message}`); }
         }
         // ★C339: 静态石镐 — kit自举的最后一环。饥荒预算下keepKit跳过roaming kit,原来静态链
         // 只造台/铁镐(要铁锭)/剑,cobble=192+stick=6+木在手却永远不出石镐 → 无镐=无矿无掩体。
