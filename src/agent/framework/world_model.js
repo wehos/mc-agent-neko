@@ -599,7 +599,8 @@ export function proposeTasks(world, bot) {
         //   deep diamond band unarmored. @46: above GO_UNDERGROUND@45 so a kitted iron bot heads for
         //   the diamond band on purpose instead of the open-ended shallow descent.
         if (hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < DIAMOND_FLOOR && hpSafeForUnderground
-            && kit.sufficientForUnderground) {   // ★T-0092 (worker-sync): armor>=4(full set=24 iron, unreachable since GET_ARMOR yields at <4) → armor>=1(reachable from one craftArmor pass) so an iron-tooled+lightly-armored bot actually commits GET_DIAMOND → mineDiamonds descends to y-52. NOT >=0. ★tool-budget: also gated on kit.sufficientForUnderground (spare-with-table or field-recraft kit) like GO_UNDERGROUND — the skill-side pick guard is the LAST line, not the plan; TOOL_UPKEEP@47 restores the invariant first.
+            && kit.sufficientForUnderground
+            && invCount(bot, /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/) >= 2) {   // ★T-0092 (worker-sync): armor>=4(full set=24 iron, unreachable since GET_ARMOR yields at <4) → armor>=1(reachable from one craftArmor pass) so an iron-tooled+lightly-armored bot actually commits GET_DIAMOND → mineDiamonds descends to y-52. NOT >=0. ★tool-budget: also gated on kit.sufficientForUnderground (spare-with-table or field-recraft kit) like GO_UNDERGROUND — the skill-side pick guard is the LAST line, not the plan; TOOL_UPKEEP@47 restores the invariant first. ★dive rations (task #9): >=2 carried edibles or GET_FOOD stocks first — the y12 famine surfacing (checkpoint #6) ate the whole night's descent.
             // Dispatch the DEDICATED mineDiamonds skill: it water-aware-descends to the diamond band,
             // x-ray finds + vein-follows diamonds, banks each haul, and LOOPS until count is reached —
             // exactly the "在该层定向循环直到挖到目标矿" T-0092 asks for. (Generic mineDown only
@@ -872,7 +873,14 @@ export function proposeTasks(world, bot) {
     //    stone/iron bot still stocking iron; the dedicated GET_DIAMOND@46 owns the diamond band) AND
     //    is bound to an OUTPUT goal in isGoalDone (stock IRON_BUFFER iron), so it stays committed
     //    underground until it has actually mined the iron it descended for — no下地→上浮→再下地 churn.
-    if (overworld && kit.sufficientForUnderground && surfaceGate.mode !== 'hold' && !threat.actionable && hpSafeForUnderground) {
+    // ★dive ration gate (task #9 third knife; checkpoint #6: the y12 dive died of famine —
+    // food 20→8 underground with ZERO carried rations, feedUp has no underground plan, the
+    // bot survived on rotten flesh and surfaced at dawn empty-handed. Deep trips must CARRY
+    // food like they carry torches: >=2 edible items or don't start the descent — GET_FOOD
+    // @higher priority then stocks up first.)
+    const carriedRations = invCount(bot, /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/);
+    if (overworld && kit.sufficientForUnderground && surfaceGate.mode !== 'hold' && !threat.actionable && hpSafeForUnderground
+        && carriedRations >= 2) {
         push({ kind: PROPOSAL_KIND.GO_UNDERGROUND, priority: 45, skill: 'mineDown',
                args: [{ targetY: IRON_TARGET_Y }],
                rationale: `kitted + gate open — descend to the iron band (y${IRON_TARGET_Y}) and mine iron (have ${ironForArmor(bot)}/${IRON_BUFFER}), stay committed underground`,
