@@ -1,0 +1,118 @@
+// Hot-reloadable REAL skill: one bounded wheat-farm pass — the OPP_WHEAT_FARM executor
+// (T-0069 sustainable food). (Checkpoint #13.2, 2026-07-02: the proposal was wired but this
+// FILE never existed — every dispatch was customSkill 'Cannot find module' → false ×3 →
+// 5-min cooldown, forever. feedUp only CONSUMES food sources; this skill CREATES one.)
+//
+// Pass = harvest mature wheat nearby → bake bread at a table → eat if hungry → replant the
+// freed farmland → sow spare seeds on any empty farmland → if seeds remain and no plot
+// exists, till a few water-adjacent dirt cells (crafting a wooden hoe if materials allow).
+// ALWAYS self-cooldowns ~5min (bot._wheatFarmCooldownUntil — the proposer gates on it) so
+// unripe plots never pin the kind. Return contract: truthy iff real progress (harvested /
+// baked / ate / sowed / tilled); honest false otherwise. No module-level mutable state.
+// Invoked via: {"skill":"wheatFarm", [{"breadTarget": 4}]}  ctx = { skills, world, mc, Vec3, log }
+import fs from 'fs';
+import path from 'path';
+const PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
+const prog = (s) => { try { fs.appendFileSync(PROG, `[${new Date().toISOString()}] ${s}\n`); } catch (e) {} };
+
+export default async function wheatFarm(bot, ctx, opts = {}) {
+    const { skills, world, mc, Vec3 } = ctx;
+    const breadTarget = Number(opts && opts.breadTarget) || 4;
+    const inv = () => world.getInventoryCounts(bot);
+    const hostileNear = (r) => { try { return Object.values(bot.entities || {}).some(e => e && e !== bot.entity && e.position && mc.isHostile(e) && e.position.distanceTo(bot.entity.position) < r); } catch (e) { return false; } };
+    const isNight = () => { try { const t = bot.time.timeOfDay; return t >= 13000 && t <= 23000; } catch (e) { return false; } };
+    const findByName = (names, r, count) => {
+        try {
+            const ids = names.map(n => bot.registry.blocksByName[n] && bot.registry.blocksByName[n].id).filter(Boolean);
+            return (bot.findBlocks({ matching: ids, maxDistance: r, count: count || 32 }) || []);
+        } catch (e) { return []; }
+    };
+    // The self-cooldown is unconditional: whatever happens below, don't re-court this kind
+    // for 5 minutes (crops grow on wall-clock minutes; churning on an unripe plot is waste).
+    const done = (result) => { try { bot._wheatFarmCooldownUntil = Date.now() + 300000; } catch (e) {} return result; };
+
+    if (isNight()) { prog('wheatFarm: night — defer, false.'); return done(false); }
+    if (hostileNear(12)) { prog('wheatFarm: hostile within 12b — false.'); return done(false); }
+
+    let harvested = 0, baked = 0, ate = false, sowed = 0, tilled = 0;
+
+    // 1) Harvest MATURE wheat within 24b (age 7 only — breaking green wheat wastes the plot).
+    const matureWheat = findByName(['wheat'], 24, 32)
+        .map(p => bot.blockAt(p))
+        .filter(b => { try { return b && b.name === 'wheat' && Number(b.getProperties().age) >= 7; } catch (e) { return false; } })
+        .sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position));
+    const freedPlots = [];
+    for (const b of matureWheat.slice(0, 12)) {
+        if (bot.interrupt_code || bot.health <= 0) break;
+        if (hostileNear(10)) break;
+        const p = b.position;
+        try {
+            if (bot.entity.position.distanceTo(p) > 4) await skills.goToPosition(bot, p.x, p.y, p.z, 2);
+            if (await skills.breakBlockAt(bot, p.x, p.y, p.z)) { harvested++; freedPlots.push(p); }
+        } catch (e) {}
+    }
+    if (harvested) { try { await skills.pickupNearbyItems(bot); } catch (e) {} }
+
+    // 2) Bake bread toward the target (3 wheat each; craftRecipe handles the table).
+    const wheatCt = inv().wheat || 0;
+    const breadCt = inv().bread || 0;
+    if (wheatCt >= 3 && breadCt < breadTarget) {
+        const want = Math.min(Math.floor(wheatCt / 3), breadTarget - breadCt);
+        try { if (await skills.craftRecipe(bot, 'bread', want)) baked = want; }
+        catch (e) { prog(`wheatFarm: bread craft failed (${e && e.message || e}) — wheat kept for next pass.`); }
+    }
+    while (bot.food < 16 && (inv().bread || 0) > 0) {
+        try { await skills.consume(bot, 'bread'); ate = true; } catch (e) { break; }
+    }
+
+    // 3) Replant freed plots, then sow spare seeds on any empty farmland within 12b.
+    const seedsLeft = () => inv().wheat_seeds || 0;
+    for (const p of freedPlots) {
+        if (bot.interrupt_code || bot.health <= 0 || !seedsLeft()) break;
+        try { if (await skills.tillAndSow(bot, p.x, p.y - 1, p.z, 'wheat_seeds')) sowed++; } catch (e) {}
+    }
+    if (seedsLeft() && !bot.interrupt_code) {
+        const emptyFarmland = findByName(['farmland'], 12, 24)
+            .filter(p => { try { const a = bot.blockAt(new Vec3(p.x, p.y + 1, p.z)); return a && a.name === 'air'; } catch (e) { return false; } });
+        for (const p of emptyFarmland.slice(0, 8)) {
+            if (bot.interrupt_code || bot.health <= 0 || !seedsLeft()) break;
+            try { if (await skills.tillAndSow(bot, p.x, p.y, p.z, 'wheat_seeds')) sowed++; } catch (e) {}
+        }
+    }
+
+    // 4) Seeds but nowhere to put them → start a plot: till water-adjacent dirt/grass (the
+    //    hydration range is 4, so cells directly beside water always qualify). Craft a wooden
+    //    hoe first if we can afford one. Bounded to 4 tills per pass.
+    if (seedsLeft() && sowed === 0 && !bot.interrupt_code) {
+        const hasHoe = () => bot.inventory.items().some(i => /_hoe$/.test(i.name || ''));
+        if (!hasHoe()) {
+            const c = inv();
+            const planks = ['oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks']
+                .reduce((s, n) => s + (c[n] || 0), 0);
+            if (planks >= 2 && (c.stick || 0) >= 2) {
+                try { await skills.craftRecipe(bot, 'wooden_hoe', 1); } catch (e) {}
+            }
+        }
+        if (hasHoe()) {
+            const water = findByName(['water'], 12, 8);
+            outer: for (const w of water) {
+                for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                    if (tilled >= 4 || bot.interrupt_code || bot.health <= 0) break outer;
+                    const gx = w.x + dx, gy = w.y, gz = w.z + dz;
+                    try {
+                        const g = bot.blockAt(new Vec3(gx, gy, gz));
+                        const above = bot.blockAt(new Vec3(gx, gy + 1, gz));
+                        if (!g || !/^(dirt|grass_block)$/.test(g.name || '') || !above || above.name !== 'air') continue;
+                        if (await skills.tillAndSow(bot, gx, gy, gz, 'wheat_seeds')) { tilled++; sowed++; }
+                    } catch (e) {}
+                }
+            }
+        } else if (!hasHoe()) {
+            prog('wheatFarm: seeds on hand but no hoe and no materials for one — plot deferred.');
+        }
+    }
+
+    prog(`wheatFarm: pass done — harvested=${harvested} baked=${baked} ate=${ate} sowed=${sowed} tilled=${tilled} bread=${inv().bread || 0}/${breadTarget} food=${bot.food}`);
+    if (harvested || baked || ate || sowed) return done({ harvested, baked, ate, sowed, tilled });
+    return done(false);
+}
