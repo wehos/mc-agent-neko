@@ -1450,7 +1450,8 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                 // walk for 8 bread is the best trade on the board at food<18.
                 try {
                     if (!world.getNearestBlock(bot, 'crafting_table', 4)) {
-                        const farTable = bot.findBlock({ matching: (b) => b && b.name === 'crafting_table', maxDistance: 24 });
+                        // 48b: the C350b maiden run had the table at 28b and starved next to it (24b radius miss)
+                        const farTable = bot.findBlock({ matching: (b) => b && b.name === 'crafting_table', maxDistance: 48 });
                         if (farTable) {
                             prog(`feedUp: C350b walking to table @${farTable.position.x},${farTable.position.z} (${Math.round(bot.entity.position.distanceTo(farTable.position))}b) to bake ${wheatCt} wheat`);
                             try { await skills.goToPosition(bot, farTable.position.x, farTable.position.y, farTable.position.z, 2); } catch (e) {}
