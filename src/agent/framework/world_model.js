@@ -129,6 +129,11 @@ function invCount(bot, re) {
 }
 /** plank-equivalents on hand: logs count ×4 (each log → 4 planks) + loose planks. */
 export function woodUnits(bot) { return invCount(bot, /_log$/) * 4 + invCount(bot, /_planks$/); }
+/** Carried takeaway rations (safe edibles incl. raw red meat — a hunt's drops count).
+ *  ONE predicate for: the dive gates (>=2 to descend), GET_FOOD's re-arm condition,
+ *  and isGoalDone(GET_FOOD) — checkpoint #7 caught the gate demanding what no
+ *  proposal could supply when these were separate hunger-only checks. */
+export function carriedRations(bot) { return invCount(bot, /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/); }
 // Smeltable+smelted iron on hand (ingot-equivalents). raw_iron smelts 1:1 → iron_ingot, so both
 // count toward what GET_ARMOR can turn into armor pieces (boots4 helmet5 leggings7 chestplate8).
 export function ironForArmor(bot) { return invCount(bot, /^raw_iron$/) + invCount(bot, /^iron_ingot$/); }
@@ -513,11 +518,19 @@ export function proposeTasks(world, bot) {
 
     // 2) Food: stock to a BUFFER, not just survival (user #5: stockpile meat).
     //    (overworld-only: feedUp flails in the nether/End; the endgame skills self-feed there.)
-    if (overworld && (vitals.food < FOOD_STOCK || !kit.foodSufficient)) {
+    //    ★ration-aware (checkpoint #7 closed d4b8d1d's structural hole: the dive gate demands
+    //    >=2 CARRIED rations but the old hunger-only condition here meant food>=16 + rations<2
+    //    proposed NOTHING that could open it — a latent deadlock the commit message promised
+    //    away without code. Now low carried rations alone re-arms GET_FOOD at modest priority,
+    //    and hunting kills naturally bank the raw meat that counts as rations.)
+    const rationsNow = carriedRations(bot);
+    if (overworld && (vitals.food < FOOD_STOCK || !kit.foodSufficient || rationsNow < 2)) {
         const pri = vitals.food <= 6 ? 88 : (vitals.food < 12 ? 55 : 35);
         push({ kind: PROPOSAL_KIND.GET_FOOD, priority: pri, skill: 'feedUp',
                rationale: vitals.food <= 6 ? 'food critical — hunt/forage now'
-                   : `stock food to ${FOOD_STOCK} (now ${vitals.food}) — keep a meat buffer, don't run lean` });
+                   : vitals.food >= FOOD_STOCK && rationsNow < 2
+                       ? `hunger fine but only ${rationsNow} carried ration(s) — hunt a takeaway buffer (dive gate needs 2)`
+                       : `stock food to ${FOOD_STOCK} (now ${vitals.food}) — keep a meat buffer, don't run lean` });
     }
 
     // 2b) ★T-0069 WHEAT FARM — SUSTAINABLE food production (the self-sufficiency root). feedUp only
@@ -878,9 +891,8 @@ export function proposeTasks(world, bot) {
     // bot survived on rotten flesh and surfaced at dawn empty-handed. Deep trips must CARRY
     // food like they carry torches: >=2 edible items or don't start the descent — GET_FOOD
     // @higher priority then stocks up first.)
-    const carriedRations = invCount(bot, /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/);
     if (overworld && kit.sufficientForUnderground && surfaceGate.mode !== 'hold' && !threat.actionable && hpSafeForUnderground
-        && carriedRations >= 2) {
+        && carriedRations(bot) >= 2) {
         push({ kind: PROPOSAL_KIND.GO_UNDERGROUND, priority: 45, skill: 'mineDown',
                args: [{ targetY: IRON_TARGET_Y }],
                rationale: `kitted + gate open — descend to the iron band (y${IRON_TARGET_Y}) and mine iron (have ${ironForArmor(bot)}/${IRON_BUFFER}), stay committed underground`,
@@ -1009,7 +1021,11 @@ export function isGoalDone(kind, world, bot) {
     const w = world || EMPTY_WORLD;
     switch (kind) {
         case PROPOSAL_KIND.BOOTSTRAP_KIT: return isBootstrapDone(w, bot);
-        case PROPOSAL_KIND.GET_FOOD:      return (w.vitals.food >= FOOD_STOCK);
+        // ★ration-aware (checkpoint #7): done = hunger stocked AND >=2 takeaway rations
+        // carried (the dive gate's requirement — hunting kills bank the raw meat that
+        // counts). Food deserts stay bounded: dry feedUp runs return false → 3-strike
+        // cooldown releases the commitment as before.
+        case PROPOSAL_KIND.GET_FOOD:      return (w.vitals.food >= FOOD_STOCK) && carriedRations(bot) >= 2;
         // Done when fully armored OR banked iron can't afford the cheapest MISSING piece (see
         // ironArmorGoalDone — a flat `<4` livelocked at e.g. boots owned + 4 iron, helmet costs 5).
         case PROPOSAL_KIND.GET_ARMOR:     return ironArmorGoalDone(w, bot);
