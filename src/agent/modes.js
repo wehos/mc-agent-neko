@@ -1560,8 +1560,26 @@ const modes_list = [
                         // when we're actually making progress toward a reachable bank.
                         try { bot.interrupt_code = false; } catch (e) {}
                         let lastDist = 1e9, stall = 0, exploreTicks = 0, exploreYaw = bot.entity.yaw;
+                        // ★C345-B (drowning 2026-07-02 12:46 postmortem): interrupt_code is ONE global
+                        // flag — action_manager.stop() pulses it every 300ms until "the action" returns,
+                        // and pulses aimed at a concurrently-running supervised skill murdered this
+                        // rescue seven times in its last 9 seconds ([swim] enter/exit@2 interrupt=true
+                        // ×7 → drowned). While OXYGEN IS CRITICAL this loop is the bot's life support:
+                        // consume stray interrupts for up to 8s (well under the 10s force-kill budget),
+                        // then honor them. Death and live supervisor-cancels always break immediately.
+                        const _swimT0 = Date.now();
                         for (let i = 0; i < 80; i++) {
-                            if (bot.interrupt_code || bot.health <= 0) { _tr(`exit@${i} interrupt=${!!bot.interrupt_code}`); break; }
+                            if (bot.interrupt_code || bot.health <= 0) {
+                                const _oxyCrit = bot.oxygenLevel !== undefined && bot.oxygenLevel <= 8;
+                                const _cancelWin = !!(bot._supervisorCancelAt && Date.now() - bot._supervisorCancelAt < 30000);
+                                if (bot.health > 0 && _oxyCrit && !_cancelWin && Date.now() - _swimT0 < 8000) {
+                                    _tr(`i=${i} consuming interrupt — oxygen critical (${bot.oxygenLevel}), rescue holds ${Math.round((8000 - (Date.now() - _swimT0)) / 1000)}s more`);
+                                    try { bot.interrupt_code = false; } catch (e) {}
+                                } else {
+                                    _tr(`exit@${i} interrupt=${!!bot.interrupt_code}`);
+                                    break;
+                                }
+                            }
                             if (!inWaterNow() && bot.entity.onGround) { _tr(`exit@${i} OUT ok`); break; }
                             if (i % 10 === 0) _tr(`i=${i} pos=${Math.floor(bot.entity.position.x)},${Math.floor(bot.entity.position.y)},${Math.floor(bot.entity.position.z)} stall=${stall}`);
                             const target = findShore();
@@ -1584,9 +1602,32 @@ const modes_list = [
                             // has demonstrably failed by then, and pillaring up always clears the edge.
                             if ((!target || stuck || i >= 30) && f) {
                                 // PILLAR UP — jump + place a block under our feet, rise out of water.
-                                bot.setControlState('forward', false);
-                                try { await skills.placeBlockUnderFeet(bot, f, { retries: 1, settleMs: 160 }); } catch (e) { try { bot.setControlState('jump', false); } catch (e2) {} }
-                                await new Promise(r => setTimeout(r, 160));
+                                // ★C345 (drowning death 2026-07-02 12:46, x72 z27: y61→53 steady sink):
+                                // in OPEN DEEP water placeBlockUnderFeet has nothing to anchor to and
+                                // fails EVERY iteration — and the old catch turned jump OFF, which shut
+                                // off buoyancy: the "100%-reliable pillar" became a 100%-reliable ANCHOR
+                                // (1 block sunk per ~2 iters until drowned at the lake bed). Pillaring is
+                                // only for standable/shallow spots; over a deep column, hold jump and
+                                // look UP — water floats a jump-held bot to the surface for free.
+                                const _deepBelow = (() => {
+                                    try {
+                                        for (let dyD = 1; dyD <= 2; dyD++) {
+                                            const bD = bot.blockAt(bot.entity.position.offset(0, -dyD, 0));
+                                            if (bD && bD.boundingBox === 'block') return false;
+                                        }
+                                        return true;
+                                    } catch (e) { return false; }
+                                })();
+                                if (_deepBelow) {
+                                    try { await bot.look(bot.entity.yaw, -1.45, false); } catch (e) {}
+                                    bot.setControlState('forward', false);
+                                    bot.setControlState('jump', true);   // buoyancy ON — surface first, pillar when standable
+                                    await new Promise(r => setTimeout(r, 300));
+                                } else {
+                                    bot.setControlState('forward', false);
+                                    try { await skills.placeBlockUnderFeet(bot, f, { retries: 1, settleMs: 160 }); } catch (e) { try { bot.setControlState('jump', true); } catch (e2) {} }
+                                    await new Promise(r => setTimeout(r, 160));
+                                }
                                 stall = 0; lastDist = 1e9;
                             } else if (target && !stuck) {
                                 try { await bot.lookAt(target.offset(0.5, 0, 0.5), true); } catch (e) {}

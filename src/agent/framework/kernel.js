@@ -285,6 +285,23 @@ export class Kernel {
         // re-dispatching immediately lands in the same interrupt (goBedSleep: 3 strikes in 16s).
         // Silent skip (≤13 ticks at 300ms); the unwind itself was logged in _settleDispatch.
         if (this._interruptHoldUntil && Date.now() < this._interruptHoldUntil) return;
+        // ★DROWNING HOLD (C345, drowning death 2026-07-02 12:46): the kernel dispatched
+        // nightShelter into a bot that was actively sinking — the new skill's pathfinder and
+        // the swim rescue then fought over one control channel until the bot died. While the
+        // bot is in water with falling air, survival reflexes own the body; tasks can wait
+        // the ~10s a rescue takes.
+        try {
+            const _wp = this.bot.entity.position;
+            const _inW = ['water', 'flowing_water'].includes((this.bot.blockAt(_wp) || {}).name)
+                || ['water', 'flowing_water'].includes((this.bot.blockAt(_wp.offset(0, 1, 0)) || {}).name);
+            if (_inW && this.bot.oxygenLevel !== undefined && this.bot.oxygenLevel <= 15) {
+                if (!this._drownHoldLogAt || Date.now() - this._drownHoldLogAt > 10000) {
+                    this._drownHoldLogAt = Date.now();
+                    this.log(`[kernel] drowning hold — in water, oxygen=${this.bot.oxygenLevel}; not dispatching ${p.kind}/${p.skill} until the rescue surfaces`);
+                }
+                return;
+            }
+        } catch (e) {}
         this.log(line);
         // ★HEARTBEAT (non-shadow only, before dispatch): prepNether.js:102 reads
         // bot._kernelDriverActive (fresh ≤10s) to yield its legacy night fallback exactly
