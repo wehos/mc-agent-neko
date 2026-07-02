@@ -269,7 +269,12 @@ export default async function migrate(bot, ctx, opts = {}) {
         gateHp, gateFood, force: opts.force === true,
     });
     log_(`gate: ${decision.reason}`);
-    if (!decision.go) return { migrated: false, reason: decision.reason };
+    // ★kernel return contract (live 2026-07-02 04:0x: 12+ MIGRATE re-commits with the bot
+    // pickless underground at y=55 — the truthy {migrated:false} no-go return reset the
+    // kernel failure counter every dispatch, so the 3-strike cooldown never released the
+    // commitment). A no-go decision did ZERO work: return false so the kind cools down and
+    // the chain rotates instead of spinning on a gate that can't open from here.
+    if (!decision.go) return false;
 
     // ---- LOCK BEARING (consistent direction for the whole journey) ----
     const bearing = migrateBearing(
