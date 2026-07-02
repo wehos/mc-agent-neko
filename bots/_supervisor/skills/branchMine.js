@@ -79,6 +79,11 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             if (!_bmReach) {
                 _bmReach = new BM_MOVES(bot);
                 _bmReach.canDig = true;
+                // ★own-infra break ban (2026-07-02 05:21Z: pathfinder dug the bot's white_bed):
+                // even this plan-only reach probe must not price a route THROUGH a bed/chest/
+                // furnace, or it would bless a dig the executor then performs. typeof-guarded
+                // for the hot-reload window against a pre-hardenMovements skills.js.
+                if (typeof skills.hardenMovements === 'function') { try { skills.hardenMovements(bot, _bmReach); } catch (e) {} }
                 _bmReach.scafoldingBlocks = [];
                 _bmReach.allow1by1towers = false;
                 _bmReach.maxDropDown = 3;

@@ -47,6 +47,37 @@ function _pathDangerZone() {
     } catch (e) { _dzPath.z = null; }
     return _dzPath.z;
 }
+// ★OWN-INFRASTRUCTURE BREAK BAN (live 2026-07-02 05:21Z: bot dug up its OWN white_bed —
+// mine_motion.jsonl logs the dig with skill:null, i.e. no skill code asked for it; the
+// pathfinder's canDig planning priced the bed like any 1-cost obstacle and chewed through.
+// Same blind spot earlier had it tool-swap-looping a dig on the base furnace). Movements
+// already ships blocksCantBreak as a Set pre-seeded with chest + undiggables (lib/movements.js:41)
+// — so we ADD, never replace: every bed color (registry scan for /_bed$/) plus workstations
+// and storage. This only forbids BREAKING these blocks during path execution; walking, route
+// digging through ordinary terrain, and dig-escape retries are untouched — escaping through
+// your own bed/chest is never the right move anyway. Fail-open by contract: a registry
+// hiccup must not break Movements construction, so worst case we pathfind unhardened.
+const _HARDEN_CANT_BREAK = [
+    'crafting_table', 'furnace', 'blast_furnace', 'smoker',
+    'chest', 'trapped_chest', 'barrel', 'ender_chest',
+];
+export function hardenMovements(bot, movements) {
+    try {
+        const byName = bot && bot.registry && bot.registry.blocksByName;
+        if (!byName || !movements) return movements;
+        if (!(movements.blocksCantBreak instanceof Set))
+            movements.blocksCantBreak = new Set(movements.blocksCantBreak || []);
+        for (const name of _HARDEN_CANT_BREAK) {
+            if (byName[name]) movements.blocksCantBreak.add(byName[name].id);
+        }
+        // Beds are 16 per-color block names (white_bed, red_bed, ...) — scan the registry
+        // instead of hard-coding the palette so no color (or future addition) slips through.
+        for (const name of Object.keys(byName)) {
+            if (/_bed$/.test(name)) movements.blocksCantBreak.add(byName[name].id);
+        }
+    } catch (e) { /* fail-open: unhardened Movements still pathfinds */ }
+    return movements;
+}
 class _NoScaffoldMovements extends _PFMovements {
     constructor(...args) {
         super(...args);
@@ -78,6 +109,13 @@ class _NoScaffoldMovements extends _PFMovements {
                 } catch (e) { return 0; }
             });
         }
+        // ★DON'T DIG OWN INFRASTRUCTURE (2026-07-02 05:21Z white_bed loss — rationale at
+        // hardenMovements above). Hooked HERE so every construction site is hardened the
+        // moment it's built — this file's 14 `new pf.Movements(bot)` sites, world.js's
+        // isClearPath, and the hot-loaded supervisor skills that destructure mfp.Movements
+        // (they hot-import after this rebinding, so they get this subclass too) — same
+        // one-hook-covers-all pattern as the scaffold/vine/kill-box guards above.
+        try { hardenMovements(args[0], this); } catch (e) {}
     }
 }
 pf.Movements = _NoScaffoldMovements;

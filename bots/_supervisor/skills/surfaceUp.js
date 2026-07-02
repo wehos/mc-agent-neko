@@ -575,6 +575,11 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
         // bounded bare-hand stone; pathfinder still prefers dirt/gravel, cobble is high-cost fallback).
         const enclosedNoPick = !hasPick() && !!(bot._mobility && bot._mobility.enclosed);
         moves.canDig = hasPick() || enclosedNoPick;
+        // ★never carve through own infrastructure (2026-07-02 05:21Z: pathfinder dug the
+        // bot's white_bed, skill:null dig in mine_motion.jsonl) — beds/workstations/chests
+        // join blocksCantBreak. typeof-guarded: this file hot-reloads and may run against a
+        // pre-hardenMovements skills.js; ordinary terrain digging is unaffected.
+        if (typeof skills.hardenMovements === 'function') { try { skills.hardenMovements(bot, moves); } catch (e) {} }
         moves.allow1by1towers = true;
         moves.allowParkour = false;
         const scaf = SCAFFOLD.map(n => mc.getBlockId(n)).filter(id => id != null);

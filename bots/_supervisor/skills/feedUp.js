@@ -162,6 +162,11 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             timeoutMs,
         });
         const moves = new Movements(bot);
+        // ★own-infra break ban (2026-07-02 05:21Z white_bed dug by pathfinder, skill:null in
+        // mine_motion.jsonl): beds/workstations/chests → blocksCantBreak. Moot while
+        // canDig=false, but keeps this set safe if the flag ever flips. typeof-guarded for
+        // the hot-reload window against a pre-hardenMovements skills.js.
+        if (typeof skills.hardenMovements === 'function') { try { skills.hardenMovements(bot, moves); } catch (e) {} }
         moves.canDig = false;
         moves.allowParkour = false;
         moves.allow1by1towers = false;
@@ -244,6 +249,10 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         if (!ok && moved < 1 && !opts._digRetry && (bot.food <= 10 || opts.digEscape)) {
             prog(`feedUp: safe ${label} no-path-from-pocket (moved=0) — dig-escape retry food=${bot.food}`);
             const dm = new Movements(bot);            // canDig stays default TRUE on purpose
+            // ★own-infra break ban even on the dig-escape retry (2026-07-02 05:21Z white_bed):
+            // escaping a famine pocket never requires eating through a bed/chest — the ban
+            // only exempts infrastructure, all ordinary escape digging stays allowed.
+            if (typeof skills.hardenMovements === 'function') { try { skills.hardenMovements(bot, dm); } catch (e) {} }
             dm.allowParkour = false;
             dm.allow1by1towers = true;                 // climb out of the pocket
             dm.maxDropDown = bot.health <= 10 ? 1 : 2;
@@ -554,6 +563,8 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                     let error = null;
                     try {
                         const moves = new Movements(bot);
+                        // ★own-infra break ban (see 2026-07-02 05:21Z white_bed note above).
+                        if (typeof skills.hardenMovements === 'function') { try { skills.hardenMovements(bot, moves); } catch (e) {} }
                         moves.canDig = false;
                         moves.allowParkour = false;
                         moves.allow1by1towers = false;
