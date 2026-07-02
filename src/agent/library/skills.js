@@ -4126,6 +4126,24 @@ export async function digOneCapOne(bot) {
         return false;
     }
 
+    // ②b Undiggable / own-infrastructure guard (live 2026-07-02 04:33: a PICKLESS bot
+    // standing on its own furnace churned all night — furnace is pick-tier, ~17.5s
+    // bare-hand vs the ~3-5s per-dig budget, and every held-item swap between attempts
+    // RESET the break progress). Utility blocks are never a shelter dig target anyway
+    // (they're the bot's own infra); anything the CURRENT hand can't break inside the
+    // budget downgrades to seal instead of burning the night. digTime is fail-open.
+    const _below = bot.blockAt(feet.offset(0, -1, 0));
+    if (_below && /furnace|crafting_table|chest|barrel|smoker|blast_furnace|_bed$|^bed$/.test(_below.name || '')) {
+        log(bot, `digOneCapOne: block below is ${_below.name} (own utility block) — refusing dig-one, downgrade to seal.`);
+        return false;
+    }
+    try {
+        if (_below && _below.digTime(bot.heldItem ? bot.heldItem.type : null, false, false, false) > 4500) {
+            log(bot, `digOneCapOne: ${_below.name} undiggable within budget with held ${bot.heldItem ? bot.heldItem.name : 'bare hand'} — refusing dig-one, downgrade to seal.`);
+            return false;
+        }
+    } catch (e) {}
+
     // ③ Dig exactly ONE block down through digDown's safety gates (water/lava
     // 6-neighbour flood guard + >=2 fall guard). Reusing it means we never
     // bypass the aquifer / cliff protections.
