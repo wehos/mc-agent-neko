@@ -4208,17 +4208,29 @@ export async function digOneCapOne(bot) {
         capName = _block ? _block.name : null;
     }
 
-    const here = bot.entity.position.floored();
-    const top = here.offset(0, 2, 0);
+    // ★C346 depth-adaptive cap (deaths #4/#5 2026-07-02 13:11, zombie siege at the FLAT
+    // village: a 1-deep pocket's cap cell (feet+2) sits one ABOVE the original surface —
+    // all six neighbours are air, so placeBlock always failed 'nothing to place on' and the
+    // bot rode out sieges in an open hole. The skill's own name says the geometry: 挖三填一
+    // — at 3 deep the cap cell sits flush IN the ground layer with solid side support. Try
+    // the cap at each depth 1→3 and deepen only while the cap cell floats; slopes still cap
+    // at depth 1 like before, flat ground now digs to where a roof is physically possible.
     let capped = false;
-    const existingCap = bot.blockAt(top);
-    if (existingCap && existingCap.boundingBox === 'block') {
-        capped = true; // already roofed by terrain
-    } else if (capName) {
-        capped = await placeBlock(bot, capName, top.x, top.y, top.z, 'bottom', true);
-    } else {
-        log(bot, 'digOneCapOne: no non-gravity cap block carried — cannot roof pocket.');
+    for (let depth = 1; depth <= 3; depth++) {
+        const here0 = bot.entity.position.floored();
+        const top0 = here0.offset(0, 2, 0);
+        const existingCap = bot.blockAt(top0);
+        if (existingCap && existingCap.boundingBox === 'block') { capped = true; break; }   // roofed by terrain
+        if (!capName) { log(bot, 'digOneCapOne: no non-gravity cap block carried — cannot roof pocket.'); break; }
+        capped = await placeBlock(bot, capName, top0.x, top0.y, top0.z, 'bottom', true);
+        if (capped) break;
+        if (depth === 3) break;
+        // cap cell floats (flat terrain) — deepen one more through digDown's own guards
+        const deeper = await digDown(bot, 1);
+        if (!deeper) { log(bot, `digOneCapOne: cap floats at depth ${depth} and digDown refused deeper — pocket stays open.`); break; }
+        log(bot, `digOneCapOne: cap had nothing to place on at depth ${depth} — deepened to ${depth + 1} (挖三填一 geometry).`);
     }
+    const here = bot.entity.position.floored();
 
     // ⑤ Patch ONLY the genuinely open side holes (boundingBox !== 'block') across
     // the two body layers (feet dy0, head dy1). Solid terrain is left untouched
