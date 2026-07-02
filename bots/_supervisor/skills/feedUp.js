@@ -203,6 +203,20 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             to: { x: +end.x.toFixed(3), y: +end.y.toFixed(3), z: +end.z.toFixed(3) },
         });
         if (error) {
+            // ★mode-contention retry (live 2026-07-02 02:22: three famine roams in a row died
+            // to "The goal was changed" within ~1.4s — self_preservation's moveAway steals the
+            // pathfinder goal mid-leg while hostiles hover, and the instant give-up left the
+            // bot starving 32b from a chicken). The reflex finishes in ~1-3s; wait it out ONCE
+            // and re-leg instead of surrendering the whole errand to a 2s dodge. Reflex still
+            // wins every individual contention — this only stops one dodge from cancelling the
+            // entire famine plan.
+            if (/goal was changed/i.test(error.message || '') && !opts._goalStolenRetry && bot.food <= 11) {
+                prog(`feedUp: safe ${label} goal stolen by a reflex — waiting it out + one re-leg`);
+                await new Promise(r => setTimeout(r, 1800));
+                if (!bot.interrupt_code && bot.health > 0) {
+                    return await safeRoamTo(x, y, z, range, label, { ...opts, _goalStolenRetry: true });
+                }
+            }
             log(bot, `feedUp: safe ${label} failed (${error.message}) from ${Math.round(start.x)},${Math.round(start.y)},${Math.round(start.z)} to ${Math.round(x)},${Math.round(y)},${Math.round(z)}`);
             prog(`feedUp: safe ${label} failed (${error.message}) from ${Math.round(start.x)},${Math.round(start.y)},${Math.round(start.z)} to ${Math.round(x)},${Math.round(y)},${Math.round(z)}`);
             return false;
