@@ -425,6 +425,17 @@ export class Agent {
             // ★death stamp (read by kernel's busy-stuck watchdog post-death fast path —
             // NOT by skills; the NOTE below about death-abort flags still governs those).
             try { this.bot._diedAt = Date.now(); } catch (e) {}
+            // ★capture the live layers NOW (checkpoint #9: the snapshot writer below runs in
+            // a later async block, by which time actions.stop()/skill settlement had already
+            // nulled _currentSkill/supervised — three deaths mid-nightShelter/shieldFight all
+            // recorded skill:null, defeating the attribution fix's purpose).
+            try {
+                this.bot._deathLayers = {
+                    skill: this.bot._currentSkill || null,
+                    supervised: this.supervised_skill || null,
+                    action: (this.actions && this.actions.currentActionLabel) || null,
+                };
+            } catch (e) {}
             this.actions.cancelResume();
             this.actions.stop();
             // NOTE: do NOT set a death-abort flag here. An earlier attempt (bot.death_abort
@@ -548,9 +559,9 @@ export class Agent {
                         // currentActionLabel only covers the actions pipeline, not kernel-dispatched
                         // skills or mode executions. 'action:null = never fought' misled a whole
                         // death-class diagnosis for hours). Record the other live layers too.
-                        action: (this.actions && this.actions.currentActionLabel) || null,
-                        skill: (b && b._currentSkill) || null,
-                        supervised: this.supervised_skill || null,
+                        action: (b && b._deathLayers && b._deathLayers.action) || (this.actions && this.actions.currentActionLabel) || null,
+                        skill: (b && b._deathLayers && b._deathLayers.skill) || (b && b._currentSkill) || null,
+                        supervised: (b && b._deathLayers && b._deathLayers.supervised) || this.supervised_skill || null,
                     };
                     fs.appendFileSync('bots/_supervisor/death_log.jsonl', JSON.stringify(rec) + '\n');
                     console.log('💀 death snapshot recorded:', cause, `y=${y}`, `mobs=${hostiles.length}`, `gear=${rec.gear.sword ? 'sword' : 'no-sword'}/${shield ? 'shield' : 'no-shield'}`);
