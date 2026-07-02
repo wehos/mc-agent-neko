@@ -1370,10 +1370,19 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         // ALL hp-gated). The guard now only gates the ROAM/HUNT path below — the actual
         // hunt-into-death case it was written for.
         if (await eat()) { await skills.wait(bot, 1200); continue; }
-        if (bot.health < 8 && hostileNear(16)) {
-            log(bot, `feedUp: HP critical (${Math.round(bot.health)}) + hostile near + no held food — bailing roam/hunt to survival modes.`);
-            prog(`feedUp: critical guard hp=${Math.round(bot.health)} hostile16=true (no held food in bag to eat in place)`);
+        // ★deadlock relaxation (live 2026-07-02 08:53: hp4/food7 at y=-29, ENCLOSED, nearest
+        // skeleton 25b away through solid stone — hostileNear(16)... registered SOMETHING and
+        // this hard-break fired before famine surface-first could climb, so 'low hp needs
+        // food' × 'food errands blocked at low hp' deadlocked in a sealed pocket forever.
+        // A mob that can't PUNCH you (nothing within 8b) can't punish a sealed staircase
+        // climb either — only a genuinely close hostile keeps the hard bail.
+        if (bot.health < 8 && hostileNear(8)) {
+            log(bot, `feedUp: HP critical (${Math.round(bot.health)}) + hostile in punch range + no held food — bailing roam/hunt to survival modes.`);
+            prog(`feedUp: critical guard hp=${Math.round(bot.health)} hostile8=true (no held food in bag to eat in place)`);
             break;
+        }
+        if (bot.health < 8 && hostileNear(16)) {
+            prog(`feedUp: hp critical but nothing in punch range (8b) — allowing surface-first/desperation paths, no roam-hunt`);
         }
         // No held food. PlanC short fetch FIRST (低险快进快出,守卫前放行——烧怪掉落
         // 5分钟 despawn,等不起), then the roam guard.
