@@ -1379,8 +1379,19 @@ export default async function prepNether(bot, ctx) {
                 return;
             }
         } catch (e) {}
-        // 2) Only bother if we're under-armed (naked respawn). Kitted + safe → skip the detour.
-        if (haveSword() && haveAnyArmor() && bot.health >= 14) { prog('bankRecover: already armed (sword+armor, hp ok) — skip'); return; }
+        // 2) Only bother if we're under-armed (naked respawn) — OR iron-poor with the bank
+        // right here. ★iron-bank self-lock (live 2026-07-02 05:12: bankGear deposited
+        // iron_ingot x13, then C338-A read ONLY inventory (ingot=2) → '0 obtainable iron' →
+        // stone-pick grind all night with 13 ingots at home; an ARMED bot never reached the
+        // withdraw below because this gate skipped first). Opportunistic top-up: iron-poor +
+        // no iron pick + bank within 16b → open and pull (WANT already lists ingot/raw x64).
+        // Throttled 10min so a fruitless open doesn't repeat every ~2s dispatch.
+        const _ironPoor = (has('iron_ingot') + has('raw_iron')) < 3 && has('iron_pickaxe') < 1;
+        const _bankDistNow = (() => { try { const me = bot.entity.position; return Math.hypot(me.x - bank.x, me.y - bank.y, me.z - bank.z); } catch (e) { return Infinity; } })();
+        const _ironTopup = _ironPoor && _bankDistNow <= 16
+            && !(bot._bankIronTopupAt && Date.now() - bot._bankIronTopupAt < 600000);
+        if (haveSword() && haveAnyArmor() && bot.health >= 14 && !_ironTopup) { prog('bankRecover: already armed (sword+armor, hp ok) — skip'); return; }
+        if (_ironTopup) { bot._bankIronTopupAt = Date.now(); prog(`bankRecover: iron top-up — inv iron ${has('iron_ingot')}+${has('raw_iron')}<3, no iron pick, bank ${Math.round(_bankDistNow)}b away → withdraw banked iron`); }
         const tableHold = tableRecoveryBlocked('bucket') || tableRecoveryBlocked('crafting_table');
         if (tableHold && containedMobilityNow()) {
             if (!bot._lastBankTableRecoveryGateAt || Date.now() - bot._lastBankTableRecoveryGateAt > 30000) {
