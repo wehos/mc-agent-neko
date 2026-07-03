@@ -6363,7 +6363,12 @@ class ModeController {
             if (mode.always) continue;
             let interruptible = mode.interrupts.some(i => i === 'all') || mode.interrupts.some(i => i === _agent.actions.currentActionLabel);
             if (mode.on && !mode.paused && !mode.active && (_agent.isIdle() || interruptible)) {
-                await mode.update(_agent);
+                // ★2026-07-03 验尸修: 原来裸 await — 排前面的 mode 一抛异常整条链断头,
+                // 后面的 self_defense/auto_eat 全部饿死 (03:10 spider 贴脸 12s act="" 无人
+                // 接战的实锤形态), 且异常会穿透 agent.update() 的 while(true) 把整个
+                // update 循环永久杀死。单 mode 异常只废自己这一拍, 不许废掉应急链。
+                try { await mode.update(_agent); }
+                catch (e) { console.error(`mode ${mode.name} update error:`, e); }
             }
             if (mode.active) break;
         }

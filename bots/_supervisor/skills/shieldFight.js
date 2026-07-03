@@ -12,9 +12,25 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
     const { skills, world, mc, log } = ctx;
     const has = (n) => world.getInventoryCounts(bot)[n] || 0;
 
-    for (const s of ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'wooden_sword', 'netherite_axe', 'diamond_axe', 'iron_axe']) {
-        if (has(s)) { await skills.equip(bot, s).catch(() => {}); break; }
-    }
+    // ★2026-07-03 验尸修 (02:12/02:13 zombie 1v1 死, combat_log 实锤全程 held=empty):
+    // 装剑原来只在技能入口做一次 — 开打瞬间撞上手部竞争 (auto_eat consume 收尾/残留合成窗口,
+    // progress 02:12:24.630Z "Failed to equip stone_sword (tick_race)" 实锤) 就整场 14s+
+    // 赤手空拳: 拳头 1dmg 杀不动僵尸, 反被磨到 hp<7 → self_pres 保命逃(红线,正确) → 走路
+    // 跑不过僵尸 → 死于 mode:self_preservation。改为战斗循环内每拍重申武器在手:
+    // 没握武器就先关掉残留窗口(卡死的合成界面会让 hotbar 换手静默失效)再装, 一次竞争最多丢一刀。
+    const WEAPONS = ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'wooden_sword', 'netherite_axe', 'diamond_axe', 'iron_axe'];
+    const armed = () => !!(bot.heldItem && WEAPONS.includes(bot.heldItem.name));
+    let rearmLogged = false;
+    const ensureWeapon = async () => {
+        if (armed()) return true;
+        const w = WEAPONS.find(n => has(n) > 0);
+        if (!w) return false;
+        if (bot.currentWindow) { try { bot.closeWindow(bot.currentWindow); } catch (e) {} }
+        try { await skills.equip(bot, w); } catch (e) {}
+        if (armed() && !rearmLogged) { rearmLogged = true; log(bot, `shieldFight: (re)armed ${w} mid-fight`); }
+        return armed();
+    };
+    await ensureWeapon();
     const shieldItem = bot.inventory.items().find(i => i.name === 'shield');
     if (shieldItem && (!bot.inventory.slots[45] || bot.inventory.slots[45].name !== 'shield')) {
         try { await bot.equip(shieldItem, 'off-hand'); } catch (e) {}
@@ -56,6 +72,7 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
         if (bot.interrupt_code) break;
         const kind = kindOf(e);
         const d = bot.entity.position.distanceTo(e.position);
+        if (kind !== 'enderman') await ensureWeapon();   // 每拍重申 — 见上方验尸注释
         // ★WITCH (2026-07-02 16:15-16:19Z 三连死, 同一只 id 349335): 盾挡不住喷溅药水的
         // 范围效果, 举盾走路还减速50% → 旧 melee 分支半速蹭近被风筝 (d 全程 1.8~5.4 震荡
         // 47s 无输出, 女巫瞬回II把偶尔一刀全洗回来), 毒tick 1dmg/1.25s 磨穿血线; hp<=6
@@ -103,6 +120,14 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
                 // distance fallback (HP unexposed): can't close the gap either.
                 if (d >= prevD - 0.5) stalls++; else { stalls = 0; }
                 prevD = d;
+                // ★2026-07-03: 本版 mineflayer 对生物 e.health 恒为 undefined (update_health 只写
+                // bot.health) → hpStuck 恒 true, 4s 一到每场真白刃战都被误判"打不到"自断循环
+                // (打断攻击节奏, 每轮白跑一遍入口装备+捡漏)。server 实证的"够得着"信号顶回去:
+                // entityHurt→bot._mobHurtAt 记录"我 4s 内打中过它"; lastDamageTime+贴脸 = "它打中我"
+                // (melee 限定 — 隔墙骷髅仍按 C353 原判据断开)。在互殴 = 可达, 清 unreachable 计时。
+                const _mh = (bot._mobHurtAt instanceof Map) ? (bot._mobHurtAt.get(e.id) || 0) : 0;
+                const _hurtUs = kind === 'melee' && (bot.lastDamageTime || 0) > Date.now() - 4000 && d < 4.5;
+                if (_mh > Date.now() - 4000 || _hurtUs) rangedSince = Date.now();
                 if (Date.now() - rangedSince > 4000 && (hpStuck || stalls >= 6)) {
                     log(bot, `shieldFight: ${kind} target unreachable (d=${d.toFixed(1)} hpStuck=${hpStuck}) — disengaging, yield to escape/food.`);
                     break;
@@ -126,7 +151,7 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
                 await aim();                   // re-aim at the (moved) target
                 bot.deactivateItem();          // release
             } catch (_) {}
-            for (const s of ['diamond_sword', 'iron_sword', 'stone_sword', 'wooden_sword']) { if (has(s)) { await skills.equip(bot, s).catch(() => {}); break; } }
+            await ensureWeapon();   // 射完切回近战武器 (bow 不在 WEAPONS 里 → 必换)
             continue;
         }
 

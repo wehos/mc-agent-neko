@@ -1043,7 +1043,11 @@ export class Agent {
             setTimeout(async () => {
                 while (true) {
                     let start = Date.now();
-                    await this.update(start - last);
+                    // ★2026-07-03 验尸修: update() 一抛异常, 这个 while(true) 就整体 reject 永久
+                    // 停摆 — 之后没有任何 mode 再跑 (不接战/不吃饭/不逃跑), bot 站桩至死。
+                    // 心跳必须不死: 单拍异常记日志跳过。
+                    try { await this.update(start - last); }
+                    catch (e) { console.error('agent update tick error:', e); }
                     let remaining = INTERVAL - (Date.now() - start);
                     if (remaining > 0) {
                         await new Promise((resolve) => setTimeout(resolve, remaining));
