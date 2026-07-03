@@ -2,7 +2,8 @@
   "seeds": [
     "2026-07-03 种子规则 (当日实证, 格式示范): matrix[holder][claimant] = 'holder'|'claimant'; 键支持家族通配 'kernel:*'/'mode:*', 精确对优先于通配。",
     "规则1 mode:self_preservation vs kernel:* → holder — C345 溺亡案: swim/drowning 营救持有身体时, kernel 派发 (nightShelter) 的 pathfinder 与营救抢控制通道直到淹死; 营救 ~10s, 任务等得起。",
-    "规则2 mode:mobility vs mode:* → holder — checkpoint#22/#16: mobility march/ENTOMBED dig-out 是被困时唯一有效解, 普通反射 (含封顶水牢里的 drowning 反射, modes.js:1414 教训) 抢它 = 挖出时间被吃掉。Phase 1 对 mode-vs-mode 只观测不执法, 此规则先做观测标注, Phase 2 生效。"
+    "规则2 mode:mobility vs mode:* → holder — checkpoint#22/#16: mobility march/ENTOMBED dig-out 是被困时唯一有效解, 普通反射 (含封顶水牢里的 drowning 反射, modes.js:1414 教训) 抢它 = 挖出时间被吃掉。Phase 1 对 mode-vs-mode 只观测不执法, 此规则先做观测标注, Phase 2 生效。",
+    "规则3-5 (对抗评审 F1 补丁, 2026-07-03): kernel:*/ws:*/watchdog:* 持身时 self_preservation/self_defense 作 claimant 秒胜 — MLG垫水(坠落~1-2s)与早窗溺水营救(oxygen 9-14, ≤8地板实证太晚)物理上等不起 LLM 4s; 与规则1完全对称=self_preservation 双向压任务技能。低优先级反射(torch/threat_radar等)仍归 LLM 管。"
   ],
   "matrix": {
     "mode:self_preservation": {
@@ -10,6 +11,17 @@
     },
     "mode:mobility": {
       "mode:*": "holder"
+    },
+    "kernel:*": {
+      "mode:self_preservation": "claimant",
+      "mode:self_defense": "claimant"
+    },
+    "ws:*": {
+      "mode:self_preservation": "claimant",
+      "mode:self_defense": "claimant"
+    },
+    "watchdog:*": {
+      "mode:self_preservation": "claimant"
     }
   },
   "log": []

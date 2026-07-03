@@ -84,7 +84,10 @@ export function vitalNow(bot) {
         if (bot.oxygenLevel !== undefined && bot.oxygenLevel <= 8) return true;
         if ((bot.health ?? 20) <= 4 && Date.now() - (bot.lastDamageTime || 0) < 4000) return true;
         if (bot.entity) {
-            if (bot.entity.onFire) return true;
+            // ★评审F2: prismarine-entity 没有 onFire 属性(运行时实证) — 着火状态在共享
+            // metadata flags 字节的 bit0。方块检查(下一行)只覆盖"站在火/岩浆里"。
+            const md = bot.entity.metadata;
+            if (md && (Number(md[0]) & 0x01)) return true;
             const p = bot.entity.position;
             const feet = bot.blockAt(p) || {};
             const head = bot.blockAt(p.offset(0, 1, 0)) || {};

@@ -314,8 +314,12 @@ export class Kernel {
         try {
             const holder = this.bot._bodyOwner;
             if (holder && holder.kind === 'mode' && /^mode:(self_preservation|mobility)$/.test(holder.name || '')) {
+                // ★评审F3: live 加 3min 年龄上限 — death#264 类挂死(runAction 永不 resolve →
+                // finally 永不跑 → 令牌永不释放)叠加种子矩阵永久 holder 规则会无限期扣押
+                // 全部派发; 挂死营救最多扣 3 分钟, 与 BUSY_STUCK_MS 同一时间尺度。
                 const live = !!(this.agent.actions && this.agent.actions.executing
-                    && this.agent.actions.currentActionLabel === holder.name);
+                    && this.agent.actions.currentActionLabel === holder.name)
+                    && Date.now() - (holder.since || 0) < 180000;
                 const fresh = Date.now() - (holder.since || 0) < 30000;
                 if (live || fresh) {
                     const v = arbitrate(holder, { name: `kernel:${p.skill}`, kind: p.kind || 'skill', vital: false },
