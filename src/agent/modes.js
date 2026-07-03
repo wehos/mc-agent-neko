@@ -92,6 +92,7 @@ function combatHasPriority(bot) {
         let near = 0, ptBlank = false;
         for (const e of Object.values(bot.entities || {})) {
             if (!(e && e.position && mc.isHostile(e) && !/creeper/i.test(e.name || ''))) continue;
+            if (isFutileMob(bot, e)) continue;   // ★C360: 黑名单怪不算"有仗要打" — 脱困反射别为打不动的怪让路
             const d = e.position.distanceTo(p);
             if (d < 8) near++;
             if (d < 3.2) ptBlank = true;                                     // 进近战臂展 = 有仗要打
@@ -167,6 +168,102 @@ function rangedUnreachableTrap(bot) {
         // "存在够不到的威胁(远程射手 或 完全封闭下的隔墙近战怪) 且 无任何能近战打到的目标"才放手脱困觅食。
         return (sawRanged || sawUnreachableMelee) && !meleeReachable;
     } catch (e) { return false; }
+}
+
+// ★C360 (T-0063, 2026-07-03 01:01Z 实锤): FUTILE-FIGHT 断路器 — 同一 mob 连打 N 轮零进展即拉黑。
+// 血案: bot 困夜宿口袋 @98,10,203, 隔墙 spider#468770 卡死在 102,7,203 (d=4.6 恒定不动) —
+// self_defense 对它 'Fighting spider!' ×400+ / 26min 独占身体, food=5 吃不上饭、SURFACE_RESCUE
+// 派不出。为什么三道旧防线全失灵:
+//  (a) rangedUnreachableTrap/sawUnreachableMelee (091bc57) 是"拓扑门"— 要求 trapped/fullyBoxed
+//      (enclosed 或 POCKET/ENTOMBED/SEALED)。00:48 bot 从 99,10,203 挪到 98,10,203 后 mobility
+//      观察者报 enclosed=false (口袋开了条缝, 01:01:57 self_pres 日志实锤), 状态不再 POCKET
+//      → trapped=false 直接短路, 内部所有判据(含 sawUnreachableMelee)根本没跑到。且 d=4.6 落在
+//      "d<4.5 半困近战可打"和"fullyBoxed 隔墙"两个分支之间的裂缝里 — 拓扑判据天然盖不住
+//      "口袋有缝但寻路仍不通"的几何。
+//  (b) shieldFight 的 4s in-skill 断路 (C353 石棺扩展) 每轮都触发 — 但它只 break 当前 cycle,
+//      无跨轮记忆; mode 层下一拍(300ms)看拓扑门=false 立刻 re-engage → ~3.8s/轮 ×400 风暴。
+//  (c) 蜘蛛 29min 没打中 bot 一次(combat_log 00:58 后零 HURT) → "挨打还手"路径也不背锅。
+// 修 (结果导向, 不再赌拓扑): 同一 entity id 连续 FUTILE_FIGHT_STRIKES 次 fight-cycle 完成而
+// ①目标没掉过血(entityHurt 服务端实证) ②bot 没接近(≥0.75b) ③没被它打中 → 拉黑该 id 5min
+// (bot._futileMobIds, 挂 bot 无模块级状态) → self_defense/defendSelf/shieldFight 三层同步豁免。
+// ★挨打必还手铁律不破: 一旦被打中且黑名单 mob 在臂展内(<4.5b) → 立即摘除(unblacklistAttackers,
+// self_defense 每拍 + threat_radar HURT 双入口, 后者 always:true 连 sticky 技能期间也在)。
+const FUTILE_FIGHT_STRIKES = 3;            // 连续零进展轮数 → 拉黑
+const FUTILE_MOB_TTL_MS = 5 * 60 * 1000;   // 黑名单时效 — 怪会走开/地形会变, 过期重试 3 轮 (~11s/5min)
+const FUTILE_CLOSE_EPS = 0.75;             // "接近了"的最小位移 (寻路抖动不算)
+
+/** 黑名单 Map(id→expiry), 挂 bot; 每次取用顺手清过期。 */
+function futileMobBlacklist(bot) {
+    let m = bot._futileMobIds;
+    if (!(m instanceof Map)) { m = new Map(); bot._futileMobIds = m; }
+    const now = Date.now();
+    for (const [id, until] of m) { if (until <= now) m.delete(id); }
+    return m;
+}
+
+/** 该实体是否在徒劳黑名单里 (self_defense/combatHasPriority/技能层共用判据)。 */
+function isFutileMob(bot, entity) {
+    try {
+        if (!entity || entity.id == null) return false;
+        const m = bot._futileMobIds;
+        return (m instanceof Map) && (m.get(entity.id) || 0) > Date.now();
+    } catch (e) { return false; }
+}
+
+/** 挨打必还手: 被打中时摘除臂展内(<4.5b)的黑名单 mob — 真打到我的怪必须重新可打。 */
+function unblacklistAttackers(bot, via) {
+    try {
+        const m = bot._futileMobIds;
+        if (!(m instanceof Map) || m.size === 0) return;
+        const p = bot.entity && bot.entity.position;
+        if (!p) return;
+        for (const id of [...m.keys()]) {
+            const e = bot.entities && bot.entities[id];
+            if (e && e.position && e.position.distanceTo(p) < 4.5) {
+                m.delete(id);
+                try {
+                    fs.appendFileSync('bots/_supervisor/progress.txt',
+                        `[${new Date().toISOString()}] [self_defense] futile-blacklist LIFTED mob#${id} ${e.name || '?'} d=${e.position.distanceTo(p).toFixed(1)} — got hit, 挨打必还手 (via ${via})\n`);
+                } catch (e2) {}
+            }
+        }
+    } catch (e) {}
+}
+
+/** fight-cycle 结果记账: 零进展(没伤到/没接近/没被打) → 记一击; 连续 N 击 → 拉黑。 */
+function recordFightOutcome(bot, cycle) {
+    try {
+        if (!cycle || cycle.id == null || !bot.entity) return;
+        // 不公平的轮次不记账 (也不清零 — 无信息): 被 interrupt 抢断的轮 (honor interrupt_code,
+        // 战斗没得到完整机会) / <2s 的秒退轮 (arbitration 拒了 / 技能入口就抛错, 不算真打过)。
+        if (bot.interrupt_code || Date.now() - cycle.t0 < 2000) return;
+        const e = bot.entities && bot.entities[cycle.id];
+        const alive = !!(e && e.position);
+        if (!alive) {   // 打死了/despawn — 有战果, 清计数
+            if (bot._futileTally && bot._futileTally.id === cycle.id) bot._futileTally = null;
+            return;
+        }
+        const endDist = e.position.distanceTo(bot.entity.position);
+        const mh = bot._mobHurtAt;
+        const targetHurt = (mh instanceof Map) && (mh.get(cycle.id) || 0) > cycle.t0;   // 目标这轮掉过血 = 打得到
+        const gotCloser = endDist < cycle.dist0 - FUTILE_CLOSE_EPS;                     // 真挪近了 = 还有戏
+        const botHurtNear = (bot.lastDamageTime || 0) > cycle.t0 && endDist < 4.5;      // 它真打到我 = 必还手
+        if (targetHurt || gotCloser || botHurtNear) {
+            if (bot._futileTally && bot._futileTally.id === cycle.id) bot._futileTally = null;
+            return;
+        }
+        let tally = bot._futileTally;
+        if (!tally || tally.id !== cycle.id) tally = bot._futileTally = { id: cycle.id, n: 0 };
+        tally.n++;
+        if (tally.n >= FUTILE_FIGHT_STRIKES) {
+            futileMobBlacklist(bot).set(cycle.id, Date.now() + FUTILE_MOB_TTL_MS);
+            bot._futileTally = null;
+            try {
+                fs.appendFileSync('bots/_supervisor/progress.txt',
+                    `[${new Date().toISOString()}] [self_defense] FUTILE-FIGHT breaker: mob#${cycle.id} ${cycle.name || '?'} d=${endDist.toFixed(1)} — ${FUTILE_FIGHT_STRIKES} 连续零进展 fight-cycle (目标没掉血/没接近/没被它打中), 拉黑 ${Math.round(FUTILE_MOB_TTL_MS / 60000)}min, 让位脱困/进食\n`);
+            } catch (e2) {}
+        }
+    } catch (e) {}
 }
 
 // ★C341 (T-0074): SEALED-ROOM detection. The mobility state machine reads any adjacent walkable air as
@@ -2857,12 +2954,29 @@ const modes_list = [
             //   fight back so ranged/sneaky attackers don't get free damage.
             // isClearPath intentionally removed so corner/behind-block mobs count.
             const bot = agent.bot;
+            // ★C360: entityHurt 监听懒注册(挂 bot, 随 bot 重建自然重挂) — 记"哪只怪最近掉过血",
+            // 是 fight-cycle "打到了没有"的服务端实证信号 (recordFightOutcome 用)。
+            if (!bot._futileHurtSub) {
+                bot._futileHurtSub = true;
+                bot.on('entityHurt', (ent) => {
+                    try {
+                        if (!ent || ent.id == null || (bot.entity && ent.id === bot.entity.id)) return;
+                        let mh = bot._mobHurtAt;
+                        if (!(mh instanceof Map)) { mh = new Map(); bot._mobHurtAt = mh; }
+                        mh.set(ent.id, Date.now());
+                        if (mh.size > 64) { const cut = Date.now() - 60000; for (const [k, v] of mh) { if (v < cut) mh.delete(k); } }
+                    } catch (e) {}
+                });
+            }
             const recentlyHurt = Date.now() - bot.lastDamageTime < 2500;
+            // ★C360 挨打必还手: 刚被打中 → 臂展内的黑名单 mob 立即恢复可打 (真威胁不豁免)。
+            if (recentlyHurt) unblacklistAttackers(bot, 'self_defense');
             const range = recentlyHurt ? 12 : 5;
             // EXCLUDE creepers — meleeing one = it detonates = death ("Fighting creeper!"
             // was a suicidal conflict with self_preservation's back-off reflex). Creepers are
             // handled ONLY by self_pres (sprint to >9 blocks). self_defense never engages them.
-            const enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity) && !/creeper/i.test(entity.name || ''), range);
+            // ★C360: 黑名单(futile-fight 断路器)mob 不 engage — 见 recordFightOutcome 注释。
+            const enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity) && !/creeper/i.test(entity.name || '') && !isFutileMob(bot, entity), range);
             // Only STAND AND FIGHT when we can actually win: a weapon in hand and
             // health > 12. Otherwise self_preservation (checked first, higher
             // priority) flees. Never trade blows barehanded or while low — that
@@ -2903,9 +3017,15 @@ const modes_list = [
             }
             if (enemy && hasWeapon && !swarmed && (bot.health > minHp || pointBlank)) {
                 say(agent, `Fighting ${enemy.name}!`);
+                // ★C360: fight-cycle 快照 — cycle 结束时 recordFightOutcome 对照它判"这轮有无进展"。
+                const cycle = { id: enemy.id, name: enemy.name, t0: Date.now(), dist0: enemy.position.distanceTo(bot.entity.position) };
                 execute(this, agent, async () => {
-                    if (hasShield) { try { await skills.customSkill(bot, 'shieldFight', range); } catch (e) { await skills.defendSelf(bot, range); } }
-                    else await skills.defendSelf(bot, range);
+                    try {
+                        if (hasShield) { try { await skills.customSkill(bot, 'shieldFight', range); } catch (e) { await skills.defendSelf(bot, range); } }
+                        else await skills.defendSelf(bot, range);
+                    } finally {
+                        recordFightOutcome(bot, cycle);
+                    }
                 });
             }
         }
@@ -2982,6 +3102,9 @@ const modes_list = [
             const hurt = bot.health < this.lastHp - 0.4;
             if (hurt) {
                 W({ t: new Date().toISOString(), ev: 'HURT', dmg: +(this.lastHp - bot.health).toFixed(1), hp: +bot.health.toFixed(1), mobs });
+                // ★C360 挨打必还手(第二入口): threat_radar always:true, sticky 技能期间 self_defense.update
+                // 可能不跑 — 这里兜底摘除臂展内黑名单 mob, 下一拍 self_defense 就能还手。
+                unblacklistAttackers(bot, 'threat_radar');
             }
             this.lastHp = bot.health;
             if (near.length || hurt) {

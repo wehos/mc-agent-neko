@@ -22,7 +22,13 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
     const haveShield = () => bot.inventory.slots[45] && bot.inventory.slots[45].name === 'shield';
     const raise = () => { try { if (haveShield()) bot.activateItem(true); } catch (e) {} };
     const lower = () => { try { bot.deactivateItem(); } catch (e) {} };
-    const enemy = () => world.getNearestEntityWhere(bot, e => mc.isHostile(e), range);
+    // ★C360 (modes.js FUTILE-FIGHT 断路器同步豁免): 黑名单里的打不动怪(bot._futileMobIds,
+    // id→expiry)不选为目标 — mode 层不 engage 它, 这里也不能替别的怪进来时把它捞回来。
+    const notFutile = (e) => {
+        const m = bot._futileMobIds;
+        return !(m instanceof Map) || !e || e.id == null || !((m.get(e.id) || 0) > Date.now());
+    };
+    const enemy = () => world.getNearestEntityWhere(bot, e => mc.isHostile(e) && notFutile(e), range);
     const kindOf = (e) => {
         const n = (e && e.name || '').toLowerCase();
         if (n.includes('creeper')) return 'creeper';

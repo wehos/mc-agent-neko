@@ -227,7 +227,17 @@ export function resolve(holder, claimant, ctx = {}) {
                 askLLM(agent, holder, claimant, ctx);   // fire-and-forget; 内部全吞
             }
         }
-        return logVerdict(bot, holder, claimant, 'pending', 'default', asking ? 'awaiting llm' : 'no llm (observe/no prompter)', ctx);
+        // ★接线验证 2026-07-03: 不问 LLM 的三种原因要分开写清 — 旧文案 'no llm (observe/no
+        // prompter)' 把"按设计只观测"和"prompter 接线断了"混成一句, 值守排障没法区分。
+        //  - observe-only: Phase 1 mode-vs-mode 只记账不执法 (modes.js 接入点 A enforce=false),
+        //    按设计不烧 LLM — 正常态。
+        //  - PROMPTER MISSING: 执法路径 (enforce) 却拿不到 agent.prompter — 这才是接线断,
+        //    需要修 (当前两个接入点都传真 agent, 此分支只在回归时点亮)。
+        const why = asking ? 'awaiting llm'
+            : (ctx.enforce === false ? 'observe-only (mode-vs-mode: 记账不执法, 按设计不问 llm)'
+                : (!agent || !agent.prompter ? 'PROMPTER MISSING — 执法路径拿不到 llm, 接线断 (需修)'
+                    : 'no bot arb state — llm skipped'));
+        return logVerdict(bot, holder, claimant, 'pending', 'default', why, ctx);
     } catch (e) {
         // 红线: 任何异常退化为"现状" (holder 保留), 永不抛出
         return { winner: 'holder', source: 'default', why: 'arbiter error: ' + ((e && e.message) || e) };

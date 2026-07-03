@@ -800,7 +800,15 @@ export async function defendSelf(bot, range=9) {
     bot.modes.pause('self_defense');
     bot.modes.pause('cowardice');
     let attacked = false;
-    let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
+    // ★C360 (modes.js FUTILE-FIGHT 断路器同步豁免): 黑名单(bot._futileMobIds, id→expiry)里的
+    // 打不动怪不选为目标 — 否则 mode 层不 engage 它, 但为别的怪进来的 defendSelf 内循环又会
+    // 把它捞回来, 断路器被驱动层旁路。被它真打中时 modes 层会立即摘除黑名单 (挨打必还手)。
+    const _engageable = (entity) => {
+        if (!mc.isHostile(entity)) return false;
+        const m = bot._futileMobIds;
+        return !(m instanceof Map) || entity.id == null || !((m.get(entity.id) || 0) > Date.now());
+    };
+    let enemy = world.getNearestEntityWhere(bot, _engageable, range);
     while (enemy) {
         await equipHighestAttack(bot);
         if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
@@ -817,7 +825,7 @@ export async function defendSelf(bot, range=9) {
         bot.pvp.attack(enemy);
         attacked = true;
         await new Promise(resolve => setTimeout(resolve, 500));
-        enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
+        enemy = world.getNearestEntityWhere(bot, _engageable, range);
         if (bot.interrupt_code) {
             bot.pvp.stop();
             return false;
