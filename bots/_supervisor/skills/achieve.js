@@ -324,6 +324,17 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
     };
     const craftNow = async (count) => {
         const id = mc.getItemId(item); if (id == null) return false;
+        // ★C349 幽灵窗口前置清理 (2026-07-03 02:15→03:11Z 实录 stick/planks 死锁): mineflayer 的
+        // clickWindow 永远发往 bot.currentWindow?.id (inventory.js L552) — 死亡/被 timebox 遗弃的
+        // 僵尸容器窗口残留后, 连 2x2 背包合成的点击都被发去服务器早已不认的 windowId, 服务器
+        // 静默丢包(无 resync 无报错) → 每次 bot.craft 20s 超时 'Event updateSlot:0 did not fire',
+        // stick/crafting_table 连挂 56min, 8 oak_planks 在手却 'NO KNOWN WAY to obtain stick',
+        // tier 铁→石回落. 同窗期 equip 也全 tick_race(同一根因: 窗口事务全 void, 挖/放方块正常).
+        // craft 自己会开/关它需要的台子窗口 — craftNow 入口处残留的窗口一律是幽灵, 先关再合成.
+        if (bot.currentWindow) {
+            prog(`${tag}★C349 lingering window ${bot.currentWindow.id}/${bot.currentWindow.type || '?'} at craft entry — close (stale-window guard)`);
+            try { bot.closeWindow(bot.currentWindow); } catch (e) {}
+        }
         let table = findTable();
         let rs = bot.recipesFor(id, null, 1, table) || [];
         if (rs.length === 0) rs = bot.recipesFor(id, null, 1, null) || [];
@@ -379,7 +390,31 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
         try { bot.clearControlStates(); } catch (e) {}
         try { for (const m of _guard) if (bot.modes && bot.modes.exists(m)) { _prev[m] = bot.modes.isOn(m); bot.modes.setOn(m, false); } } catch (e) {}
         try { await bot.craft(r, count, table || undefined); }
-        catch (e) { prog(`${tag}craft ${item} fail: ${e.message}`); }
+        catch (e) {
+            prog(`${tag}craft ${item} fail: ${e.message}`);
+            // ★C349 CRAFT-DESYNC 恢复: updateSlot 超时 = 点击被服务器静默丢弃(幽灵窗口/stateId
+            // 失同步), 盲目重跑每轮再烧 20s 永不自愈(实录卡 56min 直到路过收台子偶然重置).
+            // 恢复三步: ①关幽灵窗口(点击回到 windowId 0) ②臂展内有真实工作台就开合一次,
+            // 逼服务器重发全量 window_items+新 stateId ③同参重试一次. 只对该错误特征触发.
+            if (/updateSlot|did not fire/i.test(String(e.message || ''))) {
+                try {
+                    if (bot.currentWindow) { try { bot.closeWindow(bot.currentWindow); } catch (e2) {} }
+                    const t2 = findTable();
+                    if (t2 && bot.entity.position.distanceTo(t2.position) <= 4.5) {
+                        await new Promise((resolve) => {
+                            const done = () => { clearTimeout(tm); try { bot.removeListener('windowOpen', done); } catch (e2) {} resolve(); };
+                            const tm = setTimeout(done, 1500);
+                            bot.once('windowOpen', done);
+                            try { Promise.resolve(bot.activateBlock(t2)).catch(() => {}); } catch (e2) {}
+                        });
+                        if (bot.currentWindow) { try { bot.closeWindow(bot.currentWindow); } catch (e2) {} }
+                    }
+                    await skills.wait(bot, 300);
+                    await bot.craft(r, count, table || undefined);
+                    prog(`${tag}★C349 craft ${item} retry after window-resync OK`);
+                } catch (e2) { prog(`${tag}★C349 craft ${item} retry still failing: ${e2.message}`); }
+            }
+        }
         finally { try { for (const m in _prev) bot.modes.setOn(m, _prev[m]); } catch (e) {} }
         return have() > before;
     };
