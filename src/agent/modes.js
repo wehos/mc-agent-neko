@@ -1904,10 +1904,17 @@ const modes_list = [
             }
             else if (this.fall_blocks.some(name => blockAbove.name.includes(name))
                 || (blockAbove.boundingBox === 'block' && blockAbove.name !== 'lava')
-                || (block.boundingBox === 'block' && block.name !== 'lava')) {
+                || (block.boundingBox === 'block' && block.name !== 'lava'
+                    && !/_bed$|chest$|anvil|enchant|_slab$|_stairs$|farmland|dirt_path|carpet$/.test(block.name || '')
+                    && (!Array.isArray(block.shapes) || block.shapes.some(s => s && s[4] >= 0.99)))) {
                 // (third clause: FEET wedged in a solid block — doesn't suffocate but
                 // freezes all movement; seen entombed in a cliff alcove, pathfinder
-                // half-dug nook + interrupt storm. Dig free exactly like a head wedge.)
+                // half-dug nook + interrupt storm. Dig free exactly like a head wedge.
+                // ★C361 (checkpoint #27 拆床验尸, 4案同源): beds/chests/slabs report
+                // boundingBox='block' but are PARTIAL cubes (bed maxY=0.5625) — standing
+                // ON one put the feet 'inside' it and this clause DUG THE RESPAWN BED out
+                // from under the bot's own feet (once 2.7s after respawning on it). Partial
+                // cubes neither suffocate nor movement-lock; keep-list + full-cube guard.)
                 execute(this, agent, async () => {
                     // ANY solid block in the bot's HEAD space = suffocation in progress.
                     // Originally this branch only matched sand/gravel (falling columns) —
@@ -1942,10 +1949,14 @@ const modes_list = [
                     }
                     for (let i = 0; i < 8; i++) {
                         // head first (suffocation damage), then feet (movement lock)
+                        // ★C361: same partial-cube/keep guard as the trigger clause — the dig
+                        // target selector used to re-pick the bed even if the trigger was fixed.
+                        const _digOk = (b) => b && b.boundingBox === 'block'
+                            && !/_bed$|chest$|anvil|enchant|_slab$|_stairs$|farmland|dirt_path|carpet$/.test(b.name || '')
+                            && (!Array.isArray(b.shapes) || b.shapes.some(s => s && s[4] >= 0.99));
                         const head = bot.blockAt(bot.entity.position.offset(0, 1, 0));
                         const feet = bot.blockAt(bot.entity.position);
-                        const tgt = (head && head.boundingBox === 'block') ? head
-                            : (feet && feet.boundingBox === 'block') ? feet : null;
+                        const tgt = _digOk(head) ? head : _digOk(feet) ? feet : null;
                         if (!tgt) break;
                         try { await bot.tool.equipForBlock(tgt); } catch (e) {}
                         try { await bot.dig(tgt); } catch (e) { break; }
