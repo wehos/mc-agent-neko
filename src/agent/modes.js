@@ -9,6 +9,9 @@ import Vec3 from 'vec3';
 // from a reflex. Wires the blueprint §E.2 "never clutch over lava" guard into the
 // live MLG reflex below (the inline floor-scan skipped lava: boundingBox 'empty'≠'block').
 import { canClutchWater } from './framework/tools/lava_guard.js';
+// 身体所有权仲裁 (Phase 1, 设计稿 bots/_supervisor/arbitration-design.md): execute() 是
+// 反射抢身体的唯一入口, 在这里挂接入点 A + 所有权令牌。
+import { resolve as arbitrate, setBodyOwner, releaseBodyOwner, currentOwner as arbiterCurrentOwner, vitalNow as arbiterVitalNow } from './framework/arbiter.js';
 
 const FAMINE_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_|rotten_flesh|spider_eye/;
 const NORMAL_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_/;
@@ -6096,14 +6099,40 @@ const modes_list = [
 ];
 
 async function execute(mode, agent, func, timeout=-1) {
+    // ★仲裁接入点 A (Phase 1, 签核设计 bots/_supervisor/arbitration-design.md): 反射经
+    // 这里抢身体 (runAction→stop() 的 interrupt 脉冲) 之前, 先过所有权仲裁。今天的血账:
+    // 反射每 8s 抢 pathfinder goal, surfaceUp 夜爬 8min 走 3y (checkpoint#16)。
+    //  - holder 是 supervised 技能 (kernel/ws/watchdog) → 执法: claimant 胜 / vital 地板
+    //    才放行; holder 胜 / pending (LLM 在路上) → 本 tick 跳过该反射, 不置 interrupt,
+    //    下一拍反射条件仍在会重试 (届时矩阵/LLM 缓存已有答案)。
+    //  - holder 是另一个 mode → Phase 1 只观测 (记 log 不执法、不问 LLM), 原路照旧。
+    // 异常全吞 → 退化为今天的行为 (反射照抢)。
+    try {
+        const _claimantName = `mode:${mode.name}`;
+        const _holder = arbiterCurrentOwner(agent);
+        if (_holder && _holder.name !== _claimantName) {
+            const _enforce = _holder.kind !== 'mode';
+            const _verdict = arbitrate(_holder, { name: _claimantName, kind: 'mode', vital: arbiterVitalNow(agent.bot) },
+                { agent, enforce: _enforce, detail: `reflex ${mode.name} wants to interrupt ${_holder.name}` });
+            if (_enforce && _verdict.winner !== 'claimant') return;
+        }
+    } catch (e) {}
     if (agent.self_prompter.isActive())
         agent.self_prompter.stopLoop();
     let interrupted_action = agent.actions.currentActionLabel;
     mode.active = true;
-    let code_return = await agent.actions.runAction(`mode:${mode.name}`, async () => {
-        await func();
-    }, { timeout });
-    mode.active = false;
+    // ★所有权令牌: 与 mode.active 同生同灭; finally 只释放自己的 (owner-tag 语义 —
+    // 若期间被后来者覆写, release 是 no-op)。
+    setBodyOwner(agent.bot, `mode:${mode.name}`, 'mode');
+    let code_return;
+    try {
+        code_return = await agent.actions.runAction(`mode:${mode.name}`, async () => {
+            await func();
+        }, { timeout });
+    } finally {
+        mode.active = false;
+        releaseBodyOwner(agent.bot, `mode:${mode.name}`);
+    }
     
     // Only log mode completion for non-interrupted actions or when there's meaningful output
     if (!code_return.interrupted) {

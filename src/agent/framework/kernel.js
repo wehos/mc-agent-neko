@@ -20,6 +20,7 @@ import fs from 'fs';
 import { AGENT_MODE, FRAMEWORK_ENABLED_DEFAULT } from './contracts.js';
 import { getWorld, mentalState, proposeTasks, commitGoal } from './world_model.js';
 import { pending as pendingInstincts } from './instinct.js';
+import { resolve as arbitrate, setBodyOwner, releaseBodyOwner } from './arbiter.js';
 
 const SHADOW_LOG = 'bots/_supervisor/framework-shadow.log';
 
@@ -101,6 +102,7 @@ export class Kernel {
         this._cancelHoldAt = 0;                      // last _supervisorCancelAt we logged a dispatch-hold for
         this._interruptUnwinds = Object.create(null); // kind -> consecutive interrupt-unwind count (★valve)
         this._interruptHoldUntil = 0;                // dispatch pause after an interrupt-unwind (reflex settle)
+        this._arbHoldLogAt = 0;                      // last arbitration-hold log (10s rate limit, ★仲裁 B)
         this._companionUntil = 0;                    // companion-mode sticky window after a player msg
         this._lastShadowLog = '';
         this._lastObserveAt = 0;
@@ -302,6 +304,32 @@ export class Kernel {
                 return;
             }
         } catch (e) {}
+        // ★仲裁接入点 B (Phase 1, 签核设计 bots/_supervisor/arbitration-design.md): 派发前
+        // 若身体在一个活跃营救反射手里 (self_preservation 的 swim/drowning 营救、mobility
+        // 的 march/ENTOMBED dig-out), 先过仲裁 — holder 胜 / pending 则本 tick hold, 与上面
+        // 的 supervisor-cancel / interrupt-unwind / drowning hold 家族并列 (drowning hold 是
+        // 本机制的特例先行版, 保留不动)。"活跃" = 该 mode 动作正在执行, 或令牌 30s 内新置
+        // (防泄漏令牌永久扣押派发)。C345 血案: kernel 把 nightShelter 派进正在下沉的 bot,
+        // 新技能的 pathfinder 和 swim 营救抢一条控制通道直到淹死。异常全吞 → 照旧派发。
+        try {
+            const holder = this.bot._bodyOwner;
+            if (holder && holder.kind === 'mode' && /^mode:(self_preservation|mobility)$/.test(holder.name || '')) {
+                const live = !!(this.agent.actions && this.agent.actions.executing
+                    && this.agent.actions.currentActionLabel === holder.name);
+                const fresh = Date.now() - (holder.since || 0) < 30000;
+                if (live || fresh) {
+                    const v = arbitrate(holder, { name: `kernel:${p.skill}`, kind: p.kind || 'skill', vital: false },
+                        { agent: this.agent, detail: `kernel wants to dispatch ${p.kind}/${p.skill}` });
+                    if (v.winner !== 'claimant') {
+                        if (!this._arbHoldLogAt || Date.now() - this._arbHoldLogAt > 10000) {
+                            this._arbHoldLogAt = Date.now();
+                            this.log(`[kernel] arbitration hold — ${holder.name} owns the body (${v.source}); not dispatching ${p.kind}/${p.skill}`);
+                        }
+                        return;
+                    }
+                }
+            }
+        } catch (e) {}
         this.log(line);
         // ★HEARTBEAT (non-shadow only, before dispatch): prepNether.js:102 reads
         // bot._kernelDriverActive (fresh ≤10s) to yield its legacy night fallback exactly
@@ -335,6 +363,9 @@ export class Kernel {
         // finishing kernel dispatch used to clobber the flag mid-ws-skill, so the next tick saw
         // busy=false and double-dispatched into the running ws probe (pathfinder tug-of-war).
         this.agent.supervised_skill = 'kernel';
+        // ★所有权令牌 (伴随 supervised_skill, 同步置 — 反射的仲裁接入点 A 读它认 holder):
+        // name 带具体技能名, LLM persist 的规则可以精确到 skill; 矩阵通配 `kernel:*` 兜底。
+        setBodyOwner(this.bot, `kernel:${p.skill}`, p.kind || 'skill');
         // ★DETACHED DISPATCH (postmortem 2026-07-02 05:41 — THE root of every geared death
         // today): this await used to run INLINE in agent.update's serial 300ms loop, so ALL
         // modes (self_defense, threat_radar, auto_eat, self_preservation, the works) were
@@ -363,6 +394,7 @@ export class Kernel {
                 this.log(`[kernel] commit error: ${e && e.message || e}`);
             } finally {
                 if (this.agent.supervised_skill === 'kernel') this.agent.supervised_skill = false;
+                releaseBodyOwner(this.bot, `kernel:${p.skill}`);   // 只释放自己的 (owner-tag)
             }
             try {
                 const buf = (typeof this.bot.output === 'string') ? this.bot.output : '';
