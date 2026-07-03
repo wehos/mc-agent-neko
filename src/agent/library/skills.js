@@ -2258,9 +2258,57 @@ export async function consume(bot, itemName="") {
         log(bot, `Failed to equip ${item.name} to consume: ${equipRes.reason}.`);
         return false;
     }
-    await bot.consume();
-    log(bot, `Consumed ${item.name}.`);
-    return true;
+    // ★EAT-VOID 根修 (2026-07-02 13:57-14:01 实录: 'famine — eating mutton (emergency tier)'
+    // 连报 4 分钟而 food 恒=6): mineflayer 的 bot.consume() 在 heldItemChanged / set_cooldown
+    // 上也会把 eatingTask "正常" resolve (lib/plugins/inventory.js:77-97) — 任何反射在 1.61s
+    // 进食窗内换手持(tool_keeper 装工具/战斗装剑)或触发冷却包, consume 都无异常返回,
+    // "没 throw" ≠ "吃进去了"。两步治:
+    //   ① 进食窗内短暂压制移动 (~1.8s: 停 pathfinder + 周期 clearControlStates 保持静止;
+    //      honor interrupt_code — 中断请求一来立即放开身体, 绝不跟保命反射抢);
+    //   ② 成败只认 bot.food 差值: 没涨 = 如实 false + 日志; 连续 3 次没涨记 ★EAT-VOID
+    //      (计数挂 bot 实例, 无模块级状态), 便于观测哪个反射在偷进食窗。
+    const foodBefore = bot.food;
+    const nonHunger = /potion|milk_bucket/.test(item.name);   // 合法不涨 food 的消耗品
+    try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+    try { bot.pathfinder && bot.pathfinder.setGoal(null); } catch (e) {}
+    try { bot.clearControlStates(); } catch (e) {}
+    let eatGuardOn = true;
+    const stillGuard = (async () => {
+        const until = Date.now() + 1800;
+        while (eatGuardOn && Date.now() < until && !bot.interrupt_code) {
+            try { bot.clearControlStates(); } catch (e) {}
+            await new Promise(r => setTimeout(r, 150));
+        }
+    })();
+    let consumeErr = null;
+    try { await bot.consume(); } catch (err) { consumeErr = err; }
+    eatGuardOn = false;
+    try { await stillGuard; } catch (e) {}
+    if (nonHunger) {
+        if (consumeErr) { log(bot, `Failed to consume ${item.name}: ${consumeErr.message}.`); return false; }
+        log(bot, `Consumed ${item.name}.`);
+        return true;
+    }
+    // 等 update_health 落地再判差值 (吃完事件与 food 包几乎同刻; 最多再等 ~900ms)
+    for (let i = 0; i < 6 && bot.food <= foodBefore && !bot.interrupt_code; i++) {
+        await new Promise(r => setTimeout(r, 150));
+    }
+    if (bot.food > foodBefore || foodBefore >= 20) {
+        bot._eatVoidStreak = 0;
+        log(bot, `Consumed ${item.name} (food ${foodBefore} -> ${bot.food}).`);
+        return true;
+    }
+    bot._eatVoidStreak = (bot._eatVoidStreak || 0) + 1;
+    const why = consumeErr ? consumeErr.message : 'eat window resolved with no effect (held-item swap / cooldown packet mid-eat)';
+    log(bot, `Tried to eat ${item.name} but food did not rise (${foodBefore} -> ${bot.food}) — ${why}. Not counting it as eaten.`);
+    if (bot._eatVoidStreak >= 3) {
+        log(bot, `★EAT-VOID x${bot._eatVoidStreak}: consume keeps completing with zero food gain — something is stealing the 1.6s eat window.`);
+        try {
+            fs_dz.appendFileSync('bots/_supervisor/progress.txt',
+                `[${new Date().toISOString()}] ★EAT-VOID x${bot._eatVoidStreak} item=${item.name} food=${bot.food} hp=${Math.round(bot.health || 0)} err=${consumeErr ? consumeErr.message : 'silent-void'}\n`);
+        } catch (e) {}
+    }
+    return false;
 }
 
 

@@ -40,7 +40,10 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     const has = (n) => world.getInventoryCounts(bot)[n] || 0;
     const eat = async () => {
         const f = bot.inventory.items().find(i => FOOD_RE.test(i.name) && i.name !== 'rotten_flesh');
-        if (f && bot.food < 20) { try { await skills.consume(bot, f.name); return true; } catch (e) {} }
+        // ★EAT-VOID (13:57-14:01 实录): skills.consume 现按 bot.food 差值如实返回真假 —
+        // 透传它, 别把"试过吃"当"吃到了"(旧版无脑 return true, void 进食把各 Plan 的
+        // 成功分支全骗成 truthy)。
+        if (f && bot.food < 20) { try { return !!(await skills.consume(bot, f.name)); } catch (e) {} }
         return false;
     };
     const edibleHeld = () => bot.inventory.items().some(i => FOOD_RE.test(i.name) && i.name !== 'rotten_flesh');
@@ -1401,6 +1404,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     const rationsCount = () => { try { return bot.inventory.items().filter(i => RATION_RE2.test(i.name)).reduce((s, i) => s + i.count, 0); } catch (e) { return 0; } };
     const rationsAtEntry = rationsCount();
     let surfaceTriedThisRun = false; // ★famine surface-first: at most one climb per dispatch
+    let emergencyEatVoidStrikes = 0; // ★EAT-VOID: 本次派发内紧急档连续无差进食计数(3 次停打转)
     // ★ration-hunt entry (the last link 11:11Z: GET_FOOD proposes on rations<2 at FULL
     // hunger, but this loop keyed on hunger alone — the body never ran, feedUp honestly
     // returned false, and the takeaway buffer could never fill. Hunt also when carrying
@@ -1475,7 +1479,11 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             const flesh = bot.inventory.items().find(i => i.name === 'rotten_flesh');
             if (flesh) {
                 prog(`feedUp: famine flesh — eating rotten_flesh x1 (food=${bot.food}, nothing better held)`);
-                try { await skills.consume(bot, 'rotten_flesh'); await skills.wait(bot, 400); continue; } catch (e) {}
+                // ★EAT-VOID: 吃到(food 真涨)才 continue; void 就落到猎/觅食, 不在死进食窗打转。
+                let ate = false;
+                try { ate = await skills.consume(bot, 'rotten_flesh'); } catch (e) {}
+                if (ate) { await skills.wait(bot, 400); continue; }
+                prog(`feedUp: famine flesh eat VOID food=${bot.food} — continue to hunt/forage instead of spinning`);
             }
         }
         // Getting more means roaming to hunt — do NOT do that at night or
@@ -1531,10 +1539,17 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             } catch (e) {}
             if (bot.food <= 6) {
                 const junk = bot.inventory.items().find(i => /rotten_flesh|^beef$|^porkchop$|^chicken$|^mutton$|^rabbit$|^cod$|^salmon$/.test(i.name));
-                if (junk) {
+                // ★EAT-VOID 呼应修 (13:57-14:01 实录: 本分支连报 'eating mutton (emergency tier)'
+                // 四分钟 food 恒=6): 旧代码丢弃 consume 的返回值无条件 continue — void 进食
+                // (反射偷走 1.6s 进食窗)在这里打转到派发耗尽。现在消费诚实布尔: 吃到才
+                // continue; 连续 3 次 void 就不再选这条分支, 放行后续拾取/觅食/roam Plan。
+                if (junk && emergencyEatVoidStrikes < 3) {
                     log(bot, `feedUp: famine — eating ${junk.name} (emergency tier)`);
-                    try { await skills.consume(bot, junk.name); } catch (e) {}
-                    await skills.wait(bot, 600); continue;
+                    let ate = false;
+                    try { ate = await skills.consume(bot, junk.name); } catch (e) {}
+                    if (ate) { emergencyEatVoidStrikes = 0; await skills.wait(bot, 600); continue; }
+                    emergencyEatVoidStrikes++;
+                    prog(`feedUp: emergency tier eat VOID x${emergencyEatVoidStrikes} (${junk.name}) food=${bot.food} — fall through to fetch/forage plans`);
                 }
             }
             if (await emergencyJunk('no-regen inventory')) continue;
@@ -1626,7 +1641,12 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                         if (await eat()) { await skills.wait(bot, 600); continue; }
                     }
                     const apple = bot.inventory.items().find(i => /apple/.test(i.name || ''));
-                    if (apple) { try { await skills.consume(bot, apple.name); } catch (e) {} await skills.wait(bot, 600); continue; }
+                    if (apple) {
+                        // ★EAT-VOID: 同紧急档 — 吃到才 continue, void 落到 targetedOakAppleForage。
+                        let ate = false;
+                        try { ate = await skills.consume(bot, apple.name); } catch (e) {}
+                        if (ate) { await skills.wait(bot, 600); continue; }
+                    }
                 }
             }
             if (await targetedOakAppleForage()) { await skills.wait(bot, 600); continue; }
