@@ -1505,8 +1505,29 @@ function bedKnown(bot) {
     try {
         if (bot && bot._world && bot._world.kit && bot._world.kit.hasBed) return true;
     } catch (e) {}
-    // bed.json is written by the supervisor when a bed is placed; treat any
-    // readable record as "known". Kept lenient so a missing file just means "no bed".
+    // ★checkpoint#25 P1-B: kit.hasBed is written by NOBODY (grep across src: this read is the
+    // single hit), so bedKnown() was恒假 — GET_BED@50 kept proposing/churning forever even with a
+    // REAL bed already known (live 06:19: setBed logged spawnSet=true; landmarks counts.bed=2 with
+    // bed@56,67,160), and the committed GET_BED could never isGoalDone(:1082). Truth lives in two
+    // places this now reads:
+    //   1) bot._world.landmarks.bed — modes.js C328 landmark memory (nearest-known real *_bed block
+    //      ever scanned, persisted to landmarks.json across respawn/restart; 'bed' is a persistent
+    //      kind, so non-null exactly when counts.bed>0 — both checked defensively).
+    //   2) bots/_supervisor/bed.json WITHOUT a src field — setBed.js:225 writes {x,y,z,t} (no src)
+    //      ONLY after placing+activating a real bed ("Respawn point set"). The src:'auto-site-select'
+    //      (setBed.js:84) and src:'migrate' (migrate.js:482) writes are HOME-ANCHOR site picks made
+    //      BEFORE any bed exists — those must NOT count, or GET_BED would stop proposing a bed the
+    //      bot never actually built.
+    // The night GO_BED chain (computeNightPlan's bedAffordable/_bedLm) already reads landmarks
+    // directly and is untouched — this only fixes the GET_BED proposal gate (:578) + goal-done.
+    try {
+        const lm = bot && bot._world && bot._world.landmarks;
+        if (lm && (lm.bed || (lm.counts && Number(lm.counts.bed) > 0))) return true;
+    } catch (e) {}
+    try {
+        const bj = JSON.parse(readFileSync('bots/_supervisor/bed.json', 'utf8'));
+        if (bj && typeof bj.x === 'number' && !bj.src) return true;   // spawn anchored by a real placed bed
+    } catch (e) {}
     return false;
 }
 

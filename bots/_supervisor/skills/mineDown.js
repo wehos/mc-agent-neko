@@ -65,7 +65,12 @@ export default async function mineDown(bot, ctx, opts = {}) {
         if (avoid.some(a => a.sx === sx && a.sz === sz)) {
             const clean = [[1, 0], [0, 1], [-1, 0], [0, -1]].find(([cx, cz]) => !avoid.some(a => a.sx === cx && a.sz === cz));
             if (clean) { sx = clean[0]; sz = clean[1]; log_(`heading rotated to ${sx},${sz} — ${avoid.length} fluid-aborted heading(s) remembered near here`); }
-            else { log_('all 4 headings fluid-aborted near here — refusing, higher layer should relocate first'); return { failed: true, abort: 'all headings flooded nearby' }; }
+            // ★checkpoint#25 P1-A: only REFUSE on all-flooded headings when we still NEED to staircase
+            // down — already at band (y<=targetY+2) the descent heading is moot (the at-band delegate
+            // below hands off to branchMine, which has its own per-cell fluid guards), so stale fluid
+            // memories from earlier descents must not block lateral mining at the band.
+            else if (bot.entity.position.y > targetY + 2) { log_('all 4 headings fluid-aborted near here — refusing, higher layer should relocate first'); return { failed: true, abort: 'all headings flooded nearby' }; }
+            else { log_('all 4 headings fluid-aborted near here — but already at band; branchMine delegate owns fluid safety laterally'); }
         }
     } catch (e) {}
 
@@ -98,6 +103,39 @@ export default async function mineDown(bot, ctx, opts = {}) {
         + invCount(/_ore$/);
     const entryY = Math.round(bot.entity.position.y);
     const oreUnitsAtEntry = oreUnits();
+
+    // ★checkpoint#25 P1-A AT-BAND DELEGATE (06:53:58-06:54:03 实录: bot 首次抵达 y=12 钻石带后,
+    // 三次 mineDown 派发全部 {endY:12, dug:0, abort:null, failed:true} — 起点已在目标层, mineDown
+    // 是"只下降"的技能, 下降 0 被 return-contract 判败 → 3 振 → DUSK_MINE_NIGHT 冷却在钻石层
+    // 正上方 → bot 上浮放弃 → 钻石 0)。已在带内 (y <= targetY+2) 时正确动作不是"再下降", 而是
+    // 转入 branchMine 支线采矿 — "mine through the night" 的本意。branchMine(bot,ctx,length,targetY)
+    // 自带 lava/water/断镐/低食守卫 + C305 反 x-ray 可达门 + 自己的净进度返回契约 (真进度 truthy /
+    // 零进度 false), 这里按原契约透传其返回: 有进展 → kernel 保持 commitment 再派 (下一派仍 at-band
+    // → 再 branchMine, 即整夜带内轮采); 零进展 → 诚实 failed:true 进冷却 (是"没挖到"的真败, 不再是
+    // "没下降"的假败)。branchMine 不可用/抛错 → 退而求其次: 本轮净矿增益或实际下降 → truthy,
+    // 纯零进展仍 failed:true (诚实)。entry snapshot (entryY/oreUnitsAtEntry) 语义未破坏 — fallback
+    // 判据仍读它; abort 语义未破坏 — 委派路径 abort=null (无楼梯步, 无 abort 源)。
+    if (bot.entity.position.y <= targetY + 2) {
+        log_(`at-band start (y=${entryY} <= targetY+2=${targetY + 2}) — delegating to branchMine (lateral ore mining), not judging by descent`);
+        let bmOk = null;   // true/false = branchMine's own contract verdict; null = unavailable/threw → local fallback judge
+        if (typeof skills.customSkill === 'function') {
+            try { bmOk = !!(await skills.customSkill(bot, 'branchMine', 24, targetY)); }
+            catch (e) { bmOk = null; log_(`branchMine threw: ${e && e.message || e} — falling back to local progress judge`); }
+        } else {
+            log_('skills.customSkill unavailable — falling back to local progress judge');
+        }
+        let inv = {}; try { for (const it of bot.inventory.items()) inv[it.name] = (inv[it.name] || 0) + it.count; } catch (e) {}
+        const r = { endY: Math.round(bot.entity.position.y), dug, oreVeins: ore, hp: Math.round(bot.health), food: bot.food,
+                    abort, raw_iron: inv.raw_iron || 0, iron_ore: 0, atBand: true, delegated: 'branchMine', bmReturn: bmOk };
+        // Fallback judge mirrors the file's KERNEL-CONTRACT: real ore units gained or real descent.
+        // (In the delegate path mineDown's own dug/ore stay 0 — branchMine digs internally — so the
+        // observable local progress is picked-up ore units / y actually descended.)
+        const localProgress = (entryY - r.endY) >= 1 || oreUnits() > oreUnitsAtEntry;
+        const progressed = bmOk === null ? localProgress : bmOk;
+        if (!progressed) r.failed = true;
+        log_(`DONE ${JSON.stringify(r)} (at-band delegate: bm=${bmOk} localProgress=${localProgress})`);
+        return r;
+    }
 
     for (let i = 0; i < steps; i++) {
         const cur = bot.entity.position;
