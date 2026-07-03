@@ -92,8 +92,30 @@ export default async function goBedSleep(bot, ctx) {
     try {
         await bot.sleep(bedBlock);
     } catch (e) {
-        log(bot, `goBedSleep: sleep refused (${e && e.message || e}) — false.`);
-        return false;
+        const msg = String(e && e.message || e);
+        // ★dusk-sliver wait (2026-07-03 10:22Z live: the WHOLE chain worked — found the bed,
+        // walked to it, called sleep — and vanilla refused with 'it's not night' because the
+        // dispatch fired in the tod 12000-12542 dusk sliver where goBedSleep proposes but
+        // sleep isn't allowed yet. Arriving EARLY at the bed is the best possible state;
+        // wait it out (~27s real time) instead of burning a strike.)
+        if (/not night/i.test(msg)) {
+            log(bot, 'goBedSleep: arrived early (dusk sliver) — waiting at the bed for nightfall.');
+            const tw = Date.now();
+            let slept = false;
+            while (Date.now() - tw < 75000) {
+                if (bot.interrupt_code || bot.health <= 0) { log(bot, 'goBedSleep: interrupted while waiting for nightfall — yielding.'); return false; }
+                if (hostileNear(9)) { log(bot, 'goBedSleep: hostiles closed in while waiting — false (fight/shelter first).'); return false; }
+                await skills.wait(bot, 2000);
+                try { await bot.sleep(bedBlock); slept = true; break; } catch (e2) {
+                    const m2 = String(e2 && e2.message || e2);
+                    if (!/not night/i.test(m2)) { log(bot, `goBedSleep: sleep refused while waiting (${m2}) — false.`); return false; }
+                }
+            }
+            if (!slept) { log(bot, 'goBedSleep: night never arrived within 75s — false.'); return false; }
+        } else {
+            log(bot, `goBedSleep: sleep refused (${msg}) — false.`);
+            return false;
+        }
     }
     log(bot, 'goBedSleep: sleeping — skipping the night.');
     const t0 = Date.now();
