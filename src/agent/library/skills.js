@@ -4728,3 +4728,196 @@ export async function eatPreferred(bot) {
     if (!f) return false;
     try { await consume(bot, f); return true; } catch (e) { return false; }
 }
+
+// ── boatEscape ───────────────────────────────────────────────────────────────
+// 渡水根治 (2026-07-03 值守血账: 2 溺亡 + 3 水中被射/被啃 + 2 次 40min 级水域 PIN —
+// 本世界大洋/湖密布, 开阔深水里 swim/escapePlan/watchdog 全部乏力)。船 = 5 板:
+// 渡水 ~8×速 + 免溺 + 甩开大部分追击。modes.js 深水反射与 boatCross.js 技能共用
+// 这一个实现 (反射内不能 customSkill)。
+//
+// mineflayer 1.21.1 载具 API 实测 (本仓 node_modules 源码):
+//   bot.mount(entity) / bot.dismount() / bot.vehicle / 'mount' 'dismount' 事件 — 可用;
+//   bot.placeEntity(refBlock, face) — 对 *_boat 走 vanilla 路径 (block_place + use_item
+//   + 等 entitySpawn 'boat'), 可用 (1.21.1 船实体名就叫 'boat');
+//   bot.moveVehicle(left, forward) — 1.21.1 (< 1.21.3 newPlayerInputPacket) 只发
+//   steer_vehicle 桨输入包, 而原版服务器对 boat 是【客户端权威】物理: 只认控船乘客发的
+//   serverbound vehicle_move {x,y,z:f64, yaw,pitch:f32}, mineflayer 从不发这个包 →
+//   "mount 后 moveVehicle 无效"的历史坑属实, 不能用。
+//
+// 所以这里自己充当船的物理引擎: mount 后以 ≤0.34b/50ms (≈6.8b/s, 低于原版桨速 ~8b/s,
+// 远低于服务器每包 10b 的 moved-too-quickly 上限) 逐 tick 发 vehicle_move 逼近目标,
+// y 恒定在船落水面。服务器对每包做碰撞复算, 不认时回发 clientbound vehicle_move 纠正 —
+// 挂临时监听把本地模型钳回去; 连续被钳且无净位移 = 服务器不吃这套 → 诚实中止。mount
+// 期间 mineflayer 物理停摆且停发玩家位置包 (physics.js on('mount')→shouldUsePhysics=
+// false, updatePosition 被门), 驾驶场地干净; dismount 后服务器传送玩家 → forcedMove
+// 自动恢复物理。本地同步 bot.vehicle.position / bot.entity.position 让看门狗与世界模型
+// 看得到真实进度。
+//
+// 红线: 无模块级状态 (全部函数局部+finally 摘监听) / 每 50ms honor bot.interrupt_code
+// (interrupt 时跳过回收但必 dismount 恢复物理) / 氧气 <12 先浮到水面再放船 (vital 地板)。
+// 契约: 净水平位移 >16b → {crossed:<整数距离>}; 否则 false — 绝不虚报。
+async function _boatRecover(bot, trace) {
+    // 尝试打掉船回收 (船会掉自身物品; 拿不回也接受 — 船 5 板, 命更贵)
+    try {
+        for (let hit = 0; hit < 6; hit++) {
+            if (bot.interrupt_code || bot.health <= 0 || bot.vehicle) return false;
+            let veh = null, bd = 5;
+            for (const id in bot.entities) {
+                const e = bot.entities[id];
+                if (!e || (e.name !== 'boat' && e.name !== 'chest_boat') || !e.position) continue;
+                const d = e.position.distanceTo(bot.entity.position);
+                if (d < bd) { bd = d; veh = e; }
+            }
+            if (!veh) { if (hit > 0) trace(`boat broken after ${hit} hits (item should drop nearby)`); return true; }
+            try { await bot.lookAt(veh.position.offset(0, 0.3, 0), true); } catch (e) {}
+            try { bot.attack(veh); } catch (e) {}
+            await new Promise(r => setTimeout(r, 350));
+        }
+    } catch (e) {}
+    trace('boat not recovered (left afloat) — accepted');
+    return false;
+}
+export async function boatEscape(bot, tx, tz, opts = {}) {
+    const tag = opts.tag || '-';
+    const trace = (s) => { try { fs_dz.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [boat] (${tag}) ${s}\n`); } catch (e) {} };
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    tx = Number(tx); tz = Number(tz);
+    if (!Number.isFinite(tx) || !Number.isFinite(tz) || !bot.entity || !bot.entity.position) return false;
+    const start = bot.entity.position.clone();
+
+    // vital 地板: 淹没状态先浮到水面 (氧气恢复或 6s 超时), 再谈放船
+    if (bot.oxygenLevel !== undefined && bot.oxygenLevel < 12) {
+        trace(`oxygen ${bot.oxygenLevel} low → float first`);
+        try { await bot.look(bot.entity.yaw, -1.45, false); } catch (e) {}
+        bot.setControlState('jump', true);
+        const tF = Date.now();
+        while (Date.now() - tF < 6000 && !bot.interrupt_code && bot.health > 0
+            && bot.oxygenLevel !== undefined && bot.oxygenLevel < 15) await sleep(200);
+        bot.setControlState('jump', false);
+    }
+    if (bot.interrupt_code || bot.health <= 0) return false;
+
+    const isWaterName = (n) => n === 'water' || n === 'flowing_water';
+    const nearBoat = (maxD) => {
+        let best = null, bd = maxD;
+        for (const id in bot.entities) {
+            const e = bot.entities[id];
+            if (!e || (e.name !== 'boat' && e.name !== 'chest_boat') || !e.position) continue;
+            const d = e.position.distanceTo(bot.entity.position);
+            if (d < bd) { bd = d; best = e; }
+        }
+        return best;
+    };
+    let veh = nearBoat(6);   // 上一次尝试留下的船 → 直接骑, 省一只
+
+    if (!veh) {
+        const boatItem = bot.inventory.items().find(it => /(_boat|_raft)$/.test(it.name || ''));
+        if (!boatItem) { trace('no boat item & no boat entity — abort'); return false; }
+        // 找可放船的水面块: 目标方向 2~3.2b > 自己脚下 > 周身 r=2 环
+        const surfWater = (cx, cz) => {
+            try {
+                const yBase = Math.floor(bot.entity.position.y);
+                for (let dy = 2; dy >= -3; dy--) {
+                    const b = bot.blockAt(new Vec3(Math.floor(cx), yBase + dy, Math.floor(cz)));
+                    if (!b || !isWaterName(b.name)) continue;
+                    const up = bot.blockAt(b.position.offset(0, 1, 0));
+                    if (up && (isWaterName(up.name) || up.boundingBox === 'block')) continue;
+                    return b;
+                }
+            } catch (e) {}
+            return null;
+        };
+        const px = bot.entity.position.x, pz = bot.entity.position.z;
+        const ux = tx - px, uz = tz - pz, un = Math.hypot(ux, uz) || 1;
+        const cands = [[px + ux / un * 2, pz + uz / un * 2], [px, pz], [px + ux / un * 3.2, pz + uz / un * 3.2],
+            [px + 2, pz], [px - 2, pz], [px, pz + 2], [px, pz - 2], [px + 2, pz + 2], [px - 2, pz - 2]];
+        let ref = null;
+        for (const [cx, cz] of cands) { ref = surfWater(cx, cz); if (ref) break; }
+        if (!ref) { trace('no placeable water surface in reach — abort'); return false; }
+        try { await bot.equip(boatItem, 'hand'); } catch (e) { trace(`equip ${boatItem.name} err ${e.message}`); return false; }
+        for (let att = 0; att < 2 && !veh; att++) {
+            if (bot.interrupt_code || bot.health <= 0) return false;
+            try { veh = await bot.placeEntity(ref, new Vec3(0, 1, 0)); } catch (e) { trace(`placeEntity att${att} err ${e.message}`); }
+            if (!veh) {
+                // placeEntity 的 waitForEntitySpawn 首个无关 entitySpawn 就摘监听 (源码坑) —
+                // 兜底: 直接 use_item 对水面, 轮询船实体
+                try { await bot.lookAt(ref.position.offset(0.5, 0.9, 0.5), true); } catch (e) {}
+                try { bot.activateItem(); } catch (e) {}
+                await sleep(700);
+                veh = nearBoat(6);
+            }
+        }
+        if (!veh) { trace('boat place failed x2 — abort'); return false; }
+    }
+    trace(`boat @${veh.position.x.toFixed(1)},${veh.position.y.toFixed(1)},${veh.position.z.toFixed(1)} → mount`);
+
+    for (let att = 0; att < 3 && !bot.vehicle; att++) {
+        if (bot.interrupt_code || bot.health <= 0) break;
+        try {
+            if (veh.position.distanceTo(bot.entity.position) > 3.5) {
+                try { await bot.lookAt(veh.position, true); } catch (e) {}
+                bot.setControlState('forward', true); bot.setControlState('jump', true);
+                await sleep(700);
+                bot.setControlState('forward', false); bot.setControlState('jump', false);
+            }
+        } catch (e) {}
+        try { bot.mount(veh); } catch (e) { trace(`mount err ${e.message}`); }
+        const tM = Date.now();
+        while (!bot.vehicle && Date.now() - tM < 2000) await sleep(100);
+    }
+    if (!bot.vehicle) { trace('mount failed x3 — abort + recover'); await _boatRecover(bot, trace); return false; }
+
+    // ── 驾驶: 客户端权威 vehicle_move, 我们就是船的物理引擎 ──
+    try { bot.clearControlStates(); } catch (e) {}
+    const drive = { x: veh.position.x, y: veh.position.y, z: veh.position.z };
+    let clamped = 0;
+    const onVehMove = (pk) => {   // 服务器拒绝这步 → 回发纠正, 本地模型钳回去 (诚实)
+        clamped++;
+        if (pk && Number.isFinite(pk.x)) { drive.x = pk.x; drive.y = pk.y; drive.z = pk.z; }
+    };
+    try { bot._client.on('vehicle_move', onVehMove); } catch (e) {}
+    const arrive = opts.arrive || 7;
+    const maxMs = opts.maxMs || 120000;
+    const tD = Date.now();
+    let reason = 'timeout';
+    let anchor = { x: drive.x, z: drive.z, at: Date.now() };
+    try {
+        while (Date.now() - tD < maxMs) {
+            if (bot.interrupt_code || bot.health <= 0) { reason = 'interrupt'; break; }
+            if (!bot.vehicle) { reason = 'vehicle lost (broken/ejected)'; break; }
+            const dx = tx - drive.x, dz = tz - drive.z, d = Math.hypot(dx, dz);
+            if (d <= arrive) { reason = 'arrived'; break; }
+            const step = Math.min(0.34, d);
+            drive.x += dx / d * step; drive.z += dz / d * step;
+            const nyaw = Math.atan2(-dx, dz) * 180 / Math.PI;   // notchian 度数, 仅船头朝向 (纯装饰)
+            try { bot._client.write('vehicle_move', { x: drive.x, y: drive.y, z: drive.z, yaw: nyaw, pitch: 0 }); }
+            catch (e) { reason = `write err ${e.message}`; break; }
+            // 本地模型跟上 — mount 期间 physics 停发玩家包, 不会外泄; 看门狗看得到进度
+            try { if (bot.vehicle && bot.vehicle.position) bot.vehicle.position.set(drive.x, drive.y, drive.z); } catch (e) {}
+            try { bot.entity.position.set(drive.x, drive.y + 0.55, drive.z); } catch (e) {}
+            if (Date.now() - anchor.at > 20000) {   // 20s 净位移 <2b → 搁浅/被拒, 诚实中止
+                if (Math.hypot(drive.x - anchor.x, drive.z - anchor.z) < 2) { reason = 'no displacement 20s'; break; }
+                anchor = { x: drive.x, z: drive.z, at: Date.now() };
+            }
+            if (clamped >= 10 && Math.hypot(drive.x - start.x, drive.z - start.z) < 3) { reason = `server clamped x${clamped} at origin`; break; }
+            await sleep(50);
+        }
+    } finally {
+        try { bot._client.removeListener('vehicle_move', onVehMove); } catch (e) {}
+    }
+    trace(`drive end: ${reason} clamped=${clamped} pos=${drive.x.toFixed(1)},${drive.z.toFixed(1)}`);
+
+    // dismount 恢复物理 (必须走到 — 否则 shouldUsePhysics 停在 false, 人冻在船里)
+    for (let att = 0; att < 3 && bot.vehicle; att++) {
+        try { bot.dismount(); } catch (e) {}
+        const tU = Date.now();
+        while (bot.vehicle && Date.now() - tU < 1500) await sleep(100);
+    }
+    if (bot.vehicle) trace('WARN: still mounted after dismount x3 — physics may stay frozen');
+    await sleep(800);   // 等服务器下船传送 → forcedMove 恢复物理 + 拿到服务器真实位置
+    if (reason !== 'interrupt') await _boatRecover(bot, trace);
+    const dist = Math.hypot(bot.entity.position.x - start.x, bot.entity.position.z - start.z);
+    trace(`done: net ${Math.round(dist)}b (${reason}) hp=${Math.round(bot.health)} O2=${bot.oxygenLevel}`);
+    if (dist > 16) return { crossed: Math.round(dist) };
+    return false;
+}
