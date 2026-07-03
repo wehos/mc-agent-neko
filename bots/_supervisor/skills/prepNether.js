@@ -2659,6 +2659,22 @@ async function prepNetherInner(bot, ctx) {
             prog('prepNether: KIT — iron tier secured → crafting bucket (MLG ammo)');
             try { await skills.customSkill(bot, 'achieve', { item: 'bucket', count: 1 }); } catch (e) {}
         }
+        // 5b) ★C350 船=渡水根治 kit 常备件 (2026-07-03 值守血账: 2 溺亡 + 3 水中被射/被啃 +
+        //     2 次 40min 水域 PIN — 大洋世界水域是第一杀手, 深水反射/boatCross 都吃包里这只船)。
+        //     5 同种板一只; boatEscape 消耗/丢失后下个 prep 周期自动回补。板不齐但有 log →
+        //     先转一手板, 下轮凑齐。craftRecipe 走上面 spare-pick 段铺好的台链 (wood-first)。
+        if (!bot.interrupt_code && !bot.inventory.items().some(i => /(_boat|_raft)$/.test(i.name || ''))) {
+            const icB = c();
+            const plankB = Object.keys(icB).filter(k => k.endsWith('_planks') && icB[k] >= 5).sort((a, b) => icB[b] - icB[a])[0];
+            if (plankB) {
+                const boatB = plankB === 'bamboo_planks' ? 'bamboo_raft' : plankB.replace('_planks', '_boat');
+                prog(`prepNether: KIT — no boat → crafting ${boatB} (渡水生命线, 5x ${plankB})`);
+                try { await skills.craftRecipe(bot, boatB, 1); } catch (e) { prog(`prepNether: boat craft err ${e.message}`); }
+            } else if (planksEq() >= 5) {
+                const logB = Object.keys(icB).filter(k => k.endsWith('_log') && icB[k] > 0).sort((a, b) => icB[b] - icB[a])[0];
+                if (logB) { try { await skills.craftRecipeLocal(bot, logB.replace('_log', '_planks'), 1); } catch (e) {} }
+            }
+        }
         // 6) ★床不过夜 (痛: 辛苦做的床被收进背包,没等到安家窗口就随尸沉进峡谷): a bed in
         //    the BAG is a bed at RISK — re-anchor it NOW, every boundary, regardless of the
         //    day+calm gate (placing takes 2s; setBed handles place+activate+bed.json).

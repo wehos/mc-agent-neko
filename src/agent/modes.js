@@ -1680,6 +1680,7 @@ const modes_list = [
                         // consume stray interrupts for up to 8s (well under the 10s force-kill budget),
                         // then honor them. Death and live supervisor-cancels always break immediately.
                         const _swimT0 = Date.now();
+                        let boatTried = false;   // ★C350: 每次 execute 至多一次上船尝试 (闭包局部, 无模块态)
                         for (let i = 0; i < 80; i++) {
                             if (bot.interrupt_code || bot.health <= 0) {
                                 const _oxyCrit = bot.oxygenLevel !== undefined && bot.oxygenLevel <= 8;
@@ -1702,6 +1703,52 @@ const modes_list = [
                                 if (d >= lastDist - 0.15) stall++; else stall = 0; // not getting closer
                                 lastDist = d;
                                 if (stall >= 3) stuck = true;
+                            }
+                            // ★C350 BOAT (渡水根治 2026-07-03): 开阔深水 + 包里有船 → 不游 — 放船+
+                            // mount+客户端权威 vehicle_move 直驶目标 (skills.boatEscape, 与 boatCross.js
+                            // 共用; 反射内不能 customSkill 所以做成 skills 导出)。今日血账: 2 溺亡 +
+                            // 3 水中被射/被啃 + 2 次 40min 水域 PIN — 深水里 swim/pillar 全乏力。
+                            // 门: 未淹没 (氧气≥12; 更低的 vital 地板 boatEscape 内部先浮再船) + 脚下
+                            // 2 格无实体块 (_deepBelow 同款, 浅滩岸边不烧船) + (无岸 / 岸远 >8b / 已
+                            // stuck)。boatTried 保证每次 execute 至多一试, 失败原游泳链兜底, 不轮转。
+                            if (!boatTried && (!target || stuck || lastDist > 8)) {
+                                const _bOxyOK = bot.oxygenLevel === undefined || bot.oxygenLevel >= 12;
+                                const _bDeep = _bOxyOK && (() => {
+                                    try {
+                                        for (let dyB = 1; dyB <= 2; dyB++) {
+                                            const bB = bot.blockAt(bot.entity.position.offset(0, -dyB, 0));
+                                            if (bB && bB.boundingBox === 'block') return false;
+                                        }
+                                        return true;
+                                    } catch (e) { return false; }
+                                })();
+                                const _bItem = _bDeep && bot.inventory.items().find(it => /(_boat|_raft)$/.test(it.name || ''));
+                                if (_bItem) {
+                                    boatTried = true;
+                                    // 瞄准: 岸目标 > 陆地地标 (C348 同款过滤) > 当前航向 64b 外
+                                    let bAim = target ? { x: target.x + 0.5, z: target.z + 0.5 } : null;
+                                    if (!bAim) {
+                                        try {
+                                            const pB = bot.entity.position;
+                                            let bestB = null, bdB = Infinity;
+                                            for (const kB in (bot._landmarks || {})) {
+                                                const nB = bot._landmarks[kB];
+                                                if (!nB || !/^(wood|village|bed|chest)$/.test(nB.kind || '')) continue;
+                                                const dB = Math.hypot(nB.x - pB.x, nB.z - pB.z);
+                                                if (dB >= 4 && dB < bdB) { bdB = dB; bestB = nB; }
+                                            }
+                                            if (bestB) bAim = { x: bestB.x, z: bestB.z };
+                                        } catch (e) {}
+                                    }
+                                    if (!bAim) bAim = { x: bot.entity.position.x - Math.sin(exploreYaw) * 64, z: bot.entity.position.z - Math.cos(exploreYaw) * 64 };
+                                    _tr(`BOAT gate: deep water + ${_bItem.name} → boatEscape → ${Math.round(bAim.x)},${Math.round(bAim.z)}`);
+                                    try { bot.clearControlStates(); } catch (e) {}
+                                    let bRes = false;
+                                    try { bRes = await skills.boatEscape(bot, bAim.x, bAim.z, { tag: 'swim-reflex' }); } catch (eB) { _tr(`BOAT err ${eB.message}`); }
+                                    _tr(`BOAT result ${bRes ? 'crossed=' + bRes.crossed : 'false'} → resume swim loop`);
+                                    stall = 0; lastDist = 1e9;
+                                    continue;
+                                }
                             }
                             const f = filler();
                             // ★C318-A (T-0049, deaths #121/#122/#125): the stall>=3 pillar gate is
