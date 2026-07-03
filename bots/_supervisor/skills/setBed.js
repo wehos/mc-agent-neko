@@ -154,24 +154,41 @@ export default async function setBed(bot, ctx) {
             prog('setBed: no sword — skip active spider hunt (avoid barehanded risk), defer');
         }
 
-        // (B) SHEEP HUNT — only if still short. Defers on ANY hostile (don't chase sheep
-        //     through a swarm — that just feeds the death loop). Bounded tries / 60s cap.
-        //     远征装备门同 (A): 羊在远西猎场(spawn西南150格),木剑低血跑那么远=送(218/222)。
-        if (countMatch(/_wool$/) < 3 && _huntRange > 0) {
+        // (B) SHEEP HUNT — ★直取羊毛 (2026-07-03 任务B: 10:22 失床后 4h beds=0 wool=0, 而村口
+        //     反复扫到 sheep@33-40b — 旧门 `_huntRange > 0` 要求有剑, 裸奔=0 → 整段跳过;
+        //     木剑档半径 12 又永远够不到 33-40b 的羊 → setBed 无限 defer, 床链断死)。
+        //     羊是零反击的被动生物, 杀羊 ≠ 218/222 的低血远征猎蛛: 白天(日夜门沿用 (A) 的
+        //     isNight) + 无敌对(敌对门沿用原 hostilesNear(10) defer) + hp≥10/food≥6 底线
+        //     即可出手, 无剑也允许(拳头杀羊零风险只是慢, 有剑仍先装剑)。剪刀有则剪优先
+        //     (可持续 1-3 毛/羊), 剪完必捡 — 剪下的毛是掉落物, 旧剪刀分支从不 pickup=白剪。
+        if (countMatch(/_wool$/) < 3 && !isNight()) {
             if (hostilesNear(10) > 0) { prog(`setBed: short wool + mobs=${hostilesNear(10)} — defer (have string=${countMatch(/^string$/)})`); return false; }
+            const woolFit = bot.health >= 10 && bot.food >= 6;
+            const _sheepRange = (_huntFit || woolFit) ? 64 : 12;   // 仅低血低食才收缩到贴身
             const start = Date.now();
-            const _sheepRange = _huntFit ? 64 : _huntRange;   // C226-B1: wooden sword → only adjacent sheep
             for (let h = 0; h < 6 && countMatch(/_wool$/) < 3 && (Date.now() - start) < 60000; h++) {
                 if (bot.interrupt_code) { prog('setBed: interrupted during wool hunt'); break; }
                 if (hostilesNear(10) > 0) { prog('setBed: mob appeared mid wool-hunt — abort, defer'); return false; }
+                if (isNight()) { prog('setBed: night fell mid wool-hunt — abort, defer'); return false; }
                 const sheep = world.getNearbyEntities(bot, _sheepRange).filter(e => e && e.name === 'sheep')
                     .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
-                if (!sheep) { prog('setBed: no sheep within 64 — relying on string path, defer'); break; }
+                if (!sheep) { prog(`setBed: no sheep within ${_sheepRange} (wool=${countMatch(/_wool$/)}, string=${countMatch(/^string$/)}, fit=${woolFit ? 'wool' : (_huntFit ? 'venture' : 'close-only')}) — defer`); break; }
                 const shears = firstMatch(/^shears$/);
+                const woolBefore = countMatch(/_wool$/);
                 try {
                     await skills.goToPosition(bot, sheep.position.x, sheep.position.y, sheep.position.z, 1);
-                    if (shears) { try { await skills.equip(bot, 'shears'); } catch (e) {} try { await bot.activateEntity(sheep); } catch (e) {} await skills.wait(bot, 600); }
-                    else { try { await skills.attackEntity(bot, sheep, true); } catch (e) {} await skills.pickupNearbyItems(bot); }
+                    if (shears) {
+                        try { await skills.equip(bot, 'shears'); } catch (e) {}
+                        try { await bot.activateEntity(sheep); } catch (e) {}
+                        await skills.wait(bot, 600);
+                        try { await skills.pickupNearbyItems(bot); } catch (e) {}
+                    }
+                    if (countMatch(/_wool$/) <= woolBefore) {   // 没剪到(无剪刀/已剃) → 杀羊拾毛
+                        if (_huntSword) { try { await skills.equip(bot, _huntSword); } catch (e) {} }
+                        try { await skills.attackEntity(bot, sheep, true); } catch (e) {}
+                        try { await skills.pickupNearbyItems(bot); } catch (e) {}
+                    }
+                    prog(`setBed: 直取羊毛 wool ${woolBefore}->${countMatch(/_wool$/)} (${shears ? 'shears-first' : 'kill'}, sheep@${Math.round(sheep.position.distanceTo(bot.entity.position))}b)`);
                 } catch (e) { prog(`setBed: sheep err ${e.message}`); }
             }
         }
