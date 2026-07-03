@@ -7,6 +7,7 @@ import { plugin as pvp } from 'mineflayer-pvp';
 import { plugin as collectblock } from 'mineflayer-collectblock';
 import { plugin as autoEat } from 'mineflayer-auto-eat';
 import plugin from 'mineflayer-armor-manager';
+import { installInvSync } from './inv_sync.js';
 const armorManager = plugin;
 let mc_version = settings.minecraft_version;
 let mcdata = null;
@@ -124,6 +125,9 @@ export function initBot(username) {
         mcdata = minecraftData(mc_version);
         Item = prismarine_items(mc_version);
     });
+
+    // ★INV-DESYNC 根修: updateSlot 超时 → 主动整包重同步而非干等 20s 连败 (见 inv_sync.js)
+    installInvSync(bot);
 
     return bot;
 }
