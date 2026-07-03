@@ -62,12 +62,45 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
             [1, 1, 0], [-1, 1, 0], [0, 1, 1], [0, 1, -1],
             [0, 2, 0],
         ];
-        let placed = 0, openLeft = 0;
+        // ★自封守卫 (2026-07-02 23:34 实锤: bot 已 'Stuck in mobility-contained' 仍
+        // Placed cobblestone@99,12,203 把自己封进 1x1 石棺, 镐随后挖坏 → ENTOMBED 无镐
+        // 空转 30min+). 两条规则:
+        //   a) mobility 已判 ENTOMBED/SEALED → 本来就出不去, 再垒块只会加深棺材; 全跳过.
+        //   b) 无镐时不放"会把水平出口清零"的那一块 — 封口块全是 pick-tier(cobble),
+        //      无镐 bot 封死自己 = 只能靠 ~7.5s/块 的徒手豁免爬回来; 留一个出口, 敌对
+        //      靠近由下方 hold 循环的 hostileClose(4) 逃生舱负责. 有镐者原逻辑不变.
+        const hasPick = () => { try { return bot.inventory.items().some(i => /_pickaxe$/.test(i.name || '')); } catch (e) { return false; } };
+        const mobSt = () => { try { return (bot._mobility && bot._mobility.state) || ''; } catch (e) { return ''; } };
+        // 把候选块视作实心后, bot 还剩几个水平出口 (mobility exits 的简化版: 脚/头两格全空 = 出口)
+        const exitsAfterPlace = (cand) => {
+            try {
+                const m = bot.entity.position.floored();
+                const solidAt = (x, y, z) => {
+                    if (cand && cand.x === x && cand.y === y && cand.z === z) return true;
+                    const b = bot.blockAt(new Vec3(x, y, z));
+                    return !!(b && b.boundingBox === 'block');
+                };
+                let n = 0;
+                for (const [ex, ez] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                    if (!solidAt(m.x + ex, m.y, m.z + ez) && !solidAt(m.x + ex, m.y + 1, m.z + ez)) n++;
+                }
+                return n;
+            } catch (e) { return 1; } // fail-open: 猜还有出口, 照常封 (守卫失效不比现状差)
+        };
+        let placed = 0, openLeft = 0, guardSkipped = 0;
         for (const [dx, dy, dz] of RING) {
             if (bot.interrupt_code || bot.health <= 0) return false;
             const c = new Vec3(p.x + dx, p.y + dy, p.z + dz);
             const b = bot.blockAt(c);
             if (b && b.boundingBox === 'block') continue; // solid terrain already walls this cell
+            if (/ENTOMBED|SEALED/.test(mobSt())) {
+                guardSkipped++; openLeft++;
+                continue;
+            }
+            if (!hasPick() && dy < 2 && exitsAfterPlace(c) === 0) {
+                guardSkipped++; openLeft++;
+                continue;
+            }
             const f = filler();
             if (!f) { openLeft++; continue; }
             await skills.placeBlock(bot, f, c.x, c.y, c.z, 'bottom', true).catch(() => {});
@@ -75,6 +108,7 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
             if (after && after.boundingBox === 'block') placed++;
             else openLeft++;
         }
+        if (guardSkipped > 0) log(bot, `nightShelter: 自封守卫 skipped ${guardSkipped} cell(s) (mob=${mobSt() || '-'} pick=${hasPick()}) — refusing to entomb a pickless/contained bot.`);
         log(bot, `nightShelter: sealed ${placed} cell(s), ${openLeft} still open, filler left=${filler() || 'none'}.`);
         // Holes remain and the block bag is empty → last resort is the dig-one pocket
         // (it needs ~1 cap block at most and digOneCapOne re-checks its own safety).

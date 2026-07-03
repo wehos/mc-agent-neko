@@ -3794,6 +3794,23 @@ const modes_list = [
                 try { await bot.tool.equipForBlock(block); } catch (e) {}
                 await new Promise(r => setTimeout(r, 80));
                 if (heldIsPick()) return true;
+                // ★石棺豁免 (2026-07-03 00:07 实锤 @99,10-12,204 ENTOMBED 轮转 30min+ 零进展):
+                // hasPick() 看得见一把装备不上的镐(库存幽灵条目/equip 风暴), 两次 equip 都拿
+                // 不到手 → 旧逻辑 return false; 而 3788 的 pickless+enclosed 豁免因 hasPick()
+                // ==true 根本走不到 — 两个豁免之间的缝隙就是永锁. 真困(ENTOMBED/SEALED 或
+                // enclosed 且零出口)时拿什么挖什么: 徒手/杂物挖 stone ~7.5s 破块(无掉落),
+                // guardedDig 的 C223 动态超时已按实际挖速放宽. obsidian/bedrock 仍拒绝(徒手
+                // 250s+ 必超时死循环). 有镐且装备成功的原路径(上方提前 return true)不变.
+                const mbT = bot._mobility || {};
+                const trappedT = /ENTOMBED|SEALED/.test(mbT.state || '')
+                    || (!!mbT.enclosed && (!mbT.exits || mbT.exits.length === 0));
+                if (trappedT && !/obsidian|bedrock/.test(block.name || '')) {
+                    try {
+                        fs.appendFileSync('bots/_supervisor/progress.txt',
+                            `[${new Date().toISOString()}] [mobility] stone dig bare-hand exemption (${why}): ${block.name} @${block.position.x},${block.position.y},${block.position.z} held=${bot.heldItem ? bot.heldItem.name : 'empty'} mob=${mbT.state || '-'} enclosed=${!!mbT.enclosed}\n`);
+                    } catch (e) {}
+                    return true;
+                }
                 try {
                     fs.appendFileSync('bots/_supervisor/progress.txt',
                         `[${new Date().toISOString()}] [mobility] stone dig blocked (${why}): ${block.name} @${block.position.x},${block.position.y},${block.position.z} held=${bot.heldItem ? bot.heldItem.name : 'empty'}\n`);
@@ -4629,6 +4646,17 @@ const modes_list = [
                 try { await bot.tool.equipForBlock(block); } catch (e) {}
                 await new Promise(r => setTimeout(r, 80));
                 if (heldIsPick()) return true;
+                // ★石棺豁免 (同 mobility ensurePickForStone 的缝隙, 2026-07-03 实锤): 库存里
+                // 有一把装备不上的镐(幽灵条目/equip 风暴)时, 上面的 !pickItem() 豁免走不到,
+                // equip 又永远失败 → 真困的 bot 连徒手挖都被这里一刀切死. 真困(ENTOMBED/
+                // SEALED 或 enclosed 且零出口)放行杂物/徒手挖非黑曜石/基岩的石头.
+                const mbG = bot._mobility || {};
+                const trappedG = /ENTOMBED|SEALED/.test(mbG.state || '')
+                    || (!!mbG.enclosed && (!mbG.exits || mbG.exits.length === 0));
+                if (trappedG && !/obsidian|bedrock/.test(block.name || '')) {
+                    write('dig.barehand_exemption', { seq, target: blockObj(block), mobility: mbG.state || '', enclosed: !!mbG.enclosed, held: bot.heldItem ? bot.heldItem.name : 'empty' });
+                    return true;
+                }
                 write('dig.blocked', { seq, target: blockObj(block), reason: 'stony-without-held-pick' });
                 return false;
             };
