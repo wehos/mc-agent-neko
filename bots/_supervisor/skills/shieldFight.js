@@ -82,18 +82,23 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
             continue;
         }
         if (bot.health <= 6) break; // critical — let self_preservation flee/seal
-        if (kind === 'ranged') {
+        // ★石棺扩展 (2026-07-03 00:19 实锤 @99,10,204: 困 1x1 石棺, 洞外 spider@d=4.1 —
+        // melee 不在此检测里 → shield-rush goToPosition noPath 秒回 → 空转 ×150/s 直到
+        // maxMs, self_defense 又立刻 re-engage = mobility/脱困永饿死): 同一"打不动就放手"
+        // 判据对 melee 一样成立 — 隔墙 spider/zombie 的 HP 同样纹丝不动. 检测范围 ranged
+        // → ranged+melee; creeper/witch/enderman 各有自己的 continue 分支, 不经过这里.
+        if (kind === 'ranged' || kind === 'melee') {
             const eh = (typeof e.health === 'number') ? e.health : null;
             if (e.id !== rangedId) { rangedId = e.id; rangedSince = Date.now(); rangedHp0 = eh; prevD = d; stalls = 0; }
             else {
-                // HP-based: same ranged mob, no HP drop for ≥4s ⇒ we're not hurting it (wall in the way).
+                // HP-based: same mob, no HP drop for ≥4s ⇒ we're not hurting it (wall in the way).
                 const hpStuck = (eh !== null && rangedHp0 !== null) ? (eh >= rangedHp0 - 0.01) : true;
                 if (!hpStuck) { rangedHp0 = eh; rangedSince = Date.now(); }      // landed a hit → reset clock
                 // distance fallback (HP unexposed): can't close the gap either.
                 if (d >= prevD - 0.5) stalls++; else { stalls = 0; }
                 prevD = d;
                 if (Date.now() - rangedSince > 4000 && (hpStuck || stalls >= 6)) {
-                    log(bot, `shieldFight: ranged target unreachable (d=${d.toFixed(1)} hpStuck=${hpStuck}) — disengaging, yield to escape/food.`);
+                    log(bot, `shieldFight: ${kind} target unreachable (d=${d.toFixed(1)} hpStuck=${hpStuck}) — disengaging, yield to escape/food.`);
                     break;
                 }
             }
@@ -148,7 +153,12 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
         try { await bot.lookAt(e.position.offset(0, e.height ? e.height * 0.85 : 1.4, 0)); } catch (_) {}
         if (d > 3.2) {
             raise(); // close under guard (blocks skeleton arrows)
+            // ★spin cap (石棺实锤: noPath 秒回 → 裸 continue = ~150 次寻路/s 烧 CPU 且把
+            // path 遥测刷爆): 寻路 <400ms 就失败/返回 = 根本没路可走, 歇 250ms 再试 —
+            // 4s 的 unreachable 时钟(上方)照走, 只是不再空转风暴. 正常追击(寻路 >400ms)零影响.
+            const _rushT0 = Date.now();
             try { await skills.goToPosition(bot, e.position.x, e.position.y, e.position.z, 2); } catch (_) {}
+            if (Date.now() - _rushT0 < 400) { try { await skills.wait(bot, 250); } catch (_) {} }
         } else {
             lower();
             try { await bot.attack(e); } catch (_) {}

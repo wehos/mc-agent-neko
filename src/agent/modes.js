@@ -114,9 +114,15 @@ function combatHasPriority(bot) {
 function rangedUnreachableTrap(bot) {
     try {
         if (!bot || !bot.entity) return false;
-        const mob = (bot._mobility && bot._mobility.state) || '';
-        const enclosed = !!(bot._mobility && bot._mobility.enclosed);
-        const noExit = !!(bot._mobility && Array.isArray(bot._mobility.exits) && bot._mobility.exits.length === 0);
+        // ★石棺实锤 2026-07-03 00:19 (@99,10,204 vs spider@102,7,203 d=4.1): 进程刚重启时
+        // bot._mobility 是 undefined — 它由 mobility 模式写, 而 mobility 排在 self_defense
+        // 之后, self_defense 一开机就 engage(active=true) → ModeController break → mobility
+        // 永远没跑过一拍 → 本函数读 undefined → trapped=false → 永不 disengage → 死锁自锁.
+        // 修: 回退到 bot._world.mobility(always:true 观察者自算, 不可能被饿死, 5568).
+        const mobSrc = bot._mobility || (bot._world && bot._world.mobility) || null;
+        const mob = (mobSrc && mobSrc.state) || '';
+        const enclosed = !!(mobSrc && mobSrc.enclosed);
+        const noExit = !!(mobSrc && Array.isArray(mobSrc.exits) && mobSrc.exits.length === 0);
         // 完全封闭(无水平出口的口袋 + 顶上也封 / 活埋 / 封室): bot 隔着墙, 横挥够不到墙另一侧的任何怪 —
         // 哪怕实体距离 d=0.4(贴在墙背面)也打不到(实锤 06-27: skeleton d=0.4 @墙外, 'Fighting' 疯刷血不掉)。
         // 这种状态下"真贴脸射手用近战打断"的假设失效(bot 出不去, 挥到的是墙)。
@@ -126,7 +132,7 @@ function rangedUnreachableTrap(bot) {
         if (!trapped) return false;
         const p = bot.entity.position;
         const RANGED = /skeleton|stray|pillager/i;          // 射手 — 隔墙也能射 bot, 但 bot 横挥够不到它
-        let sawRanged = false, meleeReachable = false;
+        let sawRanged = false, meleeReachable = false, sawUnreachableMelee = false;
         for (const e of Object.values(bot.entities || {})) {
             if (!(e && e.position && mc.isHostile(e))) continue;
             const n = (e.name || '').toLowerCase();
@@ -147,10 +153,16 @@ function rangedUnreachableTrap(bot) {
                 // 饿死(实锤 06-27 91,53,160 跨多天)。真受伤(墙薄怪真打到)时仍按贴脸算, 还手保命。
                 const recentlyHurtBM = (Date.now() - (bot.lastDamageTime || 0)) < 4000;
                 if ((d < 2.5 && (!fullyBoxed || recentlyHurtBM)) || (d < 4.5 && !fullyBoxed)) meleeReachable = true;
+                // ★石棺实锤 2026-07-03 00:19: fullyBoxed + 洞外一只 spider(近战, 非 RANGED) d=4.1 —
+                // 旧判据 return sawRanged && ... 要求"必须存在远程怪"才放手, 纯近战怪隔墙时 sawRanged
+                // 永 false → self_defense 每拍 re-engage shieldFight → goToPosition noPath ×150/s 空转
+                // 14s×∞ → mobility/SURFACE_RESCUE 全饿死. 修: 完全封闭且没在挨打的隔墙近战怪也算
+                // "够不到的威胁", 与 C354 同一免责判据(hp 不掉=墙是实的).
+                else if (fullyBoxed && !recentlyHurtBM) sawUnreachableMelee = true;
             }
         }
-        // 只有"够不到的远程射手存在 且 无任何能近战打到的目标"才放手脱困觅食。
-        return sawRanged && !meleeReachable;
+        // "存在够不到的威胁(远程射手 或 完全封闭下的隔墙近战怪) 且 无任何能近战打到的目标"才放手脱困觅食。
+        return (sawRanged || sawUnreachableMelee) && !meleeReachable;
     } catch (e) { return false; }
 }
 
