@@ -4811,8 +4811,8 @@ export async function boatEscape(bot, tx, tz, opts = {}) {
     let veh = nearBoat(6);   // 上一次尝试留下的船 → 直接骑, 省一只
 
     if (!veh) {
-        const boatItem = bot.inventory.items().find(it => /(_boat|_raft)$/.test(it.name || ''));
-        if (!boatItem) { trace('no boat item & no boat entity — abort'); return false; }
+        const boatOf = () => bot.inventory.items().find(it => /(_boat|_raft)$/.test(it.name || ''));
+        if (!boatOf()) { trace('no boat item & no boat entity — abort'); return false; }
         // 找可放船的水面块: 目标方向 2~3.2b > 自己脚下 > 周身 r=2 环
         const surfWater = (cx, cz) => {
             try {
@@ -4834,20 +4834,37 @@ export async function boatEscape(bot, tx, tz, opts = {}) {
         let ref = null;
         for (const [cx, cz] of cands) { ref = surfWater(cx, cz); if (ref) break; }
         if (!ref) { trace('no placeable water surface in reach — abort'); return false; }
-        try { await bot.equip(boatItem, 'hand'); } catch (e) { trace(`equip ${boatItem.name} err ${e.message}`); return false; }
-        for (let att = 0; att < 2 && !veh; att++) {
+        // ★实弹验尸修复 (2026-07-03 09:43 双败 'Failed to place entity' ×2): 死因不是瞄准 —
+        // bot.placeEntity 的 boat 分支在 1.21.1 上就是坏的: place_entity.js:39 发 use_item
+        // 只带 {hand}, 而 1.21.1 的 use_item 包定义是 hand+sequence+rotation:vec2f, 序列化
+        // 直接抛 "SizeOf error ... reading 'x'" (本机 createSerializer 复现实锤)。nmp 的
+        // client.write 序列化错误走异步 error 不在调用点抛 → 包根本没上线, 服务器从没收到,
+        // waitForEntitySpawn 5s 超时 = 我们看到的报错。次因: 原 activateItem 兜底只有单发+
+        // 700ms 一次轮询, 且 kernel 技能并发抢手 (09:43:33 [chopDBG] digToSurface 换镐与放
+        // 船同帧实锤) 会在 equip→发包窗口把手上的船顶掉。
+        // 修法: 弃 placeEntity, 自己打 6 发点射 — 每发 ①验手 (被顶就重 equip) ②强制 look
+        // ③bot.activateItem() (它发的 use_item 自带 sequence+rotation, 1.21.1 服务器按包内
+        // 朝向 absRotateTo 再 raycast — 并发扭头再也搅不了瞄准) ④1.2s 内每 150ms 轮询船实体;
+        // 三发不中换自己脚下水柱 (踩水自放是 vanilla 最稳姿势)。
+        for (let shot = 0; shot < 6 && !veh; shot++) {
             if (bot.interrupt_code || bot.health <= 0) return false;
-            try { veh = await bot.placeEntity(ref, new Vec3(0, 1, 0)); } catch (e) { trace(`placeEntity att${att} err ${e.message}`); }
-            if (!veh) {
-                // placeEntity 的 waitForEntitySpawn 首个无关 entitySpawn 就摘监听 (源码坑) —
-                // 兜底: 直接 use_item 对水面, 轮询船实体
-                try { await bot.lookAt(ref.position.offset(0.5, 0.9, 0.5), true); } catch (e) {}
-                try { bot.activateItem(); } catch (e) {}
-                await sleep(700);
-                veh = nearBoat(6);
+            const boatItem = boatOf();
+            if (!boatItem) { trace('boat item vanished mid-place — abort'); return false; }
+            try {
+                if (!bot.heldItem || bot.heldItem.name !== boatItem.name) await bot.equip(boatItem, 'hand');
+            } catch (e) { trace(`shot${shot} equip ${boatItem.name} err ${e.message}`); await sleep(250); continue; }
+            try { await bot.lookAt(ref.position.offset(0.5, 0.9, 0.5), true); } catch (e) {}
+            if (bot.heldItem && bot.heldItem.name === boatItem.name) {   // 验手后立刻发, 不留被顶窗口
+                try { bot.activateItem(); } catch (e) { trace(`shot${shot} activateItem err ${e.message}`); }
+            } else { trace(`shot${shot} hand stomped (held=${bot.heldItem && bot.heldItem.name || 'none'}) — retry`); continue; }
+            const tP = Date.now();
+            while (!veh && Date.now() - tP < 1200) { await sleep(150); veh = nearBoat(8); }
+            if (!veh && shot === 2) {   // 三发不中 → 换自己脚下水柱再打
+                const r2 = surfWater(bot.entity.position.x, bot.entity.position.z);
+                if (r2) { ref = r2; trace(`re-aim own column @${r2.position.x},${r2.position.y},${r2.position.z}`); }
             }
         }
-        if (!veh) { trace('boat place failed x2 — abort'); return false; }
+        if (!veh) { trace('boat place failed x6 (use_item volley w/ packet rotation) — abort'); return false; }
     }
     trace(`boat @${veh.position.x.toFixed(1)},${veh.position.y.toFixed(1)},${veh.position.z.toFixed(1)} → mount`);
 
