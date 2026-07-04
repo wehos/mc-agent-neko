@@ -109,6 +109,16 @@ class _NoScaffoldMovements extends _PFMovements {
                 } catch (e) { return 0; }
             });
         }
+        // ★MOB-COST PATHING (2026-07-05 安全自查 C4): pathfinder 内建实体成本本来就开着
+        // (allowEntityDetection=true, 每只怪的碰撞箱按 entityCost/格 计入路径成本, 怪堆叠加),
+        // 但默认 entityCost=1 太软 — 绕路稍贵规划器就贴脸走过 creeper。调到 8: 单怪=明显
+        // 倾向绕行, 怪堆=成本墙; 软成本不阻断可达性(目标在怪身上的猎杀/自卫路径照常可达,
+        // 只多几点代价), 救命反射走仲裁不走寻路, 故不会瘫痪作业。creeper 单独进
+        // entitiesToAvoid (lib 内建 100/格) — 爆炸类不给"绕路太贵就算了"的余地。
+        // 注意: 实体索引只在每次算路时刷新(lib 行为), 跟踪半径=server 实体广播(~48b),
+        // 已远超可视; 途中怪贴近由 self_preservation/self_defense 反射接管。
+        this.entityCost = 8;
+        try { if (this.entitiesToAvoid && this.entitiesToAvoid.add) this.entitiesToAvoid.add('creeper'); } catch (e) {}
         // ★DON'T DIG OWN INFRASTRUCTURE (2026-07-02 05:21Z white_bed loss — rationale at
         // hardenMovements above). Hooked HERE so every construction site is hardened the
         // moment it's built — this file's 14 `new pf.Movements(bot)` sites, world.js's
