@@ -2244,6 +2244,20 @@ export async function consume(bot, itemName="") {
      * @example
      * await skills.eat(bot, "apple");
      **/
+    // ★EAT-VOID 第二刀之一: 进食互斥 (2026-07-04 07:42 x10 实录 — auto_eat 反射与 feedUp 猎杀
+    // 应急吃并发各调 consume, mineflayer 对第二个 bot.consume() 直接取消第一个:
+    // 'Consuming cancelled due to calling bot.consume() again', 谁也吃不完 1.61s, food 钉 0)。
+    // 全仓所有食客均经本函数(唯一裸 bot.consume 在下方), 窗口内后来者等首个结果, 不发第二包。
+    if (bot._eatInFlight) {
+        try { return await bot._eatInFlight; } catch (e) { return false; }
+    }
+    const _run = _consumeOnce(bot, itemName);
+    bot._eatInFlight = _run;
+    try { return await _run; }
+    finally { bot._eatInFlight = null; }
+}
+
+async function _consumeOnce(bot, itemName="") {
     let item, name;
     if (itemName) {
         item = bot.inventory.findInventoryItem(itemName);
@@ -2269,6 +2283,11 @@ export async function consume(bot, itemName="") {
     //      (计数挂 bot 实例, 无模块级状态), 便于观测哪个反射在偷进食窗。
     const foodBefore = bot.food;
     const nonHunger = /potion|milk_bucket/.test(item.name);   // 合法不涨 food 的消耗品
+    // ★EAT-VOID 第二刀之二: 手部锁 — 4a6d7cf 只压制了移动, 但杀手是"换手持"本身
+    // (tool_keeper/战斗/猎杀经 tickConfirm.equipConfirmed 在 1.61s 窗内装剑 → eatingTask
+    // 被 mineflayer 静默 resolve)。equipConfirmed 现会对 hand 目的地在此窗内等待收尾。
+    bot._eatingItem = item.name;
+    bot._eatingUntil = Date.now() + 2600;
     try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
     try { bot.pathfinder && bot.pathfinder.setGoal(null); } catch (e) {}
     try { bot.clearControlStates(); } catch (e) {}
@@ -2284,6 +2303,8 @@ export async function consume(bot, itemName="") {
     try { await bot.consume(); } catch (err) { consumeErr = err; }
     eatGuardOn = false;
     try { await stillGuard; } catch (e) {}
+    bot._eatingUntil = 0;   // 吃完(或失败)立即释放手部锁, 不占战斗反射的拍
+    bot._eatingItem = null;
     if (nonHunger) {
         if (consumeErr) { log(bot, `Failed to consume ${item.name}: ${consumeErr.message}.`); return false; }
         log(bot, `Consumed ${item.name}.`);

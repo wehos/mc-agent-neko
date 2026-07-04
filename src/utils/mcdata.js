@@ -72,6 +72,22 @@ export function initBot(username) {
     // Multiple systems listen to bot events: plugins, agent, proxy, viewer, etc.
     bot.setMaxListeners(50);
 
+    // ★EAT-VOID 手部锁 API 级兜底 (2026-07-04 07:42 x10 实录: auto_eat 开吃 1.61s 窗内,
+    // 猎杀/工具/放块等 21 处裸 bot.equip 换手 → mineflayer 在 heldItemChanged 上把 eatingTask
+    // 静默 resolve, 鸡肉在手 food 钉 0)。skills.consume 开吃时置 bot._eatingUntil(+2.6s 自过期)/
+    // bot._eatingItem; 这里包一层 bot.equip: 窗内 hand 换装(非正在吃的食物)等窗口收尾再执行 —
+    // 覆盖全部调用面(equipConfirmed 内部也走这里), 逐点补丁不可靠。甲/副手目的地不受影响。
+    const _rawEquip = bot.equip.bind(bot);
+    bot.equip = async function (item, destination) {
+        if (destination === 'hand') {
+            while (bot._eatingUntil && Date.now() < bot._eatingUntil
+                   && !(item && item.name === bot._eatingItem)) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+        }
+        return _rawEquip(item, destination);
+    };
+
     let lastPositionUpdate = 0;
     let pendingPositionPacket = null;
     const POSITION_THROTTLE_MS = 50;

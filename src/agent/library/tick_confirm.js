@@ -129,6 +129,16 @@ export async function equipConfirmed(bot, itemName, destination = 'hand', opts =
         confirmTimeoutMs = DEFAULT_CONFIRM_TIMEOUT,
     } = opts;
 
+    // ★EAT-VOID 手部锁 (2026-07-04 07:42 x10 实录: auto_eat 开吃后, 猎杀/工具反射经此咽喉点
+    // 换手装剑 → mineflayer 在 heldItemChanged 上把 eatingTask 静默 resolve, 鸡肉在手 food 钉 0):
+    // 进食窗内 (skills.consume 置 bot._eatingUntil, ≤2.6s 自过期) 的 hand 换装请求等窗口收尾,
+    // 装的就是正在吃的食物则放行; 甲/副手目的地不受影响。饿死是确定性死亡, 让两拍剑击可收回。
+    if (destination === 'hand') {
+        while (bot._eatingUntil && Date.now() < bot._eatingUntil && itemName !== bot._eatingItem) {
+            await sleepMs(100);
+        }
+    }
+
     const findItem = () => bot.inventory.slots.find(s => s && s.name === itemName);
 
     const armorSlotsByDest = { head: 5, torso: 6, legs: 7, feet: 8, 'off-hand': 45 };
