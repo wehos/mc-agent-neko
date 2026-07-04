@@ -192,6 +192,16 @@ while ($true) {
             -RedirectStandardError (Join-Path $proj 'bots\_supervisor\ticket-server.err') -WindowStyle Hidden
         Add-Content $log "[$(Get-Date -Format o)] started ticket-server.mjs (:48920)"
     }
+    # ORACLE-DAEMON KEEP-ALIVE (2026-07-05 全知层): RCON 只读 /locate 滚动侦察当前维度关键结构
+    # → oracle.json → modes.js 挂 bot._world.oracle → 提案/技能层全知决策。死了全知层静默失明,
+    # 决策自动降级为纯扫描模式 (oracle=null), 所以这里保活但不致命。
+    $oracleAlive = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*oracle-daemon.mjs*' }
+    if (-not $oracleAlive) {
+        Start-Process -FilePath 'node' -ArgumentList 'oracle-daemon.mjs' -WorkingDirectory (Join-Path $proj 'bots\_supervisor') `
+            -RedirectStandardOutput (Join-Path $proj 'bots\_supervisor\oracle-daemon.out') `
+            -RedirectStandardError (Join-Path $proj 'bots\_supervisor\oracle-daemon.err') -WindowStyle Hidden
+        Add-Content $log "[$(Get-Date -Format o)] started oracle-daemon.mjs (全知侦察)"
+    }
     # BOTWATCH KEEP-ALIVE: the anomaly detector — classifies death/stuck/idle/seal-fail from the
     # telemetry and POSTs auto-tickets to the ticket-server. Without it the board stops filling
     # itself. Needs TICKET_PORT (set above, persists in this PS session).
