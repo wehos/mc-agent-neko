@@ -716,7 +716,11 @@ export function proposeTasks(world, bot) {
     //    not a flat iron>=4 — proposing a craft pass that can't afford the next piece (boots
     //    owned + 4 iron, helmet costs 5) just spun craftArmor at @68 above the whole chain.
     //    Proposer gate and isGoalDone share the ONE predicate (the file's house idiom).
-    if (overworld && time.phase === 'day' && !(threat.actionable > 0) && !ironArmorGoalDone(w, bot)) {
+    // ★2026-07-05 无镐让位 (实录 05:04: 全镐耗尽时 GET_ARMOR@68 一分压过 REPLENISH@67,
+    // craftArmor 抢走白天窗口徒手 7.5s/块凿石找炉位反复失败, 补镐链被压制到 3-strike 冷却
+    // 才轮上)。无镐=补给紧急态: picks>0 才许提甲件。
+    if (overworld && time.phase === 'day' && !(threat.actionable > 0) && !ironArmorGoalDone(w, bot)
+        && (kit.picks || 0) > 0) {
         push({ kind: PROPOSAL_KIND.GET_ARMOR, priority: 68, skill: 'craftArmor',
                rationale: `unarmored (${vitals.armor || 0}/4 pieces) + ${ironForArmor(bot)} iron banked — smelt+craft+equip iron armor (creeper/stray insurance, save diamonds)` });
     }
