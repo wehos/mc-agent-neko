@@ -75,18 +75,30 @@ export function initBot(username) {
     // ★EAT-VOID 手部锁 API 级兜底 (2026-07-04 07:42 x10 实录: auto_eat 开吃 1.61s 窗内,
     // 猎杀/工具/放块等 21 处裸 bot.equip 换手 → mineflayer 在 heldItemChanged 上把 eatingTask
     // 静默 resolve, 鸡肉在手 food 钉 0)。skills.consume 开吃时置 bot._eatingUntil(+2.6s 自过期)/
-    // bot._eatingItem; 这里包一层 bot.equip: 窗内 hand 换装(非正在吃的食物)等窗口收尾再执行 —
+    // bot._eatingItem; 包一层 bot.equip: 窗内 hand 换装(非正在吃的食物)等窗口收尾再执行 —
     // 覆盖全部调用面(equipConfirmed 内部也走这里), 逐点补丁不可靠。甲/副手目的地不受影响。
-    const _rawEquip = bot.equip.bind(bot);
-    bot.equip = async function (item, destination) {
-        if (destination === 'hand') {
-            while (bot._eatingUntil && Date.now() < bot._eatingUntil
-                   && !(item && item.name === bot._eatingItem)) {
-                await new Promise(r => setTimeout(r, 100));
+    // ⚠必须延迟安装: version=auto 时 mineflayer 先 ping 探测协议版本才异步注入插件,
+    // createBot 刚返回时 bot.equip 是 undefined — 立即 .bind 直接 TypeError 秒崩 agent
+    // (2026-07-04 15:50-19:50 四小时停机事故根因, 'exited too quickly' 循环)。
+    const installEatHandLock = () => {
+        if (typeof bot.equip !== 'function') return false;
+        const _rawEquip = bot.equip.bind(bot);
+        bot.equip = async function (item, destination) {
+            if (destination === 'hand') {
+                while (bot._eatingUntil && Date.now() < bot._eatingUntil
+                       && !(item && item.name === bot._eatingItem)) {
+                    await new Promise(r => setTimeout(r, 100));
+                }
             }
-        }
-        return _rawEquip(item, destination);
+            return _rawEquip(item, destination);
+        };
+        return true;
     };
+    if (!installEatHandLock()) {
+        bot.once('login', () => {
+            if (!installEatHandLock()) bot.once('spawn', installEatHandLock);
+        });
+    }
 
     let lastPositionUpdate = 0;
     let pendingPositionPacket = null;
