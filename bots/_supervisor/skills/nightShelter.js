@@ -30,8 +30,22 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
 
     if (mode !== 'dig_one') mode = 'seal'; // only two modes; junk args behave as the safe default
 
+    // ★P0-2 夜间黑洞诚实化 (2026-07-04 取证: 'sealed 0, 2 still open' ×1986 条零进度合法 hold,
+    // 观测面无法区分"真封顶坚守"和"漏风空转")。契约旗 bot._nightSealedUntil (时间戳 — 评审修正:
+    // 原布尔 bot._nightSealed 有两个致命伤: ① surfaceUp 读的是另一面旗 _nightSealingUntil, 契约
+    // 根本没接上; ② 无 TTL — maxMs 切片到期"保旗"后若整夜不再被派发, 旗 stale-true 挂一整天,
+    // 白天真石棺场景会被它压住 C362 逃生 = 重造 y16 石棺 14h 活锁)。语义: Date.now() <
+    // bot._nightSealedUntil = 封顶几何完成且本技能仍在 hold (hold 循环每轮滚动续期; 未封/被拆/
+    // 拖出/黎明 → 置 0; 停止续期后 ≤10s 自动过期)。消费方 surfaceUp 的 C362 石棺排除按此旗名
+    // 读取 (与 prepNether.js 夜庇护封顶段的 bot._nightSealingUntil 并联, 两旗任一活着都算夜封顶)。
+    // 返回值契约不变 — hold 型技能活着=价值, 简单 false 会被 3-strike 冷却把整夜保护关掉。
+    const SEAL_TTL_MS = 10000; // hold 循环 2s/轮 → 10s 容忍派发切片间隙, 又短到不会压住白天逃生
+    let sealedNow = false;     // 本次派发内的封顶几何状态 (hold 循环据此滚动续期)
+    const setSealed = (v) => { sealedNow = !!v; try { bot._nightSealedUntil = v ? Date.now() + SEAL_TTL_MS : 0; } catch (e) {} };
+
     // ── ENTRY gate (checked once, per red line — not re-checked mid-build) ──
-    if (isDay()) return true; // night already over, nothing to shelter from
+    if (isDay()) { setSealed(false); return true; } // night already over (黎明=拆旗), nothing to shelter from
+    setSealed(false); // 建造开始前先摘旗 — 只有下方真封成才重新立起
 
     // ── PHASE 1: build the shelter ──
     if (mode === 'dig_one') {
@@ -51,7 +65,7 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
         } else {
             const ok = await skills.digOneCapOne(bot).catch(() => false);
             if (!ok) { log(bot, 'nightShelter: dig_one refused/failed (gravity/depth/aquifer guard) — downgrading to seal.'); mode = 'seal'; }
-            else log(bot, 'nightShelter: 挖三填一 pocket sealed.');
+            else { setSealed(true); log(bot, 'nightShelter: 挖三填一 pocket sealed.'); }
         }
     }
     if (mode === 'seal') {
@@ -117,7 +131,14 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
                 log(bot, 'nightShelter: no filler and cannot dig — exposed');
                 return false;
             }
+            setSealed(true); // dig_one 兜底成功 = 口袋封成
+            openLeft = 0;
         }
+        setSealed(openLeft === 0);
+        // ★取证注: 07-03/04 夜里 'sealed 0, 2 still open' 的几何根因不是放置失败, 是
+        // 自封守卫按设计给 PICKLESS bot 留最后一个 2 格出口 (mob=FREE pick=false ×1986 条)
+        // — 合法的活命 hold, 但必须在观测面上与真封顶区分开。
+        if (openLeft > 0) log(bot, `[nightShelter] HOLD(unsealed) open=${openLeft} guardSkip=${guardSkipped} pick=${hasPick()} filler=${filler() || 'none'} — 漏风坚守 (守卫留门/缺料), 非真封顶.`);
     }
 
     // ── PHASE 2: hold until day (EVERY iteration checks interrupt + death, red line) ──
@@ -136,16 +157,19 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
     const hostileClose = (r) => { try { return Object.values(bot.entities || {}).some(e => e && e !== bot.entity && e.position && ctx.mc.isHostile(e) && e.position.distanceTo(bot.entity.position) < r); } catch (e) { return false; } };
     let lastHp = hpAtHold;
     while (!isDay() && !isDayDirect() && Date.now() - t0 < maxMs) {
-        if (bot.interrupt_code || bot.health <= 0) break;
+        if (bot.interrupt_code || bot.health <= 0) { setSealed(false); break; } // 反射接管/死亡 — 口袋不再罩着我们, 摘旗
         if (bot.entity.position.distanceTo(holdAnchor) > 2) {
+            setSealed(false); // 被拖出口袋 = 拆封
             log(bot, 'nightShelter: dragged >2b out of the sealed pocket (unstuck/instinct/knockback — motion log path.goal names the culprit) — shelter void, re-decide.');
             return false;
         }
         if (bot.health < lastHp - 0.5 || hostileClose(4)) {
+            setSealed(false); // 封顶名存实亡 (还在挨打) = 拆封
             log(bot, `nightShelter: taking hits in the "shelter" (hp ${Math.round(bot.health)}/${Math.round(lastHp)}, hostile<4=${hostileClose(4)}) — seal failed, re-decide.`);
             return false;
         }
         lastHp = bot.health;
+        if (sealedNow) setSealed(true); // 滚动续期 — 旗只在"仍封着+仍在 hold"时活着 (TTL 防 stale-true 挂到白天)
         if (bot.food != null && bot.food < 12) {
             let f = bot.inventory.items().find(i =>
                 /^(cooked_|bread$|apple$|baked_|carrot$|potato$)/.test(i.name) || /cooked_/.test(i.name));
@@ -158,5 +182,6 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
         }
         await skills.wait(bot, 2000);
     }
+    if (isDay() || isDayDirect()) setSealed(false); // 黎明摘旗 — 白天不存在"夜封顶"状态; maxMs 夜内切片到期不摘 — TTL 10s 内 kernel 重派即续上, 若被高优 kind 接管不再派发则旗自行过期 (不 stale)
     return true; // sheltered the night slice we were dispatched for (commitment holds till day)
 }

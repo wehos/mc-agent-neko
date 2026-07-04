@@ -474,17 +474,22 @@ export default async function migrate(bot, ctx, opts = {}) {
     // score. For an unsettled hazard target, DON'T overwrite bed.json — leave setBed's own auto-selector
     // (which picks deaths-near=0 sites) to choose a safer home than the hazard we stalled in.
     const targetSafe = reachedGood || ((target.deathsNear || 0) === 0 && siteScore(target) >= 0);
+    // ★P0-2 幻影家根修 (2026-07-04 取证: bed.json={141,62,119,src:'migrate'} 是迁徙【开始】时写的,
+    // 那里从未放过床, bankGear/chopWood/prepNether 等不查 src 的读方全锚在幻影上): 预写改为事务式 —
+    // 先快照旧值, 预写只为 pin setBed 的选址器 (setBed:45 读 bed.json 做 anchor), setBed 成功会用
+    // 实证坐标覆盖 ({x,y,z,t} 无 src); setBed 失败/defer 则回滚快照, 幻影锚不再落盘过夜。
+    let bedfPrior = null, bedfPinned = false;
     if (targetSafe) {
       try {
-        // Overwrite bed.json so setBed's own remote site-selector keeps the home HERE
-        // (without this, auto-site-select's far-ring candidates would walk the bot away again).
+        try { bedfPrior = fs.readFileSync(BEDF, 'utf8'); } catch (e) {}
         const hy = Math.max(60, Math.min(95, Math.floor(bot.entity.position.y)));
         fs.writeFileSync(BEDF, JSON.stringify({
             x: target.x, y: hy, z: target.z, t: Date.now(),
             src: 'migrate', score: target.score ?? siteScore(target),
             biome: target.biome, animals: target.landAnimals, trees: target.trees,
         }));
-        log_(`anchor written @${target.x},${target.z} (score=${target.score ?? '?'} biome=${target.biome}) — invoking setBed`);
+        bedfPinned = true;
+        log_(`anchor pinned (transactional) @${target.x},${target.z} (score=${target.score ?? '?'} biome=${target.biome}) — invoking setBed`);
       } catch (e) { log_(`anchor write err: ${e && e.message || e}`); }
     } else {
         log_(`★C325 anchor SKIP @${target.x},${target.z} (deathsNear=${target.deathsNear ?? '?'} score=${siteScore(target)}, unsettled hazard) — keep prior home, don't re-anchor a death zone → setBed auto-selects safer`);
@@ -492,6 +497,14 @@ export default async function migrate(bot, ctx, opts = {}) {
 
     let bedOk = false;
     try { bedOk = await skills.customSkill(bot, 'setBed'); } catch (e) { log_(`setBed threw: ${e && e.message || e}`); }
+    if (bedfPinned && !bedOk) {
+      // setBed 没放成床 → 回滚 pin, 不留幻影锚 (旧值有则还原, 无则删文件)
+      try {
+        if (bedfPrior != null) fs.writeFileSync(BEDF, bedfPrior);
+        else fs.unlinkSync(BEDF);
+        log_(`anchor pin ROLLED BACK (setBed defer/fail) — no phantom home persisted`);
+      } catch (e) { log_(`anchor rollback err: ${e && e.message || e}`); }
+    }
 
     // ---- persist outcome + reset streaks (we acted; give the new area a chance) ----
     // ★COOLDOWN-ON-STALL FIX (C222): impose the FULL cooldown only when we actually relocated a real

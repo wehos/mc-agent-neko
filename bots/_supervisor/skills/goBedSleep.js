@@ -8,9 +8,11 @@
 // test yields to a committed DUSK_GO_BED (modes.js) so the two never double-handle.
 //
 // Return contract: truthy {slept:true} after a confirmed sleep (or already-day wake);
-// false when it genuinely cannot act (no bed known/found, unreachable, hostiles block
-// vanilla sleep, sleep throws) so the kernel's 3-strike cooldown falls through to the
-// NIGHT_DIG_ONE/NIGHT_SEAL shelter fallbacks. No module-level state.
+// truthy {placed:true,slept:false} when this run PLACED a pack bed (real world delta —
+// zero-progress false would mis-strike it; next run with no delta returns honest false);
+// false when it genuinely cannot act (no bed known/found/carried, unreachable, hostiles
+// block vanilla sleep, sleep throws) so the kernel's 3-strike cooldown falls through to
+// the NIGHT_DIG_ONE/NIGHT_SEAL shelter fallbacks. No module-level state.
 // Invoked via: {"skill":"goBedSleep"}  ctx = { skills, world, mc, Vec3, log }
 import fs from 'fs';
 import path from 'path';
@@ -31,11 +33,67 @@ export default async function goBedSleep(bot, ctx) {
         log(bot, `goBedSleep: START pos=${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)} food=${bot.food} hp=${Math.round(bot.health)}`);
     } catch (e) {}
     const isNightish = () => { try { const t = bot.time.timeOfDay; return t >= 12000 && t <= 23458; } catch (e) { return false; } };
-    const hostileNear = (r) => { try { return Object.values(bot.entities || {}).some(e => e && e !== bot.entity && e.position && ctx.mc.isHostile(e) && e.position.distanceTo(bot.entity.position) < r); } catch (e) { return false; } };
+    // ★vanilla 对齐 (P0-2 取证任务 d): 原 hostileNear(9) 以 BOT 为中心 9 格球形, 双重偏严 —
+    // vanilla 拒睡判定是以床为中心的盒形 ~8 水平 / 5 垂直 ("monsters nearby")。山坡上 8.5b 外
+    // 高处的骷髅会被旧门挡下、vanilla 却允许睡。改为床心盒形, 判不过再由 bot.sleep 的
+    // 服务器端真拒绝兜底 (catch 里诚实 false)。
+    const hostileNearBed = (bedPos) => {
+        try {
+            return Object.values(bot.entities || {}).some(e => {
+                if (!e || e === bot.entity || !e.position || !ctx.mc.isHostile(e)) return false;
+                const dx = Math.abs(e.position.x - (bedPos.x + 0.5));
+                const dy = Math.abs(e.position.y - bedPos.y);
+                const dz = Math.abs(e.position.z - (bedPos.z + 0.5));
+                return dx <= 8 && dz <= 8 && dy <= 5;
+            });
+        } catch (e) { return false; }
+    };
+    // ★夜链自愈 (P0-2 取证 2026-07-04: 07-03T11:22 最后一张床被拆 → bed landmark 归零 →
+    // bedAffordable 恒假 → DUSK_GO_BED 此后 0 提案, goBedSleep 整整一夜再未被派发)。
+    // 睡成/就地放床后立即把 bed landmark 登记回 bot._landmarks(+落盘), 不等 C328 12s 扫描 —
+    // 下一个黄昏 computeNightPlan 直接看到床, 夜链闭环。
+    const regBedLandmark = (pos) => {
+        try {
+            if (!bot._landmarks || typeof bot._landmarks !== 'object') return;
+            const key = `bed@${pos.x},${pos.y},${pos.z}`;
+            const _n = Date.now();
+            if (!bot._landmarks[key]) bot._landmarks[key] = { kind: 'bed', x: pos.x, y: pos.y, z: pos.z, ts: _n, seen: _n, meta: null };
+            else bot._landmarks[key].seen = _n;
+            fs.writeFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'landmarks.json'), JSON.stringify(bot._landmarks));
+            log(bot, `goBedSleep: bed landmark 登记 @${key} — DUSK_GO_BED 下个黄昏直接可提案.`);
+        } catch (e) {}
+    };
+    // ★就地放床 (P0-2 候选缺陷 b): 找不到床但背包里有床 → 2x1 平地就地放下再睡, 而不是
+    // false 冷却把整夜交给 nightShelter 空转。几何与 setBed.placeBed 同款 (脚/头两格支撑
+    // 实心+本体可清空)。
+    const placeBedHere = async () => {
+        let it = null;
+        try { it = (bot.inventory.items() || []).find(i => /_bed$/.test(i.name || '')); } catch (e) {}
+        if (!it) return null;
+        const base = bot.entity.position.floored();
+        const solid = (b) => b && b.boundingBox === 'block';
+        // 只认真正可替换的覆盖物: includes('grass'/'snow') 会把实心 grass_block/snow_block 当空位 → 挖坑埋床
+        const openish = (b) => b && (b.name === 'air' || b.name === 'cave_air' || /^(short_grass|tall_grass|grass|fern|snow)$/.test(b.name || ''));
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            if (bot.interrupt_code || bot.health <= 0) return null;
+            const foot = base.offset(dx, 0, dz), head = base.offset(dx * 2, 0, dz * 2);
+            if (!solid(bot.blockAt(foot.offset(0, -1, 0))) || !solid(bot.blockAt(head.offset(0, -1, 0)))) continue;
+            if (!openish(bot.blockAt(foot)) || !openish(bot.blockAt(head))) continue;
+            try {
+                for (const cell of [foot, head]) { const b = bot.blockAt(cell); if (b && b.name !== 'air' && b.name !== 'cave_air') { try { await bot.dig(b); } catch (e) {} } }
+                await skills.placeBlock(bot, it.name, foot.x, foot.y, foot.z, 'bottom', true);
+            } catch (e) { continue; }
+            const placedB = bot.findBlock({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 4 });
+            if (placedB) { log(bot, `goBedSleep: 背包床就地放置 @${placedB.position.x},${placedB.position.y},${placedB.position.z} — 不再 false 交给 nightShelter.`); regBedLandmark(placedB.position); return placedB; }
+        }
+        return null;
+    };
 
     if (!isNightish()) return { slept: false, day: true };   // night already over — commitment releases at day
 
     // 1) Locate a bed: world-model landmark first (survives chunk unload), then a live scan.
+    let placedThisRun = false;   // 本次是否就地放了床 (放床=真实进度, bail 时不按零进度 false 计 strike)
+    const bail = (msg) => { log(bot, msg + (placedThisRun ? ' (但本次已放床+登记 landmark = 有进度, 返 truthy)' : '')); return placedThisRun ? { placed: true, slept: false } : false; };
     let tgt = null;
     try { const lm = bot._world && bot._world.landmarks; if (lm && lm.bed && Number.isFinite(lm.bed.x)) tgt = lm.bed; } catch (e) {}
     let bedBlock = bot.findBlock({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 8 });
@@ -70,8 +128,15 @@ export default async function goBedSleep(bot, ctx) {
                 }
             }
         } catch (e) {}
-        log(bot, 'goBedSleep: no bed within reach (landmark stale or none) — false, shelter chain takes over.');
-        return false;
+        // 候选缺陷 b 修复: 世界里没床 ≠ 没办法睡 — 背包里若有床, 就地放床继续走睡眠链。
+        bedBlock = await placeBedHere();
+        if (!bedBlock) {
+            log(bot, 'goBedSleep: no bed within reach (landmark stale or none) and none in pack — false, shelter chain takes over.');
+            return false;
+        }
+        // 契约注: 本次运行已真实改变世界 (放床+landmark) — 后续即使被敌对/拒睡挡下, 也不能
+        // 按"零进度 false"记 strike; bail 返回 {placed:true} truthy, 下一轮零变化再诚实 false。
+        placedThisRun = true;
     }
 
     // 2) Close to interaction range.
@@ -80,13 +145,13 @@ export default async function goBedSleep(bot, ctx) {
         if (bot.interrupt_code || bot.health <= 0) { log(bot, `goBedSleep: ${bot.health <= 0 ? 'died' : 'reflex interrupt'} mid-approach to bed — yielding.`); return false; }
     }
     if (bot.entity.position.distanceTo(bedBlock.position) > 3.2) {
-        log(bot, 'goBedSleep: bed unreachable (pathing stopped short) — false.');
-        return false;
+        // 走 bail(): 若本次已就地放床, 这是真实世界增量, 不能按零进度 false 记 strike
+        return bail('goBedSleep: bed unreachable (pathing stopped short).');
     }
 
-    // 3) Vanilla blocks sleep with hostiles within ~8 — don't burn the attempt (and the
-    //    kernel strike) on a guaranteed 'monsters nearby'; report honestly instead.
-    if (hostileNear(9)) { log(bot, 'goBedSleep: hostiles within 9b — vanilla will refuse sleep; false (fight/shelter first).'); return false; }
+    // 3) Vanilla blocks sleep with hostiles within ~8h/5v OF THE BED — don't burn the attempt
+    //    (and the kernel strike) on a guaranteed 'monsters nearby'; report honestly instead.
+    if (hostileNearBed(bedBlock.position)) return bail('goBedSleep: hostiles within vanilla bed box (8h/5v) — sleep would be refused; yield (fight/shelter first).');
 
     // 4) Sleep, then hold until day (bot.wake fires automatically at dawn; poll cheaply).
     try {
@@ -104,17 +169,16 @@ export default async function goBedSleep(bot, ctx) {
             let slept = false;
             while (Date.now() - tw < 75000) {
                 if (bot.interrupt_code || bot.health <= 0) { log(bot, 'goBedSleep: interrupted while waiting for nightfall — yielding.'); return false; }
-                if (hostileNear(9)) { log(bot, 'goBedSleep: hostiles closed in while waiting — false (fight/shelter first).'); return false; }
+                if (hostileNearBed(bedBlock.position)) return bail('goBedSleep: hostiles closed in on the bed box while waiting — yield (fight/shelter first).');
                 await skills.wait(bot, 2000);
                 try { await bot.sleep(bedBlock); slept = true; break; } catch (e2) {
                     const m2 = String(e2 && e2.message || e2);
-                    if (!/not night/i.test(m2)) { log(bot, `goBedSleep: sleep refused while waiting (${m2}) — false.`); return false; }
+                    if (!/not night/i.test(m2)) return bail(`goBedSleep: sleep refused while waiting (${m2}) — yield.`);
                 }
             }
-            if (!slept) { log(bot, 'goBedSleep: night never arrived within 75s — false.'); return false; }
+            if (!slept) return bail('goBedSleep: night never arrived within 75s — yield.');
         } else {
-            log(bot, `goBedSleep: sleep refused (${msg}) — false.`);
-            return false;
+            return bail(`goBedSleep: sleep refused (${msg}) — yield.`);
         }
     }
     log(bot, 'goBedSleep: sleeping — skipping the night.');
@@ -123,5 +187,14 @@ export default async function goBedSleep(bot, ctx) {
         if (bot.health <= 0) return false;
         await skills.wait(bot, 1000);
     }
+    // ★睡成即锚定 (幻影家收敛): vanilla 睡觉本身就把重生点设到这张床 → bed.json 此刻写的是
+    // 已验证的真实床位 ({x,y,z,t} 无 src 字段 = world_model.bedKnown 认可的"真床"格式)。
+    // 顺手把 landmark 补登记, 07-03T11:22 那种"床没了 landmark 也没了"的断链下个黄昏不再发生。
+    try {
+        fs.writeFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'bed.json'),
+            JSON.stringify({ x: bedBlock.position.x, y: bedBlock.position.y, z: bedBlock.position.z, t: Date.now() }));
+        log(bot, `goBedSleep: slept OK — bed.json 锚定到真实床 @${bedBlock.position.x},${bedBlock.position.y},${bedBlock.position.z}.`);
+    } catch (e) {}
+    regBedLandmark(bedBlock.position);
     return { slept: true };
 }

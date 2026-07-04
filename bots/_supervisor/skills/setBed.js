@@ -81,15 +81,37 @@ export default async function setBed(bot, ctx) {
             }
             if (best) {
                 const hy = Math.max(60, Math.min(95, Math.floor(me.y)));
-                fs.writeFileSync(BEDF, JSON.stringify({ x: Math.round(best.cx), y: hy, z: Math.round(best.cz), t: Date.now(), src: 'auto-site-select', deathsNear: best.dn, trees: best.trees }));
-                prog(`setBed: ★自主选家 @${Math.round(best.cx)},${Math.round(best.cz)} (死亡密度${best.dn} 树${best.trees}) — 锚已自主更新,床建于此`);
+                // ★P0-2 幻影家根修 (2026-07-04 取证: bed.json 曾被选址/migrate 写到 141,62,119 等
+                // 从未放过床的点 → bankGear/chopWood/prepNether/modes 缰绳全锚在幻影上)。选址结果
+                // 只进内存 (bot._bedSitePick, 供选址消费方参考) + 日志; bed.json 从此只在"床真实
+                // 放置 + activate spawn set 成功"之后落盘 (本文件末尾唯一写点)。
+                try { bot._bedSitePick = { x: Math.round(best.cx), y: hy, z: Math.round(best.cz), t: Date.now(), deathsNear: best.dn, trees: best.trees }; } catch (e) {}
+                prog(`setBed: ★自主选家(仅内存) @${Math.round(best.cx)},${Math.round(best.cz)} (死亡密度${best.dn} 树${best.trees}) — bed.json 延迟到真实放床+锚定成功后再写`);
             }
         }
     } catch (e) { prog(`setBed: home-select err ${e.message}`); }
 
+    // ★同色羊毛口径 (P0-2 取证 2026-07-04T04:38 实锤: wool=6 仍 "You do not have the resources
+    // to craft a black_bed. It requires: black_wool: 3" — 床配方要 3 张【同色】羊毛,
+    // countMatch(/_wool$/) 混色计总数=幻觉充足, firstMatch 还会随机挑中只有 1-2 张的颜色。
+    // 07-03T16:12 起 12h+ 里 bot 一直攒着 ≥3 张混色羊毛做不出床 → 夜链断死的直接根因之一。
+    // 以下猎毛门/攒毛门/合成门全部换成"最多单色计数"。
+    const woolBest = () => {
+        const c = inv();
+        let name = null, ct = 0;
+        for (const n of Object.keys(c)) { if (/_wool$/.test(n) && c[n] > ct) { name = n; ct = c[n]; } }
+        return { color: name ? name.replace(/_wool$/, '') : 'white', ct };
+    };
+
+    // ★现床直用 (activate 失败返 false 的下一轮: 床已放在世界里、不在背包 — 不查现床会又去
+    // 猎羊做第二张床)。12b 内已有任意床 → 跳过获取/放置, 直接走激活锚定。
+    let preBed = null;
+    try { preBed = bot.findBlock({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 12 }); } catch (e) {}
+    if (preBed) prog(`setBed: 12b 内已有现床 @${preBed.position.x},${preBed.position.y},${preBed.position.z} — 跳过获取/放置, 直接激活锚定`);
+
     // ---- 1. ACQUIRE A BED -------------------------------------------------------------
-    let bedName = firstMatch(/_bed$/);
-    if (!bedName) {
+    let bedName = preBed ? null : firstMatch(/_bed$/);
+    if (!bedName && !preBed) {
         // Don't chase sheep through a mob swarm — that just feeds the death loop. If it's
         // not safe to forage, defer (return false); the caller keeps grinding and retries
         // setBed next cycle once we're clear. (The run/bunker instinct handles the swarm.)
@@ -101,8 +123,9 @@ export default async function setBed(bot, ctx) {
         //       bedless-respawn death loop in a sheepless biome.
         //   (B) SHEEP — the classic path, used if any sheep are actually around.
         const tryCraftWool = async () => {
-            const need = 3 - countMatch(/_wool$/);
-            if (need <= 0) return;
+            // string→wool 产物固定是 white_wool → 缺口按 white 单色算 (混色总数凑 3 做不了床)
+            const need = 3 - (inv().white_wool || 0);
+            if (need <= 0 || woolBest().ct >= 3) return;
             const canMake = Math.min(need, Math.floor(countMatch(/^string$/) / 4));
             if (canMake > 0) { try { await skills.craftRecipe(bot, 'white_wool', canMake); } catch (e) { prog(`setBed: craft wool err ${e.message}`); } }
         };
@@ -137,9 +160,9 @@ export default async function setBed(bot, ctx) {
         // venture) / 12 (wooden-sword opportunistic) / 0 (no sword → barehanded, skip).
         const _huntFitClose = _huntSword && bot.health >= 10 && bot.food >= 6;
         const _huntRange = _huntFit ? 48 : (_huntFitClose ? 12 : 0);
-        if (countMatch(/_wool$/) < 3 && !isNight() && hostilesNear(6) <= 2 && _huntRange > 0) {
+        if (woolBest().ct < 3 && !isNight() && hostilesNear(6) <= 2 && _huntRange > 0) {
             const startS = Date.now();
-            for (let h = 0; h < 12 && countMatch(/_wool$/) < 3 && (Date.now() - startS) < 90000; h++) {
+            for (let h = 0; h < 12 && woolBest().ct < 3 && (Date.now() - startS) < 90000; h++) {
                 if (bot.interrupt_code) { prog('setBed: interrupted during spider hunt'); break; }
                 if (isNight() || hostilesNear(6) > 4) { prog('setBed: dusk/swarm mid spider-hunt — stop'); break; }
                 const spider = world.getNearbyEntities(bot, _huntRange).filter(e => e && /spider/i.test(e.name) && !/cave/i.test(e.name))
@@ -150,7 +173,7 @@ export default async function setBed(bot, ctx) {
                 try { await skills.pickupNearbyItems(bot); } catch (e) {}
                 await tryCraftWool();
             }
-        } else if (countMatch(/_wool$/) < 3 && !isNight() && !_huntSword) {
+        } else if (woolBest().ct < 3 && !isNight() && !_huntSword) {
             prog('setBed: no sword — skip active spider hunt (avoid barehanded risk), defer');
         }
 
@@ -161,12 +184,12 @@ export default async function setBed(bot, ctx) {
         //     isNight) + 无敌对(敌对门沿用原 hostilesNear(10) defer) + hp≥10/food≥6 底线
         //     即可出手, 无剑也允许(拳头杀羊零风险只是慢, 有剑仍先装剑)。剪刀有则剪优先
         //     (可持续 1-3 毛/羊), 剪完必捡 — 剪下的毛是掉落物, 旧剪刀分支从不 pickup=白剪。
-        if (countMatch(/_wool$/) < 3 && !isNight()) {
+        if (woolBest().ct < 3 && !isNight()) {
             if (hostilesNear(10) > 0) { prog(`setBed: short wool + mobs=${hostilesNear(10)} — defer (have string=${countMatch(/^string$/)})`); return false; }
             const woolFit = bot.health >= 10 && bot.food >= 6;
             const _sheepRange = (_huntFit || woolFit) ? 64 : 12;   // 仅低血低食才收缩到贴身
             const start = Date.now();
-            for (let h = 0; h < 6 && countMatch(/_wool$/) < 3 && (Date.now() - start) < 60000; h++) {
+            for (let h = 0; h < 6 && woolBest().ct < 3 && (Date.now() - start) < 60000; h++) {
                 if (bot.interrupt_code) { prog('setBed: interrupted during wool hunt'); break; }
                 if (hostilesNear(10) > 0) { prog('setBed: mob appeared mid wool-hunt — abort, defer'); return false; }
                 if (isNight()) { prog('setBed: night fell mid wool-hunt — abort, defer'); return false; }
@@ -192,16 +215,20 @@ export default async function setBed(bot, ctx) {
                 } catch (e) { prog(`setBed: sheep err ${e.message}`); }
             }
         }
-        if (countMatch(/_wool$/) >= 3) {
-            // Match the bed color to the wool color we actually have.
-            const woolItem = firstMatch(/_wool$/);            // e.g. white_wool
-            const color = woolItem ? woolItem.replace(/_wool$/, '') : 'white';
+        const wb = woolBest();
+        if (wb.ct >= 3) {
+            // Match the bed color to the SAME-COLOR wool stack we actually have (firstMatch 会
+            // 挑到不足 3 张的颜色 — 07-04T04:38 black_bed 失败实锤)。
+            const color = wb.color;
             if (countMatch(/planks$/) < 3) { try { await skills.customSkill(bot, 'achieve', { item: 'oak_planks', count: 3 }); } catch (e) {} }
             try { await skills.craftRecipe(bot, `${color}_bed`, 1); } catch (e) { prog(`setBed: craft ${color}_bed err ${e.message}`); }
             bedName = firstMatch(/_bed$/);
+            if (!bedName) prog(`setBed: craft ${color}_bed 未产出 (单色毛${wb.ct} planks=${countMatch(/planks$/)}) — 大概率缺 planks, defer 走补给`);
+        } else if (countMatch(/_wool$/) >= 3) {
+            prog(`setBed: wool 混色陷阱 — 总${countMatch(/_wool$/)} 张但最多单色仅 ${wb.ct} (${wb.color}), 床要 3 同色 → 继续攒 ${wb.color}`);
         }
     }
-    if (!bedName) { prog('setBed: no bed and could not make one — defer (caller continues)'); log(bot, 'No bed yet — will retry once I have wool.'); return false; }
+    if (!bedName && !preBed) { prog('setBed: no bed and could not make one — defer (caller continues)'); log(bot, 'No bed yet — will retry once I have wool.'); return false; }
 
     // ---- 2. PLACE THE BED on flat solid ground with headroom --------------------------
     // A bed occupies TWO horizontal cells. Find a spot: stand on solid ground, with the
@@ -229,17 +256,36 @@ export default async function setBed(bot, ctx) {
         // Fallback: generic nearby placement.
         try { return await skills.placeBlockNearby(bot, bedName); } catch (e) { prog(`setBed: placeNearby err ${e.message}`); return false; }
     };
-    await placeBed();
+    if (!preBed) await placeBed();
 
     // ---- 3. ACTIVATE to set spawn (+ sleep if night & safe) ---------------------------
-    const bedBlock = bot.findBlock({ matching: (b) => b && b.name.includes('bed'), maxDistance: 6 });
+    const bedBlock = preBed || bot.findBlock({ matching: (b) => b && b.name.includes('bed'), maxDistance: 6 });
     if (!bedBlock) { prog('setBed: placed but cannot locate bed block — abort'); return false; }
     try { await skills.goToPosition(bot, bedBlock.position.x, bedBlock.position.y, bedBlock.position.z, 1); } catch (e) {}
     // activateBlock = right-click → "Respawn point set" (works day or night in 1.21).
     let spawnSet = false;
     try { await bot.activateBlock(bedBlock); spawnSet = true; } catch (e) { prog(`setBed: activate err ${e.message}`); }
+    // ★P0-2 幻影家根修: bed.json 只在"床真实存在 + spawn 真锚定"后写 ({x,y,z,t} 无 src 字段
+    // = world_model.bedKnown 认可的真床格式)。activate 失败 → 不写锚、不 return true —
+    // 诚实 false 让 kernel 重试 (下轮开头的"现床直用"会跳过猎毛直接再激活这张床)。
+    if (!spawnSet) {
+        prog(`==== setBed FAIL | activate 失败 spawnSet=false bed@${bedBlock.position.x},${bedBlock.position.y},${bedBlock.position.z} — 不写 bed.json, 返 false (床已在世界, 下轮直激活) ====`);
+        return false;
+    }
     // Persist home so other logic (corpseRun / future instincts) knows where base is.
     try { fs.writeFileSync(BEDF, JSON.stringify({ x: bedBlock.position.x, y: bedBlock.position.y, z: bedBlock.position.z, t: Date.now() })); } catch (e) {}
+    // ★夜链闭环: bed landmark 立即登记 (不等 C328 12s 扫描) → bedAffordable→DUSK_GO_BED
+    // 下个黄昏即可提案 (07-03T11:22 断链根修的 setBed 侧)。
+    try {
+        if (bot._landmarks && typeof bot._landmarks === 'object') {
+            const _key = `bed@${bedBlock.position.x},${bedBlock.position.y},${bedBlock.position.z}`;
+            const _n = Date.now();
+            if (!bot._landmarks[_key]) bot._landmarks[_key] = { kind: 'bed', x: bedBlock.position.x, y: bedBlock.position.y, z: bedBlock.position.z, ts: _n, seen: _n, meta: null };
+            else bot._landmarks[_key].seen = _n;
+            fs.writeFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'landmarks.json'), JSON.stringify(bot._landmarks));
+            prog(`setBed: bed landmark 已登记 @${_key} — 夜链 (bedAffordable→DUSK_GO_BED) 恢复可提案`);
+        }
+    } catch (e) {}
     // If it's night and no mobs around, actually sleep to skip the night.
     if (isNight() && hostilesNear(8) === 0) {
         try { await bot.sleep(bedBlock); prog('setBed: sleeping...'); for (let i = 0; i < 40 && bot.isSleeping; i++) await skills.wait(bot, 500); prog('setBed: woke up (morning)'); }

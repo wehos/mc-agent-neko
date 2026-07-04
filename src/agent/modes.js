@@ -5664,8 +5664,14 @@ const modes_list = [
                 // was sent to a surface bed 25 blocks up — pathfinder flailed 30s and burned the
                 // kind into cooldown, three dispatches a night. A bot deep underground shelters
                 // in place (DIG_ONE/SEAL both work down there); beds are a surface-dweller's plan.
-                const bedAffordable = !!_bedLm && _bedLm.dist <= cfg.bedReachDist && !inDeathZone && actionable === 0 && hp >= 10
-                    && (y >= 50 || _bedLm.y <= y + 8);
+                // ★P0-2 断链修 (2026-07-04 取证): 07-03T11:22 幽灵床地标清空后 _bedLm 恒 null →
+                // bedAffordable 恒假 → DUSK_GO_BED 此后 0 提案 = 夜间黑洞的提案侧断链。
+                // 背包带床是天然 affordable (goBedSleep 已支持就地放床): 无需地标、无需爬升门
+                // (床就在手里, 不存在 deep-no-bed-climb 的 30s 寻路空转问题)。
+                const _bedInPack = (() => { try { return bot.inventory.items().some(i => /_bed$/.test(i.name || '')); } catch (e) { return false; } })();
+                const bedAffordable = (!!_bedLm && _bedLm.dist <= cfg.bedReachDist && !inDeathZone && actionable === 0 && hp >= 10
+                    && (y >= 50 || _bedLm.y <= y + 8))
+                    || (_bedInPack && !inDeathZone && actionable === 0 && hp >= 10);
                 // FIGHT (commitToFight): a melee-able, point-blank NON-creeper threat we can win — sword
                 // in hand, hp headroom, not boxed in (enclosed → can't kite, prefer seal). creeper is
                 // excluded (it suicides on contact → the defense reflex layer kites it, not us).
