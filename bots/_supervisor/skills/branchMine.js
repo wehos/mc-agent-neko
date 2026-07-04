@@ -137,6 +137,29 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             }) + '\n');
         } catch (e) {}
     };
+    // ★P0-1 回程预算前置门 (review-2026-07-04-distance.md: 铁镐三落三起, >18h 无铁镐).
+    // 中途版 pickRunwayStop 只在挖矿步头触发 — 一把 <15% 耐久的孤镐照样通过入口开挖,
+    // 断在隧道深处 = 无镐 + 无替补材料开局. 入口即检: 孤镐将死 + planksEq<4 (现场造不出
+    // 替补) → 直接 return false (真零进度), kernel 冷却后补给类提案 (REPLENISH_KIT) 接手.
+    try {
+        const _picks = bot.inventory.items().filter(it => /_pickaxe$/.test(it.name || ''));
+        if (_picks.length === 1) {
+            const _it = _picks[0];
+            const _max = _it.maxDurability || 0;
+            const _used = (typeof _it.durabilityUsed === 'number') ? _it.durabilityUsed : 0;
+            const _leftPct = _max > 0 ? (_max - _used) / _max : 1;   // 未知耐久=不恐慌 (同 skills.pickRunway)
+            const _inv = pickCount() || {};
+            const _planksEq = Object.keys(_inv).reduce((s, k) =>
+                s + (k.endsWith('_planks') ? _inv[k] : 0) + (k.endsWith('_log') ? _inv[k] * 4 : 0), 0);
+            // canFieldCraftPick = "现场造得出替补"的精确谓词 (带台+棍+石也行), 双条件才 yield
+            const _canRecraft = (typeof skills.pickRunway === 'function') ? !!skills.pickRunway(bot).canFieldCraftPick : false;
+            if (_leftPct < 0.15 && _planksEq < 4 && !_canRecraft) {
+                log(bot, `[branchMine] NO-RETURN-BUDGET yield (pick dying, no spare, no planks) — ${_it.name} ${(_leftPct * 100).toFixed(0)}% left, planksEq=${_planksEq}`);
+                motion('branchMine.no_return_budget', { pick: _it.name, leftPct: +_leftPct.toFixed(3), planksEq: _planksEq });
+                return false;
+            }
+        }
+    } catch (e) {}
     const blockedByLava = (pos) => {
         const sides = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
         return sides.some(([x, y, z]) => {

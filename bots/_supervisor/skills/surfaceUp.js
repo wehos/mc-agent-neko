@@ -38,8 +38,16 @@ const FOOD_RE = /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef
 const WOOD_TYPES = ['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry'];
 const FOOT_REPLACEABLE = new Set(['torch', 'wall_torch', 'redstone_torch', 'redstone_wall_torch', 'soul_torch', 'soul_wall_torch']);
 
-export default async function surfaceUp(bot, ctx, targetY = 63) {
+export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
     const { skills, world, mc, Vec3, log } = ctx;
+    // ★孤儿协程截止 (评审 replenishKit.js:94): 嵌套调用方 (replenishKit 步①等) 用 Promise.race
+    // 截断本技能时, 被 race 掉的协程会继续跑 climbLeg/破顶循环并清 interrupt_code — 与调用方的
+    // 下一步 (chopWood/craft) 抢身体控制权, C362-broad 的 200 徒手破顶预算 × ~7.5s/块 可拖 20min
+    // 级。opts.maxMs: 技能自己到点收尾退出 (各主循环条件里查 deadlineHit, 孤儿窗口收敛到单次
+    // guardedDig 的 ≤26s 尾巴)。kernel 直派不带 opts → deadlineAt=0 永不过期, 存量行为与返回
+    // 契约零变化 (到点返回 surfaceReady(), 对带 maxMs 的嵌套调用方而言返回值本就被忽略)。
+    const deadlineAt = (opts && Number.isFinite(opts.maxMs) && opts.maxMs > 0) ? Date.now() + opts.maxMs : 0;
+    const deadlineHit = () => !!(deadlineAt && Date.now() >= deadlineAt);
     // C226-D: callers pass RELATIVE targets (pos.y + N). When the bot is already
     // high (on a peak/mountainside the caller mislabels "enclosed"), pos.y+18 from
     // y118 = 136 → surfaceReady never satisfied → runaway pillar to y127-136 where
@@ -524,6 +532,8 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
         }
         return false;
     };
+    const entryYSU = yNow();      // ★C362-broad 观测: EXIT 处对照入口 y, 打 'surfaceUp gained' 进度日志
+    let c362Broad = false;        // 本次是否走了放宽后的无镐破顶路径 (climbToSurface 闭包内赋值)
     dbg(`ENTER y=${yNow()} target=${targetY} scaffold=${scafCount()} goalY=${typeof (goals.GoalY || goals.GoalYLevel)}`);
     if (surfaceReady()) { dbg('already at open surface'); return true; }
 
@@ -543,6 +553,12 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
       try { for (const m in prevModes) bot.modes.setOn(m, prevModes[m]); } catch (e) {}
     }
     dbg(`EXIT y=${yNow()} (target ${targetY})`);
+    // ★孤儿协程截止的可观测退出: 到点主动交还身体, 不再清 interrupt_code / 不再与调用方下一步打架。
+    if (deadlineHit()) {
+        dbg(`EXIT on caller deadline (opts.maxMs=${opts && opts.maxMs}) y=${yNow()}`);
+        log(bot, `surfaceUp: caller deadline hit (maxMs=${opts && opts.maxMs}) — yielding body at y=${yNow()}.`);
+        motion('surfaceUp.deadline.exit', { y: yNow(), maxMs: (opts && opts.maxMs) || 0 });
+    }
     // C247: when the climb failed and we're still enclosed, dump a ground-truth scan so
     // the lateral-escape design can see whether a cave / drop-block is within reach.
     if (!surfaceReady()) {
@@ -552,6 +568,10 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
             motion('surfaceUp.exit_sealed_scan', { y: yNow(), hasPick: hasPick(), scaffold: scafCount(), scan: sc, env: envSnap() });
         } catch (e) { dbg(`exit-scan err ${e.message}`); }
     }
+    // ★C362-broad 验证信号: 实际爬升了才打 gained (kernel/progress 可见); y>=50 场景出现
+    // 'surfaceUp gained' = 放宽修复生效的直接证据.
+    const gainedYSU = yNow() - entryYSU;
+    if (gainedYSU >= 1) log(bot, `surfaceUp gained +${gainedYSU}y (y ${entryYSU}->${yNow()}${c362Broad ? ', C362-broad no-pick breach' : ''})`);
     log(bot, `surfaceUp done: y=${yNow()} (target ${targetY}).`);
     return surfaceReady();
 
@@ -592,7 +612,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
             let last = bot.entity.position.clone();
             let quiet = 0;
             let assisted = false;
-            while (!surfaceReady() && yNow() < legY && Date.now() - started < 30000) {
+            while (!surfaceReady() && yNow() < legY && Date.now() - started < 30000 && !deadlineHit()) {
                 await skills.wait(bot, 700);
                 if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
                 const p = bot.entity.position.clone();
@@ -620,7 +640,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
         // Climb in short legs so A* never times out on a tall shaft; monitor each leg
         // for the live "pathing but no controls / no movement" stair-edge stall.
         let stall = 0;
-        while (!surfaceReady() && yNow() < targetY && stall < 4) {
+        while (!surfaceReady() && yNow() < targetY && stall < 4 && !deadlineHit()) {
             if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
             const y0 = yNow();
             const legY = Math.min(y0 + 8, targetY);
@@ -665,6 +685,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
         }
         candidates.sort((a, b) => (b.clear - a.clear) || (a.d - b.d));
         for (const c of candidates.slice(0, 6)) {
+            if (deadlineHit()) break;
             dbg(`headroom candidate @${c.p.x},${c.p.y},${c.p.z} clear=${c.clear} d=${c.d}`);
             try {
                 await Promise.race([
@@ -697,8 +718,16 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
     // ★C362 (2026-07-04 14h no-pick tomb livelock @y16: bot buried in a 1-wide stone pocket,
     // mobility state NOT flagged 'enclosed' so the 200-breach budget never engaged → stuck at
     // plannedStoneLimit=2 → verticalBlocked → 0.0y gained for 14 HOURS). Broaden: a pickless bot
-    // that is deep (y<50) with a SOLID stone ceiling directly overhead IS tombed regardless of
-    // what the mobility classifier says — unlock the full bare-hand breach budget to grind out.
+    // with a SOLID stone ceiling directly overhead IS tombed regardless of what the mobility
+    // classifier says — unlock the full bare-hand breach budget to grind out.
+    // ★C362-broad (2026-07-04 晨): 原修只盖 y<50, 当天 y57 同类楔死/被埋活锁漏网 — "无镐+头顶
+    // 实心可破"跟深度无关, y 门去掉. 新排除项: 自愿封顶 (夜宿) 时不要徒手拆自家棚顶 — 封顶旗
+    // 有两面, 并联读取 (评审修正: 旧注释断言 nightShelter 不设旗, 并行改动后已失真):
+    //   · prepNether.js (夜庇护封顶段) 的 bot._nightSealingUntil — TTL 12s, 只盖"正在垒块"瞬间
+    //     (modes.js:3797 夜间封顶让位同款);
+    //   · nightShelter.js 的 bot._nightSealedUntil — TTL 10s 滚动续期, 盖整夜 hold; 停止
+    //     续期后自动过期, 不会 stale 到白天压住真石棺逃生.
+    // 任一窗口内不触发放宽 — 夜宿口袋的棚顶不拆.
     const _ceilCapped = (() => {
         try {
             for (let h = 2; h <= 3; h++) {
@@ -708,8 +737,21 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
         } catch (e) {}
         return false;
     })();
-    const trappedEnclosed = !hasPick() && (!!(bot._mobility && bot._mobility.enclosed)
-        || (yNow() < 50 && _ceilCapped));
+    const _nightSealHold = (() => { try {
+        const now = Date.now();
+        return !!((bot._nightSealedUntil && now < bot._nightSealedUntil) || (bot._nightSealingUntil && now < bot._nightSealingUntil));
+    } catch (e) { return false; } })();
+    const _mobEnclosed = !!(bot._mobility && bot._mobility.enclosed);
+    const trappedEnclosed = !hasPick() && !_nightSealHold && (_mobEnclosed || _ceilCapped);
+    if (trappedEnclosed && !_mobEnclosed) {
+        c362Broad = true;
+        dbg(`C362-broad: pickless under solid breachable ceiling at y=${yNow()} (mobility!=enclosed) — bare-hand breach budget unlocked (200)`);
+        log(bot, `surfaceUp C362-broad: 无镐+头顶实心可破 (y=${yNow()}) — 徒手破顶预算解锁 (200)`);
+        motion('surfaceUp.c362_broad.engaged', { y: yNow(), ceilCapped: _ceilCapped, env: envSnap() });
+    } else if (!hasPick() && _ceilCapped && _nightSealHold) {
+        dbg(`C362-broad suppressed: night-seal window active (_nightSealedUntil/_nightSealingUntil) — not breaching own shelter roof`);
+        motion('surfaceUp.c362_broad.night_seal_hold', { y: yNow() });
+    }
     const plannedStoneLimit = (famineEmergency() || trappedEnclosed) ? 200 : 2;
     const canPlanNoPickStoneBreach = (block, h) => {
         // ★C223b: ENTOMBED escape — *_ore blocks (coal_ore etc.) are bare-hand BREAKABLE (they just
@@ -989,7 +1031,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
             const budget = 8;
             let carved = 0;
             try { bot.pathfinder.setGoal(null); } catch (e) {}
-            for (let s = 0; s < budget; s++) {
+            for (let s = 0; s < budget && !deadlineHit(); s++) {
                 const cur = bot.entity.position.floored();
                 const aheadFoot = cur.offset(stepDx, 0, stepDz);
                 const aheadHead = cur.offset(stepDx, 1, stepDz);
@@ -1020,7 +1062,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
         return moved > 1.2 || yNow() < c0.y - 0.5;
     };
     let stuckFloor = 0;
-    for (let i = 0; i < 100 && !surfaceReady(); i++) {
+    for (let i = 0; i < 100 && !surfaceReady() && !deadlineHit(); i++) {
         try { bot.interrupt_code = false; } catch (e) {}
         const y0 = yNow();
         let opened = 0;
