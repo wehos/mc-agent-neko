@@ -326,10 +326,25 @@ export async function askLLM(agent, holder, claimant, ctx = {}) {
             delete s.asking[pair];
         }
         if (persist) {
-            const doc = loadMatrix(bot);
-            if (!doc.matrix[holder.name] || typeof doc.matrix[holder.name] !== 'object') doc.matrix[holder.name] = {};
-            doc.matrix[holder.name][claimant.name] = winner;
-            saveMatrix(bot, doc);
+            // ★2026-07-04 review P0-3 persist 审门:
+            // (a) 通配家族名 (owner-tag 合成的 `xxx:*`, 见 :74) 不许沉淀 — 一次情境裁决会被泛化成
+            //     整族永久规则 (kernel:* vs mode:mobility → holder 毒规则即此路铸成: 04:06 自愿封顶
+            //     场景判对, 却让所有 kernel 技能持身时的被埋 dig-out 制度性败诉, y16 石棺 14h 帮凶);
+            // (b) 压制救命反射 (mobility/self_preservation/self_defense 当 claimant 且 holder 胜) 的
+            //     规则天然依赖上下文 (自愿封顶 vs 意外被埋), 不许自动沉淀, 只能人工写矩阵。
+            // 两类都只拦"永久化", 本次裁决照常生效 (120s 短期缓存仍工作)。
+            const wildcard = String(holder.name).endsWith(':*') || String(claimant.name).endsWith(':*');
+            const suppressesRescue = winner === 'holder'
+                && /^mode:(mobility|self_preservation|self_defense)$/.test(String(claimant.name));
+            if (wildcard || suppressesRescue) {
+                why = (why + ' [persist blocked: ' + (wildcard ? 'wildcard-family' : 'rescue-suppressing') + ']').slice(0, 240);
+                persist = false;
+            } else {
+                const doc = loadMatrix(bot);
+                if (!doc.matrix[holder.name] || typeof doc.matrix[holder.name] !== 'object') doc.matrix[holder.name] = {};
+                doc.matrix[holder.name][claimant.name] = winner;
+                saveMatrix(bot, doc);
+            }
         }
         logVerdict(bot, holder, claimant, winner, persist ? 'llm-persist' : source, why, ctx, true);
     } catch (e) {}
