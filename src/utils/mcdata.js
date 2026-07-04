@@ -100,6 +100,39 @@ export function initBot(username) {
         });
     }
 
+    // ★镐分层节约 API 级兜底 (2026-07-05 实录: 铁镐 250 耐久 15min 内全烧在下潜凿石上,
+    // y 只到 33 距钻石带 -59 还差 90 层, ip1→ip0 无死亡 — mineflayer-tool equipForBlock
+    // 永远选"最快"=最高级镐)。包一层: 石头类方块(不需要铁镐才掉落的)强制用石镐,
+    // 铁/钻镐只出手在 IRON_PLUS 方块(diamond_ore/obsidian/gold/redstone/emerald/
+    // ancient_debris)。石镐不在包里/方块非镐类 → 原样放行(零回归面)。速度税(石镐挖
+    // deepslate 慢 ~50%)远小于铁镐再造一轮的补给周期。与手部锁同款延迟安装(bot.tool
+    // 是 version=auto 异步注入的插件, 立即 .bind 秒崩 — 5be4cd8 四小时停机教训)。
+    const installPickTierGuard = () => {
+        if (!bot.tool || typeof bot.tool.equipForBlock !== 'function') return false;
+        const _rawEquipForBlock = bot.tool.equipForBlock.bind(bot.tool);
+        const IRON_PLUS_RE = /diamond_ore|obsidian|gold_ore|redstone_ore|emerald_ore|ancient_debris|respawn_anchor/;
+        const PICK_MATERIAL_RE = /stone|deepslate|_ore$|andesite|diorite|granite|tuff|cobble|blackstone|netherrack|basalt|terracotta|sandstone/;
+        bot.tool.equipForBlock = async function (block, options) {
+            try {
+                const name = (block && block.name) || '';
+                if (name && PICK_MATERIAL_RE.test(name) && !IRON_PLUS_RE.test(name)) {
+                    const stonePick = bot.inventory.items().find(i => i.name === 'stone_pickaxe');
+                    if (stonePick) {
+                        if (!bot.heldItem || bot.heldItem.name !== 'stone_pickaxe') await bot.equip(stonePick, 'hand');
+                        return;
+                    }
+                }
+            } catch (e) {}
+            return _rawEquipForBlock(block, options);
+        };
+        return true;
+    };
+    if (!installPickTierGuard()) {
+        bot.once('login', () => {
+            if (!installPickTierGuard()) bot.once('spawn', installPickTierGuard);
+        });
+    }
+
     let lastPositionUpdate = 0;
     let pendingPositionPacket = null;
     const POSITION_THROTTLE_MS = 50;
