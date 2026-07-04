@@ -316,6 +316,9 @@ export default async function missionNether(bot, ctx) {
     const inNether = () => { try { return /nether/.test(bot.game.dimension); } catch (e) { return false; } };
     const wait = (ms) => skills.wait(bot, ms);
     const isNightNow = () => { try { const t = bot.time.timeOfDay; return t >= 13000 && t <= 23000; } catch (e) { return false; } };
+    // ★2026-07-05 预审 P1: :863 引用 isDuskNow 但从未定义 — ReferenceError 被外层空 catch 吞掉,
+    // C273 BOOTSTRAP COMMIT 与 lowFoodHold 后半段全部静默失效。黄昏=12000-13000 tick。
+    const isDuskNow = () => { try { const t = bot.time.timeOfDay; return t >= 12000 && t < 13000; } catch (e) { return false; } };
     const hasOverheadCover = () => {
         try {
             const p = bot.entity.position.floored();
@@ -804,7 +807,8 @@ export default async function missionNether(bot, ctx) {
         // bankRecover/holds before the loop could re-reach them (observed: fresh respawn went
         // straight into prepNether→forageExplore wandering into barren mountains, never migrating).
         try {
-            if (!isNightNow() && actionableHostilesNear(8) === 0 && Math.round(bot.health) >= 14 && bot.food >= 6
+            // ★2026-07-05 预审 P0 配套: migrate 是主世界语义(biome 搬迁), 下界不派。
+            if (!inNether() && !isNightNow() && actionableHostilesNear(8) === 0 && Math.round(bot.health) >= 14 && bot.food >= 6
                 && (!bot._lastMigrateTryAt || Date.now() - bot._lastMigrateTryAt > 120000)) {
                 bot._lastMigrateTryAt = Date.now();
                 let mr = null;
@@ -823,7 +827,12 @@ export default async function missionNether(bot, ctx) {
         // tunnel toward the anchor, but keep the human material invariant: no-pick never
         // punches stone. Dirt/gravel/wood are fair game; stone requires a pick or a real
         // planner/scaffold route.
-        try {
+        // ★2026-07-05 预审 P0: 停滞计时/BREAKOUT 的锚点是主世界床坐标(无维度标签, 无 1:8 换算) —
+        // 下界内每 4-5 分钟触发就朝错误方向凿 10 格, 离 portal 越来越远, 把胜利态定期拆掉。
+        // 下界 = 清停滞计时并整块跳过 (胜利态处理在 :1049 的 inNether 分支)。
+        if (inNether()) {
+            bot._stagPos = null; bot._stagAt = 0;
+        } else try {
             const fp = bot.entity.position;
             const lowFoodHold = lowFoodHoldEvidence();
             if (lowFoodHold) {
