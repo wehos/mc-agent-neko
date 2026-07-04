@@ -694,7 +694,22 @@ export default async function surfaceUp(bot, ctx, targetY = 63) {
     let plannedStoneBreaches = 0;
     // Sealed inside an enclosed cavity with no pick = trapped; breaking out (even slow bare-hand
     // stone) beats rotting. Treat it like the famine emergency for breach budget/food gates.
-    const trappedEnclosed = !hasPick() && !!(bot._mobility && bot._mobility.enclosed);
+    // ★C362 (2026-07-04 14h no-pick tomb livelock @y16: bot buried in a 1-wide stone pocket,
+    // mobility state NOT flagged 'enclosed' so the 200-breach budget never engaged → stuck at
+    // plannedStoneLimit=2 → verticalBlocked → 0.0y gained for 14 HOURS). Broaden: a pickless bot
+    // that is deep (y<50) with a SOLID stone ceiling directly overhead IS tombed regardless of
+    // what the mobility classifier says — unlock the full bare-hand breach budget to grind out.
+    const _ceilCapped = (() => {
+        try {
+            for (let h = 2; h <= 3; h++) {
+                const c = bot.blockAt(bot.entity.position.offset(0, h, 0));
+                if (c && c.boundingBox === 'block' && (NO_PICK_BREACHABLE.has(c.name) || /_ore$/.test(c.name || ''))) return true;
+            }
+        } catch (e) {}
+        return false;
+    })();
+    const trappedEnclosed = !hasPick() && (!!(bot._mobility && bot._mobility.enclosed)
+        || (yNow() < 50 && _ceilCapped));
     const plannedStoneLimit = (famineEmergency() || trappedEnclosed) ? 200 : 2;
     const canPlanNoPickStoneBreach = (block, h) => {
         // ★C223b: ENTOMBED escape — *_ore blocks (coal_ore etc.) are bare-hand BREAKABLE (they just
