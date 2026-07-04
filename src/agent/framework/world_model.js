@@ -89,6 +89,23 @@ let BLAZE_ROD_TARGET = 7;  // 7 rods = 14 blaze powder = 14 eyes (matches EYE_TA
 // ── ★T-0092 depth bands (区分采铁 vs 采钻 两个深度目标, 别让 mineDown 用默认 targetY=45 浅带). ──
 const IRON_TARGET_Y = 14;  // iron/coal band: y8..y16 sweet spot for iron (1.21 wide-distribution)
 const DIAMOND_TARGET_Y = -54; // diamond band: y-54..-59 peak; bedrock at y-64 (1.21) — stay above it
+// ── ★P0-1 REPLENISH_KIT 补给不变量 (review-2026-07-04-distance.md 结构洞#1: 木→棍/台→镐链没有
+//    一等 kind, 只作为前置 gate 散落在消费技能里; buffer 地下归零 → 消费者集体 yield →
+//    BOOTSTRAP_KIT 冷却 162 次 + GET_FOOD 121 次的 36h 轮转风暴)。迟滞防抖: planksEq <TRIGGER
+//    触发, >=RELEASE 才释放(isGoalDone), 免得 4↔5 边界抖动轮转。 ──
+const REPLENISH_PICKS_MIN = 2;       // 总镐数底线(备镐不变量): <2 触发, >=2 才算 done
+const REPLENISH_PLANKS_TRIGGER = 4;  // planks-equivalent 跌破即触发
+const REPLENISH_PLANKS_RELEASE = 8;  // 释放需回补到的 buffer (迟滞: 触发<4, 释放>=8)
+// ── ★P1-5 BANK_GEAR 提案端停用开关 (review-2026-07-04-distance.md 结构洞#5)。
+//    keepInventory=true 下死亡不掉落, "存箱防死丢投资"的前提为假; 实测纯负价值三连:
+//      · bankGear RAW 正则 ^diamond$ 把钻石吞进箱, 而 craftChain/endgameNeeds 只数背包不读箱子
+//        → mine→bank→re-mine 死环 (GET_DIAMOND_GEAR 永远看不到已入箱的钻);
+//      · MAT 表把 cobble 削到 16, 但 ENTER_NETHER 门要 32、GO_END 门要 64 → 存完立刻不达标;
+//      · 07-02 实锤: 13 锭铁入家箱后箱子 ghost 蒸发, 库存直接清零。
+//    kind/isGoalDone case/技能文件全保留(不删代码), 只门掉 proposeTasks 的 push。
+//    重开条件: 服务器 keepInventory 关闭(死亡真掉落)时翻回 true, 且须先修 bankGear 的 RAW/MAT
+//    口径(钻石不进 RAW、cobble/logs 保留量对齐 endgame 门槛)再开。 ──
+const BANK_GEAR_ENABLED = false;
 
 (function loadDecisionConfig() {
     let cfgPath;
@@ -150,6 +167,70 @@ function ironArmorGoalDone(world, bot) {
     const pieces = Math.min(4, (world.vitals && world.vitals.armor) || 0);
     if (pieces >= 4) return true;
     return ironForArmor(bot) < ARMOR_PIECE_COST[pieces];
+}
+// ★P0-1 REPLENISH_KIT 口径: 背包内全部镐(含快断的) — 粗基线补给不变量, 与技能端 replenishKit 的
+// "总镐数"死契约一致。"有效镐"(耐久<85%)的精细不变量归 kit.picks/TOOL_UPKEEP, 两者分工不冲突。
+function totalPicks(bot) { return invCount(bot, /_pickaxe$/); }
+// ★P1-4 铁供给断层 (review-2026-07-04 结构洞#4): 剩余缺甲件总成本 = 从已有件数起按 cheapest-first
+// 顺序累加还缺的每件 (armor=0 → 4+5+7+8=24; armor=4 → 0)。与 craftArmor 的 cheapest-first 同口径,
+// 与 ironArmorGoalDone 的"下一件"口径互补: 那是消费端(craft)释放判据, 这是采集端(挖矿)总需求。
+function ironArmorRemainingCost(world) {
+    const pieces = Math.min(4, (world.vitals && world.vitals.armor) || 0);
+    let cost = 0;
+    for (let k = pieces; k < 4; k++) cost += ARMOR_PIECE_COST[k];
+    return cost;
+}
+// ★P1-4 + review OPEN finding gatherObsidian.js:70: portal kit 的铁成本 = (无桶?3:0)+(无打火石?1:0),
+// 与 gatherObsidian:44 的 ironShort 完全同口径(空桶也算持有 — 技能会自己装水)。只在 rank-4 卡黑曜石
+// 阶段计入(hasDiamondPick && blazeShort>0 && !obsOk — 与 GET_PORTAL_KIT 提案门同一判据), 其余阶段 0。
+function portalKitIronCost(bot) {
+    const n = endgameNeeds(bot);
+    if (!(n.hasDiamondPick && n.blazeShort > 0 && !n.obsOk)) return 0;
+    let cost = 0;
+    if (invCount(bot, /^(water_)?bucket$/) < 1) cost += 3;      // 桶 = 3 锭
+    if (invCount(bot, /^flint_and_steel$/) < 1) cost += 1;      // 打火石 = 1 锭 + 1 flint
+    return cost;
+}
+// ★P1-4 铁需求总口径 = max(缺甲总成本, portal kit 铁成本) — 任务4授权的扩展: 甲齐但 GET_PORTAL_KIT
+// 被铁预检挡住时, 同一个 GET_IRON_ARMOR_SET 继续供铁, 复用一个采集 kind 比新造 kind 干净。
+// 提案门与 isGoalDone 共用本函数(本文件 house idiom: 一个判据, 两个消费者, 永不打架)。
+function ironDemandTotal(world, bot) {
+    return Math.max(ironArmorRemainingCost(world), portalKitIronCost(bot));
+}
+// ★review OPEN gatherObsidian.js:70 铁预检的 flint 侧: 打火石还差时必须有可见的 flint/gravel 来源
+// 才放行 GET_PORTAL_KIT (gatherObsidian 自己在 32 格内挖 gravel 摇 flint — 同半径同口径)。
+// findBlock 扫描 30s memo 挂 bot._*(热重载红线: 零模块级可变量), 且只在 rank-4 portal-kit 阶段被
+// 求值, 代价可控。扫描异常按 false 处理 — 宁可不提案也不派一个注定 false→3-strike→冷却的技能。
+// ★评审修正 (2026-07-04): 背包 gravel 不算来源 — gatherObsidian STEP A 的摇 flint 循环只认
+// 32 格内的 gravel 方块 (getNearestBlock 找不到即 break, re-place 分支只在挖到过方块后可达),
+// 背包 gravel 永远到不了执行端; 且 prepNether capSurplus 把 gravel CAP 到 0, 持有量随时被清成
+// 信号抖动。按它放行 = 预检自己造出注定 false→3-strike→5min 的轮转。背包 flint 保留 (STEP A
+// 直接跳过挖砾石段, 真同口径)。
+function flintSourceSignal(bot) {
+    try {
+        if (invCount(bot, /^flint$/) >= 1) return true;
+        const memo = bot && bot._gravelScanMemo;
+        if (memo && Date.now() - memo.at < 30000) return memo.v;
+        let v = false;
+        try {
+            const b = bot && bot.findBlock && bot.findBlock({ matching: (bl) => !!(bl && bl.name === 'gravel'), maxDistance: 32, count: 1 });
+            v = !!b;
+        } catch (e) { v = false; }
+        if (bot) bot._gravelScanMemo = { at: Date.now(), v };
+        return v;
+    } catch (e) { return false; }
+}
+// ★节流 progress 观测 helper: 提案端每 2s tick 重算, 裸 log 会刷爆 progress.txt — 按 key 节流
+// (state 挂 bot._* 遵守热重载红线)。新提案逻辑的可观测日志统一走这里。
+function progressLogThrottled(bot, key, ms, line) {
+    try {
+        if (!bot) return;
+        if (!bot._wmLogAt) bot._wmLogAt = {};
+        if (bot._wmLogAt[key] && Date.now() - bot._wmLogAt[key] < ms) return;
+        bot._wmLogAt[key] = Date.now();
+        appendFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../bots/_supervisor/progress.txt'),
+            `[${new Date().toISOString()}] ${line}\n`);
+    } catch (e) {}
 }
 function hasStoneTierPick(world) { return /stone|iron|diamond|netherite/.test((world.kit && world.kit.pickTier) || ''); }
 function diamondsOnHand(bot) { return invCount(bot, /^diamond$/); }
@@ -528,6 +609,30 @@ export function proposeTasks(world, bot) {
                rationale: 'sarcophagus: y<50, no pick, no wood — hand-breach to the surface (wood/food/table all live up there)' });
     }
 
+    // 1c) ★P0-1 REPLENISH_KIT — 消耗品基线补给的一等 kind (review-2026-07-04 结构洞#1)。
+    //     与三个既有邻居的分工(全部保留, 各管一段, 不互相替代):
+    //       · SURFACE_RESCUE@92: y<50 + 无镐 + 无木的石棺急救 — 徒手破顶专用, 仍最高优先接管;
+    //       · BOOTSTRAP_KIT@90/66: 冷开局 wood→table→pick→stone-tier 主链 — 但 prepNether 的
+    //         wood-first 被 true-surface 门锁死(地下/半掩体时诚实 false → 3-strike → 5min 冷却,
+    //         36h 轮转风暴的元凶), 而 replenishKit(并行 agent 在写, kind/skill 名是死契约)自己会
+    //         上浮补货, 不受该门锁 — 这正是"修复型 kind"的意义;
+    //       · TOOL_UPKEEP@47: 用手头现有材料恢复 sufficientForUnderground 不变量 — 材料没了它就
+    //         静默不提案, REPLENISH_KIT 补的正是它要的材料(planks/备镐)。
+    //     触发刻意不看 y/enclosed/threat(技能自己上浮+自带安全 gate), 只看 overworld+白天+buffer
+    //     破底(总镐<2 或 planksEq<4)。释放走 isGoalDone 的迟滞口径(镐>=2 且 planksEq>=8)。
+    //     priority: 镐=0 时 67 — 压过 understocked BOOTSTRAP_KIT@66(noPick BOOTSTRAP_KIT@90 仍
+    //     先行, 其 prepNether 被 true-surface 门 3-strike 冷却后本 kind 顶上接管, 不再空转轮转);
+    //     否则 63 — 高于 GET_FOOD@55, 低于 BOOTSTRAP_KIT@66(buffer 未破底时不抢班)。
+    if (overworld && time.phase === 'day'
+        && (totalPicks(bot) < REPLENISH_PICKS_MIN || woodUnits(bot) < REPLENISH_PLANKS_TRIGGER)) {
+        const pk = totalPicks(bot), pe = woodUnits(bot);
+        progressLogThrottled(bot, 'replenishKit', 60000,
+            `[proposeTasks] ★REPLENISH_KIT-propose: picks=${pk}/${REPLENISH_PICKS_MIN} planksEq=${pe}/${REPLENISH_PLANKS_RELEASE} pri=${pk === 0 ? 67 : 63} y=${Math.round(bot.entity.position.y)} — 补给基线破底, 派 replenishKit(修复型: 不看深度, 技能自己上浮)`);
+        push({ kind: PROPOSAL_KIND.REPLENISH_KIT, priority: pk === 0 ? 67 : 63, skill: 'replenishKit',
+               rationale: `supply baseline broken (picks ${pk}/${REPLENISH_PICKS_MIN}, planksEq ${pe}/${REPLENISH_PLANKS_RELEASE}) — surface + restock wood/spare pick before every consumer yields`,
+               hints: { picks: pk, planksEq: pe } });
+    }
+
     // 2) Food: stock to a BUFFER, not just survival (user #5: stockpile meat).
     //    (overworld-only: feedUp flails in the nether/End; the endgame skills self-feed there.)
     //    ★ration-aware (checkpoint #7 closed d4b8d1d's structural hole: the dive gate demands
@@ -628,6 +733,30 @@ export function proposeTasks(world, bot) {
                        hints: { tier: tier.level, ingots } });
             }
         }
+        // RUNG 1.5: ★P1-4 铁库存回补 — GET_IRON_ARMOR_SET 从幽灵 kind 复活为真提案 (review 结构洞#4:
+        //   它已有 isGoalDone case/DAY_ERRANDS 条目/rank3 milestone 点名, 唯独 proposeTasks 零 push)。
+        //   断层: 铁镐到手后 isGoalDone(GO_UNDERGROUND) 恒真(hasIronTierPick 短路), IRON_BUFFER=7 只够
+        //   工具, 而 ENTER_NETHER/GO_END/HUNT_PEARLS 三门都要 armor>=4(成套=24 锭) — "为甲采铁"无人
+        //   认领, 段6→段8 长期卡死。语义 = 采集端(mineDown 下铁带), 与 GET_ARMOR@68(消费端: 冶炼+
+        //   craft+穿)形成 采集→锻造 接力而非互抢: 两者可同刻提案, @68 恒赢 → 有铁先锻造; 锻不动了
+        //   (ironArmorGoalDone: 铁不够下一件, GET_ARMOR 静默)本 kind @46.5 才接管下地补铁; 攒够
+        //   ironDemandTotal 即 done 释放 → GET_ARMOR@68 接棒。口径 ironDemandTotal = max(缺甲总成本,
+        //   portal kit 铁成本) — 甲齐但 GET_PORTAL_KIT 被 3e 的铁预检挡住时本 kind 继续供铁(任务4
+        //   授权扩展), 闭环不留"甲齐缺桶铁"的死角。
+        //   @46.5: TOOL_UPKEEP@47 之下(先保镐再采矿)、GET_DIAMOND@46 之上(先甲后钻 — GET_DIAMOND 只要
+        //   armor>=1 但 ENTER_NETHER 要 4)。下矿三重门与 GO_UNDERGROUND@45/GET_DIAMOND@46 同款
+        //   (sufficientForUnderground/hpSafeForUnderground/口粮>=2), 新 kind 不绕开危血禁下矿(:450)
+        //   与 dive-ration(:917) 两个既有不变量; day/safe/surfaceGate 由外层 tierReady 已保证。
+        if (hasIronTierPick(w) && ironForArmor(bot) < ironDemandTotal(w, bot)
+            && kit.sufficientForUnderground && hpSafeForUnderground && carriedRations(bot) >= 2) {
+            const demand = ironDemandTotal(w, bot);
+            progressLogThrottled(bot, 'ironArmorSet', 120000,
+                `[proposeTasks] ★GET_IRON_ARMOR_SET-propose: iron=${ironForArmor(bot)}/${demand} (armor=${vitals.armor || 0}/4 缺甲成本=${ironArmorRemainingCost(w)} portal铁=${portalKitIronCost(bot)}) — 下铁带回补 (y${IRON_TARGET_Y}, pri=46.5)`);
+            push({ kind: PROPOSAL_KIND.GET_IRON_ARMOR_SET, priority: 46.5, skill: 'mineDown',
+                   args: [{ targetY: IRON_TARGET_Y }],
+                   rationale: `iron restock: ${ironForArmor(bot)}/${demand} iron banked for armor ${vitals.armor || 0}/4${portalKitIronCost(bot) > 0 ? ' + portal kit' : ''} — descend to the iron band (y${IRON_TARGET_Y}) and mine the gap`,
+                   hints: { iron: ironForArmor(bot), demand, armor: vitals.armor || 0, targetY: IRON_TARGET_Y } });
+        }
         // RUNG 2: iron pick in hand (diamond mining unlocked) + iron armor on → go GET DIAMONDS.
         //   Requires armor>=4 (GET_ARMOR@68 closes that first) so the bot never strip-mines the
         //   deep diamond band unarmored. @46: above GO_UNDERGROUND@45 so a kitted iron bot heads for
@@ -651,10 +780,16 @@ export function proposeTasks(world, bot) {
     //     MIGRATE@60? no — just below: a death-zone migrate still wins; but above GET_BED@50 and the
     //     tier chain): protecting banked diamonds outranks chasing more, but never a survival need.
     //     bankGear itself defers if there's no home anchor or it's unsafe, so this is cheap to propose.
-    if (overworld && time.phase === 'day' && !(threat.actionable > 0) && diamondsOnHand(bot) >= 1 && packNearlyFull(bot)) {
+    //     ★P1-5 停用: BANK_GEAR_ENABLED=false 门掉 push(理由/重开条件见文件顶部常量注释 —
+    //     keepInventory=true 下"死丢投资"前提为假, 且实测吞钻石/削 cobble/ghost 箱蒸发铁, 纯负价值)。
+    if (BANK_GEAR_ENABLED && overworld && time.phase === 'day' && !(threat.actionable > 0) && diamondsOnHand(bot) >= 1 && packNearlyFull(bot)) {
         push({ kind: PROPOSAL_KIND.BANK_GEAR, priority: 58, skill: 'bankGear',
                rationale: `${diamondsOnHand(bot)} diamond(s) + pack nearly full — bank valuables at home before a death wipes them`,
                hints: { diamonds: diamondsOnHand(bot) } });
+    } else if (!BANK_GEAR_ENABLED && overworld && diamondsOnHand(bot) >= 1 && packNearlyFull(bot)) {
+        // ★P1-5 观测: 本会触发的 BANK_GEAR 被停用门吞掉 — 10min 节流留痕, 验证停用生效 + 背包压力可见。
+        progressLogThrottled(bot, 'bankGearOff', 600000,
+            `[proposeTasks] ★BANK_GEAR-disabled: would-fire (diamonds=${diamondsOnHand(bot)} packNearlyFull) — suppressed by BANK_GEAR_ENABLED=false (keepInventory=true 存箱前提为假)`);
     }
 
     // 3e) ── ★ENDGAME chain (post-diamond → Ender Dragon, all legit — docs/HANDOFF.md cold goal). ──
@@ -690,11 +825,26 @@ export function proposeTasks(world, bot) {
         // GET_PORTAL_KIT — obsidian×OBSIDIAN_TARGET + flint_and_steel (gatherObsidian: lava pool +
         //   water bucket, gravel→flint). hpSafeForUnderground: lava work at low hp is suicide.
         //   Mutually exclusive with ENTER_NETHER via obsOk.
+        //   ★review OPEN finding gatherObsidian.js:70 铁预检 — 技能入口硬性要求 桶3锭+打火石1锭
+        //   (已持有的不计, 空桶也算)且打火石还需 flint/gravel 来源; 提案门不预检就派 = 注定
+        //   false→3-strike→5min 冷却→重派循环(endgame 阶段原本无补铁提案)。与技能 :44 的 ironShort
+        //   完全同口径: 需求 = portalKitIronCost, 库存 = ironForArmor(铁锭+raw, raw 1:1 冶炼)。
+        //   flint 侧: 已有打火石 || (背包 flint/gravel 或 32 格内 gravel — flintSourceSignal, 与技能
+        //   getNearestBlock('gravel',32) 同半径)。挡住时节流打点, 缺口由 RUNG 1.5 GET_IRON_ARMOR_SET
+        //   @46.5 的 ironDemandTotal(含 portal 铁成本)接管补铁 → 铁到位后本门自然放行。
         if (overworld && tierReady && eneeds.hasDiamondPick && eneeds.blazeShort > 0 && !eneeds.obsOk && hpSafeForUnderground) {
-            push({ kind: PROPOSAL_KIND.GET_PORTAL_KIT, priority: 52, skill: 'gatherObsidian',
-                   args: [{ obsidianTarget: OBSIDIAN_TARGET, maxMs: 480000 }],
-                   rationale: `portal kit: obsidian ${invCount(bot, /^obsidian$/)}/10 + flint_and_steel ${invCount(bot, /^flint_and_steel$/)}/1 — mine a lava pool with the diamond pick`,
-                   hints: { obsidian: invCount(bot, /^obsidian$/), target: OBSIDIAN_TARGET } });
+            const portalIronNeed = portalKitIronCost(bot);
+            const portalIronOk = ironForArmor(bot) >= portalIronNeed;
+            const portalFlintOk = invCount(bot, /^flint_and_steel$/) >= 1 || flintSourceSignal(bot);
+            if (portalIronOk && portalFlintOk) {
+                push({ kind: PROPOSAL_KIND.GET_PORTAL_KIT, priority: 52, skill: 'gatherObsidian',
+                       args: [{ obsidianTarget: OBSIDIAN_TARGET, maxMs: 480000 }],
+                       rationale: `portal kit: obsidian ${invCount(bot, /^obsidian$/)}/10 + flint_and_steel ${invCount(bot, /^flint_and_steel$/)}/1 — mine a lava pool with the diamond pick`,
+                       hints: { obsidian: invCount(bot, /^obsidian$/), target: OBSIDIAN_TARGET } });
+            } else {
+                progressLogThrottled(bot, 'portalKitBlock', 300000,
+                    `[proposeTasks] ★GET_PORTAL_KIT-precheck-block: ironNeed=${portalIronNeed} have=${ironForArmor(bot)} flintOk=${portalFlintOk} — 不提案(免 3-strike 冷却循环), 补铁归 GET_IRON_ARMOR_SET@46.5 (review gatherObsidian.js:70)`);
+            }
         }
         // ENTER_NETHER — build/light/walk the legit portal (realNetherPortal). Gear gates
         //   (food/armor/sword/bridging cobble) keep an underprepared bot out of the nether.
@@ -995,6 +1145,10 @@ export function proposeTasks(world, bot) {
                 PROPOSAL_KIND.GET_DIAMOND_GEAR, PROPOSAL_KIND.BUILD_HOME,
                 PROPOSAL_KIND.OPENING_SCOUT, PROPOSAL_KIND.OPENING_VILLAGE,
                 PROPOSAL_KIND.OPP_WHEAT_FARM, PROPOSAL_KIND.OPP_SEIZE_VILLAGE, PROPOSAL_KIND.MIGRATE,
+                // ★P0-1 REPLENISH_KIT: 提案端本就 day-only(白天门), 进这个集合只为下面的 commitment
+                // 释放条款 — 白天承诺的地表补货跨入 dusk 时立即让位夜链, 不把 replenishKit 派进黑夜
+                // 的地表砍树(与 BOOTSTRAP_KIT 同性质的日间差事)。
+                PROPOSAL_KIND.REPLENISH_KIT,
             ]);
             // ★TOOL_UPKEEP is NOT a day errand (checkpoint #13, 2026-07-02 night: pick wore to 82%
             // at dusk, the gate stripped the restock proposal, the spare-pick craft later FAILED
@@ -1086,6 +1240,11 @@ export function isGoalDone(kind, world, bot) {
         case PROPOSAL_KIND.TOOL_UPKEEP:
             return !!(w.kit && w.kit.sufficientForUnderground)
                 || invCount(bot, /^(cobblestone|cobbled_deepslate)$/) < 3 || woodUnits(bot) < 2;
+        // ★P0-1 REPLENISH_KIT done = 补给基线的迟滞释放: 总镐数>=2 且 planksEq>=8。触发是 <2/<4
+        // (proposeTasks 1c) — 触发↔释放刻意不对称(planks <4 触发但 >=8 才放手), 与 GET_FOOD 的
+        // FOOD_STOCK buffer 同思路: 补到有富余再走, 防 4↔5 边界抖动的提案轮转。
+        case PROPOSAL_KIND.REPLENISH_KIT:
+            return totalPicks(bot) >= REPLENISH_PICKS_MIN && woodUnits(bot) >= REPLENISH_PLANKS_RELEASE;
         case PROPOSAL_KIND.MIGRATE:       return !w.migration.recommend;     // arrived at a livable biome
         // ── ★T-0093 tier chain completion. ──
         // GET_IRON_TOOLS done = an iron+ pickaxe is now in hand (the rung was about crafting it).
@@ -1093,8 +1252,12 @@ export function isGoalDone(kind, world, bot) {
         // ★T-0097 NIGHT_SMELT_IRON done = same target (an iron-tier pick exists) — holds the night
         // commitment sticky across the smelt→craft hand-off until the iron pickaxe is actually crafted.
         case TASK.NIGHT_SMELT_IRON:          return hasIronTierPick(w) || (invCount(bot, /^raw_iron$/) === 0 && invCount(bot, /^iron_ingot$/) < 3);   // ★FIX (worker-sync 0630 frozen-alive): the sticky NIGHT_SMELT_IRON deadlocked into a smeltSafe no-op spin — chosen at dusk w/ raw_iron≥3, but once the iron was smelted+consumed WITHOUT reaching hasIronTierPick (ingots banked/used, no lasting iron pick), it stayed sticky dispatching smeltSafe('raw_iron',N) at raw_iron=0 → no-op every 1.5s, frozen until watchdog (live: pinned 9min @54,58 mob=FREE/ENC). Release when there's nothing left to smelt OR craft → re-evaluate → mine more iron. Does NOT gate pick-making.
-        // GET_IRON_ARMOR_SET done = fully armored OR can't afford the next piece (mirrors GET_ARMOR).
-        case PROPOSAL_KIND.GET_IRON_ARMOR_SET: return ironArmorGoalDone(w, bot);
+        // ★P1-4 GET_IRON_ARMOR_SET 复活后语义 = 采集端(下铁带补铁库存), done 与提案门(RUNG 1.5)共用
+        // ironDemandTotal = max(缺甲总成本, portal kit 铁成本): 铁攒够总需求即释放(demand=0 时恒真,
+        // 覆盖"甲齐且 portal kit 无缺"), → GET_ARMOR@68 接棒锻造。不再 mirrors GET_ARMOR 的
+        // ironArmorGoalDone("cheapest-next-piece"消费口径) — 采集端用它会攒够 4 锭就撒手, 永远到
+        // 不了成套 24 锭(结构洞#4 的另一半: 采集↔消费两端口径必须分开)。
+        case PROPOSAL_KIND.GET_IRON_ARMOR_SET: return ironForArmor(bot) >= ironDemandTotal(w, bot);
         // ★T-0092 GET_DIAMOND done = banked the DIAMOND_FLOOR buffer (≥1 diamond pick + spare worth).
         //   Stays committed deep until the floor is met → the diamond venture isn't abandoned after
         //   one ore. Survival (HOLD/food/night) still preempts via isEmergency/nightPre, so a deep

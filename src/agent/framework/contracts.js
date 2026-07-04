@@ -80,11 +80,12 @@ export const EMPTY_WORLD = Object.freeze({
  * High-level kinds of work the world model can propose. Kept coarse on purpose:
  * the LLM judges among these; exact coordinates/x-ray detail never appear here
  * (blueprint §C hard constraint — don't expose the cheat, don't overload the LLM).
- * @typedef {'BOOTSTRAP_KIT'|'SURFACE_RESCUE'|'GET_FOOD'|'GET_BED'|'GET_ARMOR'|'GET_IRON_TOOLS'|'GET_IRON_ARMOR_SET'|'GET_DIAMOND'|'BANK_GEAR'|'BUILD_HOME'|'GO_UNDERGROUND'|'TOOL_UPKEEP'|'MIGRATE'|'HOLD'|'FORAGE_SURFACE'|'SLEEP'|'FREE_PLAY'|'DUSK_MINE_NIGHT'|'DUSK_GO_BED'|'NIGHT_DIG_ONE'|'NIGHT_SEAL'|'OPENING_SCOUT'|'OPENING_VILLAGE'|'GET_DIAMOND_GEAR'|'GET_PORTAL_KIT'|'ENTER_NETHER'|'GET_BLAZE_RODS'|'HUNT_PEARLS'|'CRAFT_EYES'|'GO_END'|'SLAY_DRAGON'} ProposalKind
+ * @typedef {'BOOTSTRAP_KIT'|'SURFACE_RESCUE'|'REPLENISH_KIT'|'GET_FOOD'|'GET_BED'|'GET_ARMOR'|'GET_IRON_TOOLS'|'GET_IRON_ARMOR_SET'|'GET_DIAMOND'|'BANK_GEAR'|'BUILD_HOME'|'GO_UNDERGROUND'|'TOOL_UPKEEP'|'MIGRATE'|'HOLD'|'FORAGE_SURFACE'|'SLEEP'|'FREE_PLAY'|'DUSK_MINE_NIGHT'|'DUSK_GO_BED'|'NIGHT_DIG_ONE'|'NIGHT_SEAL'|'OPENING_SCOUT'|'OPENING_VILLAGE'|'GET_DIAMOND_GEAR'|'GET_PORTAL_KIT'|'ENTER_NETHER'|'GET_BLAZE_RODS'|'HUNT_PEARLS'|'CRAFT_EYES'|'GO_END'|'SLAY_DRAGON'} ProposalKind
  */
 export const PROPOSAL_KIND = Object.freeze({
     BOOTSTRAP_KIT: 'BOOTSTRAP_KIT',   // wood→planks→table→pick→stone tools
     SURFACE_RESCUE: 'SURFACE_RESCUE', // ★checkpoint#16 石棺修复kind: y<50无镐无木 → surfaceUp徒手破顶
+    REPLENISH_KIT: 'REPLENISH_KIT',   // ★P0-1 消耗品基线补给修复kind: 总镐<2或planksEq<4 → replenishKit 自行上浮补货(不看深度, 迟滞释放 镐>=2且planksEq>=8)
     GET_FOOD: 'GET_FOOD',
     GET_ARMOR: 'GET_ARMOR',           // smelt iron → craft+equip iron armor (裸甲被秒, 留钻石)
     GET_BED: 'GET_BED',               // wool→bed (respawn anchor, mandatory)
@@ -94,7 +95,7 @@ export const PROPOSAL_KIND = Object.freeze({
     GET_IRON_TOOLS: 'GET_IRON_TOOLS', // 攒够 raw_iron → 冶炼+造铁镐/铁剑 (tier: stone→iron 的工具门槛)
     GET_IRON_ARMOR_SET: 'GET_IRON_ARMOR_SET', // 整套铁甲 (GET_ARMOR 的"成套"升级目标, 非单件)
     GET_DIAMOND: 'GET_DIAMOND',       // ★T-0092 深挖钻石带 (targetY≈-54) → 攒够 DIAMOND_FLOOR
-    BANK_GEAR: 'BANK_GEAR',           // ★T-0092 背包有高价值矿且将满 → 回家入库 (bankGear, 死不丢投资)
+    BANK_GEAR: 'BANK_GEAR',           // ★T-0092 背包有高价值矿且将满 → 回家入库 (bankGear, 死不丢投资) — ★P1-5 提案端已停用: keepInventory=true 下前提为假 (见 world_model.js BANK_GEAR_ENABLED)
     GO_UNDERGROUND: 'GO_UNDERGROUND', // gated by surfaceGate / committed venture
     TOOL_UPKEEP: 'TOOL_UPKEEP',       // ★镐耐久预算: 备镐+随身补镐kit(台/棍/圆石) — 把 kit.sufficientForUnderground 从"拒绝下矿的门"升级为"主动修复的目标" (craftChain array preset)
     MIGRATE: 'MIGRATE',
