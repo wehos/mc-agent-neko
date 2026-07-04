@@ -1614,7 +1614,18 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         // the whole rebuild is gated on ONE log. Famine (blacklist≥8) temporarily
         // widens the visible ring to 160; first successful chop shrinks it back (the
         // blacklist empties as TTLs expire after we leave the area).
-        const _leashR = _unreach.size >= 8 ? 160 : 80;
+        // ★2026-07-05 树荒口径对齐 (视觉黑匣子实锤: ORACLE 行军把 bot 送进离锚 215 格的密林,
+        // 人站树干堆里 nearest=NONE — 行军层 _pullR 树荒时放宽到 256, 这里的候选过滤却还卡 80,
+        // 整片森林被锚距滤光。同一无木判据, 同一 256。)
+        const _noWood0 = (() => {
+            try {
+                const it = bot.inventory.items();
+                const lg = it.filter(i => /_log$/.test(i.name || '')).reduce((s, i) => s + i.count, 0);
+                const pl = it.filter(i => /_planks$/.test(i.name || '')).reduce((s, i) => s + i.count, 0);
+                return lg === 0 && pl < 4;
+            } catch (e) { return false; }
+        })();
+        const _leashR = _noWood0 ? 256 : (_unreach.size >= 8 ? 160 : 80);
         let riskySkipped = 0;
         // ★C297 TRUNK-BASE targeting (用户实拍根因: 雨林高树 — findBlocks 返回的"最近 log"常是树冠高处
         // 那截 (dy>5) → riskyTree 判 high-tree 跳过 → 拉黑 → 误当够不到 → 退化乱转/种苗,而那棵树的树干
