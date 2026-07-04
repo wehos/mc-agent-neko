@@ -19,6 +19,10 @@ $log = Join-Path $proj 'watchdog.log'
 # 本进程 env; 若靠宿主 shell 碰运气继承, 一次重启就把确定性 kernel 链静默关回 LLM baseline。
 $env:MC_FRAMEWORK_V2 = '1'
 $env:MC_FRAMEWORK_SHADOW = '0'
+# ★2026-07-05 新机: node 装在 zip 目录而非系统 PATH (与 start-neko.ps1 同一路径约定)。
+# Restart-Agent 及各 keep-alive 都用裸名 'node' 启动 — 若 PATH 里没有 node, 整条链一个也起不来。
+$node22 = 'C:\Users\Administrator\nodejs22'
+if ((Test-Path (Join-Path $node22 'node.exe')) -and ($env:PATH -notlike "*$node22*")) { $env:PATH = "$node22;$env:PATH" }
 
 # ★T-0095 ATOMIC SINGLETON — replaces the scan-and-kill TOCTOU race below. Two watchdogs spawned
 # near-simultaneously (concurrent SessionStart ensure-stack hooks / a session recycle) each scanned

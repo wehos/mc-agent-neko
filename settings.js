@@ -1,7 +1,10 @@
 const settings = {
     "minecraft_version": "auto", // or specific version like "1.21.6"
     "host": "localhost", // or "localhost", "your.ip.address.here"
-    "port": -1, // auto-scan for the open LAN port (vanilla "Open to LAN" picks a random port each time)
+    // ★2026-07-05 新机迁移: 世界从客户端 LAN(端口每次随机, findServers 只扫 49000-65000)改为本机
+    // 专用服务器固定 25565 (C:\Users\Administrator\mc-server, vanilla 1.21.1, offline-mode,
+    // keepInventory=true 已在服务器侧设置)。客户端 LAN 模式回退: 改回 -1 自动扫描。
+    "port": 25565,
     "auth": "offline", // or "microsoft"
     "player_username": "", // real in-game name of the human owner the bot follows/serves. empty = auto-detect LAN host / single-player owner at runtime
 
