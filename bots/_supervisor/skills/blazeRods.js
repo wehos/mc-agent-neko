@@ -48,11 +48,13 @@ export default async function blazeRods(bot, ctx, opts = {}) {
     const goWithTimeout = async (x, y, z, range, ms) => {
         let to = null;
         try {
-            await Promise.race([
+            // ★2026-07-05 预审 P1: goToPosition 的 NoPath/MAROONED 是 resolve(false) 不是 reject —
+            // 旧版把它当成功 → 探索循环的失败换向整体失效, 撞熔岩海方向沿一堵墙越走越远。
+            const r = await Promise.race([
                 skills.goToPosition(bot, x, y, z, range),
                 new Promise((_, rej) => { to = setTimeout(() => rej(new Error('leg-timeout')), ms); }),
             ]);
-            return true;
+            return r !== false;
         } catch (e) {
             try { bot.pathfinder.stop(); } catch (e2) {}
             try { bot.pathfinder.setGoal(null); } catch (e2) {}
@@ -264,18 +266,41 @@ export default async function blazeRods(bot, ctx, opts = {}) {
         bot._netherExplore = { origin: { x: Math.floor(bot.entity.position.x), z: Math.floor(bot.entity.position.z) }, dirIdx: 0, leg: 0 };
     }
     const findFortress = () => bot.findBlock({ matching: (b) => b && b.name === 'nether_bricks', maxDistance: 64 });
+    // ★2026-07-05 oracle 接缝 (daemon 维度修复后 nearest.fortress 首次可用): 有新鲜堡垒坐标
+    // → 直线分段行军替代盲螺旋; 连续 3 腿走不通(熔岩海)则本轮退回螺旋换向。
+    const oracleFortress = () => {
+        try {
+            const o = bot._world && bot._world.oracle;
+            const f = o && o.fresh && o.dim === 'the_nether' && o.nearest && o.nearest.fortress;
+            return (f && Number.isFinite(f.x)) ? f : null;
+        } catch (e) { return null; }
+    };
     let fortress = findFortress();
     while (!fortress && !timeUp()) {
         if (bot.interrupt_code || bot.health <= 0) return eyeEq();
+        // ★2026-07-05 预审 P1: 下界死亡重生回主世界后技能变僵尸 — 主世界扫 nether_bricks +
+        // 按下界坐标走腿, 烧完预算还占着 supervised busy。维度守卫: 已离开下界即结算退出。
+        if (!inNether()) { prog('blazeRods: no longer in nether (death/portal) — bail'); return eyeEq() > eyeEq0 ? eyeEq() : 0; }
         if (bot.food < 12) await skills.eatPreferred(bot);
         const st = bot._netherExplore;
-        const dir = DIRS[st.dirIdx % 4];
-        const dist = (st.leg + 1) * 32;
-        const tx = st.origin.x + dir[0] * dist;
-        const tz = st.origin.z + dir[1] * dist;
-        const ok = await goWithTimeout(tx, Math.floor(bot.entity.position.y), tz, 6, 45000);
-        if (ok) st.leg++;
-        else st.dirIdx = (st.dirIdx + 1) % 4;                            // change heading, never grind one wall
+        const of = oracleFortress();
+        if (of && (st.oracleFails || 0) < 3) {
+            const p = bot.entity.position;
+            const dx = of.x - p.x, dz = of.z - p.z, flat = Math.hypot(dx, dz) || 1;
+            const step = Math.min(32, flat);
+            const ok = await goWithTimeout(p.x + (dx / flat) * step, Math.floor(p.y), p.z + (dz / flat) * step, 6, 45000);
+            st.oracleFails = ok ? 0 : (st.oracleFails || 0) + 1;
+            if (!ok) st.dirIdx = (st.dirIdx + 1) % 4;
+            if ((st.oracleFails || 0) === 3) prog(`blazeRods: oracle 定向连败 3 腿 (熔岩海?) — 本轮退回螺旋探索`);
+        } else {
+            const dir = DIRS[st.dirIdx % 4];
+            const dist = (st.leg + 1) * 32;
+            const tx = st.origin.x + dir[0] * dist;
+            const tz = st.origin.z + dir[1] * dist;
+            const ok = await goWithTimeout(tx, Math.floor(bot.entity.position.y), tz, 6, 45000);
+            if (ok) st.leg++;
+            else st.dirIdx = (st.dirIdx + 1) % 4;                        // change heading, never grind one wall
+        }
         fortress = findFortress();
     }
     if (!fortress) {
@@ -301,6 +326,7 @@ export default async function blazeRods(bot, ctx, opts = {}) {
     let stalls = 0;
     while (!targetMet() && !timeUp()) {
         if (bot.interrupt_code || bot.health <= 0) return eyeEq();
+        if (!inNether()) { prog('blazeRods: no longer in nether (death mid-farm) — bail'); return eyeEq() > eyeEq0 ? eyeEq() : 0; }   // ★2026-07-05 预审 P1 僵尸模式守卫
         if (bot.food < 12) await skills.eatPreferred(bot);
         if (bot.health <= 8) {
             // Retreat + regen under shield; blaze fireballs are shield-blockable.

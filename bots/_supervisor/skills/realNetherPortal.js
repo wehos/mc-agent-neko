@@ -31,9 +31,23 @@ export default async function realNetherPortal(bot, ctx) {
         prog(`entering portal @ ${pb.position}`);
         try { await skills.goToPosition(bot, pb.position.x, pb.position.y, pb.position.z, 1); } catch (e) {}
         // Step INTO the portal block and stand still — the swap takes ~4s of contact.
+        // ★2026-07-05 预审 P1: 盲走 1500ms ≈ 6.4 格, 直接穿过 1 格厚的门框平面走到门背面 —
+        // 换维度要连续站在 portal 方块内 80 tick。改条件停止: 50ms 步长轮询脚/头是否已在
+        // nether_portal 内, 命中即停(上限 2s); 首轮未命中回身再试一轮(可能穿过去了)。
         try { await bot.lookAt(pb.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
-        bot.setControlState('forward', true);
-        await wait(1500);
+        const feetInPortal = () => {
+            try {
+                const p = bot.entity.position;
+                const f = bot.blockAt(p); const h = bot.blockAt(p.offset(0, 1, 0));
+                return (f && f.name === 'nether_portal') || (h && h.name === 'nether_portal');
+            } catch (e) { return false; }
+        };
+        for (let attempt = 0; attempt < 2 && !feetInPortal(); attempt++) {
+            bot.setControlState('forward', true);
+            for (let t = 0; t < 40 && !feetInPortal(); t++) await wait(50);   // ≤2s
+            bot.clearControlStates();
+            if (!feetInPortal()) { try { await bot.lookAt(pb.position.offset(0.5, 0.5, 0.5), true); } catch (e) {} }   // 穿过去了→回身
+        }
         bot.clearControlStates();
         for (let i = 0; i < 30; i++) {           // up to 15s for the dimension swap
             if (inNether()) { prog('★★★ DIMENSION SWAP — WE ARE IN THE NETHER ★★★'); log(bot, 'Entered the Nether!'); return true; }
