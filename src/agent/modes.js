@@ -3601,6 +3601,12 @@ const modes_list = [
                     }
                 } catch (e) {}
                 if (!(beingHurt && frozen) && !waterThreat && !idleWedge) return;
+                // ★2026-07-05 EAT-VOID 根因终章 (x34 实录 + 自带诊断 win=none using=false
+                // held=rotten_flesh): 进食守卫本来就清控制+停寻路 — 静止进食在这里被误诊为
+                // "受伤卡死", interrupt_code=true 掐死 consume; 受伤时恰是最需要吃的时刻,
+                // 于是每次开吃→掐死→重试→再掐死的 x34 连环。进食窗(≤2.6s 自过期)内豁免:
+                // 真卡死的反射最多晚 2.6s 被释放, 安全网延迟有界。
+                if (bot._eatingUntil && Date.now() < bot._eatingUntil) return;
                 if (!this.releasedAt) {
                     this.releasedAt = now;
                     say(agent, 'Reflex wedged while taking damage — force releasing!');
