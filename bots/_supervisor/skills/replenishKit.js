@@ -82,8 +82,8 @@ export default async function replenishKit(bot, ctx, opts = {}) {
     prog(`replenishKit: START picks=${before[0]} stick=${before[1]} planks=${before[2]} logs=${before[3]} table=${before[4]} planksEq=${planksEq()} y=${Math.round(bot.entity.position.y)} onSurface=${onSurface()} night=${isNight()} hostiles16=${hostilesNear(16)} hp=${Math.round(bot.health)} food=${bot.food}`);
 
     // 已达标 → 诚实 false (不该被派发到这; isGoalDone 释放承诺, 提案端负责别重复提)
-    if (picks() >= 2 && planksEq() >= 8 && cnt('stick') >= 8) {
-        prog('replenishKit: invariant already satisfied (picks>=2 planksEq>=8 stick>=8) — nothing to do, honest false');
+    if (picks() >= 3 && planksEq() >= 16 && cnt('stick') >= 8) {   // ★2026-07-05 3镐/16板 (与 world_model REPLENISH_* 同步加厚: 2镐262耐久撑不到下次补给, 20-40min/次复发)
+        prog('replenishKit: invariant already satisfied (picks>=3 planksEq>=16 stick>=8) — nothing to do, honest false');
         return false;
     }
 
@@ -159,7 +159,7 @@ export default async function replenishKit(bot, ctx, opts = {}) {
     // ── ④ 补镐到 2 把: 有 cobble(>=3/把)先石镐, 没有则木镐过渡 (镐是消耗品跑道, 宁多勿清)。
     //      craftRecipeLocal 会把随身台落在臂展内再收回 (T-0079), 不会走向 16 格外的幽灵台。──
     let guard = 0;
-    while (!stop() && !overBudget() && picks() < 2 && guard++ < 4) {
+    while (!stop() && !overBudget() && picks() < 3 && guard++ < 6) {   // ★3镐口径
         // 原料自愈: 板不够先折 log; 棍不够先折板; 都没有 → 老实 break (不空转)
         if (cnt('stick') < 2 || planksHeld() < 3) {
             const logName = anyLogName();
@@ -197,7 +197,7 @@ export default async function replenishKit(bot, ctx, opts = {}) {
     }
 
     // ── ⑤ 富余顺手补 stick>=8 (只花不伤不变量的板: 折棍后 planksEq 仍须 >=8) ─────────────
-    if (!stop() && !overBudget() && picks() >= 2 && cnt('stick') < 8 && planksHeld() >= 2) {
+    if (!stop() && !overBudget() && picks() >= 3 && cnt('stick') < 8 && planksHeld() >= 2) {
         const need = Math.ceil((8 - cnt('stick')) / 4);                       // 1 recipe = 2 planks → 4 sticks
         const affordable = Math.floor((planksEq() - 8) / 2);                  // 每 recipe 花 2 planksEq, 留住 8 底线
         const n = Math.min(need, Math.max(0, affordable));
@@ -208,6 +208,6 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         }
     }
 
-    const met = picks() >= 2 && planksEq() >= 8;
+    const met = picks() >= 3 && planksEq() >= 16;   // ★3镐/16板
     return settle(stop() ? 'interrupted' : (overBudget() ? 'budget-5min' : (met ? 'invariant-met' : 'partial')));
 }

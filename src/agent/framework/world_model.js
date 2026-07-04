@@ -93,9 +93,12 @@ const DIAMOND_TARGET_Y = -54; // diamond band: y-54..-59 peak; bedrock at y-64 (
 //    一等 kind, 只作为前置 gate 散落在消费技能里; buffer 地下归零 → 消费者集体 yield →
 //    BOOTSTRAP_KIT 冷却 162 次 + GET_FOOD 121 次的 36h 轮转风暴)。迟滞防抖: planksEq <TRIGGER
 //    触发, >=RELEASE 才释放(isGoalDone), 免得 4↔5 边界抖动轮转。 ──
-const REPLENISH_PICKS_MIN = 2;       // 总镐数底线(备镐不变量): <2 触发, >=2 才算 done
+const REPLENISH_PICKS_MIN = 3;       // 总镐数底线(备镐不变量): <3 触发, >=3 才算 done
+                                     // ★2026-07-05 2→3: 实测 2 根石镐(262耐久)撑不到下次补给窗口,
+                                     // 镐尽→徒手困地下→SURFACE_RESCUE→再补给, 20-40min/次已复发两轮。
+                                     // 技能端 replenishKit.js:85/162/200/211 已同步 3镐/16板口径。
 const REPLENISH_PLANKS_TRIGGER = 4;  // planks-equivalent 跌破即触发
-const REPLENISH_PLANKS_RELEASE = 8;  // 释放需回补到的 buffer (迟滞: 触发<4, 释放>=8)
+const REPLENISH_PLANKS_RELEASE = 16; // 释放需回补到的 buffer (迟滞: 触发<4, 释放>=16)
 // ── ★P1-5 BANK_GEAR 提案端停用开关 (review-2026-07-04-distance.md 结构洞#5)。
 //    keepInventory=true 下死亡不掉落, "存箱防死丢投资"的前提为假; 实测纯负价值三连:
 //      · bankGear RAW 正则 ^diamond$ 把钻石吞进箱, 而 craftChain/endgameNeeds 只数背包不读箱子

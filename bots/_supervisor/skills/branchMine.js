@@ -11,10 +11,14 @@ import fs from 'fs';
 import mfp from 'mineflayer-pathfinder';
 const { goals: BM_GOALS, Movements: BM_MOVES } = mfp;
 
+// ★2026-07-05 铜矿除名 (durability leak 实锤: 227 raw_copper ≈ 75 次破坏 ≈ 半根石镐耐久
+// 烧在通关全程零用途的垃圾矿上; achieve.js:1177 早有前科注释"copper-shallow band 150+铜零铁"。
+// 铜用石镐就能挖=直接吃石镐阶段的耐久; redstone/emerald/gold 需铁镐才掉落, 到铁器阶段
+// 耐久已廉价, 留着无害)。
 const ORES = ['diamond_ore', 'deepslate_diamond_ore', 'iron_ore', 'deepslate_iron_ore',
               'coal_ore', 'deepslate_coal_ore', 'gold_ore', 'deepslate_gold_ore',
               'redstone_ore', 'deepslate_redstone_ore', 'lapis_ore', 'deepslate_lapis_ore',
-              'copper_ore', 'deepslate_copper_ore', 'emerald_ore', 'deepslate_emerald_ore'];
+              'emerald_ore', 'deepslate_emerald_ore'];
 const IRON_ORES = ['iron_ore', 'deepslate_iron_ore'];
 
 export default async function branchMine(bot, ctx, length = 24, targetY = null) {
