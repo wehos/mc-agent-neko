@@ -1,4 +1,4 @@
-# 24/7 watchdog for the Neko agent. Runs DETACHED from any Claude session — keeps
+﻿# 24/7 watchdog for the Neko agent. Runs DETACHED from any Claude session — keeps
 # `node main.js` (the bot) alive forever: if port 48909 (the agent WS plugin) stops
 # listening, it clears stale 8765/48909 and relaunches. Does NOT touch the MC LAN
 # server (55916) — that's the game world, managed separately. Logs to watchdog.log.
