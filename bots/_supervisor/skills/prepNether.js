@@ -18,6 +18,14 @@ const readOakAppleBackoff = () => {
 const writeOakAppleBackoff = (rec) => {
     try { fs.writeFileSync(OAK_APPLE_BACKOFF, JSON.stringify(rec)); } catch (e) {}
 };
+// ★P1-5 BANK_GEAR 侧门停用 (评审 finding prepNether.js:2909: world_model.js:108 的
+// BANK_GEAR_ENABLED=false 只门掉了 proposeTasks 的提案, 但本文件 key-gear(盾/钻剑)首次达标时
+// 还直接 customSkill('bankGear') — 吞钻(RAW ^diamond$ 全入箱而 craftChain/endgameNeeds 只数背包
+// → GET_DIAMOND_GEAR 死环)/削 cobble 到 16(ENTER_NETHER 门要 32、GO_END 要 64)/ghost 箱蒸发
+// (07-02 13 锭铁实锤)三连全部经此侧门复活, 且触发点恰落在 endgame 前夜)。与 world_model.js:108
+// 同名同值, 共享一个可 grep 的旗; 重开条件同源: keepInventory 关闭(死亡真掉落) + bankGear 的
+// RAW/MAT 口径修好(钻石不进 RAW、cobble/logs 保留量对齐 endgame 门槛)后, 两处一起翻 true。
+const BANK_GEAR_ENABLED = false;
 
 // ★progress-aware wrapper (2026-07-02 12:35Z live: ONE dispatch chopped 4 logs, crafted planks
 // and TWO stone pickaxes, then hit a hunger-hold gate and returned false — the kernel counted
@@ -2570,8 +2578,17 @@ async function prepNetherInner(bot, ctx) {
             const ic = world.getInventoryCounts(bot);
             const CAPS = { cobblestone: 64, cobbled_deepslate: 64, stone: 0, dirt: 16, coal: 64, sand: 0, red_sand: 0, sandstone: 0, red_sandstone: 0, smooth_sandstone: 0, gravel: 0, granite: 0, andesite: 0, diorite: 0, tuff: 0, flint: 2 /* ★ed6a204 flint是flint_and_steel(endgame点火)材料 — COLLECT刚学会从gravel收flint, 清零=拆台 */, raw_copper: 0, terracotta: 0, white_terracotta: 0, orange_terracotta: 0, yellow_terracotta: 0, red_terracotta: 0, brown_terracotta: 0, light_gray_terracotta: 0, gray_terracotta: 0, cyan_terracotta: 0, rabbit_hide: 0, sugar_cane: 0 };
             let emptySlots = 36; try { emptySlots = bot.inventory.emptySlotCount(); } catch (e) {}
+            // ★P0-1 铁镐三落三起审计 (2026-07-04): 排查结论 — capSurplus 只对上面 CAPS 白名单里
+            // 点名的 bulk 方块名下发 /clear (按物品名精确匹配), 名单里从无任何镐/工具/装备,
+            // 所以它不是铁镐消失的路径 (镐的真实消耗路径=挖掘耐久磨损归零 + bankGear 把 >1 的
+            // 备镐存进家箱)。但 /clear 是不可逆销毁, CAPS 未来一旦被误编辑 (往里加了工具名)
+            // 就是灾难 → 加硬保险: endgame 关键物资 (镐类全体/桶/打火石/床/船/眼/珍珠/烈焰棒/
+            // 黑曜石/钻石/铁/台/炉/武器/甲) 即使出现在 CAPS 也拒绝下发 /clear, 并留观测日志。
+            // 镐是消耗品跑道, 宁多勿清。(注: 不匹配裸 flint — flint:2 的既有条目合法保留。)
+            const NEVER_CLEAR = /_pickaxe$|bucket$|flint_and_steel|_bed$|_boat$|ender_eye|ender_pearl|blaze_rod|blaze_powder|obsidian|^diamond|^iron_ingot$|^raw_iron$|crafting_table|furnace|^shield$|_sword$|_helmet$|_chestplate$|_leggings$|_boots$|_axe$|_shovel$|_hoe$/;
             let cleared = 0;
             for (const [name, cap] of Object.entries(CAPS)) {
+                if (NEVER_CLEAR.test(name)) { prog(`prepNether: ★capSurplus REFUSED /clear '${name}' — endgame 关键物资硬保险 (CAPS 被误编辑?)`); continue; }
                 const have = ic[name] || 0;
                 if (have <= cap) continue;
                 try { bot.chat(`/clear @s minecraft:${name} ${have - cap}`); cleared += (have - cap); } catch (e) {}
@@ -2896,8 +2913,13 @@ async function prepNetherInner(bot, ctx) {
         // After a KEY piece lands (shield or the diamond sword), bank a copy once so death
         // doesn't wipe the investment. bankGear no-ops if there's nothing spare/no anchor/unsafe.
         if (!banked && /^(shield|diamond_sword)$/.test(g.item) && has(g.item) >= g.count && !bot.interrupt_code) {
-            prog(`prepNether: key gear ${g.item} secured — banking a copy (death-proof)`);
-            try { await skills.customSkill(bot, 'bankGear'); banked = true; } catch (e) { prog(`prepNether: bankGear threw ${e.message}`); }
+            if (!BANK_GEAR_ENABLED) {
+                banked = true; // 一次性记录, 不逐 goal 刷屏
+                prog(`prepNether: key gear ${g.item} secured — bankGear SUPPRESSED (BANK_GEAR_ENABLED=false: keepInventory=true 下存箱纯负价值, 见 world_model.js:100-108)`);
+            } else {
+                prog(`prepNether: key gear ${g.item} secured — banking a copy (death-proof)`);
+                try { await skills.customSkill(bot, 'bankGear'); banked = true; } catch (e) { prog(`prepNether: bankGear threw ${e.message}`); }
+            }
         }
     }
     await equipArmor();

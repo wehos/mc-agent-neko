@@ -49,3 +49,11 @@ watchdog.stop
 bots/_supervisor/*
 !bots/_supervisor/bb-readers.mjs
 !bots/_supervisor/overseer-snapshot.mjs
+
+# hot-load skills are SOURCE, not runtime junk — world_model 提案端硬接线技能名(死契约),
+# 丢文件 = customSkill 找不到 → 3-strike → 5min 冷却的永久空转风暴。历史上 skills/*.js 全靠
+# git add -f 强加进库; replenishKit.js (2026-07-04) 差点被常规 git add 静默漏掉。三段式同上:
+# 取消忽略目录 → 再忽略目录内容(挡运行时残渣) → 只白名单 .js 技能文件。
+!bots/_supervisor/skills/
+bots/_supervisor/skills/*
+!bots/_supervisor/skills/*.js
