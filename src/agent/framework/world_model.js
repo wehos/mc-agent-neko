@@ -681,8 +681,23 @@ export function proposeTasks(world, bot) {
 
     // 3) Bed (mandatory respawn anchor) — once kit exists. (overworld-only: no beds off-overworld — they explode.)
     if (overworld && kit.picks >= 1 && !bedKnown(bot) && !(hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < DIAMOND_FLOOR)) {   // ★T-0092 completion (worker-sync): GET_BED@50 was an UNFULFILLABLE wool-errand (no wool→no bed→bedKnown永false) that OUTRANKED GET_DIAMOND@46, so an iron-tooled+armored bot never descended for diamond. Yield GET_BED exactly when the bot is diamond-ready (mirror the GET_DIAMOND gate) so GET_DIAMOND wins → mineDiamonds descends. Safe: pure re-prioritize, does NOT gate pick/bed-MAKING (keepInventory ON so a delayed respawn-anchor loses nothing).
-        push({ kind: PROPOSAL_KIND.GET_BED, priority: 50, skill: 'prepNether',   // ★T-0060 (worker-sync 0701): TRIED @44 (below GO_UNDERGROUND@45) to break the ~1h wool-wander stagnation — REVERTED. Live result: @44 correctly re-routed the commitment GET_BED→GO_UNDERGROUND/mineDown, but mineDown then NO-OP-spun (couldn't descend at the spawn-area spot -15,71) → bot HARD-PINNED ~14min, WORSE than @50's wool-wander (which at least moved + was transition-bounded). ROOT is NOT the GET_BED priority — it's the bot STUCK at a bad spot (unmineable AND wool-less) with the stuck-relocate (migration.stuckTerrain) NOT firing after 77min stall. The real fix is migrate-away-from-stuck-spot + mineDown-relocate-on-no-dig (both decision-layer, attended). Keeping @50 baseline.
-               rationale: 'no bed yet — secure wool→bed as respawn anchor (mandatory, blueprint §D.3)' });
+        // ★T-0110 (worker-frozen 0701): RE-ENABLE the @44 yield the T-0060 note below deferred. That
+        // note's exact blocker — "@44 → GO_UNDERGROUND → mineDown NO-OP-spun → HARD-PINNED, because the
+        // stuck-relocate wasn't firing; real fix = migrate-away-from-stuck-spot + mineDown-relocate-on-
+        // no-dig" — is NOW BUILT and live: the kernelDriver NO-OP-SPIN escape relocates on any churn,
+        // and migrate minForceAdvance guarantees the relocate actually moves. So when stone-kit-ready +
+        // still PRE-iron (no iron pick, none banked), drop GET_BED below GO_UNDERGROUND@45 so the bot
+        // DESCENDS for iron instead of an unfulfillable wool-wander that blocks the entire mining chain
+        // (GET_BED@50 > GET_IRON_TOOLS@47 > GO_UNDERGROUND@45 = a bedless/woolless bot never mines).
+        // A bad descent spot now triggers escape→migrate. Full @50 returns once iron tooling is underway;
+        // keepInventory ON so the deferred respawn anchor loses nothing. (T-0060 baseline below, superseded.)
+        // Condition = simply "no iron pickaxe yet" (stone-tier). Deliberately NOT stoneKitReady — that
+        // requires cobble>=8, which drops below 8 the moment the bot seals a night bunker, flipping the
+        // yield off exactly when it's needed (live: stoneKitReady=false after a NIGHT_SEAL spent cobble).
+        // Throughout stone-tier, mining iron beats a wool-errand the bot usually can't fulfil anyway.
+        const preIronDescend = !hasIronTierPick(w);
+        push({ kind: PROPOSAL_KIND.GET_BED, priority: preIronDescend ? 44 : 50, skill: 'prepNether',
+               rationale: preIronDescend ? 'no bed, but stone-kit-ready + pre-iron — DESCEND for iron first (bed deferred; keepInv ON), yield to GO_UNDERGROUND@45' : 'no bed yet — secure wool→bed as respawn anchor (mandatory, blueprint §D.3)' });
     }
 
     // 3b) ARMOR — close the chronic unarmored-death gap (86% of deaths are unarmored; bot makes an
@@ -1211,9 +1226,21 @@ export function proposeTasks(world, bot) {
 // suppression hooks into the skills are S4.3).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Bootstrap = pickaxe + stone-tier + a wood buffer (user #3 don't-stop-at-2-logs). */
+/** Bootstrap = pickaxe + stone-tier + a wood buffer (user #3 don't-stop-at-2-logs).
+ *  ★FALSE-BLOCKER FIX (worker-frozen 0701, T-0110): once pick+stone-tier are secured, the
+ *  wood-buffer sub-goal must NOT pin the bot when wood is UNREACHABLE in place (no tree ≤
+ *  woodReachDist; nearest known landmark 40b+ away). Live: 41min+ frozen-alive @88,65 —
+ *  BOOTSTRAP_KIT@66 stayed sticky (isGoalDone=false on wood 0/8) while prepNether no-op'd
+ *  every 1.5s (SKIP wood buffer: no cheap tree within 18b), starving MIGRATE@60/tier-chain.
+ *  Fresh spawns near trees keep woodKnownReach=true → still stock wood to the buffer.
+ *  Stone-kit-ready + wood UNSTOCKABLE-in-place → bootstrap DONE so the sticky commitment
+ *  releases and commitGoal re-selects MIGRATE(force,stuckTerrain) / GO_UNDERGROUND — both
+ *  beat standing frozen (relocate to trees, or descend for iron with the 2 stone picks). */
 function isBootstrapDone(world, bot) {
-    return (world.kit.picks >= 1) && hasStoneTierPick(world) && woodUnits(bot) >= WOOD_BUFFER;
+    if (!(world.kit.picks >= 1) || !hasStoneTierPick(world)) return false;
+    if (woodUnits(bot) >= WOOD_BUFFER) return true;
+    const woodReachable = !!(world.landmarks && world.landmarks.woodKnownReach);
+    return !woodReachable; // stone-kit-ready but wood unstockable in place → don't pin, let MIGRATE/descend win
 }
 
 /** Has the committed goal of `kind` been satisfied? (Completion criteria.) */

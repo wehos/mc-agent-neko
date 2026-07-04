@@ -299,6 +299,14 @@ export default async function migrate(bot, ctx, opts = {}) {
     const t0 = Date.now();
     let best = null, settled = false, settleSite = null, abort = null;
     let waterStreak = 0, stalls = 0, totalAdv = 0;
+    // ★MIN-FORCE-ADVANCE (worker-frozen 0701, T-0110): a force-relocate fired to break a STUCK bot
+    // must actually MOVE. isSettleSite settles at leg 1 whenever the CURRENT spot scores livable —
+    // so a bot stuck in a livable-but-resourceless pocket (live: @71,85 sunflower_plains score=24,
+    // elevated/unreachable trees, water-blocked descent) had the kernelDriver no-op-escape fire
+    // migrate FOUR times, each settling in place movedBlocks=0 → never left. Require a force-relocate
+    // to march a floor distance before it may settle, so it leaves the pocket to fresh ground where
+    // trees are reachable / descent works. Caller may override via opts.minAdvance.
+    const minForceAdv = (opts.minAdvance != null) ? opts.minAdvance : (opts.force === true ? 48 : 0);
     let imprisonEgressTried = false;   // ★C318 (T-0052): one surfaceUp break-out per imprisonment
     // ★C312 (T-0051): when FLEEING a death zone / bootstrap-stuck, the score>=14 + animals>=2 settle
     // bar (tuned for an IDEAL home) rejects perfectly good ESCAPE sites and traps the bot oscillating
@@ -367,9 +375,9 @@ export default async function migrate(bot, ctx, opts = {}) {
         const site = sampleSite();
         const score = siteScore(site);
         if (!best || score > best.score) best = { ...site, score };
-        if (isSettleSite(site, settleScore)) {
+        if (totalAdv >= minForceAdv && isSettleSite(site, settleScore)) {
             settled = true; settleSite = { ...site, score };
-            log_(`★ARRIVED livable land @${site.x},${site.z} biome=${site.biome} animals=${site.landAnimals} trees=${site.trees} score=${score} — settle here`);
+            log_(`★ARRIVED livable land @${site.x},${site.z} biome=${site.biome} animals=${site.landAnimals} trees=${site.trees} score=${score} (adv=${Math.round(totalAdv)}b≥${minForceAdv}) — settle here`);
             break;
         }
         if (fleeingDeathZone && totalAdv >= 48 && escapeSettleOk(site)) {

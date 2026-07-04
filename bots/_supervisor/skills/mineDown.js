@@ -260,10 +260,19 @@ export default async function mineDown(bot, ctx, opts = {}) {
         return 'retry';
     };
 
+    // ★DESCEND-TOLERANCE (worker-frozen 0701, T-0110): branch-mine once we're CLOSE to targetY, not only
+    // at the exact depth. Live depth-churn: bot pinned @48,17 (targetY=14) — it could not descend the last
+    // ~3 blocks (staircase 'no descent — wedged': digs the stair but the step-down walk fails), so cy(17)
+    // stayed > targetY(14) forever → it NEVER fell through to branchMine → mineDown returned 'no descent'
+    // every ~1.5s, kernelDriver re-dispatched, and the depth-gate (rightly) blocked the surface-migrate
+    // escape → the bot froze at the iron band mining nothing until a 25min watchdog restart. y14-20 is all
+    // prime iron band, so branch-mining at y≈17 is fully productive for the iron goal (diamonds get their
+    // own mineDiamonds@y-11). Tolerance = 6 blocks above targetY.
+    const DESCEND_TOLERANCE = 6;
     for (let i = 0; i < steps; i++) {
         const cur = bot.entity.position;
         const cy = Math.round(cur.y);
-        if (cy <= targetY) {
+        if (cy <= targetY + DESCEND_TOLERANCE) {
             // ★AT-DEPTH NO-OP FREEZE FIX (live y12 pin 450s+): mineDown ONLY descends, so once it reaches
             //   targetY it returns instantly and the proposer (GO_UNDERGROUND/DUSK_MINE_NIGHT) re-dispatches
             //   it → no-op every ~1.5s → the bot freezes at the bottom of the iron band having mined NO ore

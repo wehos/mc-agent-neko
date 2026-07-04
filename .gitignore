@@ -49,6 +49,7 @@ watchdog.stop
 bots/_supervisor/*
 !bots/_supervisor/bb-readers.mjs
 !bots/_supervisor/overseer-snapshot.mjs
+!bots/_supervisor/bot-medic.mjs
 
 # hot-load skills are SOURCE, not runtime junk — world_model 提案端硬接线技能名(死契约),
 # 丢文件 = customSkill 找不到 → 3-strike → 5min 冷却的永久空转风暴。历史上 skills/*.js 全靠
