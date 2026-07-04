@@ -4,13 +4,21 @@
 # server (55916) — that's the game world, managed separately. Logs to watchdog.log.
 #
 # Launch (detached, survives logout/session-end):
-#   Start-Process powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden','-File','C:\Users\wehos\Project\mc-agent-upstream-sync\watchdog.ps1' -WindowStyle Hidden
+#   Start-Process powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden','-File','C:\Users\Administrator\Downloads\mc-agent-neko\watchdog.ps1' -WindowStyle Hidden
 # Stop: kill the powershell process running this file, or: Remove-Item watchdog.stop (create that file to make it exit cleanly).
 
 $ErrorActionPreference = 'SilentlyContinue'
-$proj = 'C:\Users\wehos\Project\mc-agent-upstream-sync'
+# ★2026-07-04 review: $proj 由硬编码改为脚本自身所在目录 — 旧值 C:\Users\wehos\Project\mc-agent-upstream-sync
+# 在本机不存在, watchdog 因此从未真正上岗 (Set-Location 失败 + 所有相对路径落空)。
+$proj = $PSScriptRoot
+if (-not $proj) { $proj = Split-Path -Parent $MyInvocation.MyCommand.Path }
 Set-Location $proj
 $log = Join-Path $proj 'watchdog.log'
+
+# ★2026-07-04 review: 框架开关必须在 watchdog 自身 env 里显式钉死 — Restart-Agent 的子进程继承
+# 本进程 env; 若靠宿主 shell 碰运气继承, 一次重启就把确定性 kernel 链静默关回 LLM baseline。
+$env:MC_FRAMEWORK_V2 = '1'
+$env:MC_FRAMEWORK_SHADOW = '0'
 
 # ★T-0095 ATOMIC SINGLETON — replaces the scan-and-kill TOCTOU race below. Two watchdogs spawned
 # near-simultaneously (concurrent SessionStart ensure-stack hooks / a session recycle) each scanned
@@ -97,10 +105,12 @@ function Restart-Agent($reason) {
         if ($c) { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue }
     }
     Start-Sleep -Seconds 2
-    Start-Process -FilePath 'node' -ArgumentList 'main.js' -WorkingDirectory $proj `
+    # ★2026-07-04 review: 与 start-neko.ps1 对齐 — 带内存/GC flags (当前活进程即以此拉起),
+    # MC_FRAMEWORK_* 已在脚本顶部钉进本进程 env, 子进程自动继承。
+    Start-Process -FilePath 'node' -ArgumentList '--max-old-space-size=8192', '--expose-gc', 'main.js' -WorkingDirectory $proj `
         -RedirectStandardOutput (Join-Path $proj 'agent.log') `
         -RedirectStandardError (Join-Path $proj 'agent.err') -WindowStyle Hidden
-    Add-Content $log "[$(Get-Date -Format o)] relaunched node main.js"
+    Add-Content $log "[$(Get-Date -Format o)] relaunched node main.js (framework env pinned)"
     Start-Sleep -Seconds 25   # boot grace; also gives the skill time to write progress
 }
 
