@@ -1840,12 +1840,19 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                 } catch (e) { return null; }
             })();
             if (_oForest && (_oracleMarches = (_oracleMarches || 0) + 1) <= 3) {
-                _dbg(`ORACLE march ${_oracleMarches}/3 → forest @${_oForest.x},${_oForest.z} (${Math.round(_oForest.d)}b)`);
-                log(bot, `No logs in 40b — oracle knows a forest ${Math.round(_oForest.d)}b away, marching toward it.`);
+                // ★边界穿透 (实测 19:38: /locate biome 给的是群系边界点, 走到 38b 边缘仍
+                // nearest=NONE — 边缘稀树)。目标=边界点再沿进入向量深入 40 格, 直插林腹。
+                const _pv = (() => {
+                    const vx = _oForest.x - bot.entity.position.x, vz = _oForest.z - bot.entity.position.z;
+                    const L = Math.hypot(vx, vz) || 1;
+                    return { x: Math.round(_oForest.x + (vx / L) * 40), z: Math.round(_oForest.z + (vz / L) * 40) };
+                })();
+                _dbg(`ORACLE march ${_oracleMarches}/3 → forest @${_oForest.x},${_oForest.z} (${Math.round(_oForest.d)}b) 穿透点@${_pv.x},${_pv.z}`);
+                log(bot, `No logs in 40b — oracle knows a forest ${Math.round(_oForest.d)}b away, marching into it.`);
                 const _m0 = bot.entity.position.clone();
                 try {
                     await Promise.race([
-                        skills.goToPosition(bot, _oForest.x, null, _oForest.z, 24),
+                        skills.goToPosition(bot, _pv.x, null, _pv.z, 16),
                         new Promise((_, rej) => setTimeout(() => rej(new Error('oracle-march-timebox')), 60000)),
                     ]);
                 } catch (e) { try { bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} }
