@@ -1279,7 +1279,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         } catch (e) { _dbg(`sapling-grow fail: ${String(e.message).slice(0, 60)}`); bot._saplingGrowUntil = Date.now() + 30000; return false; }
     };
     const target = total() + count;
-    let stale = 0, surfaced = 0;
+    let stale = 0, surfaced = 0, _oracleMarches = 0;   // ★ORACLE 定向远征段数 (每次调用最多3段)
     let _stairDir = null;   // LOCKED dig-out direction (set on first pinned stall, reused all call)
     let _stoneAborts = 0;   // NOPICK-FAMINE: stone-face aborts this call; ≥4 = all headings stone → bare-hand climb
     // ★缰绳锚点 (220复盘: v1锚在bed.json,但那是幽灵床坐标 — 床丢了文件还在,圈心错位80格
@@ -1824,6 +1824,36 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // sapling BEFORE roaming off to starve (badlands/mesa: only unreachable plateau
             // trees, blk=N). Plants dirt+sapling+bonemeal; on success re-scan finds the tree.
             if (await _trySaplingGrow()) { stale = 0; continue; }
+            // ★ORACLE-DIRECTED EXPEDITION (2026-07-05 全知层, 实证根因: 出生地贫树, 40格扫描
+            // nearest=NONE 刷屏, 随机 yaw 远征在同一片荒原绕圈 1 小时 — 而 oracle 知道森林
+            // 就在 135 格外)。有新鲜 oracle 森林坐标且距离合理(30-500格) → 定向行军替代
+            // 随机漫游: 先 pathfinder 分段走(60s timebox), 走不动时把远征 yaw 锁成森林方位
+            // 让下面的 raw-traverse 也朝对的方向冲。每次调用最多 3 段定向, 之后回退旧逻辑
+            // (oracle 可能过期/森林隔海)。oracle 缺失/daemon 死 → 此块整体跳过, 行为=旧版。
+            const _oForest = (() => {
+                try {
+                    const o = bot._world && bot._world.oracle;
+                    const f = o && o.fresh && o.nearest && o.nearest.forest;
+                    if (!f || !Number.isFinite(f.x)) return null;
+                    const d = Math.hypot(f.x - bot.entity.position.x, f.z - bot.entity.position.z);
+                    return (d > 30 && d < 500) ? { x: f.x, z: f.z, d } : null;
+                } catch (e) { return null; }
+            })();
+            if (_oForest && (_oracleMarches = (_oracleMarches || 0) + 1) <= 3) {
+                _dbg(`ORACLE march ${_oracleMarches}/3 → forest @${_oForest.x},${_oForest.z} (${Math.round(_oForest.d)}b)`);
+                log(bot, `No logs in 40b — oracle knows a forest ${Math.round(_oForest.d)}b away, marching toward it.`);
+                const _m0 = bot.entity.position.clone();
+                try {
+                    await Promise.race([
+                        skills.goToPosition(bot, _oForest.x, null, _oForest.z, 24),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('oracle-march-timebox')), 60000)),
+                    ]);
+                } catch (e) { try { bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} }
+                // 无论走没走满, 把远征 yaw 锁成森林方位 — raw-traverse 回退也朝森林冲
+                try { bot._chopExpYaw = Math.atan2(-(_oForest.x - bot.entity.position.x), _oForest.z - bot.entity.position.z); } catch (e) {}
+                if (bot.entity.position.distanceTo(_m0) >= 8) { stale = 0; continue; }   // 有实位移 → 重扫树
+                // <8b = 被地形钉死, 落进下面的旧 moveAway/raw-traverse 链 (yaw 已锁向森林)
+            }
             // No trees in 40-block range and we're at/near the surface — we're in a BARREN
             // or WATER zone (the water-edge spawn: 1hr stuck here, 0 logs). A flat 12-block
             // moveAway never escapes a big water body, and moveAway often can't even path

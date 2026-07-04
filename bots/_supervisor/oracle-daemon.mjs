@@ -52,17 +52,26 @@ function rcon(cmd) {
     });
 }
 
-// "The nearest minecraft:xxx is at [352, ~, 144] (380 blocks away)" → {x,z,dist}
+// structure: "… is at [352, ~, 144] (380 blocks away)"; biome: "… is at [-72, 79, -48] (135 blocks away)"
 const parseLocate = (s) => {
     if (!s) return null;
-    const m = s.match(/\[(-?\d+), ~, (-?\d+)\]\s*\((\d+) blocks/);
+    const m = s.match(/\[(-?\d+), (?:~|-?\d+), (-?\d+)\]\s*\((\d+) blocks/);
     return m ? { x: +m[1], z: +m[2], dist: +m[3] } : null;
 };
 
-// 维度 → 查询集 (key → structure id/tag)。stronghold 全局静态只查一次。
+// 维度 → 查询集 (key → {t: structure|biome, id})。stronghold 全局静态只查一次。
 const QUERIES = {
-    overworld: { village: '#minecraft:village', ruined_portal: 'minecraft:ruined_portal', shipwreck: 'minecraft:shipwreck' },
-    the_nether: { fortress: 'minecraft:fortress', bastion: 'minecraft:bastion_remnant', ruined_portal_nether: 'minecraft:ruined_portal_nether' },
+    overworld: {
+        village: { t: 'structure', id: '#minecraft:village' },
+        ruined_portal: { t: 'structure', id: 'minecraft:ruined_portal' },
+        shipwreck: { t: 'structure', id: 'minecraft:shipwreck' },
+        forest: { t: 'biome', id: '#minecraft:is_forest' },   // ★木源定向 (chopWood ORACLE march 消费)
+    },
+    the_nether: {
+        fortress: { t: 'structure', id: 'minecraft:fortress' },
+        bastion: { t: 'structure', id: 'minecraft:bastion_remnant' },
+        ruined_portal_nether: { t: 'structure', id: 'minecraft:ruined_portal_nether' },
+    },
     the_end: {},
 };
 
@@ -92,8 +101,8 @@ async function cycle() {
         || Math.hypot(vit.x - lastQueryPos.x, vit.z - lastQueryPos.z) > REQUERY_DIST;
     if (moved && Object.keys(qs).length) {
         const nearest = {};
-        for (const [key, id] of Object.entries(qs)) {
-            const raw = await rcon(`execute positioned ${Math.round(vit.x)} ${Math.round(vit.y)} ${Math.round(vit.z)} run locate structure ${id}`);
+        for (const [key, q] of Object.entries(qs)) {
+            const raw = await rcon(`execute positioned ${Math.round(vit.x)} ${Math.round(vit.y)} ${Math.round(vit.z)} run locate ${q.t} ${q.id}`);
             nearest[key] = parseLocate(raw);
         }
         lastNearest = nearest;
