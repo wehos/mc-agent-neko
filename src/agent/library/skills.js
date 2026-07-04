@@ -2296,6 +2296,15 @@ async function _consumeOnce(bot, itemName="") {
     // ★EAT-VOID 第二刀之二: 手部锁 — 4a6d7cf 只压制了移动, 但杀手是"换手持"本身
     // (tool_keeper/战斗/猎杀经 tickConfirm.equipConfirmed 在 1.61s 窗内装剑 → eatingTask
     // 被 mineflayer 静默 resolve)。equipConfirmed 现会对 hand 目的地在此窗内等待收尾。
+    // ★EAT-VOID 第四刀: 副手盾卸载 (2026-07-05 x31 定案 — 自带诊断字段收网: 全部 streak
+    // 共同项 offhand=shield; 05:44 盾上身前进食零失败, 每次重启后盾未及回装的窗口连吃成功。
+    // 副手盾与 consume 的 use-item 通道冲突, 'Promise timed out' 连环)。吃前卸盾入包,
+    // 吃完(成败都)回装; 单次代价 ~200ms, 换整类故障消失。
+    let _shieldWasOff = false;
+    try {
+        const _off = bot.inventory.slots[45];
+        if (_off && _off.name === 'shield') { _shieldWasOff = true; await bot.unequip('off-hand'); }
+    } catch (e) {}
     bot._eatingItem = item.name;
     bot._eatingUntil = Date.now() + 2600;
     try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
@@ -2315,6 +2324,10 @@ async function _consumeOnce(bot, itemName="") {
     try { await stillGuard; } catch (e) {}
     bot._eatingUntil = 0;   // 吃完(或失败)立即释放手部锁, 不占战斗反射的拍
     bot._eatingItem = null;
+    // ★第四刀回装: 盾回副手 (成败路径都走到这里; equip 目的地非 'hand' 不撞手部锁)
+    if (_shieldWasOff) {
+        try { const _sh = bot.inventory.items().find(i => i.name === 'shield'); if (_sh) await bot.equip(_sh, 'off-hand'); } catch (e) {}
+    }
     if (nonHunger) {
         if (consumeErr) { log(bot, `Failed to consume ${item.name}: ${consumeErr.message}.`); return false; }
         log(bot, `Consumed ${item.name}.`);
