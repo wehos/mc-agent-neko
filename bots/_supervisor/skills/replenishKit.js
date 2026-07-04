@@ -208,6 +208,16 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         }
     }
 
+    // ── ⑥ ★口袋工作台 (2026-07-05 镐跑步机根治: 铁镐#1/#2 各 250 耐久两轮全烧, 每轮镐尽
+    //    →困地下→上浮→补给 20-40min。bot 常年背 300+ 圆石和棍, 只差随身台就能地下无限再造
+    //    石镐 — mobility 'emergency pick' 路径已会用可达台自救, 缺的就是 table=0)。花 4 板
+    //    造一张揣包里, planksEq 底线 8 之外才花。──────────────────────────────────────────
+    if (!stop() && !overBudget() && cnt('crafting_table') < 1 && planksEq() >= 12) {
+        const tb = cnt('crafting_table');
+        try { await skills.craftRecipeLocal(bot, 'crafting_table', 1); } catch (e) { prog(`replenishKit: ⑥ pocket-table err ${e.message}`); }
+        prog(`replenishKit: ⑥ pocket crafting_table ${tb}→${cnt('crafting_table')} (地下断镐自救的最后一块拼图)`);
+    }
+
     const met = picks() >= 3 && planksEq() >= 16;   // ★3镐/16板
     return settle(stop() ? 'interrupted' : (overBudget() ? 'budget-5min' : (met ? 'invariant-met' : 'partial')));
 }

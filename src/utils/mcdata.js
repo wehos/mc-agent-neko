@@ -125,6 +125,8 @@ export function initBot(username) {
             } catch (e) {}
             return _rawEquipForBlock(block, options);
         };
+        // 安装确认落盘 (2026-07-05 教训: 静默安装无法事后验证守卫是否真的在位)
+        try { console.log('⛏️ pick-tier guard installed (stone for stone, iron+ only for IRON_PLUS blocks)'); } catch (e) {}
         return true;
     };
     if (!installPickTierGuard()) {

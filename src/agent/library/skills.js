@@ -2335,8 +2335,16 @@ async function _consumeOnce(bot, itemName="") {
     if (bot._eatVoidStreak >= 3) {
         log(bot, `★EAT-VOID x${bot._eatVoidStreak}: consume keeps completing with zero food gain — something is stealing the 1.6s eat window.`);
         try {
+            // ★2026-07-05 自带诊断 (05:57 x17 复发 'Promise timed out' 自愈, 触发因子未实证 —
+            // 窗口残留/盾牌 use-item 竞争都是嫌疑): 把现场关键态钉进标记行, 下次发作免猜。
+            let _diag = '';
+            try {
+                _diag = ` win=${bot.currentWindow ? (bot.currentWindow.type || 'open') : 'none'}`
+                    + ` using=${!!bot.usingHeldItem} held=${bot.heldItem ? bot.heldItem.name : 'none'}`
+                    + ` offhand=${(bot.inventory.slots[45] && bot.inventory.slots[45].name) || 'none'}`;
+            } catch (e) {}
             fs_dz.appendFileSync('bots/_supervisor/progress.txt',
-                `[${new Date().toISOString()}] ★EAT-VOID x${bot._eatVoidStreak} item=${item.name} food=${bot.food} hp=${Math.round(bot.health || 0)} err=${consumeErr ? consumeErr.message : 'silent-void'}\n`);
+                `[${new Date().toISOString()}] ★EAT-VOID x${bot._eatVoidStreak} item=${item.name} food=${bot.food} hp=${Math.round(bot.health || 0)} err=${consumeErr ? consumeErr.message : 'silent-void'}${_diag}\n`);
         } catch (e) {}
     }
     return false;
