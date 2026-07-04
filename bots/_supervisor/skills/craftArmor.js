@@ -54,6 +54,16 @@ export default async function craftArmor(bot, ctx, opts = {}) {
     };
     const wornAtEntry = wornCount();
 
+    // ★2026-07-05 铁镐保留额 (实弹事故: 首批 3 锭+1 raw 被 boots(4铁)截胡 — 铁镐目标只因
+    // 缺 2 根棍被跳过, 铁流进甲件, 钻石解锁被推迟一整个补给周期)。无铁镐(含更高阶)时,
+    // 永久保留 3 铁给镐: 甲件预算 = 总铁 - 3。keepInventory 下裸奔多死几次是可接受消耗,
+    // 晚拿钻石不是。有镐后此门自动失效, 甲件照常。
+    const _hasIronPick = () => {
+        try { return bot.inventory.items().some(i => /^(iron|diamond|netherite)_pickaxe$/.test(i.name)); } catch (e) { return false; }
+    };
+    const _ironTotal = () => (inv()['iron_ingot'] || 0) + (inv()['raw_iron'] || 0);
+    const _armorIronBudget = () => _ironTotal() - (_hasIronPick() ? 0 : 3);
+
     let crafted = 0, stall = 0;
     for (let pass = 0; pass < 4; pass++) {
         if (bot.interrupt_code || bot.health <= 0 || Date.now() - t0 > maxMs) break;
@@ -61,6 +71,13 @@ export default async function craftArmor(bot, ctx, opts = {}) {
         const target = PIECES.find(([n]) => !havePiece(n));
         if (!target) break; // full set held/worn — done
         const [piece, cost] = target;
+
+        // ★铁镐保留额执行点: 这件甲会吃掉镐的 3 铁 → 停 (见顶部 rationale)。
+        if (cost > _armorIronBudget()) {
+            log(bot, `craftArmor: PICK-RESERVE gate — ${piece} costs ${cost} but armor budget is ${_armorIronBudget()} `
+                + `(iron ${_ironTotal()}, no iron pick yet → 3 reserved) — stopping, iron goes to the pickaxe first.`);
+            break;
+        }
 
         // Smelt just enough for THIS piece (smeltSafe places its own furnace safely).
         const ingots = inv()['iron_ingot'] || 0;

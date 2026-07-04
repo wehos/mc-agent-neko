@@ -2787,6 +2787,17 @@ async function prepNetherInner(bot, ctx) {
             prog(`prepNether: ★C338-A pivot iron_pickaxe — 0 obtainable iron (raw=${has('raw_iron')} ingot=${has('iron_ingot')}) but ${has('stone_pickaxe')} stone_pickaxe in hand; SKIP, mine iron ore WITH stone pick (craft iron pick once raw_iron≥3)`);
             continue;
         }
+        // ★2026-07-05 铁镐保留额 (实弹: 首批 3锭+1raw 被 iron_boots(4铁) 截胡 — iron_pickaxe
+        // 目标只因缺 2 根棍被跳过, 铁流进甲件)。无铁镐时甲件预算 = 总铁-3: 这件甲若吃掉镐的
+        // 3 铁 → skip 本件继续后面目标 (craftArmor.js 同口径 PICK-RESERVE)。有镐即失效。
+        if (/^iron_(chestplate|helmet|leggings|boots)$/.test(g.item) && has(g.item) < g.count && !ironPlusPick()) {
+            const _cost = { iron_chestplate: 8, iron_helmet: 5, iron_leggings: 7, iron_boots: 4 }[g.item] || 0;
+            const _ironTot = has('iron_ingot') + has('raw_iron');
+            if (_ironTot - _cost < 3) {
+                prog(`prepNether: PICK-RESERVE skip ${g.item} (cost ${_cost}, iron ${_ironTot}, 镐未合成保留 3) — 铁先变镐`);
+                continue;
+            }
+        }
         if (/^diamond_/.test(g.item) && !ironPlusPick() && has('diamond') < diamondCost(g.item)) {
             prog(`prepNether: hold ${g.item} — no iron+ pickaxe and diamonds=${has('diamond')}; finish iron tier before diamond gear`);
             return false;
