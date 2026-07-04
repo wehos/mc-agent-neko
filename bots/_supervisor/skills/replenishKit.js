@@ -218,6 +218,20 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         prog(`replenishKit: ⑥ pocket crafting_table ${tb}→${cnt('crafting_table')} (地下断镐自救的最后一块拼图)`);
     }
 
+    // ── ⑦ ★随身床 (大修A 收口, 2026-07-05: 夜税≈35%墙钟+夜死为主死因, 而提案侧 _bedInPack
+    //    分支与 goBedSleep 就地放床链在夜链五修时就已备好 — 唯缺"包里有床"这一环。dusk 走到
+    //    哪睡到哪, 床留原地当重生锚(拆床=丢重生点, 故不回收), 羊毛经济: 同色×3+板×3/张。──
+    if (!stop() && !overBudget() && !bot.inventory.items().some(i => /_bed$/.test(i.name || ''))) {
+        const wools = {};
+        try { for (const it of bot.inventory.items()) if (/_wool$/.test(it.name || '')) wools[it.name] = (wools[it.name] || 0) + it.count; } catch (e) {}
+        const best = Object.entries(wools).sort((a, b) => b[1] - a[1])[0];   // 同色口径 (setBed 混色羊毛教训)
+        if (best && best[1] >= 3 && planksHeld() >= 3) {
+            const bedName = best[0].replace('_wool', '_bed');
+            try { await skills.craftRecipeLocal(bot, bedName, 1); } catch (e) { prog(`replenishKit: ⑦ bed err ${e.message}`); }
+            prog(`replenishKit: ⑦ 随身床 ${bedName} → ${cnt(bedName)} (同色 wool=${best[1]})`);
+        }
+    }
+
     const met = picks() >= 3 && planksEq() >= 16;   // ★3镐/16板
     return settle(stop() ? 'interrupted' : (overBudget() ? 'budget-5min' : (met ? 'invariant-met' : 'partial')));
 }
