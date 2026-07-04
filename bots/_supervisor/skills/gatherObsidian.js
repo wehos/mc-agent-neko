@@ -80,10 +80,17 @@ export default async function gatherObsidian(bot, ctx, opts = {}) {
         if (has('iron_ingot') >= 3) await skills.craftRecipe(bot, 'bucket', 1).catch(() => {});
     }
     if (has('bucket') >= 1 && has('water_bucket') < 1) {
-        const w0 = world.getNearestBlock(bot, 'water', 32);
-        if (w0) {
-            await skills.goToPosition(bot, w0.position.x, w0.position.y + 1, w0.position.z, 2).catch(() => {});
-            await skills.useToolOn(bot, 'bucket', 'water').catch(() => {});
+        // ★2026-07-05 预审 P1: 原版 32 格无水即整体 abort false, 与岩浆分支的迁移重试不对称
+        // → 派发点无水 = 3-strike 冷却原地死循环。改: 与 useToolOn 的 64 格对齐 + 三段
+        // 有界 moveAway 迁移 (岩浆分支同款)。
+        for (let wtry = 0; wtry < 3 && has('water_bucket') < 1 && !stop() && !timeUp(); wtry++) {
+            const w0 = world.getNearestBlock(bot, 'water', 64);
+            if (w0) {
+                await skills.goToPosition(bot, w0.position.x, w0.position.y + 1, w0.position.z, 2).catch(() => {});
+                await skills.useToolOn(bot, 'bucket', 'water').catch(() => {});
+                if (has('water_bucket') >= 1) break;
+            }
+            if (has('water_bucket') < 1) { log(bot, `gatherObsidian: no water within 64b (try ${wtry + 1}/3) — relocating 24b`); await skills.moveAway(bot, 24).catch(() => {}); }
         }
     }
     if (has('water_bucket') < 1 || has('flint_and_steel') < 1) {
@@ -199,6 +206,12 @@ export default async function gatherObsidian(bot, ctx, opts = {}) {
             if (stop() || timeUp() || has('obsidian') >= target) break;
             if (!hasDiamondPick()) break;
             if (!safeToMine(c)) continue;
+            // ★2026-07-05 预审 P1: 自身列排除 (pour() :126-130 有同款守卫, 挖矿循环漏了) —
+            // pathfinder 会把 bot 送上黑曜石壳, 挖脚下/站立格 = 9.4s 后直坠壳下岩浆层。
+            // 站立列(同 x,z 且 c 不高于脚)不挖; 正下方是岩浆的格子须与 bot 水平距离 >=2。
+            const feet = bot.entity.position.floored();
+            if (c.x === feet.x && c.z === feet.z && c.y <= feet.y) continue;
+            if (isLavaB(bot.blockAt(c.offset(0, -1, 0))) && Math.hypot(c.x - feet.x, c.z - feet.z) < 2) continue;
             await skills.breakBlockAt(bot, c.x, c.y, c.z).catch(() => {});
             await skills.pickupNearbyItems(bot).catch(() => {});
         }

@@ -102,7 +102,10 @@ async function cycle() {
     if (moved && Object.keys(qs).length) {
         const nearest = {};
         for (const [key, q] of Object.entries(qs)) {
-            const raw = await rcon(`execute positioned ${Math.round(vit.x)} ${Math.round(vit.y)} ${Math.round(vit.z)} run locate ${q.t} ${q.id}`);
+            // ★2026-07-05 预审 P0: RCON 命令源恒在主世界 — 不加 `execute in <dim>` 的话
+            // 下界 fortress/bastion 查询 100% 'Could not find' → oracle.nearest.fortress 恒 null,
+            // 全知层下界侧从未可用。in 子句让查询在 bot 所在维度执行。
+            const raw = await rcon(`execute in minecraft:${dim} positioned ${Math.round(vit.x)} ${Math.round(vit.y)} ${Math.round(vit.z)} run locate ${q.t} ${q.id}`);
             nearest[key] = parseLocate(raw);
         }
         lastNearest = nearest;
