@@ -46,7 +46,10 @@ export default async function mineOres(bot, ctx, opts = {}) {
     const oracleList = () => {
         try {
             const oo = bot._world && bot._world.oracleOres;
-            if (oo && Array.isArray(oo[ore]) && oo[ore].length && Date.now() - (oo.ts || 0) < 600000) {
+            if (!(oo && Date.now() - (oo.ts || 0) < 600000)) return [];
+            // 夜挖(yMax 有限)优先扫描器的地下带分层名单 (top-24 山面铁过滤后可能为空)
+            if (yMax !== Infinity && ore === 'iron' && Array.isArray(oo.ironDeep) && oo.ironDeep.length) return oo.ironDeep;
+            if (Array.isArray(oo[ore]) && oo[ore].length) {
                 return yMax === Infinity ? oo[ore] : oo[ore].filter(c => c && c.y <= yMax);
             }
         } catch (e) {}

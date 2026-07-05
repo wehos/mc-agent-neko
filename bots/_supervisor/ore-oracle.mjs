@@ -107,6 +107,9 @@ async function scan() {
         totals: { diamonds: found.diamonds.length, iron: found.iron.length, coal: found.coal.length },
         diamonds: found.diamonds.slice(0, 16),
         iron: found.iron.slice(0, 24),
+        // 分层: 山顶 bot 的 iron top-24 可能全是山面铁(y60-95), 夜挖(y<=50 地下带)会空手 —
+        // 单列地下带最近 16 条 (夜挖/隐蔽作业直接用)
+        ironDeep: found.iron.filter(c => c.y <= 50).slice(0, 16),
         coal: found.coal.slice(0, 16),
     };
     try { fs.writeFileSync(OUT, JSON.stringify(out)); } catch (e) {}

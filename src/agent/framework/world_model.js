@@ -1093,8 +1093,10 @@ export function proposeTasks(world, bot) {
                 //   (y<=50) — 山面铁(y87)会把密封楼梯换成夜间地表裸采。
                 const nightHasStonePick = invCount(bot, /(stone|iron|diamond|netherite)_pickaxe$/) >= 1;
                 const nightNeedIron = !hasIronTierPick(w) || ironForArmor(bot) < ironDemandTotal(w, bot);
-                // y<=50: 列表内找最近的地下铁 (oo.iron[0] 可能是山面铁, 单看[0]会误判无目标退盲挖)
-                const nightIronTgt = (nightNeedIron && nightHasStonePick) ? oracleOreTarget(w, 'iron', 50) : null;
+                // ironDeep = 扫描器分层的地下带(y<=50)最近名单 (iron top-24 在山顶可能全是山面铁);
+                // 旧格式无 ironDeep 时回退 iron+yMax 过滤
+                const nightIronTgt = (nightNeedIron && nightHasStonePick)
+                    ? (oracleOreTarget(w, 'ironDeep') || oracleOreTarget(w, 'iron', 50)) : null;
                 if (nightIronTgt) {
                     push({ kind: TASK.DUSK_MINE_NIGHT, priority: 94, skill: 'mineOres',
                            args: [{ ore: 'iron', count: 12, maxMs: 480000, yMax: 50 }],
