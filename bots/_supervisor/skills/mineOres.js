@@ -1,0 +1,113 @@
+// mineOres — oracle 制导矿石远征 (2026-07-06 用户令: "oracle视角挖铁应该非常快, 1h 怎么可能")
+// ore-oracle 已把 iron/coal 与 diamonds 一并扫出 (bot._world.oracleOres.{iron,coal});
+// 本技能泛化 mineDiamonds 的直奔模式: 地表走到目标柱 → mineDown 密封下潜到矿层 →
+// collectBlock 脉络跟采(x-ray 64 格) → 采空则 branchMine 刷新暴露面 / 换 oracle 下一候选。
+// 铁掉 raw_iron, 煤掉 coal — 进度按掉落物库存增量计(delta 口径, 最高契约)。
+// 返回契约: 增量>0 → {ore,gained}; 零增量 → false (interrupt 解卷时 kernel 不罚)。
+import fs from 'fs';
+import path from 'path';
+
+const PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
+function prog(line) {
+    try { fs.appendFileSync(PROG, `[${new Date().toISOString()}] [mineOres] ${line}\n`); } catch (e) {}
+}
+
+// 掉落物口径: 矿石块可能被 silk/直采差异影响, 但本栈无 silk — raw_x/coal 即掉落
+const DROP_OF = { iron: /^raw_iron$/, coal: /^coal$/, gold: /^raw_gold$/, copper: /^raw_copper$/, diamonds: /^diamond$/ };
+// 采集所需镐级: 铁需石镐+, 煤任意镐
+const PICK_FOR = { iron: /(stone|iron|diamond|netherite)_pickaxe$/, gold: /(iron|diamond|netherite)_pickaxe$/, coal: /_pickaxe$/, copper: /(stone|iron|diamond|netherite)_pickaxe$/, diamonds: /(iron|diamond|netherite)_pickaxe$/ };
+// collectBlock 的 blockType 词干 (skills.js:945 oreDrops 映射 _ore/deepslate 变体)
+const COLLECT_KEY = { iron: 'iron', coal: 'coal', gold: 'gold', copper: 'copper', diamonds: 'diamond' };
+
+export default async function mineOres(bot, ctx, opts = {}) {
+    const { skills, world } = ctx;
+    const ore = String((opts && opts.ore) || 'iron');
+    const count = Number(opts && opts.count) > 0 ? Number(opts.count) : 8;
+    const maxMs = Number(opts && opts.maxMs) > 0 ? Number(opts.maxMs) : 300000;
+    const deadline = Date.now() + maxMs;
+    const dropRe = DROP_OF[ore] || new RegExp(`^raw_${ore}$`);
+    const pickRe = PICK_FOR[ore] || /_pickaxe$/;
+    const collectKey = COLLECT_KEY[ore] || ore;
+    const cnt = () => {
+        try {
+            const c = world.getInventoryCounts(bot);
+            return Object.keys(c).reduce((s, k) => s + (dropRe.test(k) ? c[k] : 0), 0);
+        } catch (e) { return 0; }
+    };
+    const hasPick = () => { try { return bot.inventory.items().some(i => pickRe.test(i.name || '')); } catch (e) { return false; } };
+
+    if (!bot || !bot.entity) return false;
+    if (!hasPick()) { prog(`ABORT ore=${ore} — 无合格镐(需 ${pickRe}), 失败让 TOOL_UPKEEP 先修`); return false; }
+    if (bot.armorManager) try { await bot.armorManager.equipAll(); } catch (e) {}
+    const g0 = cnt();
+
+    // oracle 目标 (新鲜 <10min, 平距 <250)
+    const oracleList = () => {
+        try {
+            const oo = bot._world && bot._world.oracleOres;
+            if (oo && Array.isArray(oo[ore]) && oo[ore].length && Date.now() - (oo.ts || 0) < 600000) return oo[ore];
+        } catch (e) {}
+        return [];
+    };
+    const list0 = oracleList();
+    const tgt = (() => {
+        const c0 = list0[0];
+        if (!c0) return null;
+        const p0 = bot.entity.position;
+        return Math.hypot(c0.x - p0.x, c0.z - p0.z) < 250 ? c0 : null;
+    })();
+    prog(`START ore=${ore} need=${count} have=${g0} oracle=${tgt ? `${tgt.x},${tgt.y},${tgt.z}(库存告示${list0.length})` : 'none(盲挖回退)'} pos=${bot.entity.position.floored()} hp=${Math.round(bot.health)} food=${bot.food}`);
+
+    if (tgt) {
+        const dxz = Math.hypot(tgt.x - bot.entity.position.x, tgt.z - bot.entity.position.z);
+        if (dxz > 8 && !bot.interrupt_code) {
+            await Promise.race([
+                skills.goToPosition(bot, tgt.x, null, tgt.z, 6),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('oracle-walk-timeout')), 90000)),
+            ]).catch(() => { try { bot.pathfinder.stop(); } catch (e) {} try { bot.clearControlStates(); } catch (e) {} });
+        }
+        // 垂直逼近: 高差 >6 用 mineDown 密封下潜到矿层 y-1 (够近则 collectBlock 自己挖过去);
+        // 预算余量 <60s 不再开潜 (评审: 嵌套 mineDown 自带多分钟循环, deadline 只兜 collect 环)
+        if (bot.entity.position.y - tgt.y > 6 && !bot.interrupt_code && !bot.death_abort
+            && deadline - Date.now() > 60000) {
+            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(tgt.y - 1, -58) }); } catch (e) {}
+        }
+    } else {
+        // ★评审 P2: 无可用 oracle 目标(缺失/陈旧/真距超闸)时不能在地表平采 —
+        //   回退到被替代者的行为: 密封楼梯下潜到矿带, 与旧 mineDown 路径等价。
+        const band = ore === 'coal' ? 40 : (ore === 'diamonds' ? -52 : 14);
+        if (bot.entity.position.y - band > 6 && !bot.interrupt_code && deadline - Date.now() > 60000) {
+            prog(`无 oracle 目标 — 盲挖回退: mineDown 下潜 y${band}`);
+            try { await skills.customSkill(bot, 'mineDown', { targetY: band }); } catch (e) {}
+        }
+    }
+
+    let rounds = 0;
+    while (cnt() - g0 < count && Date.now() < deadline && rounds++ < 12) {
+        if (bot.interrupt_code || bot.death_abort || bot.health <= 0) break;
+        if (!hasPick()) { prog(`镐没了(r${rounds}) — 停`); break; }
+        // 评审 P3: 背包临满掉落全丢 → cnt 恒平白烧预算, 兄弟技能同款闸
+        if ((() => { try { return bot.inventory.emptySlotCount() <= 1; } catch (e) { return false; } })()) {
+            prog(`r${rounds}: 背包临满 — 收工`); break;
+        }
+        const before = cnt();
+        try { await skills.collectBlock(bot, collectKey, Math.max(1, Math.min(4, count - (cnt() - g0)))); } catch (e) {}
+        if (cnt() > before) continue;
+        // x-ray 64 格内采空 → oracle 下一候选换点; 候选就在脚下(<4b, 单候选自旋)或无候选则支道刷新
+        const list = oracleList();
+        const nxt = list.length ? list[rounds % list.length] : null;
+        const nxtDist = nxt ? Math.hypot(nxt.x - bot.entity.position.x, nxt.z - bot.entity.position.z) : Infinity;
+        if (nxt && nxtDist >= 4 && nxtDist < 250) {
+            prog(`r${rounds}: 本区采空 → oracle 换点 ${nxt.x},${nxt.y},${nxt.z}`);
+            await Promise.race([
+                skills.goToPosition(bot, nxt.x, nxt.y, nxt.z, 3),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('hop-timeout')), 60000)),
+            ]).catch(() => { try { bot.pathfinder.stop(); } catch (e) {} try { bot.clearControlStates(); } catch (e) {} });
+        } else {
+            try { await skills.customSkill(bot, 'branchMine', 12); } catch (e) {}
+        }
+    }
+    const gained = cnt() - g0;
+    prog(`DONE ore=${ore} gained=${gained}/${count} rounds=${rounds} y=${Math.floor(bot.entity.position.y)} hp=${Math.round(bot.health)} 用时${Math.round((maxMs - (deadline - Date.now())) / 1000)}s`);
+    return gained > 0 ? { ore, gained } : false;
+}

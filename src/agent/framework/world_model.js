@@ -374,6 +374,19 @@ function isFamineStall(w) {
     const v = w.vitals || {};
     return !lethalEnvThreat(w) && (v.food || 0) <= 2 && (v.hp || 20) < 10 && !v.canRegen;
 }
+// ★2026-07-06 oracle 制导采矿: ore-oracle 的最近矿坐标 (新鲜 <10min 且平距 <250 才可用;
+//   缺失/陈旧 → null, 调用方回退盲挖)。key ∈ {iron, coal, diamonds}。
+function oracleOreTarget(w, key) {
+    try {
+        const oo = w && w.oracleOres;
+        if (!(oo && Array.isArray(oo[key]) && oo[key].length && Date.now() - (oo.ts || 0) < 600000)) return null;
+        const c0 = oo[key][0];
+        // 距离闸用扫描原点 botPos (RESCAN_DIST=48 内与真位等效): w.vitals 不带坐标
+        const bp = oo.botPos || c0;
+        if (Math.hypot(c0.x - bp.x, c0.z - bp.z) >= 250) return null;
+        return c0;
+    } catch (e) { return null; }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ★T-0093 北极星 tier 状态机. The decision layer止步于铁 because nothing made the
@@ -792,12 +805,16 @@ export function proposeTasks(world, bot) {
         if (hasIronTierPick(w) && ironForArmor(bot) < ironDemandTotal(w, bot)
             && kit.sufficientForUnderground && hpSafeForUnderground && carriedRations(bot) >= 2) {
             const demand = ironDemandTotal(w, bot);
+            // ★2026-07-06 用户令 (oracle视角挖铁): ore-oracle 已扫铁坐标 → mineOres 直奔;
+            //   oracle 缺失/陈旧才回退盲挖 mineDown 铁带。kind/isGoalDone 簿记不变。
+            const ironTgt = oracleOreTarget(w, 'iron');
             progressLogThrottled(bot, 'ironArmorSet', 120000,
-                `[proposeTasks] ★GET_IRON_ARMOR_SET-propose: iron=${ironForArmor(bot)}/${demand} (armor=${vitals.armor || 0}/4 缺甲成本=${ironArmorRemainingCost(w)} portal铁=${portalKitIronCost(bot)}) — 下铁带回补 (y${IRON_TARGET_Y}, pri=46.5)`);
-            push({ kind: PROPOSAL_KIND.GET_IRON_ARMOR_SET, priority: 46.5, skill: 'mineDown',
-                   args: [{ targetY: IRON_TARGET_Y }],
-                   rationale: `iron restock: ${ironForArmor(bot)}/${demand} iron banked for armor ${vitals.armor || 0}/4${portalKitIronCost(bot) > 0 ? ' + portal kit' : ''} — descend to the iron band (y${IRON_TARGET_Y}) and mine the gap`,
-                   hints: { iron: ironForArmor(bot), demand, armor: vitals.armor || 0, targetY: IRON_TARGET_Y } });
+                `[proposeTasks] ★GET_IRON_ARMOR_SET-propose: iron=${ironForArmor(bot)}/${demand} (armor=${vitals.armor || 0}/4 缺甲成本=${ironArmorRemainingCost(w)} portal铁=${portalKitIronCost(bot)}) — ${ironTgt ? `ORACLE直奔 ${ironTgt.x},${ironTgt.y},${ironTgt.z}` : `盲挖铁带 y${IRON_TARGET_Y}`} (pri=46.5)`);
+            push({ kind: PROPOSAL_KIND.GET_IRON_ARMOR_SET, priority: 46.5,
+                   skill: ironTgt ? 'mineOres' : 'mineDown',
+                   args: ironTgt ? [{ ore: 'iron', count: Math.max(4, demand - ironForArmor(bot)), maxMs: 300000 }] : [{ targetY: IRON_TARGET_Y }],
+                   rationale: `iron restock: ${ironForArmor(bot)}/${demand} iron banked for armor ${vitals.armor || 0}/4${portalKitIronCost(bot) > 0 ? ' + portal kit' : ''} — ${ironTgt ? `oracle-guided mineOres to ${ironTgt.x},${ironTgt.y},${ironTgt.z}` : `descend to the iron band (y${IRON_TARGET_Y})`}`,
+                   hints: { iron: ironForArmor(bot), demand, armor: vitals.armor || 0, targetY: ironTgt ? ironTgt.y : IRON_TARGET_Y, oracle: !!ironTgt } });
         }
         // RUNG 2: iron pick in hand (diamond mining unlocked) + iron armor on → go GET DIAMONDS.
         //   Requires armor>=4 (GET_ARMOR@68 closes that first) so the bot never strip-mines the
@@ -1066,11 +1083,27 @@ export function proposeTasks(world, bot) {
                 }
                 break;
             }
-            case 'MINE_THROUGH_NIGHT':
-                push({ kind: TASK.DUSK_MINE_NIGHT, priority: 94, skill: 'mineDown',
-                       args: [{ targetY: 12 }],
-                       rationale: 'kitted (pick budget + food + fill) — mine through the whole night underground' });
+            case 'MINE_THROUGH_NIGHT': {
+                // ★2026-07-06 用户令 (前期公式化: 夜里 oracle 直奔高优矿): 铁缺口未平时夜挖
+                //   优先 oracle 制导采铁 (mineOres), 铁齐/oracle 缺失才回退盲挖 y12。
+                //   评审 P1: mineOres 采铁需石镐+ (木镐 bot 秒拒 3 振 → 连坐冷却整个 kind 含
+                //   mineDown 回退) — 无石镐+夜里只走 mineDown。评审 P2: 夜里只接受地下带目标
+                //   (y<=50) — 山面铁(y87)会把密封楼梯换成夜间地表裸采。
+                const nightHasStonePick = invCount(bot, /(stone|iron|diamond|netherite)_pickaxe$/) >= 1;
+                const nightNeedIron = !hasIronTierPick(w) || ironForArmor(bot) < ironDemandTotal(w, bot);
+                let nightIronTgt = (nightNeedIron && nightHasStonePick) ? oracleOreTarget(w, 'iron') : null;
+                if (nightIronTgt && nightIronTgt.y > 50) nightIronTgt = null;
+                if (nightIronTgt) {
+                    push({ kind: TASK.DUSK_MINE_NIGHT, priority: 94, skill: 'mineOres',
+                           args: [{ ore: 'iron', count: 12, maxMs: 480000 }],
+                           rationale: `kitted night mining — ORACLE-guided iron run @${nightIronTgt.x},${nightIronTgt.y},${nightIronTgt.z} (iron gap first, then diamonds)` });
+                } else {
+                    push({ kind: TASK.DUSK_MINE_NIGHT, priority: 94, skill: 'mineDown',
+                           args: [{ targetY: 12 }],
+                           rationale: 'kitted (pick budget + food + fill) — mine through the whole night underground' });
+                }
                 break;
+            }
             case 'GO_BED':
                 // Only a FALLBACK: if the go_to_bed_sleep instinct is already driving sleep,
                 // don't double-drive it from the proposer.
@@ -1475,7 +1508,14 @@ export function commitGoal(bot, proposals, world) {
             || { kind: c.kind, skill: c.skill, args: (c.args || []), priority: 50, rationale: '(holding commitment)' };
         // Keep bot._commitment.args fresh from the live proposal (it may have re-derived
         // args this tick), else preserve the committed args. Never drop to undefined.
-        if (bot && bot._commitment) bot._commitment.args = (match.args || c.args || []);
+        // ★2026-07-06 (oracle评审 P2): skill 与 args 必须原子同刷 — 同一 kind 现在会在
+        //   mineOres{ore,count}/mineDown{targetY} 间按 oracle 新鲜度切换, 只刷 args 会让
+        //   '(holding commitment)' 回退用旧 skill 配新 args (mineDown 收到 {ore:'iron'} →
+        //   targetY 默认 45, 挖错带)。
+        if (bot && bot._commitment) {
+            bot._commitment.args = (match.args || c.args || []);
+            if (match.skill) bot._commitment.skill = match.skill;
+        }
         return { ...match, committed: true };
     }
 

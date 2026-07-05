@@ -16,10 +16,21 @@ const REGION = process.env.ORE_REGION || 'C:/Users/Administrator/mc-server/world
 const log = (m) => { try { fs.appendFileSync(LOG, `[${new Date().toISOString()}] ${m}\n`); } catch (e) {} };
 
 const mcData = minecraftData('1.21.1');
+// ★2026-07-06 用户令: "oracle视角挖铁应该非常快" — 扫描泛化到铁/煤 (mineOres 直奔坐标;
+// 铁曾是盲挖 mineDown 的 1h 级瓶颈)。palette 快路径按并集判段, 逐格再按 stateId 分族。
+const ORE_FAMILIES = {
+    diamonds: ['diamond_ore', 'deepslate_diamond_ore'],
+    iron: ['iron_ore', 'deepslate_iron_ore'],
+    coal: ['coal_ore', 'deepslate_coal_ore'],
+};
 const TARGET_STATES = new Set();
-for (const n of ['diamond_ore', 'deepslate_diamond_ore']) {
-    const b = mcData.blocksByName[n];
-    if (b) for (let s = b.minStateId; s <= b.maxStateId; s++) TARGET_STATES.add(s);
+const STATE_FAMILY = new Map();
+for (const [fam, names] of Object.entries(ORE_FAMILIES)) {
+    for (const n of names) {
+        const b = mcData.blocksByName[n];
+        if (!b) continue;
+        for (let s = b.minStateId; s <= b.maxStateId; s++) { TARGET_STATES.add(s); STATE_FAMILY.set(s, fam); }
+    }
 }
 const AnvilCls = anvilPkg.Anvil('1.21.1');
 const anvil = new AnvilCls(REGION);
@@ -35,10 +46,19 @@ async function scan() {
     if (!vit || !Number.isFinite(vit.x)) return;
     const dim = String(vit.dim || 'overworld');
     if (/nether|end/.test(dim)) return;   // 钻石只在主世界
-    if (lastScan && Math.hypot(vit.x - lastScan.x, vit.z - lastScan.z) < RESCAN_DIST) return;
+    if (lastScan && Math.hypot(vit.x - lastScan.x, vit.z - lastScan.z) < RESCAN_DIST) {
+        // ★评审 P3: 驻点采矿 >10min 会让 ts 自过期 → 消费方误判陈旧降级盲挖。跳扫也续 ts
+        //   (数据仍有效: bot 没离开扫描原点 48b) — 只改 ts 不重扫。
+        try {
+            const j = JSON.parse(fs.readFileSync(OUT, 'utf8'));
+            j.ts = Date.now();
+            fs.writeFileSync(OUT, JSON.stringify(j));
+        } catch (e) {}
+        return;
+    }
     const t0 = Date.now();
     const bcx = Math.floor(vit.x / 16), bcz = Math.floor(vit.z / 16);
-    const found = [];
+    const found = { diamonds: [], iron: [], coal: [] };
     let scanned = 0, missing = 0, skippedSecs = 0;
     for (let dx = -CHUNK_RADIUS; dx <= CHUNK_RADIUS; dx++) {
         for (let dz = -CHUNK_RADIUS; dz <= CHUNK_RADIUS; dz++) {
@@ -61,33 +81,38 @@ async function scan() {
                     return false;
                 } catch (e) { return true; }
             };
-            for (let secY = -4; secY <= 1; secY++) {          // y -64..31 覆盖钻石带
+            for (let secY = -4; secY <= 5; secY++) {          // y -64..95 覆盖钻石带+铁/煤主带
                 if (!secHasTarget(secY)) { skippedSecs++; continue; }
-                const yLo = Math.max(secY * 16, -60), yHi = Math.min(secY * 16 + 15, 16);
+                const yLo = Math.max(secY * 16, -60), yHi = Math.min(secY * 16 + 15, 95);
                 for (let y = yLo; y <= yHi; y++) {
                     for (let lx = 0; lx < 16; lx++) {
                         for (let lz = 0; lz < 16; lz++) {
                             let sid;
                             try { sid = chunk.getBlockStateId({ x: lx, y, z: lz }); } catch (e) { continue; }
-                            if (TARGET_STATES.has(sid)) found.push({ x: (bcx + dx) * 16 + lx, y, z: (bcz + dz) * 16 + lz });
+                            const fam = STATE_FAMILY.get(sid);
+                            if (fam) found[fam].push({ x: (bcx + dx) * 16 + lx, y, z: (bcz + dz) * 16 + lz });
                         }
                     }
                 }
             }
         }
     }
-    found.sort((a, b) => Math.hypot(a.x - vit.x, a.y - vit.y, a.z - vit.z) - Math.hypot(b.x - vit.x, b.y - vit.y, b.z - vit.z));
+    const byDist = (a, b) => Math.hypot(a.x - vit.x, a.y - vit.y, a.z - vit.z) - Math.hypot(b.x - vit.x, b.y - vit.y, b.z - vit.z);
+    for (const fam of Object.keys(found)) found[fam].sort(byDist);
     const out = {
         ts: Date.now(),
         botPos: { x: Math.round(vit.x), y: Math.round(vit.y), z: Math.round(vit.z) },
         scannedChunks: scanned, missingChunks: missing, skippedSections: skippedSecs,
-        totalFound: found.length,
-        diamonds: found.slice(0, 16),
+        totalFound: found.diamonds.length,   // 兼容旧口径 (mineDiamonds 日志用)
+        totals: { diamonds: found.diamonds.length, iron: found.iron.length, coal: found.coal.length },
+        diamonds: found.diamonds.slice(0, 16),
+        iron: found.iron.slice(0, 24),
+        coal: found.coal.slice(0, 16),
     };
     try { fs.writeFileSync(OUT, JSON.stringify(out)); } catch (e) {}
     lastScan = { x: vit.x, z: vit.z };
-    const near = found[0] ? Math.round(Math.hypot(found[0].x - vit.x, found[0].y - vit.y, found[0].z - vit.z)) + 'b @' + found[0].x + ',' + found[0].y + ',' + found[0].z : 'none';
-    log(`scan ${Date.now() - t0}ms chunks=${scanned}(miss ${missing}) secSkip=${skippedSecs} diamonds=${found.length} nearest=${near}`);
+    const near = (fam) => { const f = found[fam][0]; return f ? Math.round(Math.hypot(f.x - vit.x, f.y - vit.y, f.z - vit.z)) + 'b@' + f.x + ',' + f.y + ',' + f.z : 'none'; };
+    log(`scan ${Date.now() - t0}ms chunks=${scanned}(miss ${missing}) secSkip=${skippedSecs} dia=${found.diamonds.length}(${near('diamonds')}) iron=${found.iron.length}(${near('iron')}) coal=${found.coal.length}(${near('coal')})`);
 }
 
 log(`ore-oracle started (pid ${process.pid}, region ${REGION})`);
