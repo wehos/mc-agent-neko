@@ -22,7 +22,11 @@ const ORE_FAMILIES = {
     diamonds: ['diamond_ore', 'deepslate_diamond_ore'],
     iron: ['iron_ore', 'deepslate_iron_ore'],
     coal: ['coal_ore', 'deepslate_coal_ore'],
+    // ★地表水 (2026-07-06): wheatFarm 立田(水化 4 格)与 gatherObsidian 桶浇(32 格内水)
+    //   的共同硬前置 — 干旱高地 24b 找水恒空 (tilled=0 实录)。只收 y 58-70 地表带, 上限截断。
+    water: ['water'],
 };
+const WATER_Y_LO = 58, WATER_Y_HI = 70, WATER_CAP = 200;
 const TARGET_STATES = new Set();
 const STATE_FAMILY = new Map();
 for (const [fam, names] of Object.entries(ORE_FAMILIES)) {
@@ -58,7 +62,7 @@ async function scan() {
     }
     const t0 = Date.now();
     const bcx = Math.floor(vit.x / 16), bcz = Math.floor(vit.z / 16);
-    const found = { diamonds: [], iron: [], coal: [] };
+    const found = { diamonds: [], iron: [], coal: [], water: [] };
     let scanned = 0, missing = 0, skippedSecs = 0;
     for (let dx = -CHUNK_RADIUS; dx <= CHUNK_RADIUS; dx++) {
         for (let dz = -CHUNK_RADIUS; dz <= CHUNK_RADIUS; dz++) {
@@ -90,7 +94,11 @@ async function scan() {
                             let sid;
                             try { sid = chunk.getBlockStateId({ x: lx, y, z: lz }); } catch (e) { continue; }
                             const fam = STATE_FAMILY.get(sid);
-                            if (fam) found[fam].push({ x: (bcx + dx) * 16 + lx, y, z: (bcz + dz) * 16 + lz });
+                            if (!fam) continue;
+                            if (fam === 'water') {
+                                if (y < WATER_Y_LO || y > WATER_Y_HI || found.water.length >= WATER_CAP) continue;
+                            }
+                            found[fam].push({ x: (bcx + dx) * 16 + lx, y, z: (bcz + dz) * 16 + lz });
                         }
                     }
                 }
@@ -111,6 +119,7 @@ async function scan() {
         // 单列地下带最近 16 条 (夜挖/隐蔽作业直接用)
         ironDeep: found.iron.filter(c => c.y <= 50).slice(0, 16),
         coal: found.coal.slice(0, 16),
+        water: found.water.slice(0, 8),
     };
     try { fs.writeFileSync(OUT, JSON.stringify(out)); } catch (e) {}
     lastScan = { x: vit.x, z: vit.z };

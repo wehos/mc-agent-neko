@@ -137,7 +137,27 @@ export default async function wheatFarm(bot, ctx, opts = {}) {
             }
         }
         if (hasHoe()) {
-            const water = findByName(['water'], 24, 12);   // ★12→24 (新家附近水源可能不在 12b 内)
+            let water = findByName(['water'], 24, 12);   // ★12→24 (新家附近水源可能不在 12b 内)
+            if (!water.length) {
+                // ★2026-07-06 oracle 寻水腿: 干旱高地 24b 恒无水 (tilled=0 空转实录) —
+                //   ore-oracle 已扫地表水(y58-70), 走最近水源再立田 (黑曜石桶浇同源受益)。
+                try {
+                    const oo = bot._world && bot._world.oracleOres;
+                    const w0 = oo && Array.isArray(oo.water) && oo.water[0];
+                    if (w0 && Date.now() - (oo.ts || 0) < 600000) {
+                        const wd = Math.hypot(w0.x - bot.entity.position.x, w0.z - bot.entity.position.z);
+                        if (wd < 220 && !bot.interrupt_code) {   // 实测最近水 180b — 田+黑曜石双用途, 值得走
+                            prog(`wheatFarm: 24b 无水 → oracle 水源 @${w0.x},${w0.y},${w0.z} (${Math.round(wd)}b) 走过去立田`);
+                            await Promise.race([
+                                skills.goToPosition(bot, w0.x, null, w0.z, 4),
+                                new Promise((_, rej) => setTimeout(() => rej(new Error('water-walk-timeout')), 90000)),
+                            ]).catch(() => { try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} });
+                            water = findByName(['water'], 24, 12);
+                        }
+                    }
+                } catch (e) {}
+                if (!water.length) prog('wheatFarm: oracle 也无可达水源 — 本区立田不可行');
+            }
             outer: for (const w of water) {
                 for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
                     if (tilled >= 4 || bot.interrupt_code || bot.health <= 0) break outer;
