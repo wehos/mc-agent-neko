@@ -844,7 +844,10 @@ export function proposeTasks(world, bot) {
             // x-ray finds + vein-follows diamonds, banks each haul, and LOOPS until count is reached —
             // exactly the "在该层定向循环直到挖到目标矿" T-0092 asks for. (Generic mineDown only
             // descends then branch-mines once; mineDiamonds owns the deep-diamond venture.)
-            push({ kind: PROPOSAL_KIND.GET_DIAMOND, priority: 46, skill: 'mineDiamonds',
+            // ★2026-07-06 优先级反倒挂: 46→46.75 (压过 ARMOR_SET@46.5) — 实录两把铁镐都被
+            //   46.5 派去挖甲铁, 耗尽在石头上, 钻石线永远等不到活的铁镐。钻镐(1561 耐久)
+            //   到手后甲铁自然接棒, 顺序反转是使命最优。
+            push({ kind: PROPOSAL_KIND.GET_DIAMOND, priority: 46.75, skill: 'mineDiamonds',
                    args: [DIAMOND_FLOOR],
                    rationale: `iron-tooled + armored — descend to the diamond band (y${DIAMOND_TARGET_Y}) and mine to ${DIAMOND_FLOOR} diamonds`,
                    hints: { tier: tier.level, targetY: DIAMOND_TARGET_Y, diamonds: diamondsOnHand(bot) } });
