@@ -147,7 +147,9 @@ function deathEligible(bot, ctx, s, failed) {
     if (!s.respawnKnown) return false;
     // 评审 P0 修订: 裸计数条款删除 — _svnFails 只作佐证, 必须伴随真实绝境
     // (无食物+粮线以下), 记账永远不能单独解锁求死。
-    const desperate = s.food <= 4 && !s.hasAnyEdible && (s.night || failed.has('FORAGE'));
+    // 危血近战绝境(死55实录): hp<=5 被近身追猎且无盾 — 蓄意死优于火海轮盘/换血, 同价更稳
+    const meleeDoom = s.hp <= 5 && !s.hasShield && s.hostiles.some(h => h.d <= 8);
+    const desperate = (s.food <= 4 && !s.hasAnyEdible && (s.night || failed.has('FORAGE'))) || meleeDoom;
     const exhausted = (bot._svnFails || 0) >= 2 && s.food <= 6 && !s.hasAnyEdible
         && (failed.has('RELOCATE') || s.night);
     return desperate || exhausted;
@@ -159,8 +161,9 @@ function eligibleBranches(bot, ctx, s, failed) {
     if (!failed.has('REGEN') && s.hp < HP_FLOOR && s.food >= 17
         && !s.hostiles.some(h => h.d <= 16)) out.push('REGEN');
     if (!failed.has('EAT') && s.hasAnyEdible && s.food < 17) out.push('EAT');
+    // 无盾门槛收紧(死55实录: hp11 石剑硬换僵尸 3s 掉到 hp4): 无盾只在 hp>=14 且单怪时开打
     if (!failed.has('FIGHT') && s.hostiles.length && s.hostiles[0].d <= 14 && s.hp >= 8
-        && (s.hasShield || (s.sword && s.hp >= 10 && s.hostiles.length <= 2))) out.push('FIGHT');
+        && (s.hasShield || (s.sword && s.hp >= 14 && s.hostiles.length === 1))) out.push('FIGHT');
     if (!failed.has('BED') && s.night && s.bed && s.bedDist <= 64) out.push('BED');
     if (!failed.has('FORAGE') && s.day && s.overworld && s.food < 12) out.push('FORAGE');
     if (!failed.has('RELOCATE') && (s.contained || s.pinned || s.hostiles.length)) out.push('RELOCATE');
@@ -304,7 +307,9 @@ const EXEC = {
             try { await ctx.skills.customSkill(bot, 'surfaceUp', 63); } catch (e) {}
             moved = bot.entity.position.distanceTo(start);
         }
-        if (moved < 8 && !bot.interrupt_code) {
+        // 裸 moveAway 无地形安全门(死55实录: hp4 走 24 格踩进火/岩浆) — 危血不用它;
+        // escapePlan/surfaceUp 自带 cellSafety, 保留。
+        if (moved < 8 && !bot.interrupt_code && bot.health > 6) {
             try { await ctx.skills.moveAway(bot, 24); } catch (e) {}
             moved = bot.entity.position.distanceTo(start);
         }
