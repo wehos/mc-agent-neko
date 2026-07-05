@@ -55,13 +55,17 @@ export default async function mineOres(bot, ctx, opts = {}) {
     const deathZones = (() => {
         try {
             const lines = fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'death_log.jsonl'), 'utf8').trim().split('\n').slice(-50);
-            return lines.map(ln => { try { const r = JSON.parse(ln); return (typeof r.x === 'number') ? { x: r.x, z: r.z } : null; } catch (e) { return null; } }).filter(Boolean);
+            return lines.map(ln => { try { const r = JSON.parse(ln); return (typeof r.x === 'number') ? { x: r.x, y: r.y, z: r.z } : null; } catch (e) { return null; } }).filter(Boolean);
         } catch (e) { return []; }
     })();
     const inDeathZone = (c) => {
         if (!deathZones.length) return false;
         let n = 0;
-        for (const d of deathZones) { if (Math.hypot(d.x - c.x, d.z - c.z) < 16) { if (++n >= 3) return true; } }
+        for (const d of deathZones) {
+            // 三维口径: 地表死亡不拉黑正下方深处的矿 (|dy|<=12 才算同区)
+            if (Math.hypot(d.x - c.x, d.z - c.z) < 16
+                && Math.abs((typeof d.y === 'number' ? d.y : c.y) - c.y) <= 12) { if (++n >= 3) return true; }
+        }
         return false;
     };
     // oracle 目标 (新鲜 <10min, 平距 <250, 雷区外)

@@ -1060,7 +1060,10 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
             const _dpts = _dlraw.map(l => { try { const r = JSON.parse(l); return (typeof r.x === 'number') ? r : null; } catch (e) { return null; } }).filter(Boolean);
             _dzones = _dpts.filter(p => _dpts.filter(q => q !== p && Math.hypot(q.x - p.x, q.z - p.z) < 16).length >= 2);
         } catch (e) {}
-        const _inDeathZone = (p) => _dzones.some(z => Math.hypot(z.x - p.x, z.z - p.z) < 14);
+        // ★2026-07-06 三维化: 2D 盲区把地表死亡正下方 27 格的矿整列拉黑 (出生区死亡密集
+        //   → 出生区地下铁全部"不可见", 05:08 三振实录)。地表的死与深处的矿无关: |dy|<=12 才算。
+        const _inDeathZone = (p) => _dzones.some(z => Math.hypot(z.x - p.x, z.z - p.z) < 14
+            && Math.abs((typeof z.y === 'number' ? z.y : p.y) - p.y) <= 12);
 
         // The scan + per-block predicate (incl. pathfinder's safeToBreak, which walks
         // neighbour blocks) can null-deref inside dependency code — that throw used to
