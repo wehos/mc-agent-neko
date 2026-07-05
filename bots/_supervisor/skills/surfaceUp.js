@@ -190,6 +190,29 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
         } finally {
             try { bot.setControlState('jump', false); } catch (e) {}
         }
+        // ★2026-07-05 溺水簇根修 (drowning×2+Bogged@16,175 同点: 水淹竖井顶实心, 潜水硬凿
+        // 5x 慢 → 氧尽循环)。垂直被水锁死 → 横向找空气柱 (4向×6格探测头位有 air 的列)
+        // 冲刺游过去; 氧气≤6 没探到也赌方向冲。3-4 向×4s 有界; 仍湿则如实返 false,
+        // climb 侧看到 false 不该潜水长凿。
+        if (inWater()) {
+            const oxy = () => { try { return (typeof bot.oxygenLevel === 'number') ? bot.oxygenLevel : 20; } catch (e) { return 20; } };
+            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                if (!inWater()) break;
+                const p = bot.entity.position.floored();
+                let airAt = -1;
+                for (let d = 2; d <= 6; d++) {
+                    const head = bot.blockAt(p.offset(dx * d, 1, dz * d));
+                    if (head && (head.name === 'air' || head.name === 'cave_air')) { airAt = d; break; }
+                }
+                if (airAt < 0 && oxy() > 6) continue;
+                if (airAt < 0) airAt = 4;
+                dbg(`water escape: lateral → dir=${dx},${dz} d=${airAt} oxy=${oxy()}`);
+                try { await bot.lookAt(bot.entity.position.offset(dx * airAt, 1.0, dz * airAt), true); } catch (e) {}
+                bot.setControlState('forward', true); bot.setControlState('sprint', true); bot.setControlState('jump', true);
+                await skills.wait(bot, 4000);
+                try { bot.clearControlStates(); } catch (e) {}
+            }
+        }
         dbg(`water escape: swim-up end y=${yNow()} wet=${inWater()} dy=${yNow() - y0}`);
         return !inWater();
     };
