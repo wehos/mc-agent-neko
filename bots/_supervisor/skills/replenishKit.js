@@ -113,6 +113,46 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         // 只有 chopWood 是地表专属步。
     }
 
+    // ── ①.5 ★oracle 先行开拔 (2026-07-05 实录 00:24: ② 的 90s 预算被 chopWood 内部
+    //    oracle 行军(60s/腿)整段吃掉, 旧床死亡热点区 logs 0→0 超时循环跨两个白天窗)。
+    //    开拔与砍伐分账: 40 格内无树且 oracle 有森林(<400格) → 先专款走到林腹(穿透点),
+    //    ② 的预算全留给真砍。oracle 缺失/树在附近 → 此步零成本跳过。──────────────
+    if (!stop() && !overBudget() && onSurface() && logsHeld() < 4 && planksEq() < 16 && !(isNight() && hostilesNear(16) > 0)) {
+        const _treeNear = (() => {
+            try {
+                const ids = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log']
+                    .map(n => bot.registry && bot.registry.blocksByName[n] ? bot.registry.blocksByName[n].id : null).filter(x => x != null);
+                return ids.length ? (bot.findBlocks({ matching: ids, maxDistance: 40, count: 1 }) || []).length > 0 : false;
+            } catch (e) { return false; }
+        })();
+        if (!_treeNear) {
+            const f = (() => {
+                try {
+                    const o = bot._world && bot._world.oracle;
+                    const ff = o && o.fresh && o.dim === 'overworld' && o.nearest && o.nearest.forest;
+                    if (!ff || !Number.isFinite(ff.x)) return null;
+                    const d = Math.hypot(ff.x - bot.entity.position.x, ff.z - bot.entity.position.z);
+                    return (d > 30 && d < 400) ? { x: ff.x, z: ff.z, d } : null;
+                } catch (e) { return null; }
+            })();
+            if (f) {
+                const p = bot.entity.position; const vx = f.x - p.x, vz = f.z - p.z, L = Math.hypot(vx, vz) || 1;
+                const tx = Math.round(f.x + (vx / L) * 40), tz = Math.round(f.z + (vz / L) * 40);
+                prog(`replenishKit: ①.5 oracle 开拔 → 林腹 @${tx},${tz} (森林 ${Math.round(f.d)}b), 专款 90s`);
+                try {
+                    await Promise.race([
+                        skills.goToPosition(bot, tx, null, tz, 16),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('replenish-march-timeout')), 90000)),
+                    ]);
+                } catch (e) {
+                    try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
+                    try { bot.clearControlStates(); } catch (_) {}
+                    prog(`replenishKit: ①.5 开拔未完: ${e.message}`);
+                }
+            }
+        }
+    }
+
     // ── ② 地表取木: chopWood 到 logs>=4 (needLogs 关掉它的 planksEq>=8 早退, 我们真要原木)──
     if (!stop() && !overBudget() && onSurface() && logsHeld() < 4 && planksEq() < 16) {
         if (isNight() && hostilesNear(16) > 0) {
@@ -120,11 +160,11 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         } else {
             const lb = logsHeld();
             const need = Math.max(1, 4 - lb);
-            prog(`replenishKit: ② chopWood need=${need} (logs=${lb} planksEq=${planksEq()}), budget 90s`);
+            prog(`replenishKit: ② chopWood need=${need} (logs=${lb} planksEq=${planksEq()}), budget 120s`);
             try {
                 await Promise.race([
                     skills.customSkill(bot, 'chopWood', need, { needLogs: true }),
-                    new Promise((_, rej) => setTimeout(() => rej(new Error('replenish-chop-timeout')), 90000)),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('replenish-chop-timeout')), 120000)),
                 ]);
             } catch (e) {
                 try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
