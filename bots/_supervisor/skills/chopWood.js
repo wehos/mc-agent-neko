@@ -90,7 +90,16 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             && !(t >= 13000 && t <= 23000)
             && !_hostileNear(16);
     };
-    const _needsFoodYield = () => bot.food <= 8 && !_foodHeld() && !_criticalForageAllowed();
+    // ★2026-07-05 木-粮死结拆除 (19:39 实录: food=8 无可食 BAIL → 让位给 feedUp, 但 feedUp
+    // 也无猎物无食物 = 谁都不干活的死水。'让位'只有在让出去有人能接的前提下才有意义;
+    // 无食可觅时 木→锄→农场 恰是唯一的食物之路, 低险作业收益>风险)。收紧到 food<=4
+    // (真饥饿边缘才让), 且白天无敌对时进一步豁免到 food<=2。
+    const _needsFoodYield = () => {
+        if (_foodHeld() || _criticalForageAllowed()) return false;
+        const day = (() => { try { const t = bot.time.timeOfDay; return t < 12000; } catch (e) { return false; } })();
+        const safeDay = day && !_hostileNear(16);
+        return bot.food <= (safeDay ? 2 : 4);
+    };
     const _lowHpHostileYield = () => bot.health <= 14 && _hostileNear(12) && !_criticalForageAllowed();
     const _motion = (event, data = {}) => {
         try {
