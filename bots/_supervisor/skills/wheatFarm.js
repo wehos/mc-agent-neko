@@ -65,8 +65,27 @@ export default async function wheatFarm(bot, ctx, opts = {}) {
         try { await skills.consume(bot, 'bread'); ate = true; } catch (e) { break; }
     }
 
-    // 3) Replant freed plots, then sow spare seeds on any empty farmland within 12b.
+    // 2.5) ★采种 (2026-07-05 用户'farm能力太弱'加强): 种子<8 → 打附近草丛集种。没有这步,
+    //      开局 2-4 颗种子的农场永远长不大 (打草是零工具零风险动作, 1/8 掉种)。
     const seedsLeft = () => inv().wheat_seeds || 0;
+    let gathered = 0;
+    if (seedsLeft() < 8 && !bot.interrupt_code) {
+        const s0 = seedsLeft();
+        const grasses = findByName(['short_grass', 'tall_grass', 'grass'], 16, 24);
+        for (const p of grasses.slice(0, 16)) {
+            if (bot.interrupt_code || bot.health <= 0 || seedsLeft() >= 8) break;
+            if (hostileNear(10)) break;
+            try {
+                if (bot.entity.position.distanceTo(new Vec3(p.x, p.y, p.z)) > 4) await skills.goToPosition(bot, p.x, p.y, p.z, 2);
+                await skills.breakBlockAt(bot, p.x, p.y, p.z);
+            } catch (e) {}
+        }
+        try { await skills.pickupNearbyItems(bot); } catch (e) {}
+        gathered = seedsLeft() - s0;
+        if (gathered > 0) prog(`wheatFarm: 2.5 采种 +${gathered} (seeds=${seedsLeft()})`);
+    }
+
+    // 3) Replant freed plots, then sow spare seeds on any empty farmland within 12b.
     for (const p of freedPlots) {
         if (bot.interrupt_code || bot.health <= 0 || !seedsLeft()) break;
         try { if (await skills.tillAndSow(bot, p.x, p.y - 1, p.z, 'wheat_seeds')) sowed++; } catch (e) {}
@@ -94,7 +113,7 @@ export default async function wheatFarm(bot, ctx, opts = {}) {
             }
         }
         if (hasHoe()) {
-            const water = findByName(['water'], 12, 8);
+            const water = findByName(['water'], 24, 12);   // ★12→24 (新家附近水源可能不在 12b 内)
             outer: for (const w of water) {
                 for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
                     if (tilled >= 4 || bot.interrupt_code || bot.health <= 0) break outer;
@@ -112,7 +131,7 @@ export default async function wheatFarm(bot, ctx, opts = {}) {
         }
     }
 
-    prog(`wheatFarm: pass done — harvested=${harvested} baked=${baked} ate=${ate} sowed=${sowed} tilled=${tilled} bread=${inv().bread || 0}/${breadTarget} food=${bot.food}`);
-    if (harvested || baked || ate || sowed) return done({ harvested, baked, ate, sowed, tilled });
+    prog(`wheatFarm: pass done — harvested=${harvested} baked=${baked} ate=${ate} sowed=${sowed} tilled=${tilled} gathered=${gathered} bread=${inv().bread || 0}/${breadTarget} food=${bot.food}`);
+    if (harvested || baked || ate || sowed || gathered) return done({ harvested, baked, ate, sowed, tilled, gathered });
     return done(false);
 }
