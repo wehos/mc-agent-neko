@@ -146,7 +146,7 @@ export default async function wheatFarm(bot, ctx, opts = {}) {
                     const w0 = oo && Array.isArray(oo.water) && oo.water[0];
                     if (w0 && Date.now() - (oo.ts || 0) < 600000) {
                         const wd = Math.hypot(w0.x - bot.entity.position.x, w0.z - bot.entity.position.z);
-                        if (wd < 220 && !bot.interrupt_code) {   // 实测最近水 180b — 田+黑曜石双用途, 值得走
+                        if (wd < 300 && !bot.interrupt_code) {   // 220→300: 出生点重生后到水 233b (麦田=死亡循环唯一结构解, 值得走)
                             prog(`wheatFarm: 24b 无水 → oracle 水源 @${w0.x},${w0.y},${w0.z} (${Math.round(wd)}b) 走过去立田`);
                             await Promise.race([
                                 skills.goToPosition(bot, w0.x, null, w0.z, 4),
