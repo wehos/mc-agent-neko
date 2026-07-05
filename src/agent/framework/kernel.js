@@ -245,6 +245,28 @@ export class Kernel {
         const skillBusy = !!(this.bot._currentSkill || (this.agent && this.agent.supervised_skill));
         let vitalBusy = false;
         try { vitalBusy = arbiterVitalNow(this.bot); } catch (e) {}
+        // ★危急升级阀 (实录 2026-07-06 01:07: replenishKit 复派楔在夜宿 hold 里占死互斥
+        // 17:00→17:07, food=1 全程无门可入, 最后靠骷髅天然死亡完成重置): 危急档灰区
+        // (hp<=6 || food<=2) + 互斥被占且当前派发已跑 >=60s + 非恢复族技能 → 每 90s 抬一次
+        // interrupt_code 礼貌解卷(kernel 按 interrupt-unwind 不罚), 下一 idle tick force 接管。
+        if (skillBusy) {
+            try {
+                const hpN = (typeof this.bot.health === 'number') ? this.bot.health : 20;
+                const foodN = (typeof this.bot.food === 'number') ? this.bot.food : 20;
+                const critical = (hpN > 0) && (hpN <= 6 || foodN <= 2)
+                    && !(this.bot._diedAt && Date.now() - this.bot._diedAt < 20000);
+                const cur = String(this.bot._currentSkill || '');
+                const recovery = /feedUp|forage|villageHarvest|wheatFarm|smeltSafe|goBedSleep|escapePlan|surfaceUp|surviveNow/i.test(cur);
+                if (critical && !recovery && !this.bot.interrupt_code
+                    && Date.now() - (this._lastDispatchAt || 0) > 60000
+                    && Date.now() - (this._svnNudgeAt || 0) > 90000) {
+                    this._svnNudgeAt = Date.now();
+                    this.bot.interrupt_code = true;
+                    this.log(`[kernel] ★危急灰区解卷: hp=${Math.round(hpN)} food=${foodN} 互斥被 '${cur || this.agent.supervised_skill}' 占用 — 抬 interrupt 礼貌让位(unwind 不罚), 灰区指挥官下 tick 接管`);
+                    try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [kernel] ★危急灰区解卷 hp=${Math.round(hpN)} food=${foodN} cur=${cur || '-'}\n`); } catch (e) {}
+                }
+            } catch (e) {}
+        }
         if (!skillBusy && !vitalBusy) {
             // 连败计数 30min 衰减: 陈年连败不该给全新灰区解锁求死分支(deathEligible exhausted 条款)
             if (this.bot._svnFails && Date.now() - (this.bot._svnLastFailAt || 0) > 1800000) this.bot._svnFails = 0;
@@ -452,6 +474,7 @@ export class Kernel {
         // finishing kernel dispatch used to clobber the flag mid-ws-skill, so the next tick saw
         // busy=false and double-dispatched into the running ws probe (pathfinder tug-of-war).
         this.agent.supervised_skill = 'kernel';
+        this._lastDispatchAt = Date.now();   // ★危急解卷阀参照: 新派发至少跑 60s 才可被危急灰区打断
         // ★所有权令牌 (伴随 supervised_skill, 同步置 — 反射的仲裁接入点 A 读它认 holder):
         // name 带具体技能名, LLM persist 的规则可以精确到 skill; 矩阵通配 `kernel:*` 兜底。
         setBodyOwner(this.bot, `kernel:${p.skill}`, p.kind || 'skill');
