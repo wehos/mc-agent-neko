@@ -5742,7 +5742,11 @@ const modes_list = [
                 //   未立时把整夜挖矿一票否决(实录: 满腹19满血夜宿空转)。放宽 — 满腹(>=16)且
                 //   满血(>=16)可免随身口粮: 8min 夜耗 ~3-5 饱食, 上浮时仍 >=12; 且"深处饥荒"
                 //   如今由灰区指挥官兜底(food<8 触发 → 吃/觅食/转移/重置), 非当年无阀 y-29 盲远征。
-                const canMineWholeNight = picksBudget >= cfg.mineNightPickBudget && sufficientForUnderground && food >= cfg.mineNightFood && (cobble + dirtCt) >= 4
+                // ★镐预算双档 (2026-07-06, picksBudget=150<200 夜宿空转实录): 200 档为无再造
+                //   能力的盲远征校准; sufficientForUnderground 已含"备镐/野外再造"能力(312 圆石
+                //   +台通路时井下随时补镐), 此时 60 耐久足够开工 — oracle 短程直采更不在话下。
+                const canMineWholeNight = (picksBudget >= cfg.mineNightPickBudget || (sufficientForUnderground && picksBudget >= 60))
+                    && sufficientForUnderground && food >= cfg.mineNightFood && (cobble + dirtCt) >= 4
                     && (rationsCt >= 2 || (food >= 16 && hp >= 16));
                 // gravity-pit trap (mirror prepNether C334): digging into a sand/red_sand/gravel column
                 // collapses onto the head → suffocation. Below dy-1/dy-2 (dug) + dy+2 (drops into head gap).
