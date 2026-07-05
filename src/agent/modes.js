@@ -5738,7 +5738,12 @@ const modes_list = [
                 // ration gate and took the bot to y=-29 with ZERO carried food — hp4 famine at
                 // depth. Whole-night mining carries takeaway food like it carries picks.)
                 const rationsCt = Object.entries(counts).filter(([n]) => /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/.test(n)).reduce((s, [, c]) => s + c, 0);
-                const canMineWholeNight = picksBudget >= cfg.mineNightPickBudget && sufficientForUnderground && food >= cfg.mineNightFood && (cobble + dirtCt) >= 4 && rationsCt >= 2;
+                // ★2026-07-06 (用户前期公式: 夜里 oracle 直奔矿): rationsCt>=2 的硬门在口粮经济
+                //   未立时把整夜挖矿一票否决(实录: 满腹19满血夜宿空转)。放宽 — 满腹(>=16)且
+                //   满血(>=16)可免随身口粮: 8min 夜耗 ~3-5 饱食, 上浮时仍 >=12; 且"深处饥荒"
+                //   如今由灰区指挥官兜底(food<8 触发 → 吃/觅食/转移/重置), 非当年无阀 y-29 盲远征。
+                const canMineWholeNight = picksBudget >= cfg.mineNightPickBudget && sufficientForUnderground && food >= cfg.mineNightFood && (cobble + dirtCt) >= 4
+                    && (rationsCt >= 2 || (food >= 16 && hp >= 16));
                 // gravity-pit trap (mirror prepNether C334): digging into a sand/red_sand/gravel column
                 // collapses onto the head → suffocation. Below dy-1/dy-2 (dug) + dy+2 (drops into head gap).
                 const _GRAV_DEC = /^(sand|red_sand|gravel|suspicious_sand|suspicious_gravel)$/;
