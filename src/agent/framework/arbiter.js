@@ -81,13 +81,21 @@ export function currentOwner(agent) {
 /** 唯一硬编码地板: oxygen<=8 / hp<=4 且掉血中 / 着火。其余一切走矩阵/LLM。 */
 export function vitalNow(bot) {
     try {
-        if (bot.oxygenLevel !== undefined && bot.oxygenLevel <= 8) return true;
+        // ★2026-07-05 陈旧闩根修 (实录 18:04: 满血白天无威胁, self_preservation 借 vital 地板
+        // 连举 20min 钉死 kernel — RCON 实测 Air=300/Fire=-20/HurtTime=0。stale 重连丢
+        // metadata 包后, 客户端 oxygenLevel/着火位会永久卡旧值)。氧气路径要求"现在真在水里"
+        // 的方块佐证; 着火位要求 4s 内真掉血佐证 (真烧必掉血); 无佐证=陈旧闩, 不进地板。
+        if (bot.oxygenLevel !== undefined && bot.oxygenLevel <= 8 && bot.entity) {
+            const pw = bot.entity.position;
+            const wet = [bot.blockAt(pw), bot.blockAt(pw.offset(0, 1, 0))].some(b => b && /water/.test(b.name || ''));
+            if (wet) return true;
+        }
         if ((bot.health ?? 20) <= 4 && Date.now() - (bot.lastDamageTime || 0) < 4000) return true;
         if (bot.entity) {
             // ★评审F2: prismarine-entity 没有 onFire 属性(运行时实证) — 着火状态在共享
             // metadata flags 字节的 bit0。方块检查(下一行)只覆盖"站在火/岩浆里"。
             const md = bot.entity.metadata;
-            if (md && (Number(md[0]) & 0x01)) return true;
+            if (md && (Number(md[0]) & 0x01) && Date.now() - (bot.lastDamageTime || 0) < 4000) return true;
             const p = bot.entity.position;
             const feet = bot.blockAt(p) || {};
             const head = bot.blockAt(p.offset(0, 1, 0)) || {};
