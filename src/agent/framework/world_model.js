@@ -98,7 +98,11 @@ const REPLENISH_PICKS_MIN = 3;       // 总镐数底线(备镐不变量): <3 触
                                      // 镐尽→徒手困地下→SURFACE_RESCUE→再补给, 20-40min/次已复发两轮。
                                      // 技能端 replenishKit.js:85/162/200/211 已同步 3镐/16板口径。
 const REPLENISH_PLANKS_TRIGGER = 4;  // planks-equivalent 跌破即触发
-const REPLENISH_PLANKS_RELEASE = 16; // 释放需回补到的 buffer (迟滞: 触发<4, 释放>=16)
+const REPLENISH_PLANKS_RELEASE = 64; // 释放需回补到的 buffer (迟滞: 触发<4, 释放>=64)
+                                     // ★2026-07-05 用户宽迟滞令: "低于5开始、64才停, 其他资源类推" —
+                                     // 窄带(触发≈释放)正是窗口切碎的根源; 宽带让 kind 拿到窗口后
+                                     // commitGoal 粘性长期锁定, churn 消失而救命反射仍可打断。
+                                     // 64 planksEq = 16 logs ≈ 一组木的一半, 囤积形态以 log 为主(密度4x)。
 // ── ★P1-5 BANK_GEAR 提案端停用开关 (review-2026-07-04-distance.md 结构洞#5)。
 //    keepInventory=true 下死亡不掉落, "存箱防死丢投资"的前提为假; 实测纯负价值三连:
 //      · bankGear RAW 正则 ^diamond$ 把钻石吞进箱, 而 craftChain/endgameNeeds 只数背包不读箱子
@@ -658,8 +662,13 @@ export function proposeTasks(world, bot) {
     // otherwise nightShelter's raw-meat fallback owns night hunger (food<8 eats raw meat).
     const nightExposed = (time.phase === 'night' || time.phase === 'dusk') && overworld && Math.round(bot.entity.position.y) >= 50;
     const canEatInPlace = rationsNow >= 1 && vitals.food < 20;
+    // ★2026-07-05 用户令: "不要一直去杀肉, 遇到牲畜顺手收就行, farm 以小麦面包为主" —
+    // 囤肉档(@55/@35)只在面包经济未建立时放行 (无面包且无 farm 锚); 危机档(@88 food≤6)
+    // 永远在。顺手收由 OPP animal splice + 路过击杀天然覆盖。
+    const _breadStaple = invCount(bot, /^bread$/) >= 1 || !!(w.farm && Number.isFinite(w.farm.x));
     if (overworld && (vitals.food < FOOD_STOCK || !kit.foodSufficient || rationsNow < 2)
-        && (!nightExposed || canEatInPlace)) {
+        && (!nightExposed || canEatInPlace)
+        && (vitals.food <= 6 || !_breadStaple)) {
         const pri = vitals.food <= 6 ? 88 : (vitals.food < 12 ? 55 : 35);
         push({ kind: PROPOSAL_KIND.GET_FOOD, priority: pri, skill: 'feedUp',
                rationale: vitals.food <= 6 ? 'food critical — hunt/forage now'
@@ -1682,28 +1691,17 @@ export function pickTierSatisfies(bot, oreMeta) {
 export function dynamicBreadTarget(bot, world) {
     try {
         const w = world || (bot && bot._world) || EMPTY_WORLD;
-        // ★T-0069 bed-gate removal: the old `if(!bedKnown) return 0` was a HARD second gate that
-        // killed the wheat-farm entirely during bootstrap (no bed yet → target 0 → OPP_WHEAT_FARM
-        // isGoalDone=bread>=0 instantly true → never dispatched). The bed is a respawn-anchor
-        // doctrine, not a FARMING precondition — you can till+sow+harvest+bake with zero bed. The
-        // real precondition is having something to farm WITH: seeds in the bag (to sow/keep a plot)
-        // OR mature wheat already growing nearby (to harvest+bake). Without either, the skill no-ops,
-        // so a 0 target there just avoids a pointless dispatch — but a bed is no longer required.
-        const canFarm = invCount(bot, /^wheat_seeds$/) > 0 || invCount(bot, /^wheat$/) >= 3;
-        if (!canFarm) return 0;                                        // no seeds & no wheat → nothing to bake
+        // ★2026-07-05 用户宽迟滞令: "低于5个面包开始觅食, 一直到64个才停"。粘性状态机:
+        // bread<5 挂 engage 旗 → 目标 64; >=64 摘旗 → 目标回 5 (不再提案)。farm 为主粮
+        // (面包), 肉降级为顺手收 — GET_FOOD 囤肉档同步被 bread/farm 门压制。
+        // canFarm 门保留但放宽: 有 farm.json 锚也算 (熟期巡逻要能派收获)。
+        const canFarm = invCount(bot, /^wheat_seeds$/) > 0 || invCount(bot, /^wheat$/) >= 3
+            || !!(w.farm && Number.isFinite(w.farm.x));
+        if (!canFarm) return 0;
         const breadStock = invCount(bot, /^bread$/);
-        const armor = (w.vitals && w.vitals.armor) || 0;
-        const pickTier = (w.kit && w.kit.pickTier) || 'none';
-        const wood = woodUnits(bot);
-        let base = 6;
-        if (armor < 4) base += 4;                                       // pre-armor: bread is staple → stock more
-        else if (/iron|diamond|netherite/.test(pickTier)) base -= 2;    // late: other food plentiful
-        if (wood < WOOD_BUFFER || ((w.kit && w.kit.picks) || 0) < 1) base -= 3; // bootstrap unfinished
-        if (w.migration && w.migration.recommend) base = Math.min(base, 2);     // about to relocate
-        let freeSlots = 0; try { freeSlots = bot.inventory.emptySlotCount(); } catch (e) { freeSlots = 9; }
-        if (freeSlots < 6) base = Math.min(base, breadStock);          // pack nearly full → stop hoarding
-        if ((w.vitals && w.vitals.food || 20) < 8) base += 2;          // hungry now → bake a couple more
-        return Math.max(0, Math.min(base, 14));                        // never hoard > 14
+        if (breadStock < 5) bot._breadEngaged = true;
+        else if (breadStock >= 64) bot._breadEngaged = false;
+        return bot._breadEngaged ? 64 : 5;
     } catch (e) { return 0; }
 }
 

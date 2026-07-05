@@ -82,8 +82,8 @@ export default async function replenishKit(bot, ctx, opts = {}) {
     prog(`replenishKit: START picks=${before[0]} stick=${before[1]} planks=${before[2]} logs=${before[3]} table=${before[4]} planksEq=${planksEq()} y=${Math.round(bot.entity.position.y)} onSurface=${onSurface()} night=${isNight()} hostiles16=${hostilesNear(16)} hp=${Math.round(bot.health)} food=${bot.food}`);
 
     // 已达标 → 诚实 false (不该被派发到这; isGoalDone 释放承诺, 提案端负责别重复提)
-    if (picks() >= 3 && planksEq() >= 16 && cnt('stick') >= 24) {   // ★3镐/16板/24棍 (棍=地下石镐 fodder 弹药, 1 格槽=12 把柄; 14:39 实录: 唯一石镐耗尽→守卫无 fodder→铁镐#3 裸奔凿石 15min 阵亡) (与 world_model REPLENISH_* 同步加厚: 2镐262耐久撑不到下次补给, 20-40min/次复发)
-        prog('replenishKit: invariant already satisfied (picks>=3 planksEq>=16 stick>=24) — nothing to do, honest false');
+    if (picks() >= 3 && planksEq() >= 64 && cnt('stick') >= 24) {   // ★3镐/16板/24棍 (棍=地下石镐 fodder 弹药, 1 格槽=12 把柄; 14:39 实录: 唯一石镐耗尽→守卫无 fodder→铁镐#3 裸奔凿石 15min 阵亡) (与 world_model REPLENISH_* 同步加厚: 2镐262耐久撑不到下次补给, 20-40min/次复发)
+        prog('replenishKit: invariant already satisfied (picks>=3 planksEq>=64 stick>=24) — nothing to do, honest false');
         return false;
     }
 
@@ -150,7 +150,7 @@ export default async function replenishKit(bot, ctx, opts = {}) {
     //    oracle 行军(60s/腿)整段吃掉, 旧床死亡热点区 logs 0→0 超时循环跨两个白天窗)。
     //    开拔与砍伐分账: 40 格内无树且 oracle 有森林(<400格) → 先专款走到林腹(穿透点),
     //    ② 的预算全留给真砍。oracle 缺失/树在附近 → 此步零成本跳过。──────────────
-    if (!stop() && !overBudget() && onSurface() && logsHeld() < 4 && planksEq() < 16 && !(isNight() && hostilesNear(16) > 0)) {
+    if (!stop() && !overBudget() && onSurface() && planksEq() < 64 && !(isNight() && hostilesNear(16) > 0)) {
         const _treeNear = (() => {
             try {
                 const ids = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log']
@@ -187,12 +187,12 @@ export default async function replenishKit(bot, ctx, opts = {}) {
     }
 
     // ── ② 地表取木: chopWood 到 logs>=4 (needLogs 关掉它的 planksEq>=8 早退, 我们真要原木)──
-    if (!stop() && !overBudget() && onSurface() && logsHeld() < 4 && planksEq() < 16) {
+    if (!stop() && !overBudget() && onSurface() && planksEq() < 64) {
         if (isNight() && hostilesNear(16) > 0) {
             prog(`replenishKit: ② SKIP chopWood — night+hostiles16=${hostilesNear(16)}, 取木不值一条命 (delta 留给其他步)`);
         } else {
             const lb = logsHeld();
-            const need = Math.max(1, 4 - lb);
+            const need = Math.max(1, Math.min(12, Math.ceil((64 - planksEq()) / 4)));   // ★宽迟滞: 一次派发最多补 12 log
             prog(`replenishKit: ② chopWood need=${need} (logs=${lb} planksEq=${planksEq()}), budget 120s`);
             try {
                 await Promise.race([
@@ -343,6 +343,6 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         } catch (e) {}
     }
 
-    const met = picks() >= 3 && planksEq() >= 16;   // ★3镐/16板
+    const met = picks() >= 3 && planksEq() >= 64;   // ★3镐/64板 (宽迟滞令)
     return settle(stop() ? 'interrupted' : (overBudget() ? 'budget-5min' : (met ? 'invariant-met' : 'partial')));
 }
