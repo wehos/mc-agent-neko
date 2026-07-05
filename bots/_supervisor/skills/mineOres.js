@@ -49,16 +49,32 @@ export default async function mineOres(bot, ctx, opts = {}) {
     if (bot.armorManager) try { await bot.armorManager.equipAll(); } catch (e) {}
     const g0 = cnt();
 
-    // oracle 目标 (新鲜 <10min, 平距 <250)
+    // ★死亡热图避区 (deaths 58-61 四死同窝实录, chopWood/achieve 同款口径): 末 50 死亡记录
+    //   16 格内 ≥3 死 = 雷区, oracle 候选整体过滤 — 22k 铁不差雷区里那几颗。
+    const deathZones = (() => {
+        try {
+            const lines = fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'death_log.jsonl'), 'utf8').trim().split('\n').slice(-50);
+            return lines.map(ln => { try { const r = JSON.parse(ln); return (typeof r.x === 'number') ? { x: r.x, z: r.z } : null; } catch (e) { return null; } }).filter(Boolean);
+        } catch (e) { return []; }
+    })();
+    const inDeathZone = (c) => {
+        if (!deathZones.length) return false;
+        let n = 0;
+        for (const d of deathZones) { if (Math.hypot(d.x - c.x, d.z - c.z) < 16) { if (++n >= 3) return true; } }
+        return false;
+    };
+    // oracle 目标 (新鲜 <10min, 平距 <250, 雷区外)
     const oracleList = () => {
         try {
             const oo = bot._world && bot._world.oracleOres;
             if (!(oo && Date.now() - (oo.ts || 0) < 600000)) return [];
             // 夜挖(yMax 有限)优先扫描器的地下带分层名单 (top-24 山面铁过滤后可能为空)
-            if (yMax !== Infinity && ore === 'iron' && Array.isArray(oo.ironDeep) && oo.ironDeep.length) return oo.ironDeep;
-            if (Array.isArray(oo[ore]) && oo[ore].length) {
-                return yMax === Infinity ? oo[ore] : oo[ore].filter(c => c && c.y <= yMax);
+            let list = [];
+            if (yMax !== Infinity && ore === 'iron' && Array.isArray(oo.ironDeep) && oo.ironDeep.length) list = oo.ironDeep;
+            else if (Array.isArray(oo[ore]) && oo[ore].length) {
+                list = yMax === Infinity ? oo[ore] : oo[ore].filter(c => c && c.y <= yMax);
             }
+            return list.filter(c => c && !inDeathZone(c));
         } catch (e) {}
         return [];
     };
