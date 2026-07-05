@@ -46,6 +46,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
         try { return /MAROONED/.test((bot._mobility && bot._mobility.state) || ''); } catch (e) { return false; }
     };
     if (marooned()) { prog(`ABORT ore=${ore} — MAROONED 态(寻路全被压制), 让位 mobility 脱困`); return false; }
+    bot._svnOreZeroRounds = 0;   // ★跨 run 残留 bug (20:36 实录: 上 run 攒 2 + 本 run 第 1 轮 = 秒收工 46s 白跑)
     if (bot.armorManager) try { await bot.armorManager.equipAll(); } catch (e) {}
     const g0 = cnt();
 
