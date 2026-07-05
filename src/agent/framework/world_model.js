@@ -626,13 +626,19 @@ export function proposeTasks(world, bot) {
     //     priority: 镐=0 时 67 — 压过 understocked BOOTSTRAP_KIT@66(noPick BOOTSTRAP_KIT@90 仍
     //     先行, 其 prepNether 被 true-surface 门 3-strike 冷却后本 kind 顶上接管, 不再空转轮转);
     //     否则 63 — 高于 GET_FOOD@55, 低于 BOOTSTRAP_KIT@66(buffer 未破底时不抢班)。
-    if (overworld && time.phase === 'day'
+    // ★2026-07-05 夜间口袋组装: 白天门放宽 — 夜里满兜板材(≥4)或石料(≥3)而缺镐/缺台时,
+    // 合成不需要阳光 (技能端 ①.5开拔/②砍木 自带夜跳过, ⓪清囊/③板/③.5台床/③.6棍/④镐/⑧
+    // 熟食夜里全能跑)。实录 11:34: planks16+stick11 夜里干坐, 台/床/镐全欠着等日出。
+    const _nightAssembly = time.phase !== 'day'
+        && (woodUnits(bot) >= 1 || invCount(bot, /^cobblestone$/) >= 3)
+        && (totalPicks(bot) < REPLENISH_PICKS_MIN || !invCount(bot, /^crafting_table$/));
+    if (overworld && (time.phase === 'day' || _nightAssembly)
         && (totalPicks(bot) < REPLENISH_PICKS_MIN || woodUnits(bot) < REPLENISH_PLANKS_TRIGGER)) {
         const pk = totalPicks(bot), pe = woodUnits(bot);
         progressLogThrottled(bot, 'replenishKit', 60000,
-            `[proposeTasks] ★REPLENISH_KIT-propose: picks=${pk}/${REPLENISH_PICKS_MIN} planksEq=${pe}/${REPLENISH_PLANKS_RELEASE} pri=${pk === 0 ? 67 : 63} y=${Math.round(bot.entity.position.y)} — 补给基线破底, 派 replenishKit(修复型: 不看深度, 技能自己上浮)`);
+            `[proposeTasks] ★REPLENISH_KIT-propose: picks=${pk}/${REPLENISH_PICKS_MIN} planksEq=${pe}/${REPLENISH_PLANKS_RELEASE} pri=${pk === 0 ? 67 : 63} y=${Math.round(bot.entity.position.y)}${_nightAssembly ? ' [夜间口袋组装]' : ''} — 补给基线破底, 派 replenishKit(修复型: 不看深度, 技能自己上浮)`);
         push({ kind: PROPOSAL_KIND.REPLENISH_KIT, priority: pk === 0 ? 67 : 63, skill: 'replenishKit',
-               rationale: `supply baseline broken (picks ${pk}/${REPLENISH_PICKS_MIN}, planksEq ${pe}/${REPLENISH_PLANKS_RELEASE}) — surface + restock wood/spare pick before every consumer yields`,
+               rationale: `supply baseline broken (picks ${pk}/${REPLENISH_PICKS_MIN}, planksEq ${pe}/${REPLENISH_PLANKS_RELEASE})${_nightAssembly ? ' — night pocket-assembly (craft-only, chop steps self-skip)' : ' — surface + restock wood/spare pick before every consumer yields'}`,
                hints: { picks: pk, planksEq: pe } });
     }
 
