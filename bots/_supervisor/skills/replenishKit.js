@@ -82,8 +82,8 @@ export default async function replenishKit(bot, ctx, opts = {}) {
     prog(`replenishKit: START picks=${before[0]} stick=${before[1]} planks=${before[2]} logs=${before[3]} table=${before[4]} planksEq=${planksEq()} y=${Math.round(bot.entity.position.y)} onSurface=${onSurface()} night=${isNight()} hostiles16=${hostilesNear(16)} hp=${Math.round(bot.health)} food=${bot.food}`);
 
     // 已达标 → 诚实 false (不该被派发到这; isGoalDone 释放承诺, 提案端负责别重复提)
-    if (picks() >= 3 && planksEq() >= 16 && cnt('stick') >= 8) {   // ★2026-07-05 3镐/16板 (与 world_model REPLENISH_* 同步加厚: 2镐262耐久撑不到下次补给, 20-40min/次复发)
-        prog('replenishKit: invariant already satisfied (picks>=3 planksEq>=16 stick>=8) — nothing to do, honest false');
+    if (picks() >= 3 && planksEq() >= 16 && cnt('stick') >= 24) {   // ★3镐/16板/24棍 (棍=地下石镐 fodder 弹药, 1 格槽=12 把柄; 14:39 实录: 唯一石镐耗尽→守卫无 fodder→铁镐#3 裸奔凿石 15min 阵亡) (与 world_model REPLENISH_* 同步加厚: 2镐262耐久撑不到下次补给, 20-40min/次复发)
+        prog('replenishKit: invariant already satisfied (picks>=3 planksEq>=16 stick>=24) — nothing to do, honest false');
         return false;
     }
 
@@ -297,9 +297,9 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         if (wantStone) { try { await skills.equip(bot, 'stone_pickaxe'); } catch (e) {} }
     }
 
-    // ── ⑤ 富余顺手补 stick>=8 (只花不伤不变量的板: 折棍后 planksEq 仍须 >=8) ─────────────
-    if (!stop() && !overBudget() && picks() >= 3 && cnt('stick') < 8 && planksHeld() >= 2) {
-        const need = Math.ceil((8 - cnt('stick')) / 4);                       // 1 recipe = 2 planks → 4 sticks
+    // ── ⑤ 富余顺手补 stick>=24 (只花不伤不变量的板: 折棍后 planksEq 仍须 >=8) ─────────────
+    if (!stop() && !overBudget() && picks() >= 3 && cnt('stick') < 24 && planksHeld() >= 2) {
+        const need = Math.ceil((24 - cnt('stick')) / 4);                       // 1 recipe = 2 planks → 4 sticks
         const affordable = Math.floor((planksEq() - 8) / 2);                  // 每 recipe 花 2 planksEq, 留住 8 底线
         const n = Math.min(need, Math.max(0, affordable));
         if (n > 0) {
