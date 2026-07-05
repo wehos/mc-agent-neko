@@ -452,13 +452,23 @@ export default async function surviveNow(bot, ctx, opts = {}) {
                 prog(`r${round}: 灰区解除 hp=${s.hp} food=${s.food} moved=${Math.round(bot.entity.position.distanceTo(entryPos))}b — 收官`);
                 break;
             }
-            // 苦力怕近身守则: 树自管距离(sp backoff 反射保留 claimant, 但树先手更稳)
+            // 苦力怕近身守则: 树自管距离(sp backoff 反射保留 claimant, 但树先手更稳)。
+            // ★隔墙判定(首战实录 r1-r2 同点同距空转): 拉开两次距离没变 = 怪够不到(封箱墙外),
+            //   守则放行进树 — snap 是裸距普查无 LOS, 用"位移无效"作可达性代理。
             const cr = s.hostiles.find(h => /creeper/i.test(h.name || ''));
-            if (cr && cr.d < 7 && cr.entity && cr.entity.isValid !== false) {
+            if (cr && cr.d < 7 && cr.entity && cr.entity.isValid !== false
+                && (bot._svnCreeperStall || 0) < 2) {
                 prog(`r${round}: creeper@${cr.d}b — 先拉开距离`);
+                const d0 = cr.d;
                 try { await ctx.skills.moveAwayFromEntity(bot, cr.entity, 12); } catch (e) {}
+                try {
+                    const d1 = (cr.entity && cr.entity.position) ? cr.entity.position.distanceTo(bot.entity.position) : d0;
+                    bot._svnCreeperStall = (Math.abs(d1 - d0) < 1.5) ? (bot._svnCreeperStall || 0) + 1 : 0;
+                    if ((bot._svnCreeperStall || 0) >= 2) prog(`r${round}: 拉开两次无效(d≈${d1.toFixed(1)}b) — 判定隔墙, 守则放行进树`);
+                } catch (e) {}
                 continue;
             }
+            if (!(cr && cr.d < 7)) bot._svnCreeperStall = 0;   // 苦力怕走了/远了 → 复位
             const elig = eligibleBranches(bot, ctx, s, failed);
             if (!elig.length) {
                 // 自愈型空树(血在回/威胁在外)按 noop 收官, 真绝境空树按诚实零产出
