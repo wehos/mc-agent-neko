@@ -20,7 +20,7 @@ import fs from 'fs';
 import { AGENT_MODE, FRAMEWORK_ENABLED_DEFAULT } from './contracts.js';
 import { getWorld, mentalState, proposeTasks, commitGoal } from './world_model.js';
 import { pending as pendingInstincts } from './instinct.js';
-import { resolve as arbitrate, setBodyOwner, releaseBodyOwner } from './arbiter.js';
+import { resolve as arbitrate, setBodyOwner, releaseBodyOwner, vitalNow as arbiterVitalNow } from './arbiter.js';
 
 const SHADOW_LOG = 'bots/_supervisor/framework-shadow.log';
 
@@ -67,6 +67,23 @@ const SUPERVISOR_CANCEL_WINDOW_MS = 30000;   // MUST mirror the skills' cancelRe
 //    INTERRUPT_HOLD_MS so the reflex finishes instead of being re-dispatched into.
 const INTERRUPT_UNWIND_LIMIT = 8;      // consecutive unwinds of one kind → cooldown anyway
 const INTERRUPT_HOLD_MS = 4000;        // post-unwind dispatch pause (reflex settle time)
+
+// ── ★GRAY-ZONE COMMANDER (session#4 大修 2026-07-05): 灰区(hp<12 || food<8 || 同锚>5min)
+//    无唯一决策人是全部僵局的机制根源 — 每个僵局都是 2-4 个局部合理否决闸的合取, 组合空间
+//    指数级, 打地鼠不可完成(#3 全天 45+ commits 实证)。触发时 kernel 绕过提案市场强制派发
+//    surviveNow(确定性生存树: 吃>打>床>觅食>挖墙转移>求死重置; 树平手时 LLM 战术官选罐装
+//    动作)。技能激活期间软 hold 让位: 走 execute() 的由 arbitration.json kernel:surviveNow
+//    精确行挡下, 绕过 execute() 的直写路径查 bot._surviveNowUntil 滚动戳(modes.js
+//    surviveNowActive)。真·保命地板(vitalNow/溺水 hold)不受影响。
+//    反活锁: SVN 不占用 _kindCooldownUntil(它不走提案), 自带升级冷却(零进度 60s*2^n 封顶
+//    8min, 期间滚动戳 ≤30s 过期 → 正常行为接管); 树的末枝(keepInventory 死亡重置, 服务器
+//    已 RCON 验证 → bots/_supervisor/keepinv.json)保证任何灰区在有限步内终止。 ──
+const SVN_HP_FLOOR = 12;               // hp < 12 → 灰区
+const SVN_FOOD_FLOOR = 8;              // food < 8 → 灰区
+const SVN_ANCHOR_MS = 300000;          // 同 10b 锚 >5min → 灰区(僵局信号)
+const SVN_ANCHOR_RADIUS = 10;          // 与 reflex_watchdog pin/pocketFuse 同口径
+const SVN_COOLDOWN_BASE_MS = 60000;    // 零进度升级冷却基数
+const SVN_COOLDOWN_CAP_MS = 480000;    // 冷却封顶 8min
 
 // ── ★BUSY-STUCK WATCHDOG: how long bot._currentSkill may sit set with NO supervised
 //    skill and NO executing action before the kernel declares it an orphan and clears it.
@@ -178,9 +195,69 @@ export class Kernel {
         } catch (e) {}
     }
 
+    // ── ★GRAY-ZONE anchor tracker: 每 tick 便宜维护(水平 hypot, >10b 或睡眠中重置)。
+    //    reflex_watchdog 的 pinAt 被豁免族反复清零, pocketFuse 锚只在 kick 分支更新,
+    //    都不可复用(recon 定论) — kernel 自持一份。 ──
+    _trackAnchor() {
+        try {
+            const bot = this.bot;
+            const p = bot.entity.position;
+            const a = bot._svnAnchor;
+            if (bot.isSleeping || !a || Math.hypot(p.x - a.x, p.z - a.z) > SVN_ANCHOR_RADIUS) {
+                bot._svnAnchor = { x: p.x, z: p.z, since: Date.now() };
+            }
+        } catch (e) {}
+    }
+
+    /** 灰区信号: 触发原因字符串 | null。死亡/重生盈余期(20s)不触发。 */
+    _grayZoneSignal() {
+        try {
+            const bot = this.bot;
+            if (!bot.entity) return null;
+            const hp = (typeof bot.health === 'number') ? bot.health : 20;
+            const food = (typeof bot.food === 'number') ? bot.food : 20;
+            if (hp <= 0) return null;
+            if (bot._diedAt && Date.now() - bot._diedAt < 20000) return null;
+            if (bot.isSleeping) return null;
+            if (hp < SVN_HP_FLOOR) return `hp${Math.round(hp)}<${SVN_HP_FLOOR}`;
+            if (food < SVN_FOOD_FLOOR) return `food${food}<${SVN_FOOD_FLOOR}`;
+            const a = bot._svnAnchor;
+            if (a && Date.now() - a.since > SVN_ANCHOR_MS) {
+                // 夜间健康驻守(蓄意夜宿/封箱 = 本仓库鼓励行为)不算僵局 — 锚独触发要么白天,
+                // 要么伴随血粮不适(评审: 否则每个无床之夜必然整夜 SVN↔冷却抖动)。
+                let night = false;
+                try { const t = bot.time.timeOfDay; night = t >= 12542 && t <= 23459; } catch (e) {}
+                if (!night || hp < 16 || food < 12) return `anchor${Math.round((Date.now() - a.since) / 60000)}min`;
+            }
+        } catch (e) {}
+        return null;
+    }
+
     // ── survival ───────────────────────────────────────────────────────────
     async _survivalTick() {
         const ms = mentalState(this.bot);
+        this._trackAnchor();
+        // 0) ★GRAY-ZONE force-commit: 唯一决策人钩子。首飞实录(2026-07-06 00:22): 僵局态
+        //    ms.busy 恒 true — hold 类 mode 动作(flee-hold wait(2500) 每 ~6s 一轮)把
+        //    actions.executing 占满, 全 busy 闸 = 钩子自噤 = 病灶原样。所以 force 门只认
+        //    技能互斥(_currentSkill/supervised_skill, 不打断真技能), 无视 mode 动作;
+        //    真·保命地板(vitalNow: 溺水/着火/hp<=4 掉血/岩浆)进行时不抢体。
+        const skillBusy = !!(this.bot._currentSkill || (this.agent && this.agent.supervised_skill));
+        let vitalBusy = false;
+        try { vitalBusy = arbiterVitalNow(this.bot); } catch (e) {}
+        if (!skillBusy && !vitalBusy) {
+            // 连败计数 30min 衰减: 陈年连败不该给全新灰区解锁求死分支(deathEligible exhausted 条款)
+            if (this.bot._svnFails && Date.now() - (this.bot._svnLastFailAt || 0) > 1800000) this.bot._svnFails = 0;
+            const gz = this._grayZoneSignal();
+            if (gz && Date.now() >= (this.bot._svnCooldownUntil || 0)
+                && Date.now() - (this._svnLastForceAt || 0) > 2000) {
+                this._svnLastForceAt = Date.now();
+                return this._commit({
+                    chosen: { kind: 'SURVIVE_NOW', skill: 'surviveNow', args: [{ reason: gz }], priority: 200 },
+                    reason: `gray-zone force: ${gz}`, freePlay: false,
+                }, true);
+            }
+        }
         // 1) Safety/instincts always run independently (modes.js). If a reflex is
         //    about to fire, don't also commit an LLM task into this instant.
         const reflexes = pendingInstincts(this.bot);
@@ -259,8 +336,11 @@ export class Kernel {
         return { chosen: pick, reason: `${tag} (no LLM yet): ${pick ? pick.rationale : 'none'}`, freePlay: false };
     }
 
-    /** Commit a decision = dispatch its skill (or shadow-log it). */
-    async _commit(decision) {
+    /** Commit a decision = dispatch its skill (or shadow-log it).
+     *  @param {boolean} [force] ★灰区强制派发: 跳过 supervisor-cancel 窗(pin-kick 会盖戳,
+     *  否则每次踢完 kernel 哑 30s)/interrupt-hold/仲裁 hold(矩阵行本就让 surviveNow 赢,
+     *  跳过是信封保险); 溺水 hold 是保命地板, force 也不跳。 */
+    async _commit(decision, force = false) {
         const p = decision.chosen;
         const line = `[kernel] commit ${p.kind} via ${p.skill || '(free)'} — ${decision.reason}`;
         if (this.shadow) {
@@ -275,7 +355,7 @@ export class Kernel {
         // arriving mid-tick still holds; it also keeps the stale-interrupt clear below from
         // swallowing the live cancel's interrupt_code. Reflexes/modes are untouched — this
         // only pauses task dispatch. Not a strike: nothing was dispatched.
-        if (this.bot._supervisorCancelAt && Date.now() - this.bot._supervisorCancelAt < SUPERVISOR_CANCEL_WINDOW_MS) {
+        if (!force && this.bot._supervisorCancelAt && Date.now() - this.bot._supervisorCancelAt < SUPERVISOR_CANCEL_WINDOW_MS) {
             if (this._cancelHoldAt !== this.bot._supervisorCancelAt) {
                 this._cancelHoldAt = this.bot._supervisorCancelAt;
                 const left = Math.ceil((this.bot._supervisorCancelAt + SUPERVISOR_CANCEL_WINDOW_MS - Date.now()) / 1000);
@@ -286,7 +366,7 @@ export class Kernel {
         // ★INTERRUPT-UNWIND HOLD: the previous dispatch just bailed on a live reflex interrupt —
         // re-dispatching immediately lands in the same interrupt (goBedSleep: 3 strikes in 16s).
         // Silent skip (≤13 ticks at 300ms); the unwind itself was logged in _settleDispatch.
-        if (this._interruptHoldUntil && Date.now() < this._interruptHoldUntil) return;
+        if (!force && this._interruptHoldUntil && Date.now() < this._interruptHoldUntil) return;
         // ★DROWNING HOLD (C345, drowning death 2026-07-02 12:46): the kernel dispatched
         // nightShelter into a bot that was actively sinking — the new skill's pathfinder and
         // the swim rescue then fought over one control channel until the bot died. While the
@@ -313,7 +393,7 @@ export class Kernel {
         // 新技能的 pathfinder 和 swim 营救抢一条控制通道直到淹死。异常全吞 → 照旧派发。
         try {
             const holder = this.bot._bodyOwner;
-            if (holder && holder.kind === 'mode' && /^mode:(self_preservation|mobility)$/.test(holder.name || '')) {
+            if (!force && holder && holder.kind === 'mode' && /^mode:(self_preservation|mobility)$/.test(holder.name || '')) {
                 // ★评审F3: live 加 3min 年龄上限 — death#264 类挂死(runAction 永不 resolve →
                 // finally 永不跑 → 令牌永不释放)叠加种子矩阵永久 holder 规则会无限期扣押
                 // 全部派发; 挂死营救最多扣 3 分钟, 与 BUSY_STUCK_MS 同一时间尺度。
@@ -358,7 +438,12 @@ export class Kernel {
         // (decide, this import) are exactly where a ws run_skill can start. Re-check right
         // before taking the lock; no awaits between this check and the assignment, so
         // check-and-set is atomic on the JS thread. Skipping is not a strike.
-        if (mentalState(this.bot).busy) {
+        // force 路径只查技能互斥 — mode 动作(hold wait)占着 actions.executing 是灰区常态,
+        // 全 busy 复查会把强制派发也噤掉(首飞实录同因)。
+        const _busyNow = force
+            ? !!(this.bot._currentSkill || (this.agent && this.agent.supervised_skill))
+            : mentalState(this.bot).busy;
+        if (_busyNow) {
             this.log(`[kernel] dispatch skip: a supervised skill is already running — not committing ${p.skill}`);
             return;
         }
@@ -413,6 +498,37 @@ export class Kernel {
     /** Post-dispatch accounting (failure strikes / cooldowns / no-delta override) — runs in
      *  the detached dispatch context after the skill settles, NOT on the tick chain. */
     _settleDispatch(p, snap, res, threw) {
+        // ── ★SURVIVE_NOW 专用阀 (不参与 3-strike/_kindCooldownUntil/NO-DELTA 常规簿记 —
+        //    它不走提案市场, 常规冷却对它无意义且中毒: 危机中被压 5min = 灰区病灶复发)。
+        //    零进度 → 升级冷却 60s*2^n 封顶 8min(期间滚动戳 ≤30s 过期, 正常行为接管;
+        //    连败计数喂给技能的求死分支门槛); 有进度 → 清计数 + 5s 小憩(给正常派发窗口);
+        //    interrupt-unwind → 照常规 4s settle, 不罚。 ──
+        if (p.kind === 'SURVIVE_NOW') {
+            // noop = 假触发(仅同锚但健康+无威胁): 中性 — 不计连败不升级(技能已重置锚,
+            // 5min 内不会再触发); 固定 60s 冷却兜底防抖。
+            if (res && typeof res === 'object' && res.noop === true) {
+                this.bot._svnCooldownUntil = Date.now() + 60000;
+                return;
+            }
+            const failed = threw || res === false
+                || (res && typeof res === 'object' && (res.ok === false || res.failed === true));
+            if (failed && this.bot.interrupt_code) {
+                this._interruptHoldUntil = Date.now() + INTERRUPT_HOLD_MS;
+                this.log(`[kernel] surviveNow interrupt-unwind — 不罚, ${Math.round(INTERRUPT_HOLD_MS / 1000)}s 后再评估`);
+            } else if (failed) {
+                const n = (this.bot._svnFails || 0) + 1;
+                this.bot._svnFails = n;
+                this.bot._svnLastFailAt = Date.now();
+                const cd = Math.min(SVN_COOLDOWN_CAP_MS, SVN_COOLDOWN_BASE_MS * Math.pow(2, n - 1));
+                this.bot._svnCooldownUntil = Date.now() + cd;
+                this.log(`[kernel] surviveNow 零进度 x${n} — 灰区专用冷却 ${Math.round(cd / 1000)}s`);
+                try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [kernel] ★surviveNow 零进度 x${n} → 冷却 ${Math.round(cd / 1000)}s\n`); } catch (e) {}
+            } else {
+                this.bot._svnFails = 0;
+                this.bot._svnCooldownUntil = Date.now() + 5000;
+            }
+            return;
+        }
         // ★DISPATCH-FAILURE COOLDOWN. Strict `res === false` (NOT falsy): customSkill returns
         // false on a missing file / no default export / invalid name; skills returning 0 (e.g.
         // mineDiamonds' dia() count) or undefined are NOT counted. Object returns fail ONLY via

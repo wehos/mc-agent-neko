@@ -30,9 +30,20 @@ async function say(agent, message) {
     agent.openChat(message);
 }
 
+// ★2026-07-05 灰区指挥官 (session#4 大修): surviveNow 技能激活期间(滚动 30s 心跳戳,
+// 技能主循环刷新; 技能楔死/退出后 ≤30s 自动失效)挂起绕过 execute() 仲裁的软压制路径 —
+// 灰区(中低血粮+中威胁)的每个僵局都是 2-4 个局部合理否决闸的合取, 唯一决策人收敛到
+// surviveNow 的确定性树(吃>打>床>觅食>挖墙转移>求死重置)。走 execute() 的 hold 由
+// arbitration.json 的 kernel:surviveNow 精确行统一挡下, 不经此旗。真·保命地板
+// (arbiter.vitalNow: 溺水/着火/hp<=4 掉血/岩浆)不受此旗影响。
+function surviveNowActive(bot) {
+    try { return !!(bot && bot._surviveNowUntil && Date.now() < bot._surviveNowUntil); } catch (e) { return false; }
+}
+
 function famineBodyFreeze(agent, owner) {
     const bot = agent && agent.bot;
     if (!bot || !bot.entity) return false;
+    if (surviveNowActive(bot)) return false;   // ★灰区指挥官持体: 树自带觅食/求死出口, 冻结即死锁
     // ★C228: yield to an explicitly-dispatched recovery VENTURE (③ missionNether's FAMINE
     // backoff dispatches forageExplore to walk OUT of a food desert). The skill-name allowlist
     // below CANNOT see it — a nested customSkill leaves bot._currentSkill = the sticky
@@ -351,7 +362,8 @@ function _lowHpNoRegenContainedHoldRaw(bot) {
     //   hp gate + villageHarvest hard-defers on hostiles>2/hp<=4,不会无脑冲怪堆(C32 安全约束保留)。
     //   且本函数 149-151/174 行已对 water/lava/fire/坠落/被弹/贴脸 creeper 返回 null(那些 LETHAL
     //   情形不进入此 hold)→ 放行觅食只发生在"封箱安全但食料切れ"的正确场景。
-    if (/forageExplore|escapePlan|digReset|feedUp|villageHarvest/i.test(bot._currentSkill || '')) return null;
+    if (/forageExplore|escapePlan|digReset|feedUp|villageHarvest|surviveNow/i.test(bot._currentSkill || '')) return null;
+    if (surviveNowActive(bot)) return null;   // ★灰区指挥官激活(嵌套技能期间名单看不见外层, 旗兜底)
     if (!(bot.health <= 8 && bot.food < 18)) return null;
     const hasNormalFood = bot.inventory && bot.inventory.items().some(i => i && i.name && NORMAL_FOOD_RE.test(i.name));
     if (hasNormalFood) return null;
@@ -426,6 +438,7 @@ function famineForageActive(bot) {
 
 function tableRecoveryHold(bot) {
     if (!bot || !bot.entity) return null;
+    if (surviveNowActive(bot)) return null;   // ★灰区指挥官持体期间不 hold
     let isNight = false;
     try {
         const t = bot.time && bot.time.timeOfDay;
@@ -601,6 +614,7 @@ const modes_list = [
             };
             try {
                 if (!bot || !bot.entity || this.isDay(bot)) return status;
+                if (surviveNowActive(bot)) return status;   // ★灰区指挥官持体: 夜 hold 让位给树
                 const p = bot.entity.position;
                 const feet = bot.blockAt(p) || { name: 'air' };
                 const head = bot.blockAt(p.offset(0, 1, 0)) || { name: 'air' };
@@ -2080,7 +2094,7 @@ const modes_list = [
                 const lowHpNoRegenNoFood = bot.health <= 8 && bot.food < 18 && !hasNormalFood;
                 const coveredOrEnclosed = (bot._mobility && bot._mobility.enclosed) || this.hasOverheadCover(bot, 2, 6);
                 const hungryNoFoodCovered = bot.food <= 8 && !hasNormalFood && coveredOrEnclosed;
-                if ((lowHpNoRegenNoFood || hungryNoFoodCovered) && coveredOrEnclosed && cr0Dist > 5.5) {
+                if ((lowHpNoRegenNoFood || hungryNoFoodCovered) && coveredOrEnclosed && cr0Dist > 5.5 && !surviveNowActive(bot)) {
                     // ★停滞打破 (worker-death 06-26 实锤: bot 在此 hold 冻 150min @91,159 food=0 hp7,
                     //   苦力怕 6.2格静止不动). "no-calorie-burning hold" 假设威胁会过去/食物会来,但 food=0
                     //   永不回血 + 静止远苦力怕(>5.5格)不走 = 永久停滞(进度归零本身即罪). 修: 白天连续
@@ -2361,14 +2375,18 @@ const modes_list = [
                     try { bot.clearControlStates(); } catch (e) {}
                 });
             }
-            else if (this.shouldNightShelter(bot)) {
+            else if (this.shouldNightShelter(bot) && !surviveNowActive(bot)) {
+                // ★svnActive 压制(评审): sp 保留 claimant 是为早窗溺水/MLG 营救 — bunkerDown
+                // 这类"环境整理"枝在灰区指挥官持体时必须让树拍板, 否则僵局制造者借道回归。
                 if (Date.now() - (this._lastNightfallSayAt || 0) > 30000) {
                     this._lastNightfallSayAt = Date.now();
                     say(agent, 'Nightfall — securing till dawn (proactive, before mobs swarm).');
                 }
                 execute(this, agent, () => this.bunkerDown(agent));
             }
-            else if (this.shouldFlee(bot)) {
+            else if (this.shouldFlee(bot) && !surviveNowActive(bot)) {
+                // ★svnActive 压制(评审): 同上 — dig-in 墙封/逃跑枝在灰区指挥官持体时让树拍板
+                // (树的 FIGHT/RELOCATE/DEATH 自会处理), 否则 mexican-standoff 复发。
                 // THREAT RETREAT — "judge you can't win, then run." Count nearby
                 // hostiles and check for a weapon; if we're outmatched (no weapon /
                 // low health / 2+ mobs) FLEE decisively and KEEP fleeing every tick
@@ -2472,6 +2490,15 @@ const modes_list = [
             if (famineBodyFreeze(agent, 'unstuck')) {
                 this.prev_location = null;
                 this.stuck_time = 0;
+                this.step_prev_location = null;
+                return;
+            }
+            if (surviveNowActive(bot)) {
+                // ★灰区指挥官持体: 树内分支(持盾站桩/床边等待/求死站桩)是蓄意驻留, 非楔死 —
+                // moveAway/GoalInvert/65s cleanKill 会拆树。技能楔死时滚动戳 ≤30s 过期, 本安全网自动恢复。
+                this.prev_location = null;
+                this.stuck_time = 0;
+                this.prev_dig_block = null;
                 this.step_prev_location = null;
                 return;
             }
@@ -3449,7 +3476,9 @@ const modes_list = [
                             && !fluidNow && !fallingNow;
                     } catch (e) {}
                     const activeBodyWork = !!(bot.targetDigBlock || bot._mineMotionActiveDig || (bot._bodyDigLockUntil && Date.now() < bot._bodyDigLockUntil));
-                    const activeEscapeWork = /surfaceUp|feedUp/.test(bot._currentSkill || '');
+                    // ★灰区指挥官: surviveNow 激活期间(滚动戳)按逃生作业豁免 pin-kick — 戳楔死
+                    // ≤30s 过期后 watchdog 恢复踢, 与树互为安全网。
+                    const activeEscapeWork = /surfaceUp|feedUp/.test(bot._currentSkill || '') || surviveNowActive(bot);
                     // ★2026-07-05 口袋均衡熔断 (2h 沟壑实录: 8 类 hold 轮番豁免 + STUCK 重启原地
                     // 重连 = 谁都不动谁都不死的均衡, 3 次 25min 重启全免疫)。同锚 10b 内豁免
                     // 累计 >12min → 停止豁免, 放行强制释放链 (低血出门赌命=死亡重生回床=离开
@@ -6015,6 +6044,8 @@ const modes_list = [
                                 const t = w && w.time; if (!t || (t.phase !== 'dusk' && t.phase !== 'night')) return false;
                                 if (w.threat && (w.threat.actionable | 0) > 0) return false;
                                 if (w.vitals && w.vitals.hp < 6) return false;
+                                if (surviveNowActive(b)) return false;   // ★灰区指挥官持体: 床由树的③分支统一处理, 本能不抢
+
                                 // ★yield to a committed night plan (live 2026-07-02 07:12: this instinct
                                 // dragged the bot back to the bed the moment mineDown dug 3 blocks down —
                                 // GoalNear(bed) right after every descent — so DUSK_MINE_NIGHT 3-struck
@@ -6084,6 +6115,7 @@ const modes_list = [
             if (held && /_pickaxe$/.test(held.name)) return;
             if (!/stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/.test(tgt.name)) return;
             if (bot._plannedNoPickStoneUntil && Date.now() < bot._plannedNoPickStoneUntil) return;
+            if (surviveNowActive(bot)) return;   // ★灰区指挥官: 求生挖掘不设卡(树自管工具), interrupt 会拆树
             // REGIONAL dedupe: a legit NOPICK climb chews stone for many minutes in one
             // area — per-block 30s dedupe pushed 5+ alerts per climb (pure noise once
             // the supervisor knows). One alert per ~16-block region per 10 minutes; a

@@ -1,0 +1,6 @@
+{
+  "_comment": "keepInventory server-side verification cache - hard precondition for surviveNow deliberate-death branch. Written by supervisor after RCON read-only query 'gamerule keepInventory'. Branch self-disables when stale >24h or value!=true.",
+  "value": true,
+  "verifiedVia": "rcon.mjs gamerule keepInventory -> 'Gamerule keepInventory is currently set to: true'",
+  "ts": 1783265144627
+}
