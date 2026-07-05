@@ -186,15 +186,12 @@ export default async function replenishKit(bot, ctx, opts = {}) {
             prog(`replenishKit: ③ planks ${pb}→${planksHeld()} (from ${logName} x${nRecipes})`);
         }
     }
-    if (!stop() && !overBudget() && cnt('stick') < 2 && planksHeld() >= 2) {
-        const sb = cnt('stick');
-        try { await skills.craftRecipeLocal(bot, 'stick', 1); } catch (e) { prog(`replenishKit: ③ stick craft err ${e.message}`); }
-        prog(`replenishKit: ③ stick ${sb}→${cnt('stick')}`);
-    }
     // ── ③.5 ★耐久资产前移 (2026-07-05 实录: 补给周期几乎从未活到尾部⑥⑦ — 夜/死总在中途
     //    打断; 而台/床是 keepInventory 下一次合成永久持有的资产, 必须最先锁定。旧 ③ 的
     //    !tableNear() 门是反的: 在家台旁边就不揣台 → 下矿就没了。板一到手: 台(4板)→床
-    //    (同色羊毛3+板3), 然后才轮到消耗品(镐/棍)。craftRecipeLocal 零产出回退 craftRecipe。──
+    //    (同色羊毛3+板3), 然后才轮到消耗品(镐/棍)。craftRecipeLocal 零产出回退 craftRecipe。
+    //    ★排序注: 台在折棍【之前】 — 实录 10:08 最小木量(8板)时折棍先吃 2 板, 台(4板)被
+    //    截胡到 2 板断供。台是万物解锁器, 排全队最前。──
     if (!stop() && !overBudget() && cnt('crafting_table') < 1 && planksHeld() >= 4) {
         const tb = cnt('crafting_table');
         let r35 = null;
@@ -219,6 +216,12 @@ export default async function replenishKit(bot, ctx, opts = {}) {
             }
             prog(`replenishKit: ③.5 随身床 ${bedName} → ${cnt(bedName)} (同色 wool=${best[1]})`);
         }
+    }
+    // ── ③.6 折棍 (台/床锁定后才轮到消耗品) ──
+    if (!stop() && !overBudget() && cnt('stick') < 2 && planksHeld() >= 2) {
+        const sb = cnt('stick');
+        try { await skills.craftRecipeLocal(bot, 'stick', 1); } catch (e) { prog(`replenishKit: ③.6 stick craft err ${e.message}`); }
+        prog(`replenishKit: ③.6 stick ${sb}→${cnt('stick')}`);
     }
 
     // ── ④ 补镐到 2 把: 有 cobble(>=3/把)先石镐, 没有则木镐过渡 (镐是消耗品跑道, 宁多勿清)。
