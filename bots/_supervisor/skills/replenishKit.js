@@ -107,6 +107,19 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         prog(`replenishKit: ⓪ 清囊 tossed=${tossed} → empty=${_empty()} (砍木/合成都要有落点)`);
     }
 
+    // ── ⓪.5 ★零镐急救快道 (12:09 实录: 台×2+棍11+圆石在包, 镐却迟迟不出 — ② 砍木排在
+    //    ④ 前, 无板时整个派发预算烧在砍树上)。镐=0 且石镐材料齐(台/棍2/圆石3) → 进门先造
+    //    一把再走正常流程; 镐是全系统的血液, 不等木头。──
+    if (!stop() && (() => { try { return bot.inventory.items().filter(i => /_pickaxe$/.test(i.name)).length === 0; } catch (e) { return false; } })()
+        && cnt('crafting_table') >= 1 && cnt('stick') >= 2 && cnt('cobblestone') >= 3) {
+        const p0 = picks();
+        try { await skills.craftRecipeLocal(bot, 'stone_pickaxe', 1); } catch (e) { prog(`replenishKit: ⓪.5 急救镐 err ${e.message}`); }
+        if (picks() <= p0) {
+            try { await skills.craftRecipe(bot, 'stone_pickaxe', 1); } catch (e) { prog(`replenishKit: ⓪.5 fallback err ${e.message}`); }
+        }
+        prog(`replenishKit: ⓪.5 零镐急救 → picks=${picks()} (台${cnt('crafting_table')} 棍${cnt('stick')} 石${cnt('cobblestone')})`);
+    }
+
     // ── ① 不在地表 → surfaceUp 上浮 (预算 90s — 评审修正: 原先只有外层 Promise.race 截断,
     //      被 race 掉的 surfaceUp 成孤儿协程, 继续清 interrupt_code 并与步②③ 抢身体控制权
     //      (C362-broad 200 徒手破顶预算 × 90s 截断 = 20min 级互绞)。现在把 90s 作为 opts.maxMs
