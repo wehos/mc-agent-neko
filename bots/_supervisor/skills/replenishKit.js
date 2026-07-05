@@ -254,7 +254,14 @@ export default async function replenishKit(bot, ctx, opts = {}) {
     //    造一张揣包里, planksEq 底线 8 之外才花。──────────────────────────────────────────
     if (!stop() && !overBudget() && cnt('crafting_table') < 1 && planksEq() >= 12) {
         const tb = cnt('crafting_table');
-        try { await skills.craftRecipeLocal(bot, 'crafting_table', 1); } catch (e) { prog(`replenishKit: ⑥ pocket-table err ${e.message}`); }
+        let r6 = null;
+        try { r6 = await skills.craftRecipeLocal(bot, 'crafting_table', 1); } catch (e) { prog(`replenishKit: ⑥ pocket-table err ${e.message}`); }
+        // ★2026-07-05 实录 00:52 双跑零产出且无异常 — craftRecipeLocal 的失败诊断在 bot.output
+        // 黑洞里看不见。落盘返回值; false 时回退主力路径 craftRecipe (本局石镐即它所造)。
+        if (cnt('crafting_table') <= tb) {
+            prog(`replenishKit: ⑥ craftRecipeLocal=${JSON.stringify(r6)} 零产出 → 回退 craftRecipe`);
+            try { await skills.craftRecipe(bot, 'crafting_table', 1); } catch (e) { prog(`replenishKit: ⑥ fallback err ${e.message}`); }
+        }
         prog(`replenishKit: ⑥ pocket crafting_table ${tb}→${cnt('crafting_table')} (地下断镐自救的最后一块拼图)`);
     }
 
@@ -267,7 +274,12 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         const best = Object.entries(wools).sort((a, b) => b[1] - a[1])[0];   // 同色口径 (setBed 混色羊毛教训)
         if (best && best[1] >= 3 && planksHeld() >= 3) {
             const bedName = best[0].replace('_wool', '_bed');
-            try { await skills.craftRecipeLocal(bot, bedName, 1); } catch (e) { prog(`replenishKit: ⑦ bed err ${e.message}`); }
+            let r7 = null;
+            try { r7 = await skills.craftRecipeLocal(bot, bedName, 1); } catch (e) { prog(`replenishKit: ⑦ bed err ${e.message}`); }
+            if (cnt(bedName) < 1) {
+                prog(`replenishKit: ⑦ craftRecipeLocal=${JSON.stringify(r7)} 零产出 → 回退 craftRecipe`);
+                try { await skills.craftRecipe(bot, bedName, 1); } catch (e) { prog(`replenishKit: ⑦ fallback err ${e.message}`); }
+            }
             prog(`replenishKit: ⑦ 随身床 ${bedName} → ${cnt(bedName)} (同色 wool=${best[1]})`);
         }
     }
