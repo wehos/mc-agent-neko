@@ -3084,7 +3084,10 @@ const modes_list = [
             // With a shield we can fight even at lower HP (block negates the hits); the
             // shieldFight skill closes on the enemy under guard then strikes — the real
             // counter to skeletons. Without a shield, only fight when healthy (>12).
-            const minHp = hasShield ? 8 : 12;
+            // ★2026-07-05 8→6 (90min 树荫骷髅站桩僵局: hp7+有盾差 1 点被拒战, 5.8b 差 1.3b
+            // 不算贴脸 — 远程骚扰者在 4.5-8b 带永远打不着。盾挡箭逼近正是本技能设计用途;
+            // keepInventory 下劣势面=一次重置, 站桩饿死面=无限)。
+            const minHp = hasShield ? 6 : 12;
             // ★EXCEPTION — point-blank ranged enemy: the hp gate is BACKWARDS for a
             // skeleton inside melee reach. Death #263 (blackbox): hp4, skeleton at
             // 1.6-4b in a dug shaft — self_defense refused (4<12), self_preservation
