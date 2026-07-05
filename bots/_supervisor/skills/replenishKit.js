@@ -186,6 +186,25 @@ export default async function replenishKit(bot, ctx, opts = {}) {
             prog(`replenishKit: ③ planks ${pb}→${planksHeld()} (from ${logName} x${nRecipes})`);
         }
     }
+    // ── ③.4 ★清囊保槽 (10:44 定案: craftRecipeLocal=true 却零产出 = 背包满(1268件),
+    //    合成产物无处落包直接掉地 — chopWood 有 C299/C321 清囊, 合成侧一直没有。
+    //    保 ≥3 空槽: 只修剪具名大宗超帽 (白名单式, 永不碰工具/食物/矿物/木/羊毛)。──
+    const _empty = () => { try { return bot.inventory.emptySlotCount(); } catch (e) { return 9; } };
+    if (!stop() && _empty() < 3) {
+        const CAPS = { cobblestone: 128, dirt: 64, gravel: 8, andesite: 0, diorite: 0, granite: 0, tuff: 0, flint: 4, rotten_flesh: 8, netherrack: 0, cobbled_deepslate: 64, sand: 0, sandstone: 0 };
+        let tossed = 0;
+        for (const it of bot.inventory.items()) {
+            if (_empty() >= 3) break;
+            const cap = CAPS[it.name];
+            if (cap == null) continue;
+            const have = cnt(it.name);
+            if (have <= cap) continue;
+            const drop = Math.min(it.count, have - cap);
+            try { await bot.toss(it.type, null, drop); tossed += drop; } catch (e) {}
+        }
+        prog(`replenishKit: ③.4 清囊 tossed=${tossed} → empty=${_empty()} (合成产物要有落点)`);
+    }
+
     // ── ③.5 ★耐久资产前移 (2026-07-05 实录: 补给周期几乎从未活到尾部⑥⑦ — 夜/死总在中途
     //    打断; 而台/床是 keepInventory 下一次合成永久持有的资产, 必须最先锁定。旧 ③ 的
     //    !tableNear() 门是反的: 在家台旁边就不揣台 → 下矿就没了。板一到手: 台(4板)→床
