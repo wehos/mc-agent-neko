@@ -330,6 +330,19 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         }
     }
 
+    // ── ⑨ ★离场台回收 (12:49 实录: 台 2→1→0 漏光 — ⓪.5/③.5 的 craftRecipe 回退会自放台
+    //    但没有 craftRecipeLocal 的 T-0079 回收)。包里没台且 6 格内有台块 → 拆回包。──
+    if (!stop() && cnt('crafting_table') < 1) {
+        try {
+            const tb = bot.findBlock({ matching: (b) => b && b.name === 'crafting_table', maxDistance: 6 });
+            if (tb) {
+                await skills.breakBlockAt(bot, tb.position.x, tb.position.y, tb.position.z).catch(() => {});
+                await skills.pickupNearbyItems(bot).catch(() => {});
+                prog(`replenishKit: ⑨ 离场台回收 → table=${cnt('crafting_table')}`);
+            }
+        } catch (e) {}
+    }
+
     const met = picks() >= 3 && planksEq() >= 16;   // ★3镐/16板
     return settle(stop() ? 'interrupted' : (overBudget() ? 'budget-5min' : (met ? 'invariant-met' : 'partial')));
 }
