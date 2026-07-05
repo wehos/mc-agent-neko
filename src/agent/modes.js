@@ -5747,7 +5747,7 @@ const modes_list = [
                 //   +台通路时井下随时补镐), 此时 60 耐久足够开工 — oracle 短程直采更不在话下。
                 const canMineWholeNight = (picksBudget >= cfg.mineNightPickBudget || (sufficientForUnderground && picksBudget >= 60))
                     && sufficientForUnderground && food >= cfg.mineNightFood && (cobble + dirtCt) >= 4
-                    && (rationsCt >= 2 || (food >= 16 && hp >= 16));
+                    && (rationsCt >= 2 || (food >= 14 && hp >= 14));   // 16→14 (03:09 实录肚15卡线): 夜耗3-5, 14起跳上浮仍9-11, 灰区兜底
                 // gravity-pit trap (mirror prepNether C334): digging into a sand/red_sand/gravel column
                 // collapses onto the head → suffocation. Below dy-1/dy-2 (dug) + dy+2 (drops into head gap).
                 const _GRAV_DEC = /^(sand|red_sand|gravel|suspicious_sand|suspicious_gravel)$/;
