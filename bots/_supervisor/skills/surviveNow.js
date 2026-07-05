@@ -158,8 +158,8 @@ function deathEligible(bot, ctx, s, failed) {
 function eligibleBranches(bot, ctx, s, failed) {
     const out = [];
     // ⓪ REGEN: 满粮低血且威胁在外 — 自然回血就是正确答案(擦伤灰区), 站桩即产出
-    if (!failed.has('REGEN') && s.hp < HP_FLOOR && s.food >= 17
-        && !s.hostiles.some(h => h.d <= 16)) out.push('REGEN');
+    if (!failed.has('REGEN') && s.hp < HP_FLOOR && s.food >= 18
+        && !s.hostiles.some(h => h.d <= 16)) out.push('REGEN');   // >=18: 原版回血线 (17 会白站 75s)
     if (!failed.has('EAT') && s.hasAnyEdible && s.food < 17) out.push('EAT');
     // 无盾门槛收紧(死55实录: hp11 石剑硬换僵尸 3s 掉到 hp4): 无盾只在 hp>=14 且单怪时开打
     if (!failed.has('FIGHT') && s.hostiles.length && s.hostiles[0].d <= 14 && s.hp >= 8
