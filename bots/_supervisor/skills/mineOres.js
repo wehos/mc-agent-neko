@@ -24,6 +24,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
     const ore = String((opts && opts.ore) || 'iron');
     const count = Number(opts && opts.count) > 0 ? Number(opts.count) : 8;
     const maxMs = Number(opts && opts.maxMs) > 0 ? Number(opts.maxMs) : 300000;
+    const yMax = Number.isFinite(opts && opts.yMax) ? opts.yMax : Infinity;   // 夜挖只收地下带目标
     const deadline = Date.now() + maxMs;
     const dropRe = DROP_OF[ore] || new RegExp(`^raw_${ore}$`);
     const pickRe = PICK_FOR[ore] || /_pickaxe$/;
@@ -45,7 +46,9 @@ export default async function mineOres(bot, ctx, opts = {}) {
     const oracleList = () => {
         try {
             const oo = bot._world && bot._world.oracleOres;
-            if (oo && Array.isArray(oo[ore]) && oo[ore].length && Date.now() - (oo.ts || 0) < 600000) return oo[ore];
+            if (oo && Array.isArray(oo[ore]) && oo[ore].length && Date.now() - (oo.ts || 0) < 600000) {
+                return yMax === Infinity ? oo[ore] : oo[ore].filter(c => c && c.y <= yMax);
+            }
         } catch (e) {}
         return [];
     };

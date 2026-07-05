@@ -376,11 +376,13 @@ function isFamineStall(w) {
 }
 // ★2026-07-06 oracle 制导采矿: ore-oracle 的最近矿坐标 (新鲜 <10min 且平距 <250 才可用;
 //   缺失/陈旧 → null, 调用方回退盲挖)。key ∈ {iron, coal, diamonds}。
-function oracleOreTarget(w, key) {
+function oracleOreTarget(w, key, yMax = Infinity) {
     try {
         const oo = w && w.oracleOres;
         if (!(oo && Array.isArray(oo[key]) && oo[key].length && Date.now() - (oo.ts || 0) < 600000)) return null;
-        const c0 = oo[key][0];
+        // yMax: 夜挖只要地下带目标 (山面矿=夜间地表裸采) — 列表按距排序, 取首个达标者
+        const c0 = oo[key].find(c => c && c.y <= yMax);
+        if (!c0) return null;
         // 距离闸用扫描原点 botPos (RESCAN_DIST=48 内与真位等效): w.vitals 不带坐标
         const bp = oo.botPos || c0;
         if (Math.hypot(c0.x - bp.x, c0.z - bp.z) >= 250) return null;
@@ -1091,11 +1093,11 @@ export function proposeTasks(world, bot) {
                 //   (y<=50) — 山面铁(y87)会把密封楼梯换成夜间地表裸采。
                 const nightHasStonePick = invCount(bot, /(stone|iron|diamond|netherite)_pickaxe$/) >= 1;
                 const nightNeedIron = !hasIronTierPick(w) || ironForArmor(bot) < ironDemandTotal(w, bot);
-                let nightIronTgt = (nightNeedIron && nightHasStonePick) ? oracleOreTarget(w, 'iron') : null;
-                if (nightIronTgt && nightIronTgt.y > 50) nightIronTgt = null;
+                // y<=50: 列表内找最近的地下铁 (oo.iron[0] 可能是山面铁, 单看[0]会误判无目标退盲挖)
+                const nightIronTgt = (nightNeedIron && nightHasStonePick) ? oracleOreTarget(w, 'iron', 50) : null;
                 if (nightIronTgt) {
                     push({ kind: TASK.DUSK_MINE_NIGHT, priority: 94, skill: 'mineOres',
-                           args: [{ ore: 'iron', count: 12, maxMs: 480000 }],
+                           args: [{ ore: 'iron', count: 12, maxMs: 480000, yMax: 50 }],
                            rationale: `kitted night mining — ORACLE-guided iron run @${nightIronTgt.x},${nightIronTgt.y},${nightIronTgt.z} (iron gap first, then diamonds)` });
                 } else {
                     push({ kind: TASK.DUSK_MINE_NIGHT, priority: 94, skill: 'mineDown',
