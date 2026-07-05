@@ -100,6 +100,25 @@ export default async function mineOres(bot, ctx, opts = {}) {
         if (bot.interrupt_code || bot.death_abort || bot.health <= 0) break;
         if (!hasPick()) { prog(`镐没了(r${rounds}) — 停`); break; }
         if (marooned()) { prog(`r${rounds}: MAROONED — 让位 mobility 脱困`); break; }
+        // ★围殴中止 (deaths 58-60 三连死同源实录: collectBlock 把 bot 带进农场下怪窝):
+        //   ≥2 敌对近身或低血1敌对 → 携进度收工, 身体交反射/灰区 (挖矿不打逆风仗)。
+        const swarm = (() => {
+            try {
+                const p = bot.entity.position;
+                let n = 0;
+                for (const e of Object.values(bot.entities || {})) {
+                    if (!e || e === bot.entity || !e.position) continue;
+                    let h = false;
+                    try { h = ctx.mc.isHostile(e); } catch (e2) {}
+                    if (h && e.position.distanceTo(p) <= 10) n++;
+                }
+                return n;
+            } catch (e) { return 0; }
+        })();
+        if (swarm >= 2 || (swarm >= 1 && bot.health <= 10)) {
+            prog(`r${rounds}: 围殴中止 (hostiles10b=${swarm} hp=${Math.round(bot.health)}) — 携进度退`);
+            break;
+        }
         // 背包临满 → 先清囊 (replenishKit ⓪ 同款 CAPS 白名单; 首战实录: 890 件杂物 0s 收工
         // 三振整个 kind) — 倒不出 2 槽才真收工。永不碰工具/食物/矿物/木/羊毛。
         const emptyN = () => { try { return bot.inventory.emptySlotCount(); } catch (e) { return 9; } };

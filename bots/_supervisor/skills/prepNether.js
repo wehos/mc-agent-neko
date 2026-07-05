@@ -1286,6 +1286,15 @@ async function prepNetherInner(bot, ctx) {
         } catch (e) { return false; }
     };
     const corpseRun = async () => {
+        // ★2026-07-06 keepInventory 闸 (deaths=59 后 93 格白跑坟实录): keepInv 下死亡零掉落,
+        //   跑坟纯负价值(与 BANK_GEAR 停用同理)。keepinv.json 由值守 RCON 复验维护(24h TTL)。
+        try {
+            const ki = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'keepinv.json'), 'utf8'));
+            if (ki && ki.value === true && Date.now() - ki.ts < 86400000) {
+                try { fs.unlinkSync(DPOS); } catch (e) {}
+                return;
+            }
+        } catch (e) {}
         let d; try { d = JSON.parse(fs.readFileSync(DPOS, 'utf8')); } catch (e) { return; }
         if (!d || typeof d.x !== 'number') { try { fs.unlinkSync(DPOS); } catch (e) {} return; }
         const ageS = Math.round((Date.now() - (d.t || 0)) / 1000);
