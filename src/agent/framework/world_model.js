@@ -779,10 +779,12 @@ export function proposeTasks(world, bot) {
         //   → 日间制导首铁行 (夜挖 MINE_THROUGH_NIGHT 只覆盖夜; 此前首铁靠 GO_UNDERGROUND 盲逛)。
         //   同 kind GET_IRON_TOOLS: isGoalDone=hasIronTierPick, 承诺贯穿 采→熔→锻 三态切换。
         if (tier.rank === 2 && ironForArmor(bot) < 3 && !hasIronTierPick(w)) {
-            const firstIronTgt = oracleOreTarget(w, 'ironDeep') || oracleOreTarget(w, 'iron');
+            // ironDeep 优先且 args 必须带 yMax(实录 19:17: 提案看 ironDeep 但技能没收到 yMax,
+            // 自读 iron[0]=y62-93 山面铁 → 崖壁啃石 0 进账 + 190s 磨断仅剩两把镐)
+            const firstIronTgt = oracleOreTarget(w, 'ironDeep');
             if (firstIronTgt) {
                 push({ kind: PROPOSAL_KIND.GET_IRON_TOOLS, priority: 47, skill: 'mineOres',
-                       args: [{ ore: 'iron', count: 4, maxMs: 240000 }],
+                       args: [{ ore: 'iron', count: 4, maxMs: 240000, yMax: 50 }],
                        rationale: `stone tier + only ${ironForArmor(bot)} iron — ORACLE first-iron run @${firstIronTgt.x},${firstIronTgt.y},${firstIronTgt.z} (unlock iron pickaxe)`,
                        hints: { tier: tier.level, iron: ironForArmor(bot), oracle: true } });
             }
@@ -821,12 +823,12 @@ export function proposeTasks(world, bot) {
             const demand = ironDemandTotal(w, bot);
             // ★2026-07-06 用户令 (oracle视角挖铁): ore-oracle 已扫铁坐标 → mineOres 直奔;
             //   oracle 缺失/陈旧才回退盲挖 mineDown 铁带。kind/isGoalDone 簿记不变。
-            const ironTgt = oracleOreTarget(w, 'iron');
+            const ironTgt = oracleOreTarget(w, 'ironDeep') || oracleOreTarget(w, 'iron', 50);   // 地下带优先(山面铁=崖壁啃石磨镐, 19:17 实录)
             progressLogThrottled(bot, 'ironArmorSet', 120000,
                 `[proposeTasks] ★GET_IRON_ARMOR_SET-propose: iron=${ironForArmor(bot)}/${demand} (armor=${vitals.armor || 0}/4 缺甲成本=${ironArmorRemainingCost(w)} portal铁=${portalKitIronCost(bot)}) — ${ironTgt ? `ORACLE直奔 ${ironTgt.x},${ironTgt.y},${ironTgt.z}` : `盲挖铁带 y${IRON_TARGET_Y}`} (pri=46.5)`);
             push({ kind: PROPOSAL_KIND.GET_IRON_ARMOR_SET, priority: 46.5,
                    skill: ironTgt ? 'mineOres' : 'mineDown',
-                   args: ironTgt ? [{ ore: 'iron', count: Math.max(4, demand - ironForArmor(bot)), maxMs: 300000 }] : [{ targetY: IRON_TARGET_Y }],
+                   args: ironTgt ? [{ ore: 'iron', count: Math.max(4, demand - ironForArmor(bot)), maxMs: 300000, yMax: 50 }] : [{ targetY: IRON_TARGET_Y }],
                    rationale: `iron restock: ${ironForArmor(bot)}/${demand} iron banked for armor ${vitals.armor || 0}/4${portalKitIronCost(bot) > 0 ? ' + portal kit' : ''} — ${ironTgt ? `oracle-guided mineOres to ${ironTgt.x},${ironTgt.y},${ironTgt.z}` : `descend to the iron band (y${IRON_TARGET_Y})`}`,
                    hints: { iron: ironForArmor(bot), demand, armor: vitals.armor || 0, targetY: ironTgt ? ironTgt.y : IRON_TARGET_Y, oracle: !!ironTgt } });
         }
