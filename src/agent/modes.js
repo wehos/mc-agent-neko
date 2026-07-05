@@ -5801,6 +5801,18 @@ const modes_list = [
                     }
                     _farm = this._farmCache || null;
                 } catch (e) { /* farm.json 未建 → null */ }
+                // ── ★ORE ORACLE (2026-07-05 用户令2: 全图挂锁定最近钻石): ore-oracle.mjs 离线扫
+                //    region 文件 → oracle-ores.json → 挂 w.oracleOres, mineDiamonds 直奔坐标。──
+                let _oracleOres = null;
+                try {
+                    if (!this._oreCache || (now - (this._oreCacheAt || 0)) > 15000) {
+                        let rawO = fs.readFileSync('bots/_supervisor/oracle-ores.json', 'utf8');
+                        if (rawO && rawO.charCodeAt(0) === 0xFEFF) rawO = rawO.slice(1);
+                        this._oreCache = JSON.parse(rawO);
+                        this._oreCacheAt = now;
+                    }
+                    _oracleOres = this._oreCache || null;
+                } catch (e) { /* 未建 → null */ }
                 bot._world = {
                     ts: now,
                     time: { tod, phase, isDay: !isNight && !isDusk },
@@ -5818,6 +5830,7 @@ const modes_list = [
                     landmarks: { bed: _bedLm, village: _villLm, wood: _woodLmAny, woodReach: _woodLmReach, woodKnownReach: _woodKnownReach, crops: _nearLm('crops'), chest: _nearLm('chest'), animal: _nearLm('animal'), ore: _nearLm('ore'), trader: _nearLm('trader'), bedReachCost: _bedReachCost, counts: _lmCounts },   // ★C328 resource memory (multi-kind + Phase B ore/trader); ★T-0055 wood split into wood(any, telemetry) vs woodReach(y-band reachable, decision)
                     oracle: _oracle,   // ★全知情报 (oracle-daemon → oracle.json → 这里; null=daemon 未跑/无数据, fresh=false=陈旧)
                     farm: _farm,       // ★农场锚点 (wheatFarm → farm.json; {x,y,z,sownAt} — 熟期巡逻依据)
+                    oracleOres: _oracleOres,   // ★矿石先知 (ore-oracle region 扫描; {ts,diamonds:[{x,y,z}..]} — mineDiamonds 直奔)
                 };
                 // ── S4.1/4.3 COMMITMENT (decision-speed / don't-yo-yo, user #1): compute the
                 //    sticky committed goal as a world-model OUTPUT so ALL layers read it (the

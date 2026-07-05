@@ -149,6 +149,33 @@ export default async function goBedSleep(bot, ctx) {
         return bail('goBedSleep: bed unreachable (pathing stopped short).');
     }
 
+    // 2.5) ★床区布灯 (2026-07-05 用户令1: 床附近放火把保夜间安全睡眠 — 压出怪率,
+    //      让 vanilla 8h/5v 拒睡不再被刷新怪触发)。6b 内无火把且包里有 → 绕床 4 向各试放
+    //      1 支 (地面实心+目标格空气, 有界)。失败静默 — 布灯是增益不是前置。
+    if (!bot.interrupt_code) {
+        try {
+            const hasTorchNear = !!bot.findBlock({ matching: (b) => b && /^(torch|wall_torch)$/.test(b.name || ''), maxDistance: 6 });
+            const torchItem = bot.inventory.items().find(i => i.name === 'torch');
+            if (!hasTorchNear && torchItem) {
+                const bp = bedBlock.position;
+                let placedT = 0;
+                for (const [dx, dz] of [[2, 0], [-2, 0], [0, 2], [0, -2]]) {
+                    if (placedT >= 4 || bot.interrupt_code || bot.health <= 0) break;
+                    const gx = bp.x + dx, gz = bp.z + dz;
+                    for (let dy = 1; dy >= -1; dy--) {
+                        const ground = bot.blockAt(new Vec3(gx, bp.y + dy - 1, gz));
+                        const cell = bot.blockAt(new Vec3(gx, bp.y + dy, gz));
+                        if (ground && ground.boundingBox === 'block' && cell && (cell.name === 'air' || cell.name === 'cave_air')) {
+                            try { await skills.placeBlock(bot, 'torch', gx, bp.y + dy, gz, 'bottom', false); placedT++; } catch (e) {}
+                            break;
+                        }
+                    }
+                }
+                if (placedT) log(bot, `goBedSleep: 床区布灯 ×${placedT} (用户令: 夜安全睡眠)`);
+            }
+        } catch (e) {}
+    }
+
     // 3) Vanilla blocks sleep with hostiles within ~8h/5v OF THE BED — don't burn the attempt
     //    (and the kernel strike) on a guaranteed 'monsters nearby'; report honestly instead.
     if (hostileNearBed(bedBlock.position)) return bail('goBedSleep: hostiles within vanilla bed box (8h/5v) — sleep would be refused; yield (fight/shelter first).');

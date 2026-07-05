@@ -84,6 +84,22 @@ export default async function mineDown(bot, ctx, opts = {}) {
     // So each step: if the lone pick is about to break AND we can't craft a replacement, ABORT
     // now (still has a few uses to climb back; higher layer then surfaces for wood).
     const invCount = (re) => bot.inventory.items().filter(it => re.test(it.name || '')).reduce((s, it) => s + it.count, 0);
+    // ★2026-07-05 用户令1: 地底隧道直通床区 — 床锚 10-48b 内 → 井口设在家门口, 竖井天然
+    //    通家 (死亡重生即矿口, 免地表折返税)。>48b 不折返 (远征矿有自己的语境)。
+    try {
+        const lmB = bot._world && bot._world.landmarks && bot._world.landmarks.bed;
+        if (lmB && Number.isFinite(lmB.x)) {
+            const dB = Math.hypot(lmB.x - bot.entity.position.x, lmB.z - bot.entity.position.z);
+            if (dB > 10 && dB <= 48) {
+                log_(`bed-first entrance: 床锚 ${Math.round(dB)}b — 井口设在家 (用户令: 隧道直通床区)`);
+                await Promise.race([
+                    skills.goToPosition(bot, lmB.x, null, lmB.z, 6),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('bed-first-timeout')), 45000)),
+                ]).catch(() => { try { bot.pathfinder.stop(); } catch (e) {} try { bot.clearControlStates(); } catch (e) {} });
+            }
+        }
+    } catch (e) {}
+
     // ★2026-07-05 石镐 fodder 就地再造 (铁镐#3/#4 各 ~15min 阵亡实录: 分层守卫只会"装备
     // 现有石镐", 石镐断供后铁镐即裸奔凿石 — canFieldCraftPick 谓词遍地都是, 执行端一直缺位)。
     // 入口: 无石镐且材料齐(圆石3/棍2) → craftRecipeLocal 就地造 (自带口袋台放置+T-0079 回收)。

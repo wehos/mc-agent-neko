@@ -92,6 +92,29 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     };
     await toDryLand();
 
+    // ★2026-07-05 用户令2: 全图挂锁定最近钻石 — ore-oracle (region 离线扫描, 只读世界文件)
+    // 给出真·最近钻石坐标; 先地表走到目标柱再下潜, 井底即矿脉 (盲扫 y-52 时代结束)。
+    // oracle 缺失/过期(>10min) → 原路径不变。顺路矿由原有 ore-chase 覆盖 (用户: 顺路的可以挖)。
+    let oracleDia = null;
+    try {
+        const oo = bot._world && bot._world.oracleOres;
+        if (oo && Array.isArray(oo.diamonds) && oo.diamonds.length && Date.now() - (oo.ts || 0) < 600000) {
+            const p0 = bot.entity.position;
+            const tgt = oo.diamonds[0];
+            const dxz = Math.hypot(tgt.x - p0.x, tgt.z - p0.z);
+            if (dxz < 250) {
+                oracleDia = tgt;
+                log(bot, `⛏️ ORACLE 钻石锁定 @${tgt.x},${tgt.y},${tgt.z} (平距 ${Math.round(dxz)}b, 库存告示 ${oo.totalFound} 颗) — 直奔目标柱`);
+                if (dxz > 8) {
+                    await Promise.race([
+                        skills.goToPosition(bot, tgt.x, null, tgt.z, 6),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('oracle-walk-timeout')), 90000)),
+                    ]).catch(() => { try { bot.pathfinder.stop(); } catch (e) {} try { bot.clearControlStates(); } catch (e) {} });
+                }
+            }
+        }
+    } catch (e) {}
+
     const lightUp = async () => { if (has('torch') > 0) { const p = bot.entity.position; try { await skills.placeBlock(bot, 'torch', p.x, p.y, p.z, 'bottom', true); } catch (e) {} } };
     const sealCell = async (c) => { if (isOpen(c)) { const f = filler(); if (f) { try { await skills.placeBlock(bot, f, c.x, c.y, c.z, 'bottom', true); } catch (e) {} } } };
 
@@ -104,7 +127,8 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     // about to expose. If water/lava is directly in the downward path, don't punch
     // through it — tunnel sideways to dodge the aquifer (the real-player move), then
     // resume digging down on dry ground. Lava below = stop and mine from here.
-    const TARGET_Y = -52;
+    // ★oracle 目标深度: 锁定钻石时下潜到其 y-1 即停 (y=9 的脉不必凿到 -52); 否则默认带底。
+    const TARGET_Y = (typeof oracleDia === 'object' && oracleDia && Number.isFinite(oracleDia.y)) ? Math.min(oracleDia.y - 1, 16) : -52;
 
     // Seal water/lava in the 4 side walls at a single y-level the bot can currently
     // REACH (it must be standing adjacent — you can't place a block against a face

@@ -202,6 +202,15 @@ while ($true) {
             -RedirectStandardError (Join-Path $proj 'bots\_supervisor\oracle-daemon.err') -WindowStyle Hidden
         Add-Content $log "[$(Get-Date -Format o)] started oracle-daemon.mjs (全知侦察)"
     }
+    # ORE-ORACLE KEEP-ALIVE (2026-07-05 用户令2 矿石级全知): 离线扫 region 文件出真·最近钻石
+    # → oracle-ores.json → bot._world.oracleOres → mineDiamonds 直奔坐标。只读世界文件。
+    $oreAlive = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*ore-oracle*' }
+    if (-not $oreAlive) {
+        Start-Process -FilePath 'node' -ArgumentList 'ore-oracle.mjs' -WorkingDirectory (Join-Path $proj 'bots\_supervisor') `
+            -RedirectStandardOutput (Join-Path $proj 'bots\_supervisor\ore-oracle.out') `
+            -RedirectStandardError (Join-Path $proj 'bots\_supervisor\ore-oracle.err') -WindowStyle Hidden
+        Add-Content $log "[$(Get-Date -Format o)] started ore-oracle.mjs (矿石先知)"
+    }
     # BOTWATCH KEEP-ALIVE: the anomaly detector — classifies death/stuck/idle/seal-fail from the
     # telemetry and POSTs auto-tickets to the ticket-server. Without it the board stops filling
     # itself. Needs TICKET_PORT (set above, persists in this PS session).

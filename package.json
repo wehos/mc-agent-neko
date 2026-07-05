@@ -27,6 +27,7 @@
         "open": "^10.2.0",
         "openai": "^4.4.0",
         "prismarine-item": "^1.15.0",
+        "prismarine-provider-anvil": "^2.13.0",
         "prismarine-viewer": "^1.32.0",
         "replicate": "^0.29.4",
         "ses": "^1.9.1",
@@ -38,8 +39,8 @@
         "yargs": "^17.7.2"
     },
     "overrides": {
-      "canvas": "^3.1.0",
-      "gl": "^8.1.6"
+        "canvas": "^3.1.0",
+        "gl": "^8.1.6"
     },
     "scripts": {
         "postinstall": "patch-package",
