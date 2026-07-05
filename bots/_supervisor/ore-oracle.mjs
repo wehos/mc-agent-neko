@@ -37,7 +37,9 @@ for (const [fam, names] of Object.entries(ORE_FAMILIES)) {
     }
 }
 const AnvilCls = anvilPkg.Anvil('1.21.1');
-const anvil = new AnvilCls(REGION);
+// ★2026-07-06 幻影矿根因: server autosave 重排 .mca 内部 chunk 偏移表, 长驻实例的
+//   旧句柄按过期偏移读出错位数据 (RCON 实证: 铁 y47-50 全幻影=stale 读, 钻石准=紧挨
+//   启动的新鲜读)。每次 scan() 重建实例, 句柄/偏移表永远新鲜。
 
 const CHUNK_RADIUS = 8;      // ±8 chunks ≈ 128 格半径
 const RESCAN_DIST = 48;      // bot 移动超此距离才重扫 (扫描是重操作)
@@ -61,6 +63,7 @@ async function scan() {
         return;
     }
     const t0 = Date.now();
+    const anvil = new AnvilCls(REGION);   // 每扫新建 — 防 autosave 偏移表过期(幻影矿根因)
     const bcx = Math.floor(vit.x / 16), bcz = Math.floor(vit.z / 16);
     const found = { diamonds: [], iron: [], coal: [], water: [] };
     let scanned = 0, missing = 0, skippedSecs = 0;
