@@ -312,8 +312,19 @@ function detectSealedRoom(bot) {
 // 消失即重置计时。LETHAL 情形 raw 本就返回 null, 不受影响。
 function lowHpNoRegenContainedHold(bot) {
     const held = _lowHpNoRegenContainedHoldRaw(bot);
-    if (!held) { try { if (bot) bot._nrpHoldSince = 0; } catch (e) {} return null; }
+    if (!held) {
+        // ★闪抖防重置 (21:36 实录: raw 条件的怪距/覆盖项瞬时翻假一次就清计时, 骷髅在阈值
+        // 附近晃 = 4min 永远凑不满)。连续非 hold >30s 才真正重置计时。
+        try {
+            if (bot) {
+                if (!bot._nrpNotHeldSince) bot._nrpNotHeldSince = Date.now();
+                else if (Date.now() - bot._nrpNotHeldSince > 30000) { bot._nrpHoldSince = 0; }
+            }
+        } catch (e) {}
+        return null;
+    }
     try {
+        bot._nrpNotHeldSince = 0;
         if (!bot._nrpHoldSince || bot.food > (bot._nrpHoldFood ?? -1)) {
             bot._nrpHoldSince = Date.now(); bot._nrpHoldFood = bot.food;
         } else if (Date.now() - bot._nrpHoldSince > 240000) {
