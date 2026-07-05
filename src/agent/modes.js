@@ -3450,7 +3450,24 @@ const modes_list = [
                     } catch (e) {}
                     const activeBodyWork = !!(bot.targetDigBlock || bot._mineMotionActiveDig || (bot._bodyDigLockUntil && Date.now() < bot._bodyDigLockUntil));
                     const activeEscapeWork = /surfaceUp|feedUp/.test(bot._currentSkill || '');
-                    if ((nightBunker || lowFoodShelter || famineHold || noRegenLowHpHold || bodyBudgetContainedHold || tableRecoveryHold || nightStandDownHold || killBoxLowFoodHold) && !activeBodyWork && !activeEscapeWork) {
+                    // ★2026-07-05 口袋均衡熔断 (2h 沟壑实录: 8 类 hold 轮番豁免 + STUCK 重启原地
+                    // 重连 = 谁都不动谁都不死的均衡, 3 次 25min 重启全免疫)。同锚 10b 内豁免
+                    // 累计 >12min → 停止豁免, 放行强制释放链 (低血出门赌命=死亡重生回床=离开
+                    // 口袋; keepInventory 下死亡是出口, 无限驻守才是事故)。
+                    let pocketFuse = false;
+                    try {
+                        const pp = bot.entity.position;
+                        if (!bot._exemptAnchor || Math.hypot(pp.x - bot._exemptAnchor.x, pp.z - bot._exemptAnchor.z) > 10) {
+                            bot._exemptAnchor = { x: pp.x, z: pp.z, at: now };
+                        } else if (now - bot._exemptAnchor.at > 720000) {
+                            pocketFuse = true;
+                            if (now - (bot._exemptFuseLogAt || 0) > 60000) {
+                                bot._exemptFuseLogAt = now;
+                                try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [reflex_watchdog] ★口袋均衡熔断: 同锚 10b 内豁免 >12min — 停止豁免, 放行强制链\n`); } catch (e) {}
+                            }
+                        }
+                    } catch (e) {}
+                    if ((nightBunker || lowFoodShelter || famineHold || noRegenLowHpHold || bodyBudgetContainedHold || tableRecoveryHold || nightStandDownHold || killBoxLowFoodHold) && !activeBodyWork && !activeEscapeWork && !pocketFuse) {
                         // Legit sheltering is deliberate immobility, not a stale stack.
                         // Reset the pin window so dawn/food recovery gets a fresh grace
                         // period instead of being kicked immediately by old shelter time.
