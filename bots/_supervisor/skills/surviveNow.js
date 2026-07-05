@@ -431,14 +431,19 @@ export default async function surviveNow(bot, ctx, opts = {}) {
                 break;
             }
             if (bot.interrupt_code) { prog(`r${round}: interrupt — 让位`); break; }
-            // 水情让位(评审): 早窗溺水营救(oxygen 9-15)等不起 vitalNow ≤8 地板 — 主动收官,
-            // 戳清零后 self_preservation 满权限接管。
+            // 水情/窒息让位(评审+死57实录): 早窗溺水营救等不起 vitalNow 地板; 头/脚埋进实体块
+            // (沙砾塌头)时任何"站桩"分支(REGEN)都是等死 — 主动收官, 戳清零后营救反射满权限接管。
             try {
                 const wp = bot.entity.position;
                 const wf = bot.blockAt(wp), wh = bot.blockAt(wp.offset(0, 1, 0));
                 const inWater = /water/.test((wf && wf.name) || '') || /water/.test((wh && wh.name) || '');
                 if (inWater && typeof bot.oxygenLevel === 'number' && bot.oxygenLevel <= 15) {
                     prog(`r${round}: 水情(oxygen=${bot.oxygenLevel}) — 提前收官让位营救`);
+                    break;
+                }
+                const buried = (wf && wf.boundingBox === 'block') || (wh && wh.boundingBox === 'block');
+                if (buried) {
+                    prog(`r${round}: 窒息(feet=${wf && wf.name} head=${wh && wh.name}) — 提前收官让位挖头营救`);
                     break;
                 }
             } catch (e) {}

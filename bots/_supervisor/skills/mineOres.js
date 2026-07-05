@@ -39,6 +39,13 @@ export default async function mineOres(bot, ctx, opts = {}) {
 
     if (!bot || !bot.entity) return false;
     if (!hasPick()) { prog(`ABORT ore=${ore} — 无合格镐(需 ${pickRe}), 失败让 TOOL_UPKEEP 先修`); return false; }
+    // ★死57前实录: MAROONED 态下 goToPosition 无条件秒返 false → collectBlock 全瞬败,
+    //   13 轮 7s 空转白磨镐; 而能解 MAROONED 的 mobility 被本技能身体令牌挡住 = 死锁。
+    //   让位: 诚实 false, kernel 记账冷却, mobility 拿身体脱困后下个窗口再来。
+    const marooned = () => {
+        try { return /MAROONED/.test((bot._mobility && bot._mobility.state) || ''); } catch (e) { return false; }
+    };
+    if (marooned()) { prog(`ABORT ore=${ore} — MAROONED 态(寻路全被压制), 让位 mobility 脱困`); return false; }
     if (bot.armorManager) try { await bot.armorManager.equipAll(); } catch (e) {}
     const g0 = cnt();
 
@@ -92,6 +99,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
     while (cnt() - g0 < count && Date.now() < deadline && rounds++ < 12) {
         if (bot.interrupt_code || bot.death_abort || bot.health <= 0) break;
         if (!hasPick()) { prog(`镐没了(r${rounds}) — 停`); break; }
+        if (marooned()) { prog(`r${rounds}: MAROONED — 让位 mobility 脱困`); break; }
         // 背包临满 → 先清囊 (replenishKit ⓪ 同款 CAPS 白名单; 首战实录: 890 件杂物 0s 收工
         // 三振整个 kind) — 倒不出 2 槽才真收工。永不碰工具/食物/矿物/木/羊毛。
         const emptyN = () => { try { return bot.inventory.emptySlotCount(); } catch (e) { return 9; } };
@@ -114,8 +122,18 @@ export default async function mineOres(bot, ctx, opts = {}) {
             if (emptyN() <= 1) { prog(`r${rounds}: 清囊后仍满 — 收工`); break; }
         }
         const before = cnt();
-        try { await skills.collectBlock(bot, collectKey, Math.max(1, Math.min(4, count - (cnt() - g0)))); } catch (e) {}
-        if (cnt() > before) continue;
+        const rT0 = Date.now();
+        try { await skills.collectBlock(bot, collectKey, Math.max(1, Math.min(4, count - (cnt() - g0)))); }
+        catch (e) { prog(`r${rounds}: collectBlock 异常 ${(e && e.message) || e}`); }
+        if (cnt() > before) { bot._svnOreZeroRounds = 0; continue; }
+        // 死57前实录: 13 轮 7 秒空转(collectBlock 秒败被吞) — 连续 3 轮零增量且轮耗 <5s
+        // = 系统性失败(目标不可达/被挖空/镐门), 提前收工省镐, 让 3-strike 正常记账。
+        bot._svnOreZeroRounds = (bot._svnOreZeroRounds || 0) + 1;
+        if (bot._svnOreZeroRounds >= 3 && Date.now() - rT0 < 5000) {
+            prog(`r${rounds}: 连续 ${bot._svnOreZeroRounds} 轮秒败零增量 — 收工(省镐)`);
+            bot._svnOreZeroRounds = 0;
+            break;
+        }
         // x-ray 64 格内采空 → oracle 下一候选换点; 候选就在脚下(<4b, 单候选自旋)或无候选则支道刷新
         const list = oracleList();
         const nxt = list.length ? list[rounds % list.length] : null;
