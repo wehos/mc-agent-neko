@@ -92,9 +92,26 @@ export default async function mineOres(bot, ctx, opts = {}) {
     while (cnt() - g0 < count && Date.now() < deadline && rounds++ < 12) {
         if (bot.interrupt_code || bot.death_abort || bot.health <= 0) break;
         if (!hasPick()) { prog(`镐没了(r${rounds}) — 停`); break; }
-        // 评审 P3: 背包临满掉落全丢 → cnt 恒平白烧预算, 兄弟技能同款闸
-        if ((() => { try { return bot.inventory.emptySlotCount() <= 1; } catch (e) { return false; } })()) {
-            prog(`r${rounds}: 背包临满 — 收工`); break;
+        // 背包临满 → 先清囊 (replenishKit ⓪ 同款 CAPS 白名单; 首战实录: 890 件杂物 0s 收工
+        // 三振整个 kind) — 倒不出 2 槽才真收工。永不碰工具/食物/矿物/木/羊毛。
+        const emptyN = () => { try { return bot.inventory.emptySlotCount(); } catch (e) { return 9; } };
+        if (emptyN() <= 1) {
+            const CAPS = { cobblestone: 128, dirt: 64, gravel: 8, andesite: 0, diorite: 0, granite: 0, tuff: 0, flint: 4, rotten_flesh: 8, netherrack: 0, cobbled_deepslate: 64, sand: 0, sandstone: 0, coal: 128, feather: 4, dandelion: 0, azure_bluet: 0, lily_pad: 0, brown_mushroom: 2, egg: 1 };
+            let tossed = 0;
+            try {
+                const haveOf = (n) => bot.inventory.items().reduce((s, i) => s + (i.name === n ? i.count : 0), 0);
+                for (const it of bot.inventory.items()) {
+                    if (emptyN() >= 3) break;
+                    const cap = CAPS[it.name];
+                    if (cap == null) continue;
+                    const have = haveOf(it.name);
+                    if (have <= cap) continue;
+                    const drop = Math.min(it.count, have - cap);
+                    try { await bot.toss(it.type, null, drop); tossed += drop; } catch (e) {}
+                }
+            } catch (e) {}
+            prog(`r${rounds}: 清囊 tossed=${tossed} → empty=${emptyN()}`);
+            if (emptyN() <= 1) { prog(`r${rounds}: 清囊后仍满 — 收工`); break; }
         }
         const before = cnt();
         try { await skills.collectBlock(bot, collectKey, Math.max(1, Math.min(4, count - (cnt() - g0)))); } catch (e) {}
