@@ -819,7 +819,8 @@ export function proposeTasks(world, bot) {
         //   (sufficientForUnderground/hpSafeForUnderground/口粮>=2), 新 kind 不绕开危血禁下矿(:450)
         //   与 dive-ration(:917) 两个既有不变量; day/safe/surfaceGate 由外层 tierReady 已保证。
         if (hasIronTierPick(w) && ironForArmor(bot) < ironDemandTotal(w, bot)
-            && kit.sufficientForUnderground && hpSafeForUnderground && carriedRations(bot) >= 2) {
+            && kit.sufficientForUnderground && hpSafeForUnderground
+            && (carriedRations(bot) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档: 贫瘠世界口粮存不下来, 满腹+灰区兜底+keepInv 等效(夜挖门同理)
             const demand = ironDemandTotal(w, bot);
             // ★2026-07-06 用户令 (oracle视角挖铁): ore-oracle 已扫铁坐标 → mineOres 直奔;
             //   oracle 缺失/陈旧才回退盲挖 mineDown 铁带。kind/isGoalDone 簿记不变。
@@ -838,7 +839,7 @@ export function proposeTasks(world, bot) {
         //   the diamond band on purpose instead of the open-ended shallow descent.
         if (hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < DIAMOND_FLOOR && hpSafeForUnderground
             && kit.sufficientForUnderground
-            && invCount(bot, /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/) >= 2) {   // ★T-0092 (worker-sync): armor>=4(full set=24 iron, unreachable since GET_ARMOR yields at <4) → armor>=1(reachable from one craftArmor pass) so an iron-tooled+lightly-armored bot actually commits GET_DIAMOND → mineDiamonds descends to y-52. NOT >=0. ★tool-budget: also gated on kit.sufficientForUnderground (spare-with-table or field-recraft kit) like GO_UNDERGROUND — the skill-side pick guard is the LAST line, not the plan; TOOL_UPKEEP@47 restores the invariant first. ★dive rations (task #9): >=2 carried edibles or GET_FOOD stocks first — the y12 famine surfacing (checkpoint #6) ate the whole night's descent.
+            && (invCount(bot, /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档(贫瘠世界口粮存不下, 满腹+灰区兜底+keepInv 等效); ★T-0092 (worker-sync): armor>=4(full set=24 iron, unreachable since GET_ARMOR yields at <4) → armor>=1(reachable from one craftArmor pass) so an iron-tooled+lightly-armored bot actually commits GET_DIAMOND → mineDiamonds descends to y-52. NOT >=0. ★tool-budget: also gated on kit.sufficientForUnderground (spare-with-table or field-recraft kit) like GO_UNDERGROUND — the skill-side pick guard is the LAST line, not the plan; TOOL_UPKEEP@47 restores the invariant first. ★dive rations (task #9): >=2 carried edibles or GET_FOOD stocks first — the y12 famine surfacing (checkpoint #6) ate the whole night's descent.
             // Dispatch the DEDICATED mineDiamonds skill: it water-aware-descends to the diamond band,
             // x-ray finds + vein-follows diamonds, banks each haul, and LOOPS until count is reached —
             // exactly the "在该层定向循环直到挖到目标矿" T-0092 asks for. (Generic mineDown only
@@ -1163,7 +1164,7 @@ export function proposeTasks(world, bot) {
     // food like they carry torches: >=2 edible items or don't start the descent — GET_FOOD
     // @higher priority then stocks up first.)
     if (overworld && kit.sufficientForUnderground && surfaceGate.mode !== 'hold' && !threat.actionable && hpSafeForUnderground
-        && carriedRations(bot) >= 2) {
+        && (carriedRations(bot) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档 (同 GET_DIAMOND/GET_IRON_ARMOR_SET/夜挖门)
         push({ kind: PROPOSAL_KIND.GO_UNDERGROUND, priority: 45, skill: 'mineDown',
                args: [{ targetY: IRON_TARGET_Y }],
                rationale: `kitted + gate open — descend to the iron band (y${IRON_TARGET_Y}) and mine iron (have ${ironForArmor(bot)}/${IRON_BUFFER}), stay committed underground`,
