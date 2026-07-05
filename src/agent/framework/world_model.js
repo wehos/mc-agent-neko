@@ -673,7 +673,12 @@ export function proposeTasks(world, bot) {
     //     (90/66) and armor (68); above generic mining (45). It only fires once food isn't critical
     //     (>6) so it never competes with the starve-now path. dynamicBreadTarget gates the dispatch
     //     to a real bread deficit, so a fed bot with a full bread stock won't churn on it.
-    const canFarmNow = (invCount(bot, /^wheat_seeds$/) > 0 || invCount(bot, /^wheat$/) >= 3);
+    // ★2026-07-05 用户四连问修复: 旧 canFarmNow=(有种或有麦) — 种子播完(=0)后提案永不再触发,
+    // 已播的地永远没人回来收 (巡回断链根因)。熟期巡逻分支: farm.json 锚存在且播种超 22min
+    // (小麦熟期量级) → 即使零种零麦也派 wheatFarm 回去收割 (技能端 0 步会走回锚点)。
+    const farmRipe = !!(w.farm && Number.isFinite(w.farm.x) && (w.farm.sownAt || 0) > 0
+        && (Date.now() - w.farm.sownAt) > 22 * 60 * 1000);
+    const canFarmNow = (invCount(bot, /^wheat_seeds$/) > 0 || invCount(bot, /^wheat$/) >= 3 || farmRipe);
     const breadDeficit = invCount(bot, /^bread$/) < dynamicBreadTarget(bot, w);
     if (overworld && time.phase === 'day' && !(threat.actionable > 0) && vitals.food > 6 && canFarmNow && breadDeficit
         && (!bot || Date.now() >= (bot._wheatFarmCooldownUntil || 0))) {

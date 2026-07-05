@@ -5789,6 +5789,18 @@ const modes_list = [
                     const oc = this._oracleCache;
                     if (oc && oc.ts) _oracle = Object.assign({}, oc, { fresh: (now - oc.ts) < 90000 });
                 } catch (e) { /* oracle.json 缺失/坏 → oracle=null, 全链降级为无全知模式 */ }
+                // ── ★FARM 锚点 (2026-07-05 用户四连问: 农场坐标持久化): wheatFarm 写 farm.json,
+                //    这里挂 w.farm 供提案层熟期巡逻 (种子播完=0 时收获巡逻分支的依据)。──
+                let _farm = null;
+                try {
+                    if (!this._farmCache || (now - (this._farmCacheAt || 0)) > 10000) {
+                        let rawF = fs.readFileSync('bots/_supervisor/farm.json', 'utf8');
+                        if (rawF && rawF.charCodeAt(0) === 0xFEFF) rawF = rawF.slice(1);
+                        this._farmCache = JSON.parse(rawF);
+                        this._farmCacheAt = now;
+                    }
+                    _farm = this._farmCache || null;
+                } catch (e) { /* farm.json 未建 → null */ }
                 bot._world = {
                     ts: now,
                     time: { tod, phase, isDay: !isNight && !isDusk },
@@ -5805,6 +5817,7 @@ const modes_list = [
                     opening,     // ★framework-v2 deterministic opening intent (SCOUT/WOOD_BUFFER/VILLAGE_HARVEST/DONE)
                     landmarks: { bed: _bedLm, village: _villLm, wood: _woodLmAny, woodReach: _woodLmReach, woodKnownReach: _woodKnownReach, crops: _nearLm('crops'), chest: _nearLm('chest'), animal: _nearLm('animal'), ore: _nearLm('ore'), trader: _nearLm('trader'), bedReachCost: _bedReachCost, counts: _lmCounts },   // ★C328 resource memory (multi-kind + Phase B ore/trader); ★T-0055 wood split into wood(any, telemetry) vs woodReach(y-band reachable, decision)
                     oracle: _oracle,   // ★全知情报 (oracle-daemon → oracle.json → 这里; null=daemon 未跑/无数据, fresh=false=陈旧)
+                    farm: _farm,       // ★农场锚点 (wheatFarm → farm.json; {x,y,z,sownAt} — 熟期巡逻依据)
                 };
                 // ── S4.1/4.3 COMMITMENT (decision-speed / don't-yo-yo, user #1): compute the
                 //    sticky committed goal as a world-model OUTPUT so ALL layers read it (the

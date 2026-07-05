@@ -36,6 +36,30 @@ export default async function wheatFarm(bot, ctx, opts = {}) {
 
     let harvested = 0, baked = 0, ate = false, sowed = 0, tilled = 0;
 
+    // ── 0) ★农场巡回 (2026-07-05 用户四连问: 坐标不保存/无巡回/种子播完提案断链)。
+    //    farm.json 持久锚点; 脚边 24b 无麦无田但锚点在 12-250b 内 → 先走回农场再干活。
+    //    (提案侧 modes.js 挂 w.farm + world_model 熟期巡逻分支配套, 种子=0 也会派收获。)──
+    const FARM_FILE = path.resolve(process.cwd(), 'bots', '_supervisor', 'farm.json');
+    let farmAnchor = null;
+    try { farmAnchor = JSON.parse(fs.readFileSync(FARM_FILE, 'utf8')); } catch (e) {}
+    if (!findByName(['wheat', 'farmland'], 24, 2).length && farmAnchor && Number.isFinite(farmAnchor.x)) {
+        const fd = Math.hypot(farmAnchor.x - bot.entity.position.x, farmAnchor.z - bot.entity.position.z);
+        if (fd > 12 && fd < 250) {
+            prog(`wheatFarm: 0 巡回 → 农场锚 @${farmAnchor.x},${farmAnchor.z} (${Math.round(fd)}b)`);
+            try {
+                await Promise.race([
+                    skills.goToPosition(bot, farmAnchor.x, farmAnchor.y || null, farmAnchor.z, 8),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('farm-walk-timeout')), 90000)),
+                ]);
+            } catch (e) {
+                try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
+                try { bot.clearControlStates(); } catch (_) {}
+                prog(`wheatFarm: 0 巡回未达: ${e.message}`);
+            }
+            if (bot.interrupt_code || bot.health <= 0) return done(false);
+        }
+    }
+
     // 1) Harvest MATURE wheat within 24b (age 7 only — breaking green wheat wastes the plot).
     const matureWheat = findByName(['wheat'], 24, 32)
         .map(p => bot.blockAt(p))
@@ -130,6 +154,28 @@ export default async function wheatFarm(bot, ctx, opts = {}) {
             prog('wheatFarm: seeds on hand but no hoe and no materials for one — plot deferred.');
         }
     }
+
+    // ── 5) ★农场锚点落盘 + 持久地标 (坐标保存问题的正解): 以最近 farmland 为锚写 farm.json
+    //    (sowed/tilled 刷新 sownAt = 熟期计时起点), 并登记持久 'farm' 地标 (非 _TRANSIENT_LM
+    //    类, 不过期 — goBedSleep regBedLandmark 同款直写)。──────────────────────────────
+    try {
+        const fl = findByName(['farmland'], 24, 1)[0];
+        if (fl) {
+            const prevSown = (farmAnchor && farmAnchor.sownAt) || 0;
+            fs.writeFileSync(FARM_FILE, JSON.stringify({
+                x: fl.x, y: fl.y, z: fl.z,
+                sownAt: (sowed || tilled) ? Date.now() : prevSown,
+                updatedAt: Date.now(),
+            }));
+            if (bot._landmarks && typeof bot._landmarks === 'object') {
+                const key = `farm@${fl.x},${fl.y},${fl.z}`;
+                const _n = Date.now();
+                if (!bot._landmarks[key]) bot._landmarks[key] = { kind: 'farm', x: fl.x, y: fl.y, z: fl.z, ts: _n, seen: _n, meta: null };
+                else bot._landmarks[key].seen = _n;
+            }
+            prog(`wheatFarm: 5 农场锚落盘 @${fl.x},${fl.y},${fl.z} sownAt=${(sowed || tilled) ? 'now' : 'kept'}`);
+        }
+    } catch (e) {}
 
     prog(`wheatFarm: pass done — harvested=${harvested} baked=${baked} ate=${ate} sowed=${sowed} tilled=${tilled} gathered=${gathered} bread=${inv().bread || 0}/${breadTarget} food=${bot.food}`);
     if (harvested || baked || ate || sowed || gathered) return done({ harvested, baked, ate, sowed, tilled, gathered });
