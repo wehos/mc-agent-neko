@@ -2446,25 +2446,43 @@ const modes_list = [
             }
             const containedHold = lowHpNoRegenContainedHold(bot);
             if (containedHold) {
-                try {
-                    bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null);
-                    bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop();
-                    bot.clearControlStates();
-                } catch (e) {}
-                this.prev_location = null;
-                this.stuck_time = 0;
-                this.prev_dig_block = null;
-                this.step_prev_location = null;
-                if (Date.now() - (bot._lastUnstuckContainedHoldAt || 0) > 15000) {
-                    bot._lastUnstuckContainedHoldAt = Date.now();
-                    const p = bot.entity.position.floored();
+                // ★2026-07-05 hold 预算 (25min 白天冻结实录: 本 hold 每 tick 清 pathfinder goal
+                // = 实际免疫一切 kernel 派发, 各技能内闸又同时挡工作 → '活着但零产出'僵局,
+                // 比死亡重置还贵)。持续 >4min 且 food 无增 → 预算耗尽停止压制 (放行工作/
+                // 脱困); food 上升或脱离 hold 条件即重置预算。
+                if (!bot._nrHoldSince || bot.food > (bot._nrHoldFood ?? -1)) {
+                    bot._nrHoldSince = Date.now(); bot._nrHoldFood = bot.food;
+                }
+                const holdSpent = Date.now() - bot._nrHoldSince > 240000;
+                if (!holdSpent) {
+                    try {
+                        bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null);
+                        bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop();
+                        bot.clearControlStates();
+                    } catch (e) {}
+                    this.prev_location = null;
+                    this.stuck_time = 0;
+                    this.prev_dig_block = null;
+                    this.step_prev_location = null;
+                    if (Date.now() - (bot._lastUnstuckContainedHoldAt || 0) > 15000) {
+                        bot._lastUnstuckContainedHoldAt = Date.now();
+                        const p = bot.entity.position.floored();
+                        try {
+                            fs.appendFileSync('bots/_supervisor/progress.txt',
+                                `[${new Date().toISOString()}] [unstuck] no-regen contained hold: food=${bot.food} hp=${Math.round(bot.health || 0)} pos=${p.x},${p.y},${p.z} mob=${containedHold.mob || '-'} enclosed=${containedHold.enclosed} covered=${containedHold.covered} closest=${containedHold.closestName || '-'}@${Number.isFinite(containedHold.closest) ? containedHold.closest.toFixed(1) : '-'} — suppress moveAway/GoalInvert\n`);
+                        } catch (e) {}
+                    }
+                    return;
+                }
+                if (Date.now() - (bot._nrHoldSpentLogAt || 0) > 30000) {
+                    bot._nrHoldSpentLogAt = Date.now();
                     try {
                         fs.appendFileSync('bots/_supervisor/progress.txt',
-                            `[${new Date().toISOString()}] [unstuck] no-regen contained hold: food=${bot.food} hp=${Math.round(bot.health || 0)} pos=${p.x},${p.y},${p.z} mob=${containedHold.mob || '-'} enclosed=${containedHold.enclosed} covered=${containedHold.covered} closest=${containedHold.closestName || '-'}@${Number.isFinite(containedHold.closest) ? containedHold.closest.toFixed(1) : '-'} — suppress moveAway/GoalInvert\n`);
+                            `[${new Date().toISOString()}] [unstuck] no-regen hold BUDGET SPENT (>4min food 无增) — 停止压制, 放行工作/脱困\n`);
                     } catch (e) {}
                 }
-                return;
-            }
+                // fall through: 预算耗尽 → 不再压制, unstuck 正常逻辑接管
+            } else { bot._nrHoldSince = 0; }
             const tableHold = tableRecoveryHold(bot);
             if (tableHold) {
                 try {
