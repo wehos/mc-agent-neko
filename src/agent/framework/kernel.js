@@ -242,7 +242,12 @@ export class Kernel {
         //    actions.executing 占满, 全 busy 闸 = 钩子自噤 = 病灶原样。所以 force 门只认
         //    技能互斥(_currentSkill/supervised_skill, 不打断真技能), 无视 mode 动作;
         //    真·保命地板(vitalNow: 溺水/着火/hp<=4 掉血/岩浆)进行时不抢体。
-        const skillBusy = !!(this.bot._currentSkill || (this.agent && this.agent.supervised_skill));
+        // skillBusy 口径(第三实录修订, 孤儿名噤声 9min): _currentSkill 单独在位可能是孤儿
+        // (17:02 replenishKit 幽灵名 + 夜宿 hold 的 executing 饿着 busy-stuck 清理器 540s)。
+        // 真派发必有 supervised_skill(kernel/ws 同步置), mode 内嵌技能必有 actions.executing —
+        // 纯孤儿在 hold 间隙(每 ~6s 有 2.5s+ 空窗)会被 force 逮住, 9min 噤声变秒级。
+        const skillBusy = !!((this.agent && this.agent.supervised_skill)
+            || (this.bot._currentSkill && this.agent && this.agent.actions && this.agent.actions.executing));
         let vitalBusy = false;
         try { vitalBusy = arbiterVitalNow(this.bot); } catch (e) {}
         // ★危急升级阀 (实录 2026-07-06 01:07: replenishKit 复派楔在夜宿 hold 里占死互斥
@@ -463,7 +468,8 @@ export class Kernel {
         // force 路径只查技能互斥 — mode 动作(hold wait)占着 actions.executing 是灰区常态,
         // 全 busy 复查会把强制派发也噤掉(首飞实录同因)。
         const _busyNow = force
-            ? !!(this.bot._currentSkill || (this.agent && this.agent.supervised_skill))
+            ? !!((this.agent && this.agent.supervised_skill)
+                || (this.bot._currentSkill && this.agent && this.agent.actions && this.agent.actions.executing))
             : mentalState(this.bot).busy;
         if (_busyNow) {
             this.log(`[kernel] dispatch skip: a supervised skill is already running — not committing ${p.skill}`);
