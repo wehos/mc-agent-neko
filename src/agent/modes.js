@@ -5675,9 +5675,13 @@ const modes_list = [
                 // 背包带床是天然 affordable (goBedSleep 已支持就地放床): 无需地标、无需爬升门
                 // (床就在手里, 不存在 deep-no-bed-climb 的 30s 寻路空转问题)。
                 const _bedInPack = (() => { try { return bot.inventory.items().some(i => /_bed$/.test(i.name || '')); } catch (e) { return false; } })();
-                const bedAffordable = (!!_bedLm && _bedLm.dist <= cfg.bedReachDist && !inDeathZone && actionable === 0 && hp >= 10
+                // ★2026-07-05 用户问'等黎明为什么不睡觉' → hp>=10 门定性为软 bug: 低血+断粮夜
+                // (hp7/food15 零可食实录, 20min hold) 正是最需要跳夜的时刻, 却被 hp 门锁死;
+                // 同表达式已要求 actionable===0, 走夜路的真实风险已被覆盖, hp 门冗余。
+                // 10→5: 仅濒死(hp<5)才拒走 — 那时任何移动都危险, 归 shelter。
+                const bedAffordable = (!!_bedLm && _bedLm.dist <= cfg.bedReachDist && !inDeathZone && actionable === 0 && hp >= 5
                     && (y >= 50 || _bedLm.y <= y + 8))
-                    || (_bedInPack && !inDeathZone && actionable === 0 && hp >= 10);
+                    || (_bedInPack && !inDeathZone && actionable === 0 && hp >= 5);
                 // FIGHT (commitToFight): a melee-able, point-blank NON-creeper threat we can win — sword
                 // in hand, hp headroom, not boxed in (enclosed → can't kite, prefer seal). creeper is
                 // excluded (it suicides on contact → the defense reflex layer kites it, not us).
