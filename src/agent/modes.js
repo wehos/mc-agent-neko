@@ -306,7 +306,27 @@ function detectSealedRoom(bot) {
     } catch (e) { return { sealed: false }; }
 }
 
+// ★2026-07-05 家族级预算包装器 (unstuck 侧预算落地后 self_preservation flee-hold 同病
+// 复发, 15min 墨西哥僵局)。预算下沉到共享谓词, 一处覆盖全部消费者: hold 真实成立期间
+// 连续 >4min 且 food 无增 → 自答 null (全家失效, 正常行为接管); food 上升或 hold 条件
+// 消失即重置计时。LETHAL 情形 raw 本就返回 null, 不受影响。
 function lowHpNoRegenContainedHold(bot) {
+    const held = _lowHpNoRegenContainedHoldRaw(bot);
+    if (!held) { try { if (bot) bot._nrpHoldSince = 0; } catch (e) {} return null; }
+    try {
+        if (!bot._nrpHoldSince || bot.food > (bot._nrpHoldFood ?? -1)) {
+            bot._nrpHoldSince = Date.now(); bot._nrpHoldFood = bot.food;
+        } else if (Date.now() - bot._nrpHoldSince > 240000) {
+            if (Date.now() - (bot._nrpHoldSpentLogAt || 0) > 30000) {
+                bot._nrpHoldSpentLogAt = Date.now();
+                try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [hold-budget] no-regen hold 家族预算耗尽 (>4min food 无增) — 谓词自答 null, 放行一切\n`); } catch (e) {}
+            }
+            return null;
+        }
+    } catch (e) {}
+    return held;
+}
+function _lowHpNoRegenContainedHoldRaw(bot) {
     if (!bot || !bot.entity) return null;
     // ★RECOVERY-SKILL EXIT: a deliberately-dispatched escape/relocate/forage skill MUST be able
     // to move even at low hp — otherwise this hold vetoes ALL supervisor-skill movement (incl.
