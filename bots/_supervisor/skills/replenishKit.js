@@ -284,6 +284,24 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         }
     }
 
+    // ── ⑧ ★熟食储备 (大修C 核心缺环, 2026-07-05: 3死/小时的'以死换饭'循环 — bot 背着
+    //    熔炉+煤79 却生吃腐肉度日, 生肉掉落从不烤。有生肉+煤 → smeltSafe 烤熟, 熟食比生肉
+    //    营养×1.6 且无中毒。目标熟食≥8; 无生肉/无燃料零成本跳过。──────────────────
+    if (!stop() && !overBudget()) {
+        const RAWS = ['beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon'];
+        const cookedCount = () => RAWS.reduce((s, r) => s + cnt('cooked_' + r), 0);
+        if (cookedCount() < 8 && (cnt('coal') > 0 || cnt('charcoal') > 0)) {
+            for (const r of RAWS) {
+                if (stop() || overBudget() || cookedCount() >= 8) break;
+                const n = cnt(r);
+                if (n < 1) continue;
+                const cb = cookedCount();
+                try { await skills.customSkill(bot, 'smeltSafe', r, Math.min(n, 8 - cb)); } catch (e) { prog(`replenishKit: ⑧ cook ${r} err ${e.message}`); }
+                prog(`replenishKit: ⑧ 烤 ${r}×${Math.min(n, 8 - cb)} → 熟食 ${cb}→${cookedCount()}`);
+            }
+        }
+    }
+
     const met = picks() >= 3 && planksEq() >= 16;   // ★3镐/16板
     return settle(stop() ? 'interrupted' : (overBudget() ? 'budget-5min' : (met ? 'invariant-met' : 'partial')));
 }
