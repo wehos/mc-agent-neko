@@ -84,6 +84,16 @@ export default async function mineDown(bot, ctx, opts = {}) {
     // So each step: if the lone pick is about to break AND we can't craft a replacement, ABORT
     // now (still has a few uses to climb back; higher layer then surfaces for wood).
     const invCount = (re) => bot.inventory.items().filter(it => re.test(it.name || '')).reduce((s, it) => s + it.count, 0);
+    // ★2026-07-05 石镐 fodder 就地再造 (铁镐#3/#4 各 ~15min 阵亡实录: 分层守卫只会"装备
+    // 现有石镐", 石镐断供后铁镐即裸奔凿石 — canFieldCraftPick 谓词遍地都是, 执行端一直缺位)。
+    // 入口: 无石镐且材料齐(圆石3/棍2) → craftRecipeLocal 就地造 (自带口袋台放置+T-0079 回收)。
+    try {
+        const _hasStone = bot.inventory.items().some(i => i.name === 'stone_pickaxe');
+        if (!_hasStone && invCount(/^cobblestone$/) >= 3 && invCount(/^stick$/) >= 2) {
+            await skills.craftRecipeLocal(bot, 'stone_pickaxe', 1).catch(() => {});
+            log_(`fodder-recraft: stone_pickaxe → ${bot.inventory.items().some(i => i.name === 'stone_pickaxe') ? 'OK' : 'fail'} (保铁镐不碰石)`);
+        }
+    } catch (e) {}
     // The predicate math now lives in the shared skills.pickRunway (one tool-durability
     // budget for the descent gate, TOOL_UPKEEP proposal, and every dig loop — the local
     // copies here were the original but drifted from modes.js's kit variant; the shared

@@ -34,6 +34,14 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
     const CHEAP_PICKS = ['wooden_pickaxe', 'stone_pickaxe', 'iron_pickaxe', 'diamond_pickaxe', 'netherite_pickaxe'];
     const BEST_PICKS = ['netherite_pickaxe', 'diamond_pickaxe', 'iron_pickaxe', 'stone_pickaxe', 'wooden_pickaxe'];
     const pickCount = () => world.getInventoryCounts(bot);
+    // ★2026-07-05 石镐 fodder 就地再造 (mineDown 同款 — 分层守卫需要石镐存在才能保铁镐)。
+    try {
+        const _inv0 = world.getInventoryCounts(bot);
+        if (!bot.inventory.items().some(i => i.name === 'stone_pickaxe')
+            && (_inv0.cobblestone || 0) >= 3 && (_inv0.stick || 0) >= 2) {
+            await skills.craftRecipeLocal(bot, 'stone_pickaxe', 1).catch(() => {});
+        }
+    } catch (e) {}
     const requiredPickTier = (name = '') => {
         if (/obsidian/.test(name)) return 4;
         if (/diamond_ore|redstone_ore|emerald_ore|gold_ore/.test(name)) return 3;
