@@ -165,7 +165,8 @@ function eligibleBranches(bot, ctx, s, failed) {
     if (!failed.has('FIGHT') && s.hostiles.length && s.hostiles[0].d <= 14 && s.hp >= 8
         && (s.hasShield || (s.sword && s.hp >= 14 && s.hostiles.length === 1))) out.push('FIGHT');
     if (!failed.has('BED') && s.night && s.bed && s.bedDist <= 64) out.push('BED');
-    if (!failed.has('FORAGE') && s.day && s.overworld && s.food < 12) out.push('FORAGE');
+    // food<12(饿) 或 低血且 food<18(回血线下, 4:27 实录 hp5/food13 空树连败): 猎到 18 才能自然回血
+    if (!failed.has('FORAGE') && s.day && s.overworld && (s.food < 12 || (s.hp < HP_FLOOR && s.food < 18))) out.push('FORAGE');
     if (!failed.has('RELOCATE') && (s.contained || s.pinned || s.hostiles.length)) out.push('RELOCATE');
     if (!failed.has('DEATH') && deathEligible(bot, ctx, s, failed)) out.push('DEATH');
     return out;
@@ -292,7 +293,9 @@ const EXEC = {
         // 让 feedUp 不再让路。
         const f0 = bot.food, r0 = rationCount(bot);
         try { bot._hungerGateHunt = Date.now(); } catch (e) {}
-        try { await ctx.skills.customSkill(bot, 'feedUp', 14); } catch (e) {}
+        // 低血驱动的觅食要冲回血线(18), 纯饥饿驱动 14 够用
+        const targetFood = (bot.health < HP_FLOOR) ? 18 : 14;
+        try { await ctx.skills.customSkill(bot, 'feedUp', targetFood); } catch (e) {}
         return (bot.food > f0 || rationCount(bot) > r0)
             ? { food: bot.food, gained: bot.food - f0, rations: rationCount(bot) - r0 } : null;
     },
