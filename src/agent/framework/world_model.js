@@ -775,6 +775,18 @@ export function proposeTasks(world, bot) {
         //   run smeltSafe (places furnace + smelts); once ingots are in hand, run craftChain('iron_tier')
         //   (crafts iron pickaxe + sword + shield). @47: just above open-ended GO_UNDERGROUND@45 —
         //   "have the ore in hand, upgrade before diving again" — but below GET_ARMOR@68 and all survival.
+        // RUNG 0.9 (2026-07-06 用户令 oracle挖铁): 首铁空档 — 石器级 + 铁不足 3 + oracle 有目标
+        //   → 日间制导首铁行 (夜挖 MINE_THROUGH_NIGHT 只覆盖夜; 此前首铁靠 GO_UNDERGROUND 盲逛)。
+        //   同 kind GET_IRON_TOOLS: isGoalDone=hasIronTierPick, 承诺贯穿 采→熔→锻 三态切换。
+        if (tier.rank === 2 && ironForArmor(bot) < 3 && !hasIronTierPick(w)) {
+            const firstIronTgt = oracleOreTarget(w, 'ironDeep') || oracleOreTarget(w, 'iron');
+            if (firstIronTgt) {
+                push({ kind: PROPOSAL_KIND.GET_IRON_TOOLS, priority: 47, skill: 'mineOres',
+                       args: [{ ore: 'iron', count: 4, maxMs: 240000 }],
+                       rationale: `stone tier + only ${ironForArmor(bot)} iron — ORACLE first-iron run @${firstIronTgt.x},${firstIronTgt.y},${firstIronTgt.z} (unlock iron pickaxe)`,
+                       hints: { tier: tier.level, iron: ironForArmor(bot), oracle: true } });
+            }
+        }
         if (tier.rank === 2 && ironForArmor(bot) >= 3 && !hasIronTierPick(w)) {
             const ingots = invCount(bot, /^iron_ingot$/);
             const rawIron = invCount(bot, /^raw_iron$/);
