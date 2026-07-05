@@ -191,9 +191,34 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         try { await skills.craftRecipeLocal(bot, 'stick', 1); } catch (e) { prog(`replenishKit: ③ stick craft err ${e.message}`); }
         prog(`replenishKit: ③ stick ${sb}→${cnt('stick')}`);
     }
-    if (!stop() && !overBudget() && cnt('crafting_table') === 0 && !tableNear() && planksHeld() >= 4) {
-        try { await skills.craftRecipeLocal(bot, 'crafting_table', 1); } catch (e) { prog(`replenishKit: ③ table craft err ${e.message}`); }
-        prog(`replenishKit: ③ crafting_table inv=${cnt('crafting_table')}`);
+    // ── ③.5 ★耐久资产前移 (2026-07-05 实录: 补给周期几乎从未活到尾部⑥⑦ — 夜/死总在中途
+    //    打断; 而台/床是 keepInventory 下一次合成永久持有的资产, 必须最先锁定。旧 ③ 的
+    //    !tableNear() 门是反的: 在家台旁边就不揣台 → 下矿就没了。板一到手: 台(4板)→床
+    //    (同色羊毛3+板3), 然后才轮到消耗品(镐/棍)。craftRecipeLocal 零产出回退 craftRecipe。──
+    if (!stop() && !overBudget() && cnt('crafting_table') < 1 && planksHeld() >= 4) {
+        const tb = cnt('crafting_table');
+        let r35 = null;
+        try { r35 = await skills.craftRecipeLocal(bot, 'crafting_table', 1); } catch (e) { prog(`replenishKit: ③.5 table err ${e.message}`); }
+        if (cnt('crafting_table') <= tb) {
+            prog(`replenishKit: ③.5 craftRecipeLocal=${JSON.stringify(r35)} 零产出 → 回退 craftRecipe`);
+            try { await skills.craftRecipe(bot, 'crafting_table', 1); } catch (e) { prog(`replenishKit: ③.5 fallback err ${e.message}`); }
+        }
+        prog(`replenishKit: ③.5 口袋台 ${tb}→${cnt('crafting_table')}`);
+    }
+    if (!stop() && !overBudget() && !bot.inventory.items().some(i => /_bed$/.test(i.name || ''))) {
+        const wools = {};
+        try { for (const it of bot.inventory.items()) if (/_wool$/.test(it.name || '')) wools[it.name] = (wools[it.name] || 0) + it.count; } catch (e) {}
+        const best = Object.entries(wools).sort((a, b) => b[1] - a[1])[0];
+        if (best && best[1] >= 3 && planksHeld() >= 3) {
+            const bedName = best[0].replace('_wool', '_bed');
+            let r36 = null;
+            try { r36 = await skills.craftRecipeLocal(bot, bedName, 1); } catch (e) { prog(`replenishKit: ③.5 bed err ${e.message}`); }
+            if (cnt(bedName) < 1) {
+                prog(`replenishKit: ③.5 bed craftRecipeLocal=${JSON.stringify(r36)} 零产出 → 回退 craftRecipe`);
+                try { await skills.craftRecipe(bot, bedName, 1); } catch (e) { prog(`replenishKit: ③.5 bed fallback err ${e.message}`); }
+            }
+            prog(`replenishKit: ③.5 随身床 ${bedName} → ${cnt(bedName)} (同色 wool=${best[1]})`);
+        }
     }
 
     // ── ④ 补镐到 2 把: 有 cobble(>=3/把)先石镐, 没有则木镐过渡 (镐是消耗品跑道, 宁多勿清)。
@@ -248,41 +273,8 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         }
     }
 
-    // ── ⑥ ★口袋工作台 (2026-07-05 镐跑步机根治: 铁镐#1/#2 各 250 耐久两轮全烧, 每轮镐尽
-    //    →困地下→上浮→补给 20-40min。bot 常年背 300+ 圆石和棍, 只差随身台就能地下无限再造
-    //    石镐 — mobility 'emergency pick' 路径已会用可达台自救, 缺的就是 table=0)。花 4 板
-    //    造一张揣包里, planksEq 底线 8 之外才花。──────────────────────────────────────────
-    if (!stop() && !overBudget() && cnt('crafting_table') < 1 && planksEq() >= 12) {
-        const tb = cnt('crafting_table');
-        let r6 = null;
-        try { r6 = await skills.craftRecipeLocal(bot, 'crafting_table', 1); } catch (e) { prog(`replenishKit: ⑥ pocket-table err ${e.message}`); }
-        // ★2026-07-05 实录 00:52 双跑零产出且无异常 — craftRecipeLocal 的失败诊断在 bot.output
-        // 黑洞里看不见。落盘返回值; false 时回退主力路径 craftRecipe (本局石镐即它所造)。
-        if (cnt('crafting_table') <= tb) {
-            prog(`replenishKit: ⑥ craftRecipeLocal=${JSON.stringify(r6)} 零产出 → 回退 craftRecipe`);
-            try { await skills.craftRecipe(bot, 'crafting_table', 1); } catch (e) { prog(`replenishKit: ⑥ fallback err ${e.message}`); }
-        }
-        prog(`replenishKit: ⑥ pocket crafting_table ${tb}→${cnt('crafting_table')} (地下断镐自救的最后一块拼图)`);
-    }
-
-    // ── ⑦ ★随身床 (大修A 收口, 2026-07-05: 夜税≈35%墙钟+夜死为主死因, 而提案侧 _bedInPack
-    //    分支与 goBedSleep 就地放床链在夜链五修时就已备好 — 唯缺"包里有床"这一环。dusk 走到
-    //    哪睡到哪, 床留原地当重生锚(拆床=丢重生点, 故不回收), 羊毛经济: 同色×3+板×3/张。──
-    if (!stop() && !overBudget() && !bot.inventory.items().some(i => /_bed$/.test(i.name || ''))) {
-        const wools = {};
-        try { for (const it of bot.inventory.items()) if (/_wool$/.test(it.name || '')) wools[it.name] = (wools[it.name] || 0) + it.count; } catch (e) {}
-        const best = Object.entries(wools).sort((a, b) => b[1] - a[1])[0];   // 同色口径 (setBed 混色羊毛教训)
-        if (best && best[1] >= 3 && planksHeld() >= 3) {
-            const bedName = best[0].replace('_wool', '_bed');
-            let r7 = null;
-            try { r7 = await skills.craftRecipeLocal(bot, bedName, 1); } catch (e) { prog(`replenishKit: ⑦ bed err ${e.message}`); }
-            if (cnt(bedName) < 1) {
-                prog(`replenishKit: ⑦ craftRecipeLocal=${JSON.stringify(r7)} 零产出 → 回退 craftRecipe`);
-                try { await skills.craftRecipe(bot, bedName, 1); } catch (e) { prog(`replenishKit: ⑦ fallback err ${e.message}`); }
-            }
-            prog(`replenishKit: ⑦ 随身床 ${bedName} → ${cnt(bedName)} (同色 wool=${best[1]})`);
-        }
-    }
+    // ── ⑥⑦ 口袋台/随身床已前移至 ③.5 (耐久资产先锁定 — 周期常死在尾部, 台/床是
+    //    keepInventory 下的一次性永久资产, 见 ③.5 rationale)。──
 
     // ── ⑧ ★熟食储备 (大修C 核心缺环, 2026-07-05: 3死/小时的'以死换饭'循环 — bot 背着
     //    熔炉+煤79 却生吃腐肉度日, 生肉掉落从不烤。有生肉+煤 → smeltSafe 烤熟, 熟食比生肉
