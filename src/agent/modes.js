@@ -5715,34 +5715,62 @@ const modes_list = [
                 // proposer can navigate BACK to remembered resources instead of only live-sensing 24b.
                 try {
                     if (!bot._landmarks) { try { bot._landmarks = JSON.parse(fs.readFileSync('bots/_supervisor/landmarks.json', 'utf8')); } catch (e) { bot._landmarks = {}; } }
-                    if (!bot._lastLmScan || now - bot._lastLmScan > 12000) {
-                        bot._lastLmScan = now;
-                        let dirty = false;
-                        const reg = (kind, x, y, z, meta) => {
-                            const key = `${kind}@${Math.round(x)},${Math.round(y)},${Math.round(z)}`;
-                            if (!bot._landmarks[key]) { bot._landmarks[key] = { kind, x: Math.round(x), y: Math.round(y), z: Math.round(z), ts: now, seen: now, meta: meta || null }; dirty = true; }
-                            else { bot._landmarks[key].seen = now; if (meta) bot._landmarks[key].meta = meta; }
-                        };
-                        try { for (const bp of bot.findBlocks({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 48, count: 16 })) reg('bed', bp.x, bp.y, bp.z); } catch (e) {}
-                        try { for (const e of Object.values(bot.entities || {})) { if (e && /villager/.test(e.name || '') && e.position) reg('village', e.position.x, e.position.y, e.position.z); } } catch (e) {}
-                        try { for (const bp of bot.findBlocks({ matching: (b) => b && /^(crafting_table|furnace|bell)$/.test(b.name || ''), maxDistance: 48, count: 8 })) { const bn = bot.blockAt(bp); reg(bn && bn.name === 'bell' ? 'village' : ((bn && bn.name) || 'craft'), bp.x, bp.y, bp.z); } } catch (e) {}
-                        // ★opening-spec C328 multi-kind: the scanner only knew bed/village/craft. The
-                        // OPENING decision (SCOUT/WOOD_BUFFER/VILLAGE_HARVEST) needs to remember WOOD
-                        // (nearest tree for the bootstrap pick), CROPS/FARMLAND (village food), CHESTS
-                        // (loot/storage), and ANIMALS (cow/pig/sheep/chicken → meat+wool→bed). Register
-                        // each as a distinct landmark kind so _nearLm('wood'|'crops'|'chest'|'animal')
-                        // can navigate the bot BACK to bootstrap resources instead of dead-reckoning.
-                        try { for (const bp of bot.findBlocks({ matching: (b) => b && /_log$/.test(b.name || ''), maxDistance: 32, count: 8 })) reg('wood', bp.x, bp.y, bp.z); } catch (e) {}
-                        try { for (const bp of bot.findBlocks({ matching: (b) => b && /^(hay_block|wheat|carrots|potatoes|beetroots|farmland)$/.test(b.name || ''), maxDistance: 32, count: 8 })) reg('crops', bp.x, bp.y, bp.z); } catch (e) {}
-                        try { for (const bp of bot.findBlocks({ matching: (b) => b && /^(chest|barrel)$/.test(b.name || ''), maxDistance: 48, count: 8 })) reg('chest', bp.x, bp.y, bp.z); } catch (e) {}
-                        try { for (const e of Object.values(bot.entities || {})) { if (e && /^(cow|pig|sheep|chicken|mooshroom)$/.test(e.name || '') && e.position) reg('animal', e.position.x, e.position.y, e.position.z, (e.name || '')); } } catch (e) {}
-                        // ★task-queue Phase B opportunistic detection sources (design §5.3): ORE veins (iron/
-                        //   diamond, near-range so the bot only grabs what it'd pass; meta=subtype for collectBlock
-                        //   + pick-tier gate) and WANDERING TRADER (kill for lead/栓绳). Scanned here so
-                        //   bot._world.landmarks.{ore,trader} exist for spliceOpportunistic.
-                        try { for (const bp of bot.findBlocks({ matching: (b) => b && /(^|_)(iron|diamond)_ore$/.test(b.name || ''), maxDistance: 16, count: 12 })) { const bn = bot.blockAt(bp); reg('ore', bp.x, bp.y, bp.z, /diamond/.test((bn && bn.name) || '') ? 'diamond' : 'iron'); } } catch (e) {}
-                        try { for (const e of Object.values(bot.entities || {})) { if (e && /^(wandering_trader|trader_llama)$/.test(e.name || '') && e.position) reg('trader', e.position.x, e.position.y, e.position.z, e.name); } } catch (e) {}
-                        if (dirty) { try { fs.writeFileSync('bots/_supervisor/landmarks.json', JSON.stringify(bot._landmarks)); } catch (e) {} }
+                    // ★2026-07-06 session#7 ELOOP 根治(满视距丝滑): 这段 landmark 扫描是全 agent 最重的
+                    //   单拍同步块 — 6 个 findBlocks(bed/craft maxDist48 count16/8 + wood/crops32 + chest48
+                    //   + ore16)原先背靠背同步跑, 探针实测单拍冻结 550-665ms, 每 12s 一次(= ⏱ELOOP 主源, 不是
+                    //   chunk 解析: chunkParse=0ms chunks=0 而 modes≈580ms)。findBlocks 用谓词函数 → 稀有目标
+                    //   (bed/chest 常不达 count)时把整个八面体扫穿, 每命中 palette 的 section 迭代 4096 block×
+                    //   new Block(满视距下加载 section 更多 → 更重, 且大量 Block 分配触发 GC = 扫描后紧跟的
+                    //   other 卡顿)。
+                    //   修: 把"12s 一次全量 6 扫"改成"每 2s tick 只跑 1 组扫描, round-robin 6 组 → 12s 走完一轮"。
+                    //   单拍最坏 = 单个最贵扫描(~140ms)而非 6× 叠加; 且 DETACHED async 不占 modes 拍。行为等价:
+                    //   同 12s 刷新周期、同 reg 口径/范围/count、同落盘 — 只是把一次性 burst 摊到 6 拍。互斥
+                    //   _lmScanning 防重入(上一组还在跑就跳过本 tick)。
+                    if (!bot._lmScanning) {
+                        // 每 2000ms 推进一组(与 world_model 2s tick 同频); 一轮 6 组 = 12s(= 旧全量周期)。
+                        if (!bot._lmGroupAt || now - bot._lmGroupAt >= 2000) {
+                            bot._lmGroupAt = now;
+                            const gi = (bot._lmGroupIdx = ((bot._lmGroupIdx || 0)) % 6);
+                            bot._lmGroupIdx = gi + 1;
+                            bot._lmScanning = true;
+                            const _reg = (kind, x, y, z, meta) => {
+                                const key = `${kind}@${Math.round(x)},${Math.round(y)},${Math.round(z)}`;
+                                if (!bot._landmarks[key]) { bot._landmarks[key] = { kind, x: Math.round(x), y: Math.round(y), z: Math.round(z), ts: now, seen: now, meta: meta || null }; return true; }
+                                bot._landmarks[key].seen = now; if (meta) bot._landmarks[key].meta = meta; return false;
+                            };
+                            (async () => {
+                              let dirty = false;
+                              const reg = (...a) => { if (_reg(...a)) dirty = true; };
+                              try {
+                                // 6 组, 每 tick 跑一组。分组把最贵的 bed / chest 各自独占一拍(它们 maxDist48 稀有
+                                // → 全扫最重), 其余便宜项拼组。跨 findBlocks 组内也不叠(每组≤1 个 findBlocks)。
+                                switch (gi) {
+                                  case 0: // bed (最贵: maxDist48 count16 稀有)
+                                    try { for (const bp of bot.findBlocks({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 48, count: 16 })) reg('bed', bp.x, bp.y, bp.z); } catch (e) {}
+                                    break;
+                                  case 1: // craft/furnace/bell (maxDist48 count8) + villager 实体(便宜)
+                                    try { for (const e of Object.values(bot.entities || {})) { if (e && /villager/.test(e.name || '') && e.position) reg('village', e.position.x, e.position.y, e.position.z); } } catch (e) {}
+                                    try { for (const bp of bot.findBlocks({ matching: (b) => b && /^(crafting_table|furnace|bell)$/.test(b.name || ''), maxDistance: 48, count: 8 })) { const bn = bot.blockAt(bp); reg(bn && bn.name === 'bell' ? 'village' : ((bn && bn.name) || 'craft'), bp.x, bp.y, bp.z); } } catch (e) {}
+                                    break;
+                                  case 2: // wood(maxDist32 count8) — ★C328 记住最近树做 bootstrap
+                                    try { for (const bp of bot.findBlocks({ matching: (b) => b && /_log$/.test(b.name || ''), maxDistance: 32, count: 8 })) reg('wood', bp.x, bp.y, bp.z); } catch (e) {}
+                                    break;
+                                  case 3: // crops/farmland(maxDist32 count8) — 村庄食物
+                                    try { for (const bp of bot.findBlocks({ matching: (b) => b && /^(hay_block|wheat|carrots|potatoes|beetroots|farmland)$/.test(b.name || ''), maxDistance: 32, count: 8 })) reg('crops', bp.x, bp.y, bp.z); } catch (e) {}
+                                    break;
+                                  case 4: // chest/barrel(maxDist48 count8 稀有 → 较贵) + 动物实体(便宜)
+                                    try { for (const bp of bot.findBlocks({ matching: (b) => b && /^(chest|barrel)$/.test(b.name || ''), maxDistance: 48, count: 8 })) reg('chest', bp.x, bp.y, bp.z); } catch (e) {}
+                                    try { for (const e of Object.values(bot.entities || {})) { if (e && /^(cow|pig|sheep|chicken|mooshroom)$/.test(e.name || '') && e.position) reg('animal', e.position.x, e.position.y, e.position.z, (e.name || '')); } } catch (e) {}
+                                    break;
+                                  case 5: // ore(maxDist16 count12 便宜) + 流浪商人(便宜) — ★task-queue Phase B 机会源
+                                    try { for (const bp of bot.findBlocks({ matching: (b) => b && /(^|_)(iron|diamond)_ore$/.test(b.name || ''), maxDistance: 16, count: 12 })) { const bn = bot.blockAt(bp); reg('ore', bp.x, bp.y, bp.z, /diamond/.test((bn && bn.name) || '') ? 'diamond' : 'iron'); } } catch (e) {}
+                                    try { for (const e of Object.values(bot.entities || {})) { if (e && /^(wandering_trader|trader_llama)$/.test(e.name || '') && e.position) reg('trader', e.position.x, e.position.y, e.position.z, e.name); } } catch (e) {}
+                                    break;
+                                }
+                                if (dirty) { try { fs.writeFileSync('bots/_supervisor/landmarks.json', JSON.stringify(bot._landmarks)); } catch (e) {} }
+                              } finally { bot._lmScanning = false; }
+                            })();
+                        }
                     }
                 } catch (e) {}
                 // ★TRANSIENT freshness (task-queue Phase C opp-completion): ore/animal/trader/crops get
