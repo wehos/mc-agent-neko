@@ -16,6 +16,11 @@
 | #1 | 867e4fb | fleeMove probe 加 above(y2), step-up 要头顶空间否则拒该朝向(不再撞 2 格唇死跳) |
 | #6 | 8360940 | collectBlock 停滞早停(不动+不进账 6s→中止)止 pathfinder unstick 抖动; 配合 #2 近树 direct-chop |
 
+**★值守中新发现+修 (监控死亡实录, 非用户上报)**:
+- **#9 求死出口披甲失效** (7c75bee): iron 甲 bot 求死"蹭怪"打不死→预算耗尽卡 25min→watchdog 重启。修: 蹭怪连 2 轮不掉血转跌落致死(跌落不被甲减)。
+- **#10 冰盖水溺死** (e01f26b): deaths #5/#8/#9 三次冰封水域近地表被 ICE 封顶溺死(深水破岩分支 y<55 不触发, swim 破冰太慢)。修: self_preservation 溺水链加 ICE 专项分支, 头顶是冰则优先 equip镐+dig 快速破冰上浮。
+- ⚠镐经济(#7 机制7)另一 session 在实现(spec-pickaxe-stockpile-redesign, 改 branchMine/mineDiamonds/replenishKit/world_model/skills), 勿双改。
+
 **保守取舍(未做/降级, 均低风险残留)**: #3 未放宽 reuse 门 pocket(携带复用已根治乱扔, 放宽有误注销风险); #1 未加 fleeMove 垫柱跳(持镐走已有凿墙; edge_unstick 互搏留查); #4 未加 nightShelter 平地拒 dig_one(cap 选料已解常见情形, wood-only 平地散板是罕见早期边角)。
 
 ---
