@@ -1928,18 +1928,39 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         // minutes inside a single call — the escalating relocate below never ran because
         // the loop never iterated. Race against a timeout; on hang, stop the pathfinder
         // so the next pass can relocate to a reachable grove.
+        let _collectStallIv = null;
         try {
             // ★veinFollow=true → chop the WHOLE connected tree (flood-fill all connected logs)
             // and pick up every drop, instead of one bottom log then wandering off (用户: "只挖
             // 第一层就走"). harvestConnectedVein walks to + digs + pickupNearbyItems each log.
             // Longer timeout (45s) since a full tree is many logs.
+            // ★#6 (review-2026-07-06 换手抖动): 对不可达树, collectBlock 内寻路反复 unstick →
+            //   pathfinder.stopDigging 打断 near-complete dig(真凶), 手上道具循环换, 空转到 45s 超时。
+            //   停滞早停: 不动(位移<0.3)且不进账(total 不涨)累计 ≥6s = 抖动特征(正常挖掘 total 上涨
+            //   或行走位移会重置计数) → 提早中止, 让下面生走/relocate/blacklist 接手, 抖动窗口 45s→6s。
+            const _cbBefore = total();
+            let _cbLastPos = bot.entity.position.clone();
+            let _cbStallMs = 0;
+            const _cbStall = new Promise((_, rej) => {
+                _collectStallIv = setInterval(() => {
+                    try {
+                        const moved = bot.entity.position.distanceTo(_cbLastPos);
+                        _cbLastPos = bot.entity.position.clone();
+                        if (moved < 0.3 && total() <= _cbBefore) _cbStallMs += 1000; else _cbStallMs = 0;
+                        if (_cbStallMs >= 6000) rej(new Error('chop-collect-stall'));
+                    } catch (e) {}
+                }, 1000);
+            });
             await Promise.race([
                 skills.collectBlock(bot, nearest.t, 1, null, true),
                 new Promise((_, rej) => setTimeout(() => rej(new Error('chop-timeout')), 45000)),
+                _cbStall,
             ]);
         } catch (e) {
             try { bot.pathfinder.stop(); } catch (_) {}
             try { bot.clearControlStates(); } catch (_) {}
+        } finally {
+            try { if (_collectStallIv) clearInterval(_collectStallIv); } catch (e) {}
         }
         if (total() <= before) {
             // ★生走逼近 (黑名单膨胀到33条的根源: 6.8格外平地树被寻路否决,直砍臂展只有
