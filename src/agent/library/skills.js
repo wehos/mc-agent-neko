@@ -918,14 +918,19 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
         if (reachOf() > 4.6) return 'unreachable';
         const cur = bot.blockAt(block.position);
         if (dead(cur)) return 'gone';
-        // ★C337 (T-0035 reopen·回归): anti-x-ray LOS gate, opt-in via requireLOS (collectBlock passes it
-        // for ORE). After approach the bot can still be on the NEAR side of a thin wall with the target
-        // 2.5-4.6b away THROUGH solid rock → digging it = x-ray (用户"矿在距离内但中间隔着石头,违反规则").
-        // Block ONLY the unambiguous x-ray: at-distance(>2.5b, not tunneled-adjacent) AND occluded
-        // (no line-of-sight). A buried ore we legitimately tunneled UP TO is reachOf≤2.5 (exempt), and a
-        // genuinely visible ore passes canSeeBlock — so legit vein/tunnel mining is unaffected; only the
-        // reach-through-a-wall grab is refused, routing the caller to expose it properly or skip it.
-        if (requireLOS && reachOf() > 2.5) {
+        // ★C337+ (2026-07-06 用户实拍: 站墙前把墙后下方的铁隔墙挖掉, 然后卡墙乱挥镐子过不去):
+        // anti-x-ray LOS gate, opt-in via requireLOS (collectBlock passes it for ORE). Enforce
+        // line-of-sight to the ore at ANY distance — canSeeBlock raycasts eye→block-centre and is
+        // TRUE only when the first solid-shaped block the ray hits IS the target (air passes through).
+        // So an ore we legitimately tunnelled UP TO has an EXPOSED face → canSeeBlock TRUE → passes;
+        // an ore behind a solid wall → the wall's shape is hit first → FALSE → refused.
+        // ★The OLD `reachOf()>2.5` exemption was the x-ray HOLE: it assumed a tunnelled-up ore fails
+        // canSeeBlock and needs a blanket pass, but a tunnelled-up ore does NOT fail it (its near face
+        // is exposed). All the exemption actually did was let the bot reach-through a 1-block wall to
+        // grab ore ≤2.5b away (bug 1), and then — because that pocket is behind the wall — jam the
+        // pickup pathfind against the wall swinging forever (bug 2). No distance exemption now: occluded
+        // ⇒ refuse; the caller skips+excludes and branchMine's carve-a-stand-cell path exposes it legit.
+        if (requireLOS) {
             const _los = (() => { try { return bot.canSeeBlock(cur); } catch (e) { return true; } })();
             if (!_los) return 'occluded';
         }
@@ -1309,7 +1314,12 @@ async function harvestConnectedVein(bot, startPos, blocktypes, max=64) {
         // "抬头空挥" on a tall tree's high logs, the equip step keeps a sword off wood, and the
         // 8s backstop bounds each log. Expand neighbours regardless of outcome (a leaning/bent
         // trunk unreachable from here may be reachable from an adjacent cell).
-        const r = await safeDig(bot, b, { maxMs: 8000, pickup: true });
+        // ★requireLOS: this flood-fill only ever runs on ORE veins (collectBlock veinActive), so
+        // apply the SAME anti-x-ray LOS gate as the main dig — never reach a vein block through a
+        // wall. safeDig approaches (repositions) blocks >4.4b first, so a wrapping vein still gets
+        // exhausted from reachable angles; a genuinely walled-off tail is left for the next scan
+        // (recoverable) rather than x-ray-grabbed.
+        const r = await safeDig(bot, b, { maxMs: 8000, pickup: true, requireLOS: true });
         if (r === 'ok') mined++;
         for (const [dx,dy,dz] of NB) queue.push(p.offset(dx,dy,dz));
     }
