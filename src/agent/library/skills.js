@@ -1128,26 +1128,40 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
         // cycle). Guard per-block (skip the offending block) and around the scan.
         let blocks = [];
         try {
-            blocks = world.getNearestBlocksWhere(bot, block => {
+            // ★2026-07-06 session#7 满视距 ELOOP 修: 原先 getNearestBlocksWhere 在 64b 八面体上对每个
+            //   命中格跑昂贵谓词(safeToBreak 要走邻块检查 + _inDeathZone + exclude), 且外层 maxAttempts
+            //   每轮重扫 — 探针实录 act=chopWood other≈670ms(视距相关: 满视距下 64b 内加载 section 多 →
+            //   全扫 + 每格 safeToBreak = 事件循环长冻)。
+            //   修: 两段扫。① 先用 findBlocks 按方块类型 ID 数组快扫(仅 palette+indexOf, 无 safeToBreak)
+            //   拿最近的一批候选位置(取 count 的宽松倍数, 保证过滤后仍够); ② 只对这一小批候选跑昂贵谓词
+            //   (safeToBreak/deathzone/exclude/液体源)。语义等价(同 64b 半径、同最终判据、同排序), 但把
+            //   O(八面体×safeToBreak) 降成 O(八面体×廉价类型判) + O(少量候选×safeToBreak)。
+            const _want = veinActive ? 8 : 1;
+            const _ids = [];
+            try { for (const n of blocktypes) { const bid = mc.getBlockId(n); if (bid != null) _ids.push(bid); } } catch (e) {}
+            // ① 廉价类型快扫(候选取 max(64, want*8), 给 ② 的过滤留足冗余; 稀有目标时上限自然收敛)。
+            let _cands = [];
+            if (_ids.length) {
+                try { _cands = bot.findBlocks({ matching: _ids, maxDistance: 64, count: Math.max(64, _want * 8) }) || []; } catch (e) { _cands = []; }
+            }
+            // ② 对候选(已按距排序)跑昂贵谓词, 收满 want 即停 — safeToBreak 只在少量候选上求值。
+            for (const _pos of _cands) {
+                if (blocks.length >= _want) break;
+                const block = bot.blockAt(_pos);
                 try {
-                    if (!block || !block.position || !blocktypes.includes(block.name)) {
-                        return false;
-                    }
-                    if (_inDeathZone(block.position)) return false;   // 雷区矿物不可见
+                    if (!block || !block.position || !blocktypes.includes(block.name)) continue;
+                    if (_inDeathZone(block.position)) continue;   // 雷区矿物不可见
                     if (exclude) {
+                        let _ex = false;
                         for (let position of exclude) {
-                            if (block.position.x === position.x && block.position.y === position.y && block.position.z === position.z) {
-                                return false;
-                            }
+                            if (block.position.x === position.x && block.position.y === position.y && block.position.z === position.z) { _ex = true; break; }
                         }
+                        if (_ex) continue;
                     }
-                    if (isLiquid) {
-                        // collect only source blocks
-                        return block.metadata === 0;
-                    }
-                    return movements.safeToBreak(block) || unsafeBlocks.includes(block.name);
-                } catch (e) { return false; }
-            }, 64, veinActive ? 8 : 1);   // ★C304 ore: keep fallbacks so we can skip across-gap nearest to a reachable one
+                    if (isLiquid) { if (block.metadata === 0) blocks.push(block); continue; }   // 液体只收源块
+                    if (movements.safeToBreak(block) || unsafeBlocks.includes(block.name)) blocks.push(block);
+                } catch (e) { continue; }
+            }
         } catch (err) {
             const frame = (err.stack || '').split('\n')[1] || '';
             log(bot, `⚠️ ${blockType} scan failed: ${err}.${frame ? ' @' + frame.trim() : ''} — retrying next pass.`);
