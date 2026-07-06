@@ -1109,6 +1109,15 @@ export function proposeTasks(world, bot) {
                 //   评审 P1: mineOres 采铁需石镐+ (木镐 bot 秒拒 3 振 → 连坐冷却整个 kind 含
                 //   mineDown 回退) — 无石镐+夜里只走 mineDown。评审 P2: 夜里只接受地下带目标
                 //   (y<=50) — 山面铁(y87)会把密封楼梯换成夜间地表裸采。
+                // ★2026-07-06 夜钻优先 (镐#3 夜铁行 10min 磨死实录): 铁镐在世+钻<3 → 夜里
+                //   直接 mineDiamonds — 镐的寿命用在唯一非它不可的地方(钻矿), 铁 gap 让位
+                //   (与日间 GET_DIAMOND@46.75 同一反倒挂逻辑)。
+                if (hasIronTierPick(w) && diamondsOnHand(bot) < DIAMOND_FLOOR) {
+                    push({ kind: TASK.DUSK_MINE_NIGHT, priority: 94, skill: 'mineDiamonds',
+                           args: [DIAMOND_FLOOR],
+                           rationale: `night DIAMOND rush — iron pick alive, spend it on diamond ore before it wears (${diamondsOnHand(bot)}/${DIAMOND_FLOOR})` });
+                    break;
+                }
                 const nightHasStonePick = invCount(bot, /(stone|iron|diamond|netherite)_pickaxe$/) >= 1;
                 const nightNeedIron = !hasIronTierPick(w) || ironForArmor(bot) < ironDemandTotal(w, bot);
                 // ironDeep = 扫描器分层的地下带(y<=50)最近名单 (iron top-24 在山顶可能全是山面铁);
