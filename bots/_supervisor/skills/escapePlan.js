@@ -394,7 +394,14 @@ async function runNavTo(bot, ctx, opts) {
         return { reached: false, error: String(e && e.message || e) };
     } finally {
         if (opts.peaceful) { try { bot.chat('/difficulty ' + origDiff); } catch (e) {} }
-        try { fs.writeFileSync('bots/_supervisor/sticky_skill.json', JSON.stringify({ skill: 'missionNether', args: [] })); } catch (e) {}
+        // ★2026-07-06 sticky 伏击洞 (review P3 实弹咬人): framework-v2 live 时无条件写
+        //   sticky_skill.json={missionNether} 会在重启后被 bridge 重新武装, 抢占全部
+        //   ws/kernel 派发 (迁锚行动被伏击实录)。框架旗下不写。
+        try {
+            if (process.env.MC_FRAMEWORK_V2 !== '1') {
+                fs.writeFileSync('bots/_supervisor/sticky_skill.json', JSON.stringify({ skill: 'missionNether', args: [] }));
+            }
+        } catch (e) {}
     }
 }
 
