@@ -4638,7 +4638,10 @@ const modes_list = [
                         };
                         let floorOK = safeLandingAhead();
                         if (!floorOK) {
-                            const fill = bot.inventory.items().find(it => FILLR.test(it.name));
+                            // ★#5 (review-2026-07-06 垫脚用木板): MAROONED 架桥选料 cheap-first, 木料末位
+                            //   回退 (原 .find(FILLR) 按槽位序先选木板 → 烧木架桥)。
+                            const fill = bot.inventory.items().find(it => FILLR.test(it.name) && !/_planks$|_log$|_wood$/.test(it.name))
+                                || bot.inventory.items().find(it => FILLR.test(it.name));
                             const bp = bot.entity.position;
                             let placedBridge = false;
                             if (fill && Math.hypot(bp.x - (m2.x + sx + 0.5), bp.z - (m2.z + sz + 0.5)) >= 0.85) {

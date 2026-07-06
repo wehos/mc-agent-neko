@@ -4321,18 +4321,24 @@ export async function digOneCapOne(bot) {
     // ④ Cap the head: place a NON-gravity block two above the (new) feet so it
     // can't fall through the pocket. Pick a solid filler we actually carry.
     const inv = world.getInventoryCounts(bot);
+    // ★#4 (review-2026-07-06 乱放木板): cap/侧墙材料 cheap-first, 木料末位。旧版 _CAP_PREFS 只列
+    // oak_planks(漏 spruce 等), fallback 抓"任意固体"会选中 spruce_planks → 工作台旁乱堆木板(真凶,
+    // 初诊误判在 modes.js)。扩充贱料清单 + fallback 拆两段: 先任意非木贱料, 只有木料时才用(裸生
+    // 封顶保命 — modes.js:1175 保护的 wood-only seal 不能断)。cap(④)与侧墙(⑤ 4376)共用 capName。
     const _CAP_PREFS = [
-        'cobblestone', 'cobbled_deepslate', 'stone', 'dirt', 'deepslate',
-        'andesite', 'diorite', 'granite', 'netherrack', 'tuff', 'oak_planks',
+        'cobblestone', 'cobbled_deepslate', 'stone', 'dirt', 'coarse_dirt', 'deepslate',
+        'andesite', 'diorite', 'granite', 'netherrack', 'tuff', 'sandstone', 'red_sandstone', 'terracotta',
     ];
     let capName = _CAP_PREFS.find(n => (inv[n] || 0) > 0);
     if (!capName) {
-        // Fall back to any carried solid block that isn't a gravity / falling type.
-        const _block = bot.inventory.items().find(it =>
+        const _solidOK = (it) =>
             !_isGravity({ name: it.name }) &&
             !/sword|pickaxe|axe|shovel|hoe|_ingot|_pickaxe|bucket|torch|seeds|^bed$|_bed$|food|apple|bread|meat|fish/.test(it.name) &&
-            (mc.getItemId(it.name) != null));
-        capName = _block ? _block.name : null;
+            (mc.getItemId(it.name) != null);
+        const items = bot.inventory.items();
+        const _nonWood = items.find(it => _solidOK(it) && !/_planks$|_log$|_wood$/.test(it.name));   // 先非木贱料
+        const _wood = items.find(it => _solidOK(it) && /_planks$|_log$|_wood$/.test(it.name));       // 木料末位(仅裸生保命)
+        capName = (_nonWood && _nonWood.name) || (_wood && _wood.name) || null;
     }
 
     // ★C346 depth-adaptive cap (deaths #4/#5 2026-07-02 13:11, zombie siege at the FLAT
