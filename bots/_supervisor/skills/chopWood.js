@@ -1678,11 +1678,19 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             }
             return '';
         };
-        for (const t of LOGS) {
-            const id = bot.registry && bot.registry.blocksByName[t] ? bot.registry.blocksByName[t].id : null;
+        // ★2026-07-06 session#7 ELOOP 根治(满视距丝滑): 原先对 8 种 LOGS 各跑一次 findBlocks(maxDist40
+        //   count16)= 8 个八面体扫描背靠背同步, 探针实测 act=chopWood 单拍冻结 500-1795ms(⏱ELOOP 主源之一,
+        //   chunkParse/physTick/gc 全 0)。稀有树(count16 常不达)时每次都把 40b 八面体扫穿, ×8。
+        //   修: 合并成 1 次 findBlocks(ID 数组 matching 全部 log 类型)。mineflayer findBlocks 支持数组匹配
+        //   (getMatchingFunction→isMatchingType, palette 快速跳过 + indexOf), 结果 = 8 类型的并集(同候选集),
+        //   处理时用 blockAt(base).name 反推类型 t 供日志。~8x 降本, 语义等价。
+        {
+            const logIds = LOGS.map(t => (bot.registry && bot.registry.blocksByName[t] ? bot.registry.blocksByName[t].id : null)).filter(v => v != null);
             let cands = [];
-            if (id != null) { try { cands = bot.findBlocks({ matching: id, maxDistance: 40, count: 16 }) || []; } catch (e) { cands = []; } }
-            if (!cands.length) { const b = world.getNearestBlock(bot, t, 40); if (b) cands = [b.position]; }  // fallback
+            if (logIds.length) { try { cands = bot.findBlocks({ matching: logIds, maxDistance: 40, count: 16 }) || []; } catch (e) { cands = []; } }
+            if (!cands.length) { // fallback: 单类型 getNearestBlock 兜底(与原逐类型 fallback 同效, 取任一最近)
+                for (const t of LOGS) { const b = world.getNearestBlock(bot, t, 40); if (b) { cands = [b.position]; break; } }
+            }
             for (const p of cands) {
                 const base = _trunkBase(p);                    // ★C297 resolve to trunk base (ground), not the detected canopy log
                 const key = `${Math.floor(base.x)},${Math.floor(base.y)},${Math.floor(base.z)}`;
@@ -1693,7 +1701,11 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                 if (_opts.criticalForageLocalOnly && (d > 10.5 || (base.y - bot.entity.position.y) > 5)) continue;
                 const risk = riskyTree(base, d);
                 if (risk) { riskySkipped++; continue; }
-                if (d < ndist) { ndist = d; nearest = { b: bot.blockAt(base), t, key, drop: Math.round(p.y - base.y) }; }   // drop = how far the canopy log was lowered to its base (★C297 evidence)
+                if (d < ndist) {
+                    const bb = bot.blockAt(base);
+                    const t = (bb && bb.name) || 'log';        // ★合并扫描后从方块反推类型(原来靠外层 for t)
+                    ndist = d; nearest = { b: bb, t, key, drop: Math.round(p.y - base.y) };
+                }   // drop = how far the canopy log was lowered to its base (★C297 evidence)
             }
         }
         _dbg(`iter${i} y=${Math.floor(bot.entity.position.y)} nearest=${nearest ? nearest.t + '@' + ndist.toFixed(1) + 'b' + (nearest.drop > 1 ? `↓${nearest.drop}(★C297base)` : '') : 'NONE'} total=${total()} stale=${stale} surfaced=${surfaced} blk=${_unreach.size} riskySkip=${riskySkipped}`);
