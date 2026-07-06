@@ -1575,6 +1575,37 @@ const modes_list = [
                     const _headCapped = _hCap && _hCap.boundingBox === 'block' && !/water|lava/.test(_hCap.name || '');
                     if (_drownSub && _subEnc && _headCapped) return;   // 封顶水牢溺水: 让 mobility ENTOMBED dig 独占
                 } catch (e) {}
+                // ★#10 (2026-07-06 实录 deaths #5/#8/#9 三次冰盖水溺死, 全图复发): 溺水且头顶【直接是
+                //   ICE】时 — 深水分支(y<55)不触发(近地表 y60), swim 反射+edge_unstick 破冰太慢(氧气耗尽
+                //   前没破穿)→淹死。冰破极快, 直接优先破冰盖上浮。ICE 专项(非石牢/开阔水): 只在头位/头顶
+                //   确为冰时抢, 且需真溺水(oxy≤14); 深潜氧足或水/石盖不触发, 不动现有深水/开阔/石牢链。
+                try {
+                    const _iceRe = /(^|_)ice$|packed_ice|blue_ice|frosted_ice/;
+                    const _drownIce = bot.oxygenLevel !== undefined && bot.oxygenLevel <= 14;
+                    const _hi1 = bot.blockAt(bot.entity.position.offset(0, 1, 0));
+                    const _hi2 = bot.blockAt(bot.entity.position.offset(0, 2, 0));
+                    const _iceAbove = (_hi1 && _iceRe.test(_hi1.name || '')) || (_hi2 && _iceRe.test(_hi2.name || ''));
+                    if (_drownIce && _iceAbove) {
+                        say(agent, 'Drowning under ice — breaking through!');
+                        execute(this, agent, async () => {
+                            for (let i = 0; i < 6 && (bot.oxygenLevel === undefined || bot.oxygenLevel < 16); i++) {
+                                if (bot.interrupt_code) break;
+                                const c1 = bot.blockAt(bot.entity.position.offset(0, 1, 0));
+                                const c2 = bot.blockAt(bot.entity.position.offset(0, 2, 0));
+                                const tgt = (c1 && _iceRe.test(c1.name || '')) ? c1 : ((c2 && _iceRe.test(c2.name || '')) ? c2 : null);
+                                if (!tgt) break;   // 冰已破穿 → 头顶通了, 跳出去上浮
+                                try { await bot.lookAt(tgt.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
+                                try { if (bot.tool && bot.tool.equipForBlock) await bot.tool.equipForBlock(tgt); } catch (e) {}   // 镐破冰更快 (C314 同款 equip-first)
+                                try { bot.setControlState('jump', true); } catch (e) {}
+                                try { await bot.dig(tgt); } catch (e) {}
+                                await new Promise(r => setTimeout(r, 100));
+                            }
+                            try { bot.setControlState('jump', true); } catch (e) {}   // 破穿后持续上浮
+                            await new Promise(r => setTimeout(r, 300));
+                        });
+                        return;
+                    }
+                } catch (e) {}
                 // ===== SWIMMING INSTINCT (hardcoded reflex, not a skill) ==========
                 // The bot is in water. Three regimes, by situation:
                 // ★Trigger EARLY (≤14, not ≤8). y51 deep-water deaths kept recurring (the death-
