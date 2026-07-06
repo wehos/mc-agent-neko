@@ -948,6 +948,14 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             }
         } catch (e) {}
         if (!best) return false;
+        // ★#2 sibling (review-2026-07-06 穿墙挖树): 别 x-ray 隔墙挖 log — >2.2b 且看不见=隔掩体墙, 跳过。
+        try {
+            if (best.dist > 2.2 && !bot.canSeeBlock(best.block)) {
+                motion('feedUp.local_oak_decay.xray_skip', { target: `${best.block.name}@${best.block.position.x},${best.block.position.y},${best.block.position.z}`, dist: +best.dist.toFixed(2) });
+                bot._feedUpLocalOakDecayUntil = Date.now() + 45000;   // 别立刻重试同块
+                return false;
+            }
+        } catch (e) {}
         const logBlock = best.block;
         bot._feedUpLocalOakDecayUntil = Date.now() + 45000;
         prog(`feedUp: ${label} local oak decay kick ${logBlock.name}@${logBlock.position.x},${logBlock.position.y},${logBlock.position.z} dist=${best.dist.toFixed(1)} dy=${best.relDy.toFixed(1)} food=${bot.food} hp=${Math.round(bot.health)} — no roam/no climb`);

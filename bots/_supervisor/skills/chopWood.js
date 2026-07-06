@@ -163,6 +163,18 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         _dbg(`stone dig blocked: no pick actually held for ${block.name}${why ? ' ' + why : ''} held=${bot.heldItem ? bot.heldItem.name : 'empty'}`);
         return false;
     };
+    // ★#5 贱料优先填料 (review-2026-07-06): 垫脚/垫柱选 dirt/cobble 等贱料, 木板/原木仅在实在没
+    // 别的时才用 (木料留给工具/台/棍)。扁平正则 + .find() 会按物品栏槽位序先命中木板 → 烧木板垫脚;
+    // 改成全库范式 (skills.js:2016 / modes.js:1691) 的两段式: 有序贱料先, 木料末位回退 (不可删回退 —
+    // coffin/无贱料时唯一能垫脱困)。三处 (surf-stair 732 / LEASH-stair 1488 / LEASH-pillar 1519) 共用。
+    const CHEAP_FILL = ['dirt', 'coarse_dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'deepslate',
+        'andesite', 'diorite', 'granite', 'tuff', 'gravel', 'sand', 'red_sand', 'sandstone', 'red_sandstone'];
+    const pickFiller = () => {
+        const items = bot.inventory.items();
+        for (const n of CHEAP_FILL) { const it = items.find(i => i.name === n); if (it) return it; }
+        const terra = items.find(i => /_terracotta$|^terracotta$/.test(i.name)); if (terra) return terra;   // badlands 贱料
+        return items.find(i => /_planks$|_log$|_wood$/.test(i.name)) || null;   // 木料末位回退 (不可删)
+    };
     const guardedDig = async (block, why = '') => {
         if (!block) return false;
         // ★C339 (T-0064): no x-ray TRUNK reach. Don't chop a LOG/WOOD block we can NEITHER stand next
@@ -729,7 +741,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // dirt=21 yet it fell through to the unstable staircase). Do it by hand reliably:
             // clear the head, equip filler, jump, and place a block under our feet at the apex.
             // Vertical rise that CANNOT fall back (unlike raw stair-climbing in cave terrain).
-            const _fill = bot.inventory.items().find(it => /dirt|cobblestone|cobbled|granite|andesite|diorite|^stone$|tuff|gravel|^sand$|red_sand|sandstone|terracotta|_planks$|_log$/.test(it.name));   // ★C280 +red_sand/terracotta (badlands)
+            const _fill = pickFiller();   // ★#5 贱料优先, 木料末位回退 (原扁平正则 .find 按槽位序先选木板烧木垫脚)
             // ★STAIR-PLACE first (deterministic +1, proven in LEASH; the self-pillar
             // below is a hitbox race that mostly loses — saw y oscillate 60↔62 for 5min
             // with 22 dirt in the bag). Place into an ADJACENT cell at foot height
@@ -982,10 +994,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                         const under = bot.blockAt(it.position.offset(0, -0.4, 0).floored());
                         const reach = bot.entity.position.offset(0, 1.6, 0).distanceTo(it.position);
                         if (under && /_leaves$|_log$|_wood$/.test(under.name || '') && reach <= 4.8) {
-                            await bot.lookAt(under.position.offset(0.5, 0.5, 0.5), true);
-                            try { await bot.tool.equipForBlock(under); } catch (e) {}
-                            if (bot.heldItem && /_sword$/.test(bot.heldItem.name)) { try { await bot.unequip('hand'); } catch (e) {} }
-                            await bot.dig(under);
+                            await guardedDig(under, 'funnel-dig');   // ★#2 sibling: 裸 bot.dig(log/leaf)→guardedDig(log 走 C339 视线闸, 叶不受闸)
                         }
                     } catch (e) {}
                 }
@@ -1485,7 +1494,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                                 // then step up onto it: +1 per round, zero races.
                                 if (!escaped) {
                                     const sc0 = bot.entity.position.floored();
-                                    const fillS = bot.inventory.items().find(it => /^dirt$|cobblestone|cobbled|granite|andesite|diorite|^stone$|tuff|gravel|_planks$|_log$/.test(it.name));
+                                    const fillS = pickFiller();   // ★#5 贱料优先, 木料末位回退
                                     if (fillS) {
                                         for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
                                             const open = (b) => !b || b.boundingBox !== 'block';
@@ -1516,7 +1525,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                                 if (!escaped) {
                                     _dbg(`LEASH walled-in → pillar up 3 with carried blocks`);
                                     for (let pu = 0; pu < 3; pu++) {
-                                        const fillL = bot.inventory.items().find(it => /^dirt$|cobblestone|cobbled|granite|andesite|diorite|^stone$|tuff|gravel|_planks$|_log$/.test(it.name));
+                                        const fillL = pickFiller();   // ★#5 贱料优先, 木料末位回退
                                         if (!fillL) break;
                                         const yb = bot.entity.position.y;
                                         const hL = bot.blockAt(bot.entity.position.offset(0, 2, 0));
@@ -1978,7 +1987,19 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // with nothing and we blacklisted tree after tree, naked, at night).
             // A human standing at a tree just chops it: if the log is in ARM'S REACH,
             // bypass the pathfinder verdict entirely — equip, dig, grab drops.
-            if (nearest && nearest.b && nearest.b.position
+            // ★#2 (review-2026-07-06 穿墙挖树): direct-chop 绕过 pathfinder verdict 是对的(够得着就砍),
+            // 但它此前只看距离不看视线 → 隔掩体墙 x-ray 挖穿外面 3.7b 的树(实录)。补 C339 同参视线闸:
+            // 距离>2.2 且看不见(canSeeBlock=false)=隔墙, 不直砍, 落到下面 C323 走过去(能看见再砍)。
+            const _dcOccluded = (() => {
+                try {
+                    if (!nearest || !nearest.b || !nearest.b.position) return false;
+                    const d = bot.entity.position.offset(0, 1.62, 0).distanceTo(nearest.b.position.offset(0.5, 0.5, 0.5));
+                    if (d <= 2.2) return false;   // arm's reach / tunneled-adjacent — 豁免(canSeeBlock 抽风)
+                    return !bot.canSeeBlock(nearest.b);
+                } catch (e) { return false; }
+            })();
+            if (_dcOccluded && nearest && nearest.b) _dbg(`direct-chop SKIP (occluded x-ray): ${nearest.b.name}@${nearest.b.position.x},${nearest.b.position.y},${nearest.b.position.z}`);
+            if (!_dcOccluded && nearest && nearest.b && nearest.b.position
                 && bot.entity.position.distanceTo(nearest.b.position.offset(0.5, 0.5, 0.5)) <= 4.5) {
                 try {
                     // ★整柱砍 (用户实拍: 直砍v1只挖一根就走→满地浮空半棵树): walk the trunk
@@ -1993,9 +2014,10 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                         const lb = bot.blockAt(bp.offset(0, dy, 0));
                         if (!lb || !/_log$|_wood$/.test(lb.name)) { if (dy > 0) break; else continue; }
                         if (bot.entity.position.offset(0, 1.6, 0).distanceTo(lb.position.offset(0.5, 0.5, 0.5)) > 4.8) break;   // out of arm's reach — stop, don't leave a swing-at-air loop
-                        try { await bot.tool.equipForBlock(lb); } catch (e) {}
-                        if (bot.heldItem && /_sword$/.test(bot.heldItem.name)) { try { await bot.unequip('hand'); } catch (e) {} }
-                        try { await bot.dig(lb); dug++; } catch (e) { break; }
+                        // ★#2: 逐格走 guardedDig — C339 per-block 视线闸(上柱某格被墙/叶挡时拦)+身体挖锁,
+                        //   替掉裸 bot.dig(绕闸 x-ray)。guardedDig 自己 equip+lookAt; 返回 false(遮挡/忙)则停。
+                        if (!(await guardedDig(lb, 'direct-chop'))) break;
+                        dug++;
                     }
                     const _sw = await _sweepDrops(8, 6);   // 踩格子捡掉落 — pickupNearbyItems 不够可靠
                     if (dug > 0) _dbg(`direct-chop: dug ${dug} logs (full column) total=${total()} sweep[seen=${_sw.seen} reached=${_sw.reached} near=${_sw.near || '-'}]`);   // ★C298 seen=0→drops not spawning/falling away; seen>0 reached=0→unreachable (dy>1=on leaf canopy above; big h=across gap)
