@@ -61,12 +61,17 @@ export function initBot(username) {
         auth: settings.auth,
         version: mc_version,
         checkTimeoutInterval: 60000,
-        // ★2026-07-06 Fabric ELOOP 修: 不设 viewDistance 时服务器按自身/默认发大量 chunk,
-        // Fabric 世界 chunk 数据更大 → mineflayer 同步解析(prismarine-chunk)反复阻塞事件循环
-        // (实录 ELOOP stall 240ms→6832ms 成簇, 移动进新区时批量 chunk 加载最重)。降到 'short'(4
-        // chunk=64b): bot 本地动作(砍/挖 ~16b)+ 全知扫描(村庄/树 48b<64b)都够, chunk 解析量骤降。
-        // 可被 env MC_VIEW_DISTANCE 覆盖(原版世界不卡可设 'normal'/'far')。
-        viewDistance: process.env.MC_VIEW_DISTANCE || 'short',
+        // ★2026-07-06 session#7 满视距丝滑定案 (推翻早期 chunk-parse 假设): 加归因探针(agent.js
+        //   ELOOP probe 拆 chunkParse/modes/physTick/gc/other + act 标签)实测发现——满视距下的多秒
+        //   ⏱ELOOP 卡顿 100% 是 bot 侧同步块, 不是 chunk 解析(实录 chunkParse≈0ms chunks=0 而
+        //   modes/other 达数百ms～数秒)。三大源已根治, 均与 chunk 解析无关:
+        //     1) world_model landmark 扫描 6×findBlocks 背靠背(每12s ~580ms) → round-robin 一拍一组
+        //     2) chopWood 找树 8×findBlocks(500-1795ms) → 合并成 1 次 ID 数组匹配
+        //     3) collectBlock 64b 采集扫每格 safeToBreak(~670ms) → 两段扫(廉价类型快扫→少量候选过滤)
+        //     4) pathfinder A* 每 physicsTick 阻塞(322ms) → tickTimeout 40→15ms(见下 _tunePathfinder)
+        //   修后满视距('far')最大卡顿从 6832ms → ~240ms, 消灭全部秒级冻结 → 保满视距不再需要降 'short'。
+        //   默认 'far' = 满视距(用户红线: 不接受 'short' 妥协)。可 env MC_VIEW_DISTANCE 覆盖。
+        viewDistance: process.env.MC_VIEW_DISTANCE || 'far',
     }
     if (!mc_version || mc_version === "auto") {
         delete options.version;
@@ -194,6 +199,27 @@ export function initBot(username) {
         mcdata = minecraftData(mc_version);
         Item = prismarine_items(mc_version);
     });
+
+    // ★2026-07-06 session#7 满视距 ELOOP 修 (pathfinder A* 每 physicsTick 阻塞): 探针实录 view=far 时
+    //   physicsTick 派发单拍达 322ms — mineflayer-pathfinder 默认 tickTimeout=40ms(每游戏刻最多算 40ms
+    //   A*), 满视距下加载区域大→搜索空间大→部分路径 partial, monitorMovement 每 physicsTick(20/s)反复
+    //   compute, 40ms/刻持续占满事件循环(= ⏱ELOOP 的 physTick 大头, 视距相关)。把 tickTimeout 降到 15ms:
+    //   每刻 A* 少算 → 事件循环更早让出, 路径改用更多刻算完(thinkTimeout 5000ms 上限不变 → 成功率不降,
+    //   只是墙钟略久)。这是安全旋钮(不动 searchRadius, 远程导航仍可达)。可用 env MC_PF_TICK_MS 覆盖。
+    //   ⚠必须延迟到 login 后 — pathfinder 是 version=auto 异步注入的插件, createBot 刚返回时 bot.pathfinder
+    //   还是 undefined(与 bot.equip/bot.tool 同款延迟注入教训)。
+    const _tunePathfinder = () => {
+        try {
+            if (!bot.pathfinder) return false;
+            const ms = parseInt(process.env.MC_PF_TICK_MS || '', 10);
+            bot.pathfinder.tickTimeout = (Number.isFinite(ms) && ms > 0) ? ms : 15;
+            try { console.log(`🧭 pathfinder tickTimeout=${bot.pathfinder.tickTimeout}ms (ELOOP: cap per-tick A* 卡顿, 满视距丝滑)`); } catch (e) {}
+            return true;
+        } catch (e) { return false; }
+    };
+    if (!_tunePathfinder()) {
+        bot.once('login', () => { if (!_tunePathfinder()) bot.once('spawn', _tunePathfinder); });
+    }
 
     // ★INV-DESYNC 根修: updateSlot 超时 → 主动整包重同步而非干等 20s 连败 (见 inv_sync.js)
     installInvSync(bot);
