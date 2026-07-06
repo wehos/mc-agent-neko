@@ -5738,6 +5738,23 @@ const modes_list = [
                                 if (!bot._landmarks[key]) { bot._landmarks[key] = { kind, x: Math.round(x), y: Math.round(y), z: Math.round(z), ts: now, seen: now, meta: meta || null }; return true; }
                                 bot._landmarks[key].seen = now; if (meta) bot._landmarks[key].meta = meta; return false;
                             };
+                            // ★2026-07-06 session#7: 谓词函数 matcher → 缓存的方块 ID 数组。findBlocks 用数组匹配走
+                            //   isMatchingType(indexOf)而非每格 new String + 正则, 且 palette 快扫更省。ID 表由 mc.getAllBlocks
+                            //   按同一正则枚举一次, 挂 bot._lmIds 缓存(热重载红线: 状态在 bot 上)。语义严格等价(同方块集)。
+                            if (!bot._lmIds) {
+                                try {
+                                    const idsBy = (re) => mc.getAllBlocks().filter(b => re.test(b.name || '')).map(b => b.id);
+                                    bot._lmIds = {
+                                        bed: idsBy(/_bed$/),
+                                        craft: idsBy(/^(crafting_table|furnace|bell)$/),
+                                        wood: idsBy(/_log$/),
+                                        crops: idsBy(/^(hay_block|wheat|carrots|potatoes|beetroots|farmland)$/),
+                                        chest: idsBy(/^(chest|barrel)$/),
+                                        ore: idsBy(/(^|_)(iron|diamond)_ore$/),
+                                    };
+                                } catch (e) { bot._lmIds = null; }
+                            }
+                            const _ids = bot._lmIds || {};
                             (async () => {
                               let dirty = false;
                               const reg = (...a) => { if (_reg(...a)) dirty = true; };
@@ -5746,24 +5763,24 @@ const modes_list = [
                                 // → 全扫最重), 其余便宜项拼组。跨 findBlocks 组内也不叠(每组≤1 个 findBlocks)。
                                 switch (gi) {
                                   case 0: // bed (最贵: maxDist48 count16 稀有)
-                                    try { for (const bp of bot.findBlocks({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 48, count: 16 })) reg('bed', bp.x, bp.y, bp.z); } catch (e) {}
+                                    if (_ids.bed) try { for (const bp of bot.findBlocks({ matching: _ids.bed, maxDistance: 48, count: 16 })) reg('bed', bp.x, bp.y, bp.z); } catch (e) {}
                                     break;
                                   case 1: // craft/furnace/bell (maxDist48 count8) + villager 实体(便宜)
                                     try { for (const e of Object.values(bot.entities || {})) { if (e && /villager/.test(e.name || '') && e.position) reg('village', e.position.x, e.position.y, e.position.z); } } catch (e) {}
-                                    try { for (const bp of bot.findBlocks({ matching: (b) => b && /^(crafting_table|furnace|bell)$/.test(b.name || ''), maxDistance: 48, count: 8 })) { const bn = bot.blockAt(bp); reg(bn && bn.name === 'bell' ? 'village' : ((bn && bn.name) || 'craft'), bp.x, bp.y, bp.z); } } catch (e) {}
+                                    if (_ids.craft) try { for (const bp of bot.findBlocks({ matching: _ids.craft, maxDistance: 48, count: 8 })) { const bn = bot.blockAt(bp); reg(bn && bn.name === 'bell' ? 'village' : ((bn && bn.name) || 'craft'), bp.x, bp.y, bp.z); } } catch (e) {}
                                     break;
                                   case 2: // wood(maxDist32 count8) — ★C328 记住最近树做 bootstrap
-                                    try { for (const bp of bot.findBlocks({ matching: (b) => b && /_log$/.test(b.name || ''), maxDistance: 32, count: 8 })) reg('wood', bp.x, bp.y, bp.z); } catch (e) {}
+                                    if (_ids.wood) try { for (const bp of bot.findBlocks({ matching: _ids.wood, maxDistance: 32, count: 8 })) reg('wood', bp.x, bp.y, bp.z); } catch (e) {}
                                     break;
                                   case 3: // crops/farmland(maxDist32 count8) — 村庄食物
-                                    try { for (const bp of bot.findBlocks({ matching: (b) => b && /^(hay_block|wheat|carrots|potatoes|beetroots|farmland)$/.test(b.name || ''), maxDistance: 32, count: 8 })) reg('crops', bp.x, bp.y, bp.z); } catch (e) {}
+                                    if (_ids.crops) try { for (const bp of bot.findBlocks({ matching: _ids.crops, maxDistance: 32, count: 8 })) reg('crops', bp.x, bp.y, bp.z); } catch (e) {}
                                     break;
                                   case 4: // chest/barrel(maxDist48 count8 稀有 → 较贵) + 动物实体(便宜)
-                                    try { for (const bp of bot.findBlocks({ matching: (b) => b && /^(chest|barrel)$/.test(b.name || ''), maxDistance: 48, count: 8 })) reg('chest', bp.x, bp.y, bp.z); } catch (e) {}
+                                    if (_ids.chest) try { for (const bp of bot.findBlocks({ matching: _ids.chest, maxDistance: 48, count: 8 })) reg('chest', bp.x, bp.y, bp.z); } catch (e) {}
                                     try { for (const e of Object.values(bot.entities || {})) { if (e && /^(cow|pig|sheep|chicken|mooshroom)$/.test(e.name || '') && e.position) reg('animal', e.position.x, e.position.y, e.position.z, (e.name || '')); } } catch (e) {}
                                     break;
                                   case 5: // ore(maxDist16 count12 便宜) + 流浪商人(便宜) — ★task-queue Phase B 机会源
-                                    try { for (const bp of bot.findBlocks({ matching: (b) => b && /(^|_)(iron|diamond)_ore$/.test(b.name || ''), maxDistance: 16, count: 12 })) { const bn = bot.blockAt(bp); reg('ore', bp.x, bp.y, bp.z, /diamond/.test((bn && bn.name) || '') ? 'diamond' : 'iron'); } } catch (e) {}
+                                    if (_ids.ore) try { for (const bp of bot.findBlocks({ matching: _ids.ore, maxDistance: 16, count: 12 })) { const bn = bot.blockAt(bp); reg('ore', bp.x, bp.y, bp.z, /diamond/.test((bn && bn.name) || '') ? 'diamond' : 'iron'); } } catch (e) {}
                                     try { for (const e of Object.values(bot.entities || {})) { if (e && /^(wandering_trader|trader_llama)$/.test(e.name || '') && e.position) reg('trader', e.position.x, e.position.y, e.position.z, e.name); } } catch (e) {}
                                     break;
                                 }
