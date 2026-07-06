@@ -2,7 +2,24 @@
 
 用户接手 55916 世界值守后连续肉眼上报 7 个行为异常。每个都经"定位根因(运行时日志核实)→修复方案+同款全库排查→**对抗验证**"三段（3 个并行工作流, 15 agents, ~1.08M subagent tokens）。**关键: 对抗验证把 6 个初诊里的 3 个推翻了——朴素修法是死代码或脱靶。修复前务必以本表的"真根因"为准, 别照初版方案改。**
 
-红线: 全程只读诊断, 未改任何代码。
+## ★修复落地 (2026-07-06 session#5, 用户令"1~6+8 全修"; #7 开局模板留待讨论)
+
+全部按对抗验证后的【真根因】改(非初版), 每个独立提交并推 origin。skills/*.js 热加载即生效, src/*(modes/skills.js)已重启加载。
+
+| # | commit | 修法摘要 |
+|---|--------|---------|
+| #2 | 8d00579 | direct-chop 入口补 canSeeBlock 闸 + 逐格走 guardedDig; funnel-dig/feedUp:971 同补 |
+| #5 | 8d00579 + ef04d0f | chopWood 三处填料 + modes.js MAROONED 架桥 → pickFiller 贱料优先、木料末位回退(不删) |
+| #8 | c2af88e | surfaceUp guardedDig 挖成功后清头顶塌落重力方块(gravel/sand), 只影响上挖 |
+| #3 | 7d0dd4e | achieve craft 后 reclaimLocalTable(只收本地放的, 复用共享站不收)+craftChain STEP3 后收+prepNether 3 处放台登记→顺手收 |
+| #4 | ef04d0f | skills.js digOneCapOne cap/侧墙料 cheap-first 木料末位(保留 wood-only 封顶); 真凶在此非 modes bunkerDown |
+| #1 | 867e4fb | fleeMove probe 加 above(y2), step-up 要头顶空间否则拒该朝向(不再撞 2 格唇死跳) |
+| #6 | 8360940 | collectBlock 停滞早停(不动+不进账 6s→中止)止 pathfinder unstick 抖动; 配合 #2 近树 direct-chop |
+
+**保守取舍(未做/降级, 均低风险残留)**: #3 未放宽 reuse 门 pocket(携带复用已根治乱扔, 放宽有误注销风险); #1 未加 fleeMove 垫柱跳(持镐走已有凿墙; edge_unstick 互搏留查); #4 未加 nightShelter 平地拒 dig_one(cap 选料已解常见情形, wood-only 平地散板是罕见早期边角)。
+
+---
+原始诊断如下(只读, 未改代码时所写):
 
 ## 难度表（难度=对抗验证后终值）
 
