@@ -61,6 +61,12 @@ export function initBot(username) {
         auth: settings.auth,
         version: mc_version,
         checkTimeoutInterval: 60000,
+        // ★2026-07-06 Fabric ELOOP 修: 不设 viewDistance 时服务器按自身/默认发大量 chunk,
+        // Fabric 世界 chunk 数据更大 → mineflayer 同步解析(prismarine-chunk)反复阻塞事件循环
+        // (实录 ELOOP stall 240ms→6832ms 成簇, 移动进新区时批量 chunk 加载最重)。降到 'short'(4
+        // chunk=64b): bot 本地动作(砍/挖 ~16b)+ 全知扫描(村庄/树 48b<64b)都够, chunk 解析量骤降。
+        // 可被 env MC_VIEW_DISTANCE 覆盖(原版世界不卡可设 'normal'/'far')。
+        viewDistance: process.env.MC_VIEW_DISTANCE || 'short',
     }
     if (!mc_version || mc_version === "auto") {
         delete options.version;
