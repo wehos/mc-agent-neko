@@ -58,6 +58,12 @@
 - **战略根**: bot 跳过地表 bootstrap(炉+床+口粮)就下矿→挖 18 生铁炼不了+镐断(picks 0/3)+挨饿(food 5→死)→上浮被僵尸杀重置。**违背开局公式硬化指令**。deaths 1→2 均此模式。
 - **修**: (机械)smeltSafe 建站前先合成熔炉+不在窄坑建站(上浮/开阔格); (战略, 最高杠杆)提案层强制 bootstrap 门——无床/无炉/无备镐/无口粮缓冲前不许下矿远征。
 
+### #8 surfaceUp 穿砾石柱窒息 — 待评估（2026-07-06 12:31 实录，deaths→3）
+- **现象**: 死亡 #3 窒息(suffocation), y59 白天无怪。skill=surfaceUp, bot y53 往上挖 y57 coarse_dirt 逃生, foot=gravel 穿砾石/泥土柱; 挖掉下方泥土后**上方砾石/沙塌落砸头窒息**(hp 爬升中已 17→9)。
+- **根因**: surfaceUp 往上开逃生通道时不检测/不先清头顶的重力方块(gravel/sand); 挖掉支撑→塌方埋头。经典预存在 surfaceUp 缺陷。
+- **与挖泥空手改动无关**(已排查): coarse_dirt 镐挖=空手挖同速(镐不加速泥土类), 调用方 await 挖完才上升, 砾石不在 DIRT_RE, agent.err 无我方代码异常。
+- **修向**: surfaceUp 上挖前探测头顶 2-3 格是否有 gravel/sand, 有则先横向绕开或自下而上逐个清落, 不在重力柱正下方上升。
+
 ## 三条贯穿性根源（比单个 bug 更高杠杆）
 1. **pathfinder 对"不可达目标"的原地 unstick 反射** = #1 / #6 / #7 的共同真凶。跳、来回跑、换手、`stopDigging` 打断都是它 unstick 副作用。修它同缓三症。
 2. **"木料当填料"类缺陷（~6 副本）** = #4 / #5 + creeperInterpose(modes:1012) + 裸重生 bunker(modes:1188) + digOneCapOne(skills:4330)。同模式: 木板入填料集且无贱料优先。
