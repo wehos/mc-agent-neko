@@ -851,6 +851,7 @@ const modes_list = [
             const probe = (ux, uz) => ({
                 foot: sol(bot.blockAt(me.offset(ux * 1.1, 0, uz * 1.1))),
                 head: sol(bot.blockAt(me.offset(ux * 1.1, 1, uz * 1.1))),
+                above: sol(bot.blockAt(me.offset(ux * 1.1, 2, uz * 1.1))),   // ★#1: y2 ahead — step-up 落脚后头顶空间
                 water: wet(bot.blockAt(me.offset(ux * 1.1, 0, uz * 1.1))) || wet(bot.blockAt(me.offset(ux * 2.2, 0, uz * 2.2)))
                     || wet(bot.blockAt(me.offset(ux * 1.1, -1, uz * 1.1))),
                 drop: droppy(ux, uz),
@@ -870,7 +871,10 @@ const modes_list = [
                     const ca = Math.cos(a), sa = Math.sin(a);
                     const ux = dx * ca - dz * sa, uz = dx * sa + dz * ca;   // rotate desired heading by a
                     const p = probe(ux, uz);
-                    if (!p.head && !p.drop && (!pass.dry || !p.water)) { hx = ux; hz = uz; needJump = p.foot; _found = true; break; }   // head clear + no ledge (+dry on first pass) → run
+                    // ★#1 (review-2026-07-06 坑里跳不出): step-up(p.foot=有台阶)且落脚后头顶(y2)实心 =
+                    //   2 格墙唇/低天花板, jump 只上 1 格必撞顶翻不过 → 原地死跳(实录被钉死跳 10s 被追死)。
+                    //   拒该朝向, 让扇形换向或落到凿墙出口; 平走(p.foot=false)不受影响。
+                    if (!p.head && !p.drop && (!pass.dry || !p.water) && !(p.foot && p.above)) { hx = ux; hz = uz; needJump = p.foot; _found = true; break; }   // head clear + no ledge (+dry) + 非2格唇 → run
                 }
             }
             // ★C334-A 真逼角(全 360° head 全堵/全 droppy)+有镐 → "翻越"=向 away 方向凿穿头层 1 格开口
