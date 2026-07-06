@@ -4911,6 +4911,27 @@ const modes_list = [
             const delay = (ms) => new Promise(r => setTimeout(r, ms));
             const isStonyBlock = (block) => !!(block && stony.test(block.name || ''));
             const itemName = (item) => typeof item === 'string' ? item : (item && item.name);
+            // ★2026-07-06 用户令: 挖泥土/软土类必须空手 (省镐/剑/斧耐久 — 这些工具挖土同样掉 1 耐久
+            // 却零收益), 挖完防抖切回原道具。植入 bot.dig 主钩子 = 每条 dig 路径生效 (collectblock/
+            // guardedDig/direct-chop/寻路开路)。防抖: 连续挖泥保持空手 (equipForBlock 对泥土不会重装
+            // 工具), 停挖 600ms 才切回 — 否则每块 卸→装 会复现"换手抖动"(review-2026-07-06 #6)。
+            const DIRT_RE = /^(dirt|grass_block|coarse_dirt|rooted_dirt|podzol|mycelium|mud|farmland|dirt_path)$/;
+            const RESTORE_TOOL_RE = /_pickaxe$|_axe$|_sword$|_shovel$|_hoe$/;
+            const scheduleDirtRestore = () => {
+                if (bot._dirtRestoreTimer) { clearTimeout(bot._dirtRestoreTimer); bot._dirtRestoreTimer = null; }
+                bot._dirtRestoreTimer = setTimeout(async () => {
+                    bot._dirtRestoreTimer = null;
+                    const want = bot._dirtRestore; bot._dirtRestore = null;
+                    if (!want) return;
+                    try {
+                        // 只在仍空手时切回 — 若 bot 已为下个任务(如挖石)装好工具, 别覆盖它(防抖)
+                        if (bot.heldItem) return;
+                        const it = bot.inventory.items().find(i => i.type === want.type)
+                            || bot.inventory.items().find(i => i.name === want.name);
+                        if (it) await bot.equip(it, 'hand');
+                    } catch (e) {}
+                }, 600);
+            };
             const isWaterBlock = (block) => !!(block && /^(flowing_)?water$/.test(block.name || ''));
             const inWaterNow = () => isWaterBlock(bot.blockAt(bot.entity.position))
                 || isWaterBlock(bot.blockAt(bot.entity.position.offset(0, 1, 0)));
@@ -4974,6 +4995,18 @@ const modes_list = [
                     write('dig.end', { seq, ok: false, ms: Date.now() - startedAt, target: blockObj(block), error: err.message, env: envSnap() });
                     throw err;
                 }
+                // ★泥土空手闸: 还在挖泥则取消待切回(保持空手); 首次手持工具则暂存并卸到空手。
+                //   连续挖泥时 equipForBlock 对泥土不会重装工具, 故只有首块会真正 unequip, 之后保持空手。
+                try {
+                    if (DIRT_RE.test((block && block.name) || '')) {
+                        if (bot._dirtRestoreTimer) { clearTimeout(bot._dirtRestoreTimer); bot._dirtRestoreTimer = null; }
+                        if (bot.heldItem && RESTORE_TOOL_RE.test(bot.heldItem.name)) {
+                            if (!bot._dirtRestore) bot._dirtRestore = { type: bot.heldItem.type, name: bot.heldItem.name };
+                            write('dig.dirt_barehand', { seq, target: blockObj(block), stash: bot._dirtRestore.name });
+                            await bot.unequip('hand');
+                        }
+                    }
+                } catch (e) {}
                 bot._mineMotionActiveDig = { seq, stony: isStonyBlock(block), target: blockObj(block), startedAt };
                 try {
                     const result = await originalDig(block, ...args);
@@ -4984,6 +5017,8 @@ const modes_list = [
                     throw e;
                 } finally {
                     if (bot._mineMotionActiveDig && bot._mineMotionActiveDig.seq === seq) bot._mineMotionActiveDig = null;
+                    // ★挖完防抖切回原道具: 若挖过泥土卸了工具, 停挖 600ms 后(仍空手时)切回
+                    if (bot._dirtRestore) scheduleDirtRestore();
                 }
             };
             const originalEquip = bot.equip.bind(bot);
