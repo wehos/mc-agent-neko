@@ -329,6 +329,12 @@ const EXEC = {
         prog(`★求死重置启动: hp=${s.hp} food=${s.food} night=${s.night} hostiles=${s.hostiles.length} — keepInventory 已验证, 重生=满状态回床`);
         const budget = Date.now() + 120000;
         let stall = 0;
+        // ★#9 (2026-07-06 实录: iron 甲 bot 求死"蹭怪"打不死 → 求死预算耗尽未死 → 卡 25min watchdog
+        //   重启, deaths 不涨). 甲太肉时僵尸伤害被挡, food<18 不回也不掉血(普难饥饿地板 hp10) → 蹭怪
+        //   几分钟杀不死; 跌落伤害不被铁甲减(无羽落), 是披甲 bot 唯一可靠致死。蹭怪连 2 轮不掉血=甲在
+        //   扛/怪够不到 → 下轮转跌落(悬崖腿/高台跳落), 别死磕蹭怪耗尽预算。
+        let lastHp = bot.health;
+        let noDmgRounds = 0;
         while (!died() && Date.now() < budget) {
             const h = (() => {
                 try {
@@ -345,11 +351,14 @@ const EXEC = {
                     return best;
                 } catch (e) { return null; }
             })();
-            if (h) {
+            if (h && noDmgRounds < 2) {
                 // 蹭怪: 走贴身站桩不还手
                 try { await ctx.skills.goToPosition(bot, h.position.x, h.position.y, h.position.z, 1); } catch (e) {}
                 try { bot.clearControlStates(); } catch (e) {}
                 try { await ctx.skills.wait(bot, 3000); } catch (e) {}
+                // ★#9 蹭怪是否真在掉血? 连 2 轮不掉(甲扛/怪够不到) → noDmgRounds 满 → 下轮走跌落
+                if (bot.health >= lastHp - 0.5) noDmgRounds++; else noDmgRounds = 0;
+                lastHp = bot.health;
             } else if (await (async () => {
                 // ★悬崖腿 (08:17 实录: 林冠区跳落柱位反复找不到, 终局保证脆): 本地形群山峭壁,
                 //   24 格内扫落差 >= hp+4 的崖沿 — 走过去迈出去, 比穿树冠立柱可靠。
