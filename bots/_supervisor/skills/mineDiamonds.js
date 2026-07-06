@@ -233,6 +233,78 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     await lightUp();
     log(bot, `at y=${yNow()}, water-aware descent done, x-ray mining (modes handle survival)...`);
 
+    // ── ★2026-07-06 E 直线矿透 ([[spec-pickaxe-stockpile-redesign]]): oracle 有目标且"全知前瞻"确认无坠落/
+    //   无挖穿液体/无空穴/无怪时, 朝钻石直线快挖(替代盲挖 branchMine)。blockAt 读已加载区块=权威无陈旧,
+    //   命中任一风险即回退谨慎路径; 有怪先绕垂直轴一步(用户令 有怪绕路), 绕不开则停交回 collectBlock。 ──
+    const HOSTILE_RE = /zombie|skeleton|creeper|spider|witch|enderman|drowned|husk|stray|slime|silverfish|cave_spider|warden|phantom/i;
+    const hostileNear = (r = 8) => { try { return Object.values(bot.entities).some(e => e && e.position && e.name && HOSTILE_RE.test(e.name) && e.position.distanceTo(bot.entity.position) < r); } catch (e) { return false; } };
+    // 沿 (dx,dz) 主轴前瞻 n 格: 要挖的 1x2(脚+头)与脚下地板全为待挖实心、无水/岩浆、无空穴 → 安全直挖。
+    const straightSafe = (dx, dz, n = 5) => {
+        try {
+            const p = bot.entity.position.floored();
+            const px = dz, pz = dx;   // 垂直于挖掘轴的单位向量(侧壁方向)
+            for (let d = 1; d <= n; d++) {
+                const floor = blk(p.offset(dx * d, -1, dz * d));
+                if (!floor || floor.boundingBox !== 'block' || LAVA.has(floor.name) || WATER.has(floor.name)) return false;   // 悬空/液体地板 → 坠落或涌水
+                for (const dy of [0, 1]) {
+                    const c = blk(p.offset(dx * d, dy, dz * d));
+                    if (c && (LAVA.has(c.name) || WATER.has(c.name))) return false;   // 挖穿到液体
+                    if (!c || c.boundingBox === 'empty' || OPEN.has(c.name)) return false;   // 空穴(前方已 open)
+                }
+                // ★review 修 (off-axis 液体涌入): 侧壁/顶/底邻格若有岩浆/水, 挖开这段走廊会被从侧面淹/烧 —
+                //   补齐 digDown/blockedByLava 的 6 邻检(它们正是为"含水层从侧面涌入"而设), 有液体即拒绝直挖。
+                for (const dy of [0, 1]) {
+                    for (const [ox, oy, oz] of [[px, 0, pz], [-px, 0, -pz], [0, 1, 0], [0, -1, 0]]) {
+                        const s = blk(p.offset(dx * d + ox, dy + oy, dz * d + oz));
+                        if (s && (LAVA.has(s.name) || WATER.has(s.name))) return false;
+                    }
+                }
+            }
+            return true;
+        } catch (e) { return false; }
+    };
+    // 朝 tgt 曼哈顿直线挖(主轴优先): 每步前瞻安全才挖 1x2 + 走进; 有怪/不安全先绕垂直轴一步, 绕不开则停。
+    const straightMineToward = async (tgt, maxSteps = 20) => {
+        let dug = 0;
+        for (let s = 0; s < maxSteps; s++) {
+            if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
+            if (bot.death_abort || pickRunwayStop()) break;
+            const p = bot.entity.position;
+            const dxRaw = tgt.x - p.x, dzRaw = tgt.z - p.z;
+            if (Math.hypot(dxRaw, dzRaw) < 1.5) break;   // 到达目标柱(井底即脉, collectBlock 接手)
+            let dx = Math.abs(dxRaw) >= Math.abs(dzRaw) ? (Math.sign(dxRaw) || 1) : 0;
+            let dz = dx ? 0 : (Math.sign(dzRaw) || 1);
+            if (hostileNear(6) || !straightSafe(dx, dz, 5)) {
+                const ax = dx ? 0 : (Math.sign(dxRaw) || 1), az = dx ? (Math.sign(dzRaw) || 1) : 0;   // 垂直轴绕行
+                if (!(ax || az) || hostileNear(6) || !straightSafe(ax, az, 5)) break;                 // 绕不开 → 停(回退谨慎路径)
+                dx = ax; dz = az;
+            }
+            const fp = bot.entity.position.floored();
+            const feet = new Vec3(fp.x + dx, fp.y, fp.z + dz);
+            const head = feet.offset(0, 1, 0);
+            for (const c of [head, feet]) { const b = blk(c); if (b && !OPEN.has(b.name)) await skills.breakBlockAt(bot, c.x, c.y, c.z).catch(() => {}); }
+            await Promise.race([
+                skills.goToPosition(bot, feet.x + 0.5, feet.y, feet.z + 0.5, 0),
+                new Promise((r) => setTimeout(r, 3000)),
+            ]).catch(() => {});
+            // ★review 修 (走廊侧壁封堵): 与竖井下潜同款 — 走进新格后封住脚/头两层的 4 侧壁液体
+            //   (straightSafe 已挡住"挖前有液体", 这里再兜底挖后渗漏的水/砾, 远离竖井密封逃生柱时的保险)。
+            try { const yf = bot.entity.position.floored().y; await sealLevel(yf); await sealLevel(yf + 1); } catch (e) {}
+            dug++;
+        }
+        return dug;
+    };
+    // 当前最近的新鲜 oracle 钻石(<10min, 平距<250) — 挖矿循环重取(oracle 每 60s 重扫, 逐颗接近)。
+    const freshOracleDia = () => {
+        try {
+            const oo = bot._world && bot._world.oracleOres;
+            if (!(oo && Array.isArray(oo.diamonds) && oo.diamonds.length && Date.now() - (oo.ts || 0) < 600000)) return null;
+            const p0 = bot.entity.position;
+            const t = oo.diamonds[0];
+            return (t && Number.isFinite(t.x) && Math.hypot(t.x - p0.x, t.z - p0.z) < 250) ? t : null;
+        } catch (e) { return null; }
+    };
+
     // ---- FAST x-ray mining. collectBlock locates+paths+vein-follows the nearest
     // diamond within 64; the survival modes deal with any mobs/water en route. ----
     // BANK-AWARE mining: deposit each haul into the persistent chest so a later
@@ -263,9 +335,15 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
         await skills.collectBlock(bot, 'diamond', count).catch(e => log(bot, `collect diamond err: ${e.message}`));
         if ((banked + dia()) >= count) break;
         if (dia() === before) {
-            // nothing in x-ray range — tunnel to expose fresh ground, then search again
-            try { await skills.customSkill(bot, 'branchMine', 16); }
-            catch (e) { try { await skills.digDown(bot, 6); } catch (e2) {} }
+            // nothing in x-ray range — ★E 直线矿透: oracle 有新鲜目标且前瞻安全 → 朝它直线快挖; 否则盲挖 branchMine 暴露新面
+            const ot = freshOracleDia();
+            let straightDug = 0;
+            if (ot) { try { straightDug = await straightMineToward(ot, 20); } catch (e) { straightDug = 0; } }
+            if (straightDug > 0) { log(bot, `⛏️ 直线矿透 +${straightDug} 步 → oracle @${ot.x},${ot.y},${ot.z} (前瞻安全)`); }
+            else {
+                try { await skills.customSkill(bot, 'branchMine', 16); }
+                catch (e) { try { await skills.digDown(bot, 6); } catch (e2) {} }
+            }
         }
         // bank what we've mined so far so a death from here on doesn't lose it
         if (dia() > 0) { await skills.customSkill(bot, 'diamondBank', 'deposit').catch(() => {}); }

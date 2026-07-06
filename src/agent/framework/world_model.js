@@ -277,6 +277,19 @@ function hasStoneTierPick(world) { return /stone|iron|diamond|netherite/.test((w
 function diamondsOnHand(bot) { return invCount(bot, /^diamond$/); }
 // ★2026-07-06 钻石相位目标: 无钻镐 → DIAMOND_FLOOR(够本造首镐即释放); 有钻镐 → DIAMOND_SNOWBALL_TARGET(滚雪球)。
 function diamondTarget(bot) { return invCount(bot, /^(diamond|netherite)_pickaxe$/) >= 1 ? DIAMOND_SNOWBALL_TARGET : DIAMOND_FLOOR; }
+// ★2026-07-06 钻甲件数(穿戴 slots 5-8 + 背包持有), 供 GET_DIAMOND_ARMOR 提案/isGoalDone。invCount 只数背包不数穿戴, 故单列。
+function diamondArmorPieces(bot) {
+    try {
+        let n = 0;
+        const sl = (bot && bot.inventory && bot.inventory.slots) || [];
+        for (let i = 5; i <= 8; i++) if (sl[i] && /^diamond_(helmet|chestplate|leggings|boots)$/.test(sl[i].name || '')) n++;
+        return n + invCount(bot, /^diamond_(helmet|chestplate|leggings|boots)$/);
+    } catch (e) { return 0; }
+}
+// 钻甲提案门/释放的钻石阈值: 至少够最便宜件(4) + 镐保留(未囤够3钻镐前留9钻给镐)。与 craftArmor{diamond} 的 _matBudget 同口径。
+function diamondArmorFloor(bot) { return 4 + (invCount(bot, /^(diamond|netherite)_pickaxe$/) >= 3 ? 0 : 9); }   // ★review: 含 netherite(同 pickStockPlan 口径)
+// ★2026-07-06 钻石装备齐(3 有效钻镐 + 4 钻甲) → 雪球停 (别造完装备后还回挖补满 40; 用户令 40=装备+余量, 非常驻40)。
+function diamondGearComplete(bot) { return effectivePicksMatching(bot, /^(diamond|netherite)_pickaxe$/) >= 3 && diamondArmorPieces(bot) >= 4; }
 /** Pack is nearly full (≤4 free slots) → time to bank before drops are lost to a full inventory. */
 function packNearlyFull(bot) { try { return bot.inventory.emptySlotCount() <= 4; } catch (e) { return false; } }
 /**
@@ -888,7 +901,7 @@ export function proposeTasks(world, bot) {
         //   Requires armor>=4 (GET_ARMOR@68 closes that first) so the bot never strip-mines the
         //   deep diamond band unarmored. @46: above GO_UNDERGROUND@45 so a kitted iron bot heads for
         //   the diamond band on purpose instead of the open-ended shallow descent.
-        if (hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < diamondTarget(bot) && hpSafeForUnderground
+        if (hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < diamondTarget(bot) && !diamondGearComplete(bot) && hpSafeForUnderground
             && kit.sufficientForUnderground
             && (invCount(bot, /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档(贫瘠世界口粮存不下, 满腹+灰区兜底+keepInv 等效); ★T-0092 (worker-sync): armor>=4(full set=24 iron, unreachable since GET_ARMOR yields at <4) → armor>=1(reachable from one craftArmor pass) so an iron-tooled+lightly-armored bot actually commits GET_DIAMOND → mineDiamonds descends to y-52. NOT >=0. ★tool-budget: also gated on kit.sufficientForUnderground (spare-with-table or field-recraft kit) like GO_UNDERGROUND — the skill-side pick guard is the LAST line, not the plan; TOOL_UPKEEP@47 restores the invariant first. ★dive rations (task #9): >=2 carried edibles or GET_FOOD stocks first — the y12 famine surfacing (checkpoint #6) ate the whole night's descent.
             // Dispatch the DEDICATED mineDiamonds skill: it water-aware-descends to the diamond band,
@@ -955,6 +968,16 @@ export function proposeTasks(world, bot) {
                    args: ['diamond_tier'],
                    rationale: `${diamondsOnHand(bot)} diamonds banked + no diamond pickaxe — craft diamond pick(+sword) (obsidian needs a diamond pick)`,
                    hints: { diamonds: diamondsOnHand(bot) } });
+        }
+        // GET_DIAMOND_ARMOR — ★2026-07-06 钻石滚雪球攒够后 → 全套钻甲 (endgame 生存升级, 用户令 40钻=钻甲24+3钻镐9+3余)。
+        //   @53: 压过 endgame@52(先穿甲再进下界), 让位钻石雪球 GET_DIAMOND@54(先攒够钻)与囤钻镐 REPLENISH@62(先囤3钻镐)。
+        //   craftArmor{tier:diamond} 自带 9 钻镐保留额; 门 diamondArmorFloor 同口径。日间安全站桩(craftChain 自放台)。
+        if (overworld && tierReady && eneeds.hasDiamondPick && diamondArmorPieces(bot) < 4
+            && diamondsOnHand(bot) >= diamondArmorFloor(bot)) {
+            push({ kind: PROPOSAL_KIND.GET_DIAMOND_ARMOR, priority: 53, skill: 'craftArmor',
+                   args: [{ tier: 'diamond' }],
+                   rationale: `diamond snowball — craft+equip full diamond armor (${diamondArmorPieces(bot)}/4 pieces, ${diamondsOnHand(bot)} diamonds)`,
+                   hints: { pieces: diamondArmorPieces(bot), diamonds: diamondsOnHand(bot) } });
         }
         // GET_PORTAL_KIT — obsidian×OBSIDIAN_TARGET + flint_and_steel (gatherObsidian: lava pool +
         //   water bucket, gravel→flint). hpSafeForUnderground: lava work at low hp is suicide.
@@ -1167,7 +1190,7 @@ export function proposeTasks(world, bot) {
                 // ★2026-07-06 夜钻优先 (镐#3 夜铁行 10min 磨死实录): 铁镐在世+钻<3 → 夜里
                 //   直接 mineDiamonds — 镐的寿命用在唯一非它不可的地方(钻矿), 铁 gap 让位
                 //   (与日间 GET_DIAMOND@46.75 同一反倒挂逻辑)。
-                if (hasIronTierPick(w) && diamondsOnHand(bot) < diamondTarget(bot)) {
+                if (hasIronTierPick(w) && diamondsOnHand(bot) < diamondTarget(bot) && !diamondGearComplete(bot)) {
                     const _nTgt = diamondTarget(bot);   // ★相位: 无钻镐→3(造首镐), 有钻镐→40(夜里也滚雪球)
                     push({ kind: TASK.DUSK_MINE_NIGHT, priority: 94, skill: 'mineDiamonds',
                            args: [_nTgt],
@@ -1304,7 +1327,7 @@ export function proposeTasks(world, bot) {
             const DAY_ERRANDS = new Set([
                 PROPOSAL_KIND.BOOTSTRAP_KIT, PROPOSAL_KIND.GET_BED, PROPOSAL_KIND.GET_ARMOR,
                 PROPOSAL_KIND.GET_IRON_TOOLS, PROPOSAL_KIND.GET_IRON_ARMOR_SET,
-                PROPOSAL_KIND.GET_DIAMOND_GEAR, PROPOSAL_KIND.BUILD_HOME,
+                PROPOSAL_KIND.GET_DIAMOND_GEAR, PROPOSAL_KIND.GET_DIAMOND_ARMOR, PROPOSAL_KIND.BUILD_HOME,
                 PROPOSAL_KIND.OPENING_SCOUT, PROPOSAL_KIND.OPENING_VILLAGE,
                 PROPOSAL_KIND.OPP_WHEAT_FARM, PROPOSAL_KIND.OPP_SEIZE_VILLAGE, PROPOSAL_KIND.MIGRATE,
                 // ★P0-1 REPLENISH_KIT: 提案端本就 day-only(白天门), 进这个集合只为下面的 commitment
@@ -1444,7 +1467,7 @@ export function isGoalDone(kind, world, bot) {
         //   Stays committed deep until the floor is met → the diamond venture isn't abandoned after
         //   one ore. Survival (HOLD/food/night) still preempts via isEmergency/nightPre, so a deep
         //   commitment never traps the bot through danger.
-        case PROPOSAL_KIND.GET_DIAMOND:      return diamondsOnHand(bot) >= diamondTarget(bot);   // ★相位: 无钻镐→3(造首镐), 有钻镐→40(滚雪球)
+        case PROPOSAL_KIND.GET_DIAMOND:      return diamondsOnHand(bot) >= diamondTarget(bot) || diamondGearComplete(bot);   // ★相位: 无钻镐→3(造首镐); 有钻镐→40(滚雪球) 或 装备齐即停(免回挖)
         // ★T-0092 BANK_GEAR done = the diamonds are off-hand (deposited) OR the pack reopened. Either
         //   way the bank run achieved its purpose; re-fires next time the pack fills with valuables.
         case PROPOSAL_KIND.BANK_GEAR:        return diamondsOnHand(bot) < 1 || !packNearlyFull(bot);
@@ -1503,6 +1526,8 @@ export function isGoalDone(kind, world, bot) {
         // a fully futile dispatch now trips the kernel's 3x/5-min cooldown, and this release
         // covers the diamonds-spent/lost path the cooldown can't see.
         case PROPOSAL_KIND.GET_DIAMOND_GEAR: return invCount(bot, /^(diamond|netherite)_pickaxe$/) >= 1 || diamondsOnHand(bot) < DIAMOND_FLOOR;
+        // ★钻甲 done = 4 件钻甲齐 OR 钻石不够下一件+镐保留 (材料短缺释放, 镜像 GET_ARMOR — 缺口归钻石雪球补)。
+        case PROPOSAL_KIND.GET_DIAMOND_ARMOR: return diamondArmorPieces(bot) >= 4 || diamondsOnHand(bot) < diamondArmorFloor(bot);
         case PROPOSAL_KIND.GET_PORTAL_KIT:   { const n = endgameNeeds(bot); return n.obsOk || dimOf(bot) !== 'overworld' || n.blazeShort === 0; }
         case PROPOSAL_KIND.ENTER_NETHER:     return dimOf(bot) === 'the_nether';
         // Success-exit AND death-respawn both land in the overworld; in-nether it holds sticky

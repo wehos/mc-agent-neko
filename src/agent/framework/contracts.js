@@ -80,7 +80,7 @@ export const EMPTY_WORLD = Object.freeze({
  * High-level kinds of work the world model can propose. Kept coarse on purpose:
  * the LLM judges among these; exact coordinates/x-ray detail never appear here
  * (blueprint §C hard constraint — don't expose the cheat, don't overload the LLM).
- * @typedef {'BOOTSTRAP_KIT'|'SURFACE_RESCUE'|'REPLENISH_KIT'|'GET_FOOD'|'GET_BED'|'GET_ARMOR'|'GET_IRON_TOOLS'|'GET_IRON_ARMOR_SET'|'GET_DIAMOND'|'BANK_GEAR'|'BUILD_HOME'|'GO_UNDERGROUND'|'TOOL_UPKEEP'|'MIGRATE'|'HOLD'|'FORAGE_SURFACE'|'SLEEP'|'FREE_PLAY'|'DUSK_MINE_NIGHT'|'DUSK_GO_BED'|'NIGHT_DIG_ONE'|'NIGHT_SEAL'|'OPENING_SCOUT'|'OPENING_VILLAGE'|'GET_DIAMOND_GEAR'|'GET_PORTAL_KIT'|'ENTER_NETHER'|'GET_BLAZE_RODS'|'HUNT_PEARLS'|'CRAFT_EYES'|'GO_END'|'SLAY_DRAGON'} ProposalKind
+ * @typedef {'BOOTSTRAP_KIT'|'SURFACE_RESCUE'|'REPLENISH_KIT'|'GET_FOOD'|'GET_BED'|'GET_ARMOR'|'GET_IRON_TOOLS'|'GET_IRON_ARMOR_SET'|'GET_DIAMOND'|'BANK_GEAR'|'BUILD_HOME'|'GO_UNDERGROUND'|'TOOL_UPKEEP'|'MIGRATE'|'HOLD'|'FORAGE_SURFACE'|'SLEEP'|'FREE_PLAY'|'DUSK_MINE_NIGHT'|'DUSK_GO_BED'|'NIGHT_DIG_ONE'|'NIGHT_SEAL'|'OPENING_SCOUT'|'OPENING_VILLAGE'|'GET_DIAMOND_GEAR'|'GET_DIAMOND_ARMOR'|'GET_PORTAL_KIT'|'ENTER_NETHER'|'GET_BLAZE_RODS'|'HUNT_PEARLS'|'CRAFT_EYES'|'GO_END'|'SLAY_DRAGON'} ProposalKind
  */
 export const PROPOSAL_KIND = Object.freeze({
     BOOTSTRAP_KIT: 'BOOTSTRAP_KIT',   // wood→planks→table→pick→stone tools
@@ -120,6 +120,7 @@ export const PROPOSAL_KIND = Object.freeze({
     SURVIVAL_NIGHT: 'SURVIVAL_NIGHT',       // (Phase C+ 可选) 单夜保命 trigger 动态 resolve 成下地/床/挖三填一/seal
     // ── ★ENDGAME chain (post-diamond → Ender Dragon, all LEGIT — zero server commands) ──
     GET_DIAMOND_GEAR: 'GET_DIAMOND_GEAR', // banked diamonds → craft diamond pickaxe(+sword) (rank 3→4 bridge; craftChain 'diamond_tier')
+    GET_DIAMOND_ARMOR: 'GET_DIAMOND_ARMOR', // ★2026-07-06 钻石滚雪球后 → 全套钻甲 (craftArmor{tier:diamond}; 40钻 = 钻甲24+3钻镐9+3余)
     GET_PORTAL_KIT: 'GET_PORTAL_KIT',     // obsidian×10(+spare) + flint_and_steel via gatherObsidian (lava pool + water bucket, gravel→flint)
     ENTER_NETHER: 'ENTER_NETHER',         // build/light/walk the legit nether portal (realNetherPortal)
     GET_BLAZE_RODS: 'GET_BLAZE_RODS',     // in-nether: find fortress → farm blazes to rod target → exit via portal (blazeRods)
