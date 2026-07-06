@@ -239,9 +239,13 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     // death can't erase progress; keep diving until chest + inventory >= count, then
     // withdraw enough to craft. (death drops only what we carry, not the chest.)
     let g2 = 0;
+    // ★2026-07-06 钻石滚雪球 ([[spec-pickaxe-stockpile-redesign]]): count 可达 40(得钻镐后). 旧固定 10 轮上限
+    //   会让 40 目标每次派发只挖 ~10 轮就返回, 反复 re-descend 磨镐。上限随 count 放大(封顶 24 轮/派发, 免
+    //   长期霸占身体不让生存反射复评); 跨派发靠 oracle 60s 重扫更新 diamonds[0] 逐颗接近, 自然滚雪球。
+    const ROUND_CAP = Math.max(10, Math.min(24, count));
     let banked = await skills.customSkill(bot, 'diamondBank', 'count').catch(() => 0);
     const bankedAtEntry = banked;
-    while ((banked + dia()) < count && g2++ < 10) {
+    while ((banked + dia()) < count && g2++ < ROUND_CAP) {
         if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} } // a mode acted — resume
         // ★Re-check the pickaxe mid-mining: it can break (durability) or be lost to a death+
         // respawn while this loop runs. Keep digging the diamond layer pickaxe-less = useless.

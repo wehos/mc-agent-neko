@@ -23,16 +23,15 @@ const IRON_ORES = ['iron_ore', 'deepslate_iron_ore'];
 
 export default async function branchMine(bot, ctx, length = 24, targetY = null) {
     const { skills, world, mc, Vec3, log } = ctx;
-    // Use the CHEAP pickaxe to tunnel (stone), and save the good pickaxe's
-    // durability for actually mining ores (diamond needs iron+ to drop).
+    // ★方案A (2026-07-06, [[spec-pickaxe-stockpile-redesign]]): 取"够用的最低品级 + 同级剩余耐久最低"的镐
+    //   — 凿石用石镐、挖钻用铁镐(省钻镐), 同级把快断的先用尽。CHEAP_PICKS/BEST_PICKS 静态序已废(不再区分
+    //   tunnel/ore 取向, 统一由方块 requiredPickTier 定 minTier), 只保留 PICK_TIER 供 equipPick 排序。
     const PICK_TIER = {
         wooden_pickaxe: 1, golden_pickaxe: 1,
         stone_pickaxe: 2,
         iron_pickaxe: 3,
         diamond_pickaxe: 4, netherite_pickaxe: 5,
     };
-    const CHEAP_PICKS = ['wooden_pickaxe', 'stone_pickaxe', 'iron_pickaxe', 'diamond_pickaxe', 'netherite_pickaxe'];
-    const BEST_PICKS = ['netherite_pickaxe', 'diamond_pickaxe', 'iron_pickaxe', 'stone_pickaxe', 'wooden_pickaxe'];
     const pickCount = () => world.getInventoryCounts(bot);
     // ★2026-07-05 石镐 fodder 就地再造 (mineDown 同款 — 分层守卫需要石镐存在才能保铁镐)。
     try {
@@ -49,15 +48,22 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
         if (/coal_ore|stone|deepslate|andesite|diorite|granite|tuff|cobble|blackstone/.test(name)) return 1;
         return 0;
     };
+    // ★2026-07-06 方案A ([[spec-pickaxe-stockpile-redesign]]): 够用的最低品级 + 同级剩余耐久最低先用
+    //   (护高级镐: 挖钻也用铁镐省钻镐; 同级把快断的用尽再换新)。preferBest 形参保留兼容但不再取"最高级"
+    //   — 无论凿石/挖矿都取"能挖动的最低品级", 只是 minTier 由方块 requiredPickTier 决定。
     const equipPick = async (minTier = 1, preferBest = false) => {
-        const inv = pickCount();
-        const order = preferBest ? BEST_PICKS : CHEAP_PICKS;
-        const pick = order.find(p => (inv[p] || 0) > 0 && PICK_TIER[p] >= minTier);
-        if (!pick) return false;
+        void preferBest;
+        const remain = (i) => { const m = i.maxDurability || 0, u = (typeof i.durabilityUsed === 'number') ? i.durabilityUsed : 0; return m > 0 ? (m - u) : Infinity; };
+        const held = bot.inventory.items().filter(i => /_pickaxe$/.test(i.name) && (PICK_TIER[i.name] || 0) >= minTier);
+        if (!held.length) return false;
+        const useTier = Math.min(...held.map(i => PICK_TIER[i.name] || 0));
+        const chosen = held.filter(i => (PICK_TIER[i.name] || 0) === useTier).sort((a, b) => remain(a) - remain(b))[0];
+        if (!chosen) return false;
         try {
-            const ok = await skills.equip(bot, pick);
+            if (bot.heldItem && (PICK_TIER[bot.heldItem.name] || 0) === useTier && remain(bot.heldItem) <= remain(chosen)) return true;
+            await bot.equip(chosen, 'hand');   // 装具体那把(worn 实例) — skills.equip 按名取只会拿第一把, 无法区分耐久
             await skills.wait(bot, 80);
-            return ok !== false;
+            return !!(bot.heldItem && /_pickaxe$/.test(bot.heldItem.name) && (PICK_TIER[bot.heldItem.name] || 0) >= minTier);
         } catch (e) {
             return false;
         }

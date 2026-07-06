@@ -80,7 +80,11 @@ const FOOD_STOCK = 16;     // food level considered "stocked" (not just survival
 //    so it升级 once (and brings spares) instead of下地→上浮→再下地 thrashing. const→let so the
 //    decision-config loader can patch them later if needed. ──
 let IRON_BUFFER = 7;       // ironForArmor (raw_iron+ingot) to stock at the iron tier: 1 pick(3)+1 sword(2)+spares→armor next
-let DIAMOND_FLOOR = 3;     // diamonds to bank before GET_DIAMOND is "done" (≥1 diamond pickaxe + spare)
+let DIAMOND_FLOOR = 3;     // diamonds to bank before the FIRST diamond pickaxe is crafted (≥1 pick + spare)
+// ★2026-07-06 用户令 (钻石滚雪球, [[spec-pickaxe-stockpile-redesign]]): 得钻镐后继续高优挖钻到 40 颗
+//   (全套钻甲24 + 3钻镐9 + 3备用3 + 余量) 再转杀龙 endgame。GET_DIAMOND 相位化: 无钻镐→DIAMOND_FLOOR
+//   够本造首镐; 有钻镐→DIAMOND_SNOWBALL_TARGET 且优先级抬到 endgame 之上 (见 diamondTarget/GET_DIAMOND)。
+let DIAMOND_SNOWBALL_TARGET = 40;
 // ── ★ENDGAME tunables (post-diamond → Ender Dragon chain, all legit). const→let so the
 //    decision-config loader can patch them like the survival buffers above. ──
 let OBSIDIAN_TARGET = 14;  // 10 frame minimum + 4 spare to rebuild a ghast-broken portal
@@ -178,6 +182,36 @@ function ironArmorGoalDone(world, bot) {
 // ★P0-1 REPLENISH_KIT 口径: 背包内全部镐(含快断的) — 粗基线补给不变量, 与技能端 replenishKit 的
 // "总镐数"死契约一致。"有效镐"(耐久<85%)的精细不变量归 kit.picks/TOOL_UPKEEP, 两者分工不冲突。
 function totalPicks(bot) { return invCount(bot, /_pickaxe$/); }
+// ── ★2026-07-06 用户令 tier 参数化囤镐 ([[spec-pickaxe-stockpile-redesign]]) ──
+// "有效镐" = 耐久用量 <85% (镜像 modes.js kit / skills.pickRunway 的 effective 口径 — 快断的不算库存)。
+function effectivePicksMatching(bot, re) {
+    try {
+        return bot.inventory.items().filter(i => {
+            if (!re.test(i.name || '')) return false;
+            const max = i.maxDurability || 0, used = (typeof i.durabilityUsed === 'number') ? i.durabilityUsed : 0;
+            return !max || (used / max) < 0.85;
+        }).reduce((s, i) => s + i.count, 0);
+    } catch (e) { return 0; }
+}
+// tier 囤镐计划: 石阶段=沿用总镐>=3 (fodder, plan=null); 铁阶段=囤 4 铁镐(触发 有效铁镐≤1);
+// 钻阶段=囤 3 钻镐(触发 有效钻镐<3)。re 指该 tier 镐; target 释放线; triggerFloor 触发线(<它就补)。
+// 停造(木/石)由执行端 replenishKit ④ 依 tier 处理 — 这里只管"够不够/该补多少"的提案侧口径。
+function pickStockPlan(world) {
+    const pt = (world.kit && world.kit.pickTier) || '';
+    if (/diamond|netherite/.test(pt)) return { tier: 'diamond', re: /^(diamond|netherite)_pickaxe$/, target: 3, triggerFloor: 3, craft: 'diamond_pickaxe' };
+    if (/iron/.test(pt)) return { tier: 'iron', re: /^iron_pickaxe$/, target: 4, triggerFloor: 2, craft: 'iron_pickaxe' };
+    return null;   // stone/none: legacy total-picks>=3 fodder floor governs (byte-identical to pre-change)
+}
+// ★review 2026-07-06: 手头材料能否再造一把本 tier 镐 — 提案触发(_planMat)与 isGoalDone 释放(tierMatShort)
+//   共用这一个真相 (否则触发/释放材料口径不一致 → 造到不足 target 又停不下的 5min-cooldown churn, 复现
+//   TOOL_UPKEEP 的材料耗尽释放教训)。铁镐: 3 锭, 或 raw_iron+锭>=3 且有燃料(replenishKit ④-pre 冶炼);
+//   钻镐: 3 钻。executor(replenishKit ④/④-pre) 的造镐门与此严格同口径。
+function pickPlanHasMat(bot, plan) {
+    if (!plan) return false;
+    if (plan.tier === 'diamond') return invCount(bot, /^diamond$/) >= 3;
+    return invCount(bot, /^iron_ingot$/) >= 3
+        || (ironForArmor(bot) >= 3 && (invCount(bot, /^coal$/) > 0 || invCount(bot, /^charcoal$/) > 0));
+}
 // ★P1-4 铁供给断层 (review-2026-07-04 结构洞#4): 剩余缺甲件总成本 = 从已有件数起按 cheapest-first
 // 顺序累加还缺的每件 (armor=0 → 4+5+7+8=24; armor=4 → 0)。与 craftArmor 的 cheapest-first 同口径,
 // 与 ironArmorGoalDone 的"下一件"口径互补: 那是消费端(craft)释放判据, 这是采集端(挖矿)总需求。
@@ -241,6 +275,8 @@ function progressLogThrottled(bot, key, ms, line) {
 }
 function hasStoneTierPick(world) { return /stone|iron|diamond|netherite/.test((world.kit && world.kit.pickTier) || ''); }
 function diamondsOnHand(bot) { return invCount(bot, /^diamond$/); }
+// ★2026-07-06 钻石相位目标: 无钻镐 → DIAMOND_FLOOR(够本造首镐即释放); 有钻镐 → DIAMOND_SNOWBALL_TARGET(滚雪球)。
+function diamondTarget(bot) { return invCount(bot, /^(diamond|netherite)_pickaxe$/) >= 1 ? DIAMOND_SNOWBALL_TARGET : DIAMOND_FLOOR; }
 /** Pack is nearly full (≤4 free slots) → time to bank before drops are lost to a full inventory. */
 function packNearlyFull(bot) { try { return bot.inventory.emptySlotCount() <= 4; } catch (e) { return false; } }
 /**
@@ -612,7 +648,7 @@ export function proposeTasks(world, bot) {
     //    no logs. Off-overworld the primary in-dimension skills need no wood/pick to proceed.
     if (overworld && !isBootstrapDone(w, bot)) {
         const noPick = kit.picks < 1;
-        push({ kind: PROPOSAL_KIND.BOOTSTRAP_KIT, priority: noPick ? 90 : 66, skill: 'prepNether',
+        push({ kind: PROPOSAL_KIND.BOOTSTRAP_KIT, priority: noPick ? 90 : 64, skill: 'prepNether',
                rationale: noPick
                    ? 'no usable pickaxe — finish wood→planks→table→pickaxe→stone tools before anything else'
                    : `kit started but understocked (wood ${woodUnits(bot)}/${WOOD_BUFFER}, tier ${kit.pickTier}) — stock wood + upgrade to stone tools, don't wander off`,
@@ -651,13 +687,24 @@ export function proposeTasks(world, bot) {
     const _nightAssembly = time.phase !== 'day'
         && (woodUnits(bot) >= 1 || invCount(bot, /^cobblestone$/) >= 3)
         && (totalPicks(bot) < REPLENISH_PICKS_MIN || !invCount(bot, /^crafting_table$/));
+    // ★2026-07-06 tier 参数化 ([[spec-pickaxe-stockpile-redesign]]): 除总镐 fodder 底线外, 铁/钻阶段
+    //   还要囤够本 tier 镐 (铁 4 / 钻 3, 触发线见 pickStockPlan)。tier 短缺也触发本 kind, 由 replenishKit ④
+    //   就地用手头 ingot/diamond 造对应镐 (缺料由采矿链补)。priority: picks==0 仍 67(脱困急态, 压过 farm@65),
+    //   否则 62 (囤备镐属日间 chore, 让位 farm@65/补木@64 — 用户令 白天 farm>镐>装备)。
+    const _plan = pickStockPlan(w);
+    // 只在 replenishKit ④ 能真正造出该 tier 镐时才让 tier 短缺触发本 kind (免"提了却造不动"→3-strike 冷却churn)。
+    //   ★review 修: 铁镐口径含燃料 (raw_iron 无煤无锭 → 造不出, pickPlanHasMat 与 executor/释放门同真相)。
+    const _planMat = pickPlanHasMat(bot, _plan);
+    const _tierShort = _plan && _planMat && effectivePicksMatching(bot, _plan.re) < _plan.triggerFloor;
     if (overworld && (time.phase === 'day' || _nightAssembly)
-        && (totalPicks(bot) < REPLENISH_PICKS_MIN || woodUnits(bot) < REPLENISH_PLANKS_TRIGGER)) {
+        && (totalPicks(bot) < REPLENISH_PICKS_MIN || _tierShort || woodUnits(bot) < REPLENISH_PLANKS_TRIGGER)) {
         const pk = totalPicks(bot), pe = woodUnits(bot);
+        const _pri = pk === 0 ? 67 : 62;
+        const _tierTag = _plan ? ` ${_plan.tier}镐=${effectivePicksMatching(bot, _plan.re)}/${_plan.target}` : '';
         progressLogThrottled(bot, 'replenishKit', 60000,
-            `[proposeTasks] ★REPLENISH_KIT-propose: picks=${pk}/${REPLENISH_PICKS_MIN} planksEq=${pe}/${REPLENISH_PLANKS_RELEASE} pri=${pk === 0 ? 67 : 63} y=${Math.round(bot.entity.position.y)}${_nightAssembly ? ' [夜间口袋组装]' : ''} — 补给基线破底, 派 replenishKit(修复型: 不看深度, 技能自己上浮)`);
-        push({ kind: PROPOSAL_KIND.REPLENISH_KIT, priority: pk === 0 ? 67 : 63, skill: 'replenishKit',
-               rationale: `supply baseline broken (picks ${pk}/${REPLENISH_PICKS_MIN}, planksEq ${pe}/${REPLENISH_PLANKS_RELEASE})${_nightAssembly ? ' — night pocket-assembly (craft-only, chop steps self-skip)' : ' — surface + restock wood/spare pick before every consumer yields'}`,
+            `[proposeTasks] ★REPLENISH_KIT-propose: picks=${pk}/${REPLENISH_PICKS_MIN}${_tierTag} planksEq=${pe}/${REPLENISH_PLANKS_RELEASE} pri=${_pri} y=${Math.round(bot.entity.position.y)}${_nightAssembly ? ' [夜间口袋组装]' : ''} — 补给基线破底, 派 replenishKit(修复型: 不看深度, 技能自己上浮)`);
+        push({ kind: PROPOSAL_KIND.REPLENISH_KIT, priority: _pri, skill: 'replenishKit',
+               rationale: `supply baseline broken (picks ${pk}/${REPLENISH_PICKS_MIN}${_tierTag}, planksEq ${pe}/${REPLENISH_PLANKS_RELEASE})${_nightAssembly ? ' — night pocket-assembly (craft-only, chop steps self-skip)' : ' — surface + restock wood/spare pick before every consumer yields'}`,
                hints: { picks: pk, planksEq: pe } });
     }
 
@@ -699,10 +746,11 @@ export function proposeTasks(world, bot) {
     //     real proposer task: when it's day, safe, and we CAN actually farm (seeds in the bag to
     //     sow/keep a plot OR mature wheat already growing nearby to harvest+bake), run one bounded
     //     pass (harvest → bake bread → replant). The skill self-cooldowns (~5min) so unripe plots
-    //     don't pin it. @50: a buffer-building task — below crisis food (GET_FOOD@88/55), bootstrap
-    //     (90/66) and armor (68); above generic mining (45). It only fires once food isn't critical
-    //     (>6) so it never competes with the starve-now path. dynamicBreadTarget gates the dispatch
-    //     to a real bread deficit, so a fed bot with a full bread stock won't churn on it.
+    //     don't pin it. ★2026-07-06 用户令 @50→@65 ([[spec-pickaxe-stockpile-redesign]]): 白天 farm(小麦流)
+    //     >囤镐>装备 — 面包经济优先。现居 noPick BOOTSTRAP_KIT(90)/危机食物(88)/囤镐-无镐(67) 之下, 囤镐-备镐
+    //     (62)/补木(64)/装备(58)/挖矿(45) 之上。注意: 这里 farm 专指小麦流, 捕猎(GET_FOOD@88/55/35) 不在此列。
+    //     It only fires once food isn't critical (>6). dynamicBreadTarget gates the dispatch to a real
+    //     bread deficit, so a fed bot with a full bread stock won't churn on it.
     // ★2026-07-05 用户四连问修复: 旧 canFarmNow=(有种或有麦) — 种子播完(=0)后提案永不再触发,
     // 已播的地永远没人回来收 (巡回断链根因)。熟期巡逻分支: farm.json 锚存在且播种超 22min
     // (小麦熟期量级) → 即使零种零麦也派 wheatFarm 回去收割 (技能端 0 步会走回锚点)。
@@ -710,9 +758,11 @@ export function proposeTasks(world, bot) {
         && (Date.now() - w.farm.sownAt) > 22 * 60 * 1000);
     const canFarmNow = (invCount(bot, /^wheat_seeds$/) > 0 || invCount(bot, /^wheat$/) >= 3 || farmRipe);
     const breadDeficit = invCount(bot, /^bread$/) < dynamicBreadTarget(bot, w);
-    if (overworld && time.phase === 'day' && !(threat.actionable > 0) && vitals.food > 6 && canFarmNow && breadDeficit
+    // ★review 修 (farm 50→65 越过 MIGRATE@60): 死区/不宜居/卡地形/无木生物群系(migration.recommend)时
+    //   farm 必须让位迁移 — 否则揣着种子的 bot 会在该逃离的地形上原地种田而非撤离。加 !migration.recommend 门。
+    if (overworld && time.phase === 'day' && !migration.recommend && !(threat.actionable > 0) && vitals.food > 6 && canFarmNow && breadDeficit
         && (!bot || Date.now() >= (bot._wheatFarmCooldownUntil || 0))) {
-        push({ kind: PROPOSAL_KIND.OPP_WHEAT_FARM, priority: 50, skill: 'wheatFarm',
+        push({ kind: PROPOSAL_KIND.OPP_WHEAT_FARM, priority: 65, skill: 'wheatFarm',
                args: [{ breadTarget: dynamicBreadTarget(bot, w) }],
                rationale: `sustainable food: harvest+bake wheat→bread (target ${dynamicBreadTarget(bot, w)}, have ${invCount(bot, /^bread$/)}) — stop relying on cheat-supply` });
     }
@@ -743,10 +793,11 @@ export function proposeTasks(world, bot) {
     //    iron is enough for a piece, smelt+craft+equip iron armor (iron preserves diamonds — user
     //    choice 铁甲留钻石). DAY + safe only (craft at the furnace, never exposed at night). When iron
     //    is short this stays silent and GO_UNDERGROUND mining accumulates more; it re-fires next pass.
-    //    @68: above the understocked-wood BOOTSTRAP_KIT (66) — a bot WITH an iron pick + banked iron
-    //    but no armor, stuck deep where it can't reach wood, must armor up rather than deadlock forever
-    //    on a wood buffer it can't fill underground. Still below noPick BOOTSTRAP_KIT (90) and critical
-    //    food (88): get a pickaxe / don't starve first. Above migrate (60) / bed (50) / mining (45).
+    //    ★2026-07-06 用户令降级 ([[spec-pickaxe-stockpile-redesign]]): 68→58。用户明确取舍"白天 farm>镐>
+    //    装备", 接受随之升高的裸甲死亡率。装备现居 farm(65)/囤镐(67/62)/补木(64)/迁移(60) 之下, 仍在 noPick
+    //    BOOTSTRAP_KIT(90)/危机食物(88) 与 GET_FOOD-buffer(55)/tier挖矿(45-47) 之间。旧"@68 压 understocked
+    //    BOOTSTRAP_KIT(66) 防深地无木死锁"的安全阀已撤: 深地脱困由会自上浮的 REPLENISH_KIT→surfaceUp 兜底
+    //    (surfaceUp 分腿爬+横向迂回+徒手破顶, 见 skills/surfaceUp.js), 与装备排位无关。
     //    ★review craftArmor:60: gate on ironArmorGoalDone (cheapest-MISSING-piece affordability),
     //    not a flat iron>=4 — proposing a craft pass that can't afford the next piece (boots
     //    owned + 4 iron, helmet costs 5) just spun craftArmor at @68 above the whole chain.
@@ -756,7 +807,7 @@ export function proposeTasks(world, bot) {
     // 才轮上)。无镐=补给紧急态: picks>0 才许提甲件。
     if (overworld && time.phase === 'day' && !(threat.actionable > 0) && !ironArmorGoalDone(w, bot)
         && (kit.picks || 0) > 0) {
-        push({ kind: PROPOSAL_KIND.GET_ARMOR, priority: 68, skill: 'craftArmor',
+        push({ kind: PROPOSAL_KIND.GET_ARMOR, priority: 58, skill: 'craftArmor',
                rationale: `unarmored (${vitals.armor || 0}/4 pieces) + ${ironForArmor(bot)} iron banked — smelt+craft+equip iron armor (creeper/stray insurance, save diamonds)` });
     }
 
@@ -837,7 +888,7 @@ export function proposeTasks(world, bot) {
         //   Requires armor>=4 (GET_ARMOR@68 closes that first) so the bot never strip-mines the
         //   deep diamond band unarmored. @46: above GO_UNDERGROUND@45 so a kitted iron bot heads for
         //   the diamond band on purpose instead of the open-ended shallow descent.
-        if (hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < DIAMOND_FLOOR && hpSafeForUnderground
+        if (hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < diamondTarget(bot) && hpSafeForUnderground
             && kit.sufficientForUnderground
             && (invCount(bot, /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档(贫瘠世界口粮存不下, 满腹+灰区兜底+keepInv 等效); ★T-0092 (worker-sync): armor>=4(full set=24 iron, unreachable since GET_ARMOR yields at <4) → armor>=1(reachable from one craftArmor pass) so an iron-tooled+lightly-armored bot actually commits GET_DIAMOND → mineDiamonds descends to y-52. NOT >=0. ★tool-budget: also gated on kit.sufficientForUnderground (spare-with-table or field-recraft kit) like GO_UNDERGROUND — the skill-side pick guard is the LAST line, not the plan; TOOL_UPKEEP@47 restores the invariant first. ★dive rations (task #9): >=2 carried edibles or GET_FOOD stocks first — the y12 famine surfacing (checkpoint #6) ate the whole night's descent.
             // Dispatch the DEDICATED mineDiamonds skill: it water-aware-descends to the diamond band,
@@ -847,10 +898,14 @@ export function proposeTasks(world, bot) {
             // ★2026-07-06 优先级反倒挂: 46→46.75 (压过 ARMOR_SET@46.5) — 实录两把铁镐都被
             //   46.5 派去挖甲铁, 耗尽在石头上, 钻石线永远等不到活的铁镐。钻镐(1561 耐久)
             //   到手后甲铁自然接棒, 顺序反转是使命最优。
-            push({ kind: PROPOSAL_KIND.GET_DIAMOND, priority: 46.75, skill: 'mineDiamonds',
-                   args: [DIAMOND_FLOOR],
-                   rationale: `iron-tooled + armored — descend to the diamond band (y${DIAMOND_TARGET_Y}) and mine to ${DIAMOND_FLOOR} diamonds`,
-                   hints: { tier: tier.level, targetY: DIAMOND_TARGET_Y, diamonds: diamondsOnHand(bot) } });
+            // ★2026-07-06 钻石相位优先级 ([[spec-pickaxe-stockpile-redesign]]): 无钻镐 @46.75(挖够 DIAMOND_FLOOR
+            //   造首镐); 有钻镐 @54 — 压过 endgame 链(52-53), 让 bot 先滚雪球到 DIAMOND_SNOWBALL_TARGET(40) 再进
+            //   下界杀龙 (用户令 "得钻镐后优先继续挖钻")。仍让位 farm@65(仅真缺面包才抢)/装备@58 之上/survival。
+            const _diaTgt = diamondTarget(bot);
+            push({ kind: PROPOSAL_KIND.GET_DIAMOND, priority: invCount(bot, /^(diamond|netherite)_pickaxe$/) >= 1 ? 54 : 46.75, skill: 'mineDiamonds',
+                   args: [_diaTgt],
+                   rationale: `iron-tooled + armored — descend to the diamond band (y${DIAMOND_TARGET_Y}) and mine to ${_diaTgt} diamonds`,
+                   hints: { tier: tier.level, targetY: DIAMOND_TARGET_Y, diamonds: diamondsOnHand(bot), target: _diaTgt } });
         }
     }
 
@@ -1058,7 +1113,7 @@ export function proposeTasks(world, bot) {
                        rationale: `bare opening — scout for ${opening.need || 'resources'} (no known reachable wood/village yet)` });
                 break;
             case 'WOOD_BUFFER':
-                push({ kind: PROPOSAL_KIND.BOOTSTRAP_KIT, priority: 66, skill: 'prepNether',
+                push({ kind: PROPOSAL_KIND.BOOTSTRAP_KIT, priority: 64, skill: 'prepNether',
                        args: [{ woodTarget: WOOD_BUFFER }],
                        rationale: `wood known but understocked (${woodUnits(bot)}/${WOOD_BUFFER}) — buffer wood before going under`,
                        hints: { woodTarget: WOOD_BUFFER, wood: woodUnits(bot) } });
@@ -1112,10 +1167,11 @@ export function proposeTasks(world, bot) {
                 // ★2026-07-06 夜钻优先 (镐#3 夜铁行 10min 磨死实录): 铁镐在世+钻<3 → 夜里
                 //   直接 mineDiamonds — 镐的寿命用在唯一非它不可的地方(钻矿), 铁 gap 让位
                 //   (与日间 GET_DIAMOND@46.75 同一反倒挂逻辑)。
-                if (hasIronTierPick(w) && diamondsOnHand(bot) < DIAMOND_FLOOR) {
+                if (hasIronTierPick(w) && diamondsOnHand(bot) < diamondTarget(bot)) {
+                    const _nTgt = diamondTarget(bot);   // ★相位: 无钻镐→3(造首镐), 有钻镐→40(夜里也滚雪球)
                     push({ kind: TASK.DUSK_MINE_NIGHT, priority: 94, skill: 'mineDiamonds',
-                           args: [DIAMOND_FLOOR],
-                           rationale: `night DIAMOND rush — iron pick alive, spend it on diamond ore before it wears (${diamondsOnHand(bot)}/${DIAMOND_FLOOR})` });
+                           args: [_nTgt],
+                           rationale: `night DIAMOND rush — iron pick alive, spend it on diamond ore before it wears (${diamondsOnHand(bot)}/${_nTgt})` });
                     break;
                 }
                 const nightHasStonePick = invCount(bot, /(stone|iron|diamond|netherite)_pickaxe$/) >= 1;
@@ -1361,8 +1417,16 @@ export function isGoalDone(kind, world, bot) {
         // ★P0-1 REPLENISH_KIT done = 补给基线的迟滞释放: 总镐数>=2 且 planksEq>=8。触发是 <2/<4
         // (proposeTasks 1c) — 触发↔释放刻意不对称(planks <4 触发但 >=8 才放手), 与 GET_FOOD 的
         // FOOD_STOCK buffer 同思路: 补到有富余再走, 防 4↔5 边界抖动的提案轮转。
-        case PROPOSAL_KIND.REPLENISH_KIT:
-            return totalPicks(bot) >= REPLENISH_PICKS_MIN && woodUnits(bot) >= REPLENISH_PLANKS_RELEASE;
+        case PROPOSAL_KIND.REPLENISH_KIT: {
+            // ★2026-07-06 tier 参数化释放: fodder 底线(总镐>=3) + 木料 buffer + tier 镐达标(铁>=4/钻>=3)。
+            //   tier 达标用 target(释放线, 与触发线 triggerFloor 迟滞不对称: 铁 ≤1 触发但 >=4 才放手)。
+            const plan = pickStockPlan(w);
+            // ★review 修: tier 达标 OR 手头材料已不够再造一把本 tier 镐 → 释放 (与触发 _planMat 同真相的负命题)。
+            //   否则 executor 造到材料耗尽仍不足 target, isGoalDone 永假 → commitGoal '(holding commitment)'
+            //   反复重派 → 5min 冷却 churn, 抢走采矿的身体。释放后身体回采矿(去补锭/钻), 缺口自然补齐。
+            const tierOk = !plan || effectivePicksMatching(bot, plan.re) >= plan.target || !pickPlanHasMat(bot, plan);
+            return totalPicks(bot) >= REPLENISH_PICKS_MIN && tierOk && woodUnits(bot) >= REPLENISH_PLANKS_RELEASE;
+        }
         case PROPOSAL_KIND.MIGRATE:       return !w.migration.recommend;     // arrived at a livable biome
         // ── ★T-0093 tier chain completion. ──
         // GET_IRON_TOOLS done = an iron+ pickaxe is now in hand (the rung was about crafting it).
@@ -1380,7 +1444,7 @@ export function isGoalDone(kind, world, bot) {
         //   Stays committed deep until the floor is met → the diamond venture isn't abandoned after
         //   one ore. Survival (HOLD/food/night) still preempts via isEmergency/nightPre, so a deep
         //   commitment never traps the bot through danger.
-        case PROPOSAL_KIND.GET_DIAMOND:      return diamondsOnHand(bot) >= DIAMOND_FLOOR;
+        case PROPOSAL_KIND.GET_DIAMOND:      return diamondsOnHand(bot) >= diamondTarget(bot);   // ★相位: 无钻镐→3(造首镐), 有钻镐→40(滚雪球)
         // ★T-0092 BANK_GEAR done = the diamonds are off-hand (deposited) OR the pack reopened. Either
         //   way the bank run achieved its purpose; re-fires next time the pack fills with valuables.
         case PROPOSAL_KIND.BANK_GEAR:        return diamondsOnHand(bot) < 1 || !packNearlyFull(bot);

@@ -856,10 +856,45 @@ export async function defendSelf(bot, range=9) {
 // silently miss the guard (that's exactly how the "抬头空挥" regression slipped into the
 // vein flood-fill while the main collectBlock path already had it).
 
+// ── ★2026-07-06 方案A 选镐 ([[spec-pickaxe-stockpile-redesign]]) ──────────────────
+// 用户令: 挖矿护住高级镐(挖钻用铁镐, 省钻镐)、凿石用石镐; 同一品级内先用"快断的"(剩余耐久最低),
+// 把近报废的镐用尽再换新的。mineflayer 的 bot.tool.equipForBlock 只按挖掘速度=最高品级选镐(铁镐
+// 烧在石头上), 故对"需镐方块"改用本函数 — equipForDig 是全仓库 dig 的取镐 choke-point。
+const _PICK_TIER_RANK = { wooden: 1, golden: 1, stone: 2, iron: 3, diamond: 4, netherite: 5 };
+// 方块需要的最低镐品级 (0 = 非镐类方块, 交回 equipForBlock 处理木/土/沙, 不夺其选择)。
+function pickReqTier(block) {
+    const n = (block && block.name) || '';
+    if (/obsidian|ancient_debris|crying_obsidian|respawn_anchor/.test(n)) return 4;                 // diamond+
+    if (/diamond_ore|emerald_ore|redstone_ore|gold_ore/.test(n)) return 3;                          // iron+
+    if (/iron_ore|lapis_ore|copper_ore/.test(n)) return 2;                                          // stone+
+    if (/_ore$|stone|deepslate|andesite|diorite|granite|tuff|calcite|cobble|blackstone|basalt|netherrack|end_stone|sandstone|terracotta|concrete$|amethyst|nether_brick|quartz_block|glowstone|magma_block|smooth_|polished_|_bricks$/.test(n)) return 1;   // any pick
+    return 0;
+}
+// 挑最优镐并装备 (方案A: 够用的最低品级 + 同级剩余耐久最低)。返回是否已握上合规镐。
+async function equipPickForBlock(bot, block) {
+    try {
+        const req = pickReqTier(block);
+        if (req <= 0) return false;
+        const tierOf = (i) => _PICK_TIER_RANK[(i.name || '').split('_')[0]] || 0;
+        const remain = (i) => { const m = i.maxDurability || 0, u = (typeof i.durabilityUsed === 'number') ? i.durabilityUsed : 0; return m > 0 ? (m - u) : Infinity; };
+        const picks = bot.inventory.items().filter(i => /_pickaxe$/.test(i.name || '') && tierOf(i) >= req);
+        if (!picks.length) return false;
+        const useTier = Math.min(...picks.map(tierOf));                                                       // 够用的最低品级
+        const chosen = picks.filter(i => tierOf(i) === useTier).sort((a, b) => remain(a) - remain(b))[0];     // 同级最低耐久先用
+        if (!chosen) return false;
+        // 已握同级且不比 chosen 更新的镐 → 免重装 (防每次 dig 抖动切换)
+        if (bot.heldItem && /_pickaxe$/.test(bot.heldItem.name || '') && tierOf(bot.heldItem) === useTier && remain(bot.heldItem) <= remain(chosen)) return true;
+        await bot.equip(chosen, 'hand');
+        return !!(bot.heldItem && /_pickaxe$/.test(bot.heldItem.name || '') && tierOf(bot.heldItem) >= req);
+    } catch (e) { return false; }
+}
+
 // Pick the right tool for a block, but NEVER hold a sword to break wood — equipForBlock
 // leaves a combat sword in hand when axe-less → "用木剑砍树" (slow + burns combat durability).
 // Drop to bare hand for logs/wood when we have no axe. Every dig path uses this.
+// ★方案A: 需镐方块先走 equipPickForBlock (护高级镐/同级先用快断的); 命中即返回, 否则回退 equipForBlock。
 async function equipForDig(bot, block) {
+    try { if (block && pickReqTier(block) > 0 && await equipPickForBlock(bot, block)) return; } catch (e) {}
     try { await bot.tool.equipForBlock(block); } catch (e) {}
     if (/_log$|_wood$|_stem$|_hyphae$/.test(block.name) && bot.heldItem && /_sword$/.test(bot.heldItem.name)
         && !bot.inventory.items().some(i => /_axe$/.test(i.name))) {

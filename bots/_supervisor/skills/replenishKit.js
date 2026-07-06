@@ -40,6 +40,20 @@ export default async function replenishKit(bot, ctx, opts = {}) {
     // 总镐数 = 不变量口径 (raw count, 不看耐久 — 耐久感知的 effectivePicks 属于提案端;
     // 执行端只对"数量"负责, 宁多勿少, 镐是消耗品跑道)
     const picks = () => { try { return bot.inventory.items().filter(i => PICK_RE.test(i.name)).length; } catch (e) { return 0; } };
+    // ── ★2026-07-06 tier 参数化囤镐 ([[spec-pickaxe-stockpile-redesign]]): 到铁停木镐、到钻停石镐;
+    //   铁阶段囤 4 铁镐, 钻阶段囤 3 钻镐 (与 world_model pickStockPlan 同口径)。──
+    const TIER_OF = (n) => /diamond|netherite/.test(n) ? 4 : /iron/.test(n) ? 3 : /stone/.test(n) ? 2 : /wood|golden/.test(n) ? 1 : 0;
+    const bestPickTier = () => { try { return bot.inventory.items().filter(i => PICK_RE.test(i.name)).reduce((m, i) => Math.max(m, TIER_OF(i.name)), 0); } catch (e) { return 0; } };
+    // ★review 修 (raw↔effective 口径): 提案端 isGoalDone 用"有效镐"(耐久<85%)释放, executor 的 tier 门必须同口径,
+    //   否则 4 把里 3 把快断(raw=4,eff=1) → executor 认为够(不补)而提案端认为不够 → 死锁 churn。tier 决策用 eff*,
+    //   raw ironPicksN/diaPicksN 仅留作日志诊断。
+    const effOfTier = (re) => { try { return bot.inventory.items().filter(i => re.test(i.name) && (!i.maxDurability || ((typeof i.durabilityUsed === 'number' ? i.durabilityUsed : 0) / i.maxDurability) < 0.85)).reduce((s, i) => s + i.count, 0); } catch (e) { return 0; } };
+    const effIronPicksN = () => effOfTier(/^iron_pickaxe$/);
+    const effDiaPicksN = () => effOfTier(/^(diamond|netherite)_pickaxe$/);
+    const ironPicksN = () => { try { return bot.inventory.items().filter(i => i.name === 'iron_pickaxe').reduce((s, i) => s + i.count, 0); } catch (e) { return 0; } };   // raw, 仅日志
+    const diaPicksN = () => { try { return bot.inventory.items().filter(i => /^(diamond|netherite)_pickaxe$/.test(i.name)).reduce((s, i) => s + i.count, 0); } catch (e) { return 0; } };   // raw, 仅日志
+    // 该 tier 囤镐目标是否达标(释放线, 有效镐口径): 钻>=3 / 铁>=4 / 石(fodder)总数>=3。
+    const tierPickGoalMet = () => { const bt = bestPickTier(); if (bt >= 4) return effDiaPicksN() >= 3; if (bt >= 3) return effIronPicksN() >= 4; return picks() >= 3; };
     const tableNear = () => { try { return !!world.getNearestBlock(bot, 'crafting_table', 4); } catch (e) { return false; } };
 
     // 地表判定: 头顶 10 格无实体方块 (树叶/藤不算封顶, 抄 prepNether coveredAboveNow 的排除法) 且 y>=55
@@ -82,8 +96,8 @@ export default async function replenishKit(bot, ctx, opts = {}) {
     prog(`replenishKit: START picks=${before[0]} stick=${before[1]} planks=${before[2]} logs=${before[3]} table=${before[4]} planksEq=${planksEq()} y=${Math.round(bot.entity.position.y)} onSurface=${onSurface()} night=${isNight()} hostiles16=${hostilesNear(16)} hp=${Math.round(bot.health)} food=${bot.food}`);
 
     // 已达标 → 诚实 false (不该被派发到这; isGoalDone 释放承诺, 提案端负责别重复提)
-    if (picks() >= 3 && planksEq() >= 64 && cnt('stick') >= 24) {   // ★3镐/16板/24棍 (棍=地下石镐 fodder 弹药, 1 格槽=12 把柄; 14:39 实录: 唯一石镐耗尽→守卫无 fodder→铁镐#3 裸奔凿石 15min 阵亡) (与 world_model REPLENISH_* 同步加厚: 2镐262耐久撑不到下次补给, 20-40min/次复发)
-        prog('replenishKit: invariant already satisfied (picks>=3 planksEq>=64 stick>=24) — nothing to do, honest false');
+    if (picks() >= 3 && tierPickGoalMet() && planksEq() >= 64 && cnt('stick') >= 24) {   // ★3镐/64板/24棍 + tier 镐达标(铁4/钻3) — 棍=地下石镐 fodder 弹药; 与 world_model REPLENISH_*/pickStockPlan 同步
+        prog(`replenishKit: invariant already satisfied (picks=${picks()} tierOk 铁${ironPicksN()}钻${diaPicksN()} planksEq=${planksEq()} stick=${cnt('stick')}) — nothing to do, honest false`);
         return false;
     }
 
@@ -257,19 +271,32 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         prog(`replenishKit: ③.6 stick ${sb}→${cnt('stick')}`);
     }
 
-    // ── ④ 补镐到 2 把: 有 cobble(>=3/把)先石镐, 没有则木镐过渡 (镐是消耗品跑道, 宁多勿清)。
-    //      craftRecipeLocal 会把随身台落在臂展内再收回 (T-0079), 不会走向 16 格外的幽灵台。──
+    // ── ④-pre ★tier 囤镐备料 (2026-07-06): 铁阶段缺铁镐(<4)且有 raw_iron 无锭 → 先冶炼补锭再造铁镐
+    //    (与 ⑧ 烤肉同 smeltSafe 惯用法; 需煤/炭)。钻镐用钻石(终态资源, 由 mineDiamonds 滚雪球供给,
+    //    此处不冶炼)。──
+    if (!stop() && !overBudget() && bestPickTier() === 3 && effIronPicksN() < 4
+        && cnt('iron_ingot') < 3 && cnt('raw_iron') >= 3 && (cnt('coal') > 0 || cnt('charcoal') > 0)) {
+        const rb = cnt('iron_ingot');
+        try { await skills.customSkill(bot, 'smeltSafe', 'raw_iron', Math.min(cnt('raw_iron'), 6)); } catch (e) { prog(`replenishKit: ④-pre 冶铁 err ${e.message}`); }
+        prog(`replenishKit: ④-pre 冶铁补锭 ${rb}→${cnt('iron_ingot')} (为囤铁镐)`);
+    }
+
+    // ── ④ 补镐 (tier 参数化): fodder 数量底线 picks>=3 + tier 囤(铁镐 4 / 钻镐 3)。选造顺序: 有料先造
+    //      高价 tier 镐; 否则 fodder — 到钻停石镐、到铁停木镐。craftRecipeLocal 把随身台落在臂展内再收回
+    //      (T-0079), 不会走向 16 格外的幽灵台。取镐由 skills 端方案A 在 dig 时选(此处不再手动 equip)。──
     let guard = 0;
-    while (!stop() && !overBudget() && picks() < 3 && guard++ < 6) {   // ★3镐口径
-        // 原料自愈: 板不够先折 log; 棍不够先折板; 都没有 → 老实 break (不空转)
+    while (!stop() && !overBudget() && guard++ < 10) {
+        const bt = bestPickTier();
+        const needFodder = picks() < 3;                                              // 数量底线(够本下矿, raw 总镐 — 与 isGoalDone totalPicks 同口径)
+        const needIron = bt === 3 && effIronPicksN() < 4 && cnt('iron_ingot') >= 3;   // ★review: 有效铁镐<4(与提案端同口径)且有锭
+        const needDia = bt >= 4 && effDiaPicksN() < 3 && cnt('diamond') >= 3;         // ★review: 有效钻镐<3 且有钻
+        if (!needFodder && !needIron && !needDia) break;
+
+        // 原料自愈: 板不够先折 log; 棍不够先折板 (镐柄 2 棍); 都没有 → 老实 break (不空转)
         if (cnt('stick') < 2 || planksHeld() < 3) {
             const logName = anyLogName();
-            if (planksHeld() < 4 && logName) {
-                try { await skills.craftRecipeLocal(bot, plankNameFor(logName), 1); } catch (e) {}
-            }
-            if (cnt('stick') < 2 && planksHeld() >= 2) {
-                try { await skills.craftRecipeLocal(bot, 'stick', 1); } catch (e) {}
-            }
+            if (planksHeld() < 4 && logName) { try { await skills.craftRecipeLocal(bot, plankNameFor(logName), 1); } catch (e) {} }
+            if (cnt('stick') < 2 && planksHeld() >= 2) { try { await skills.craftRecipeLocal(bot, 'stick', 1); } catch (e) {} }
             if (cnt('stick') < 2) { prog(`replenishKit: ④ break — 棍造不出 (planks=${planksHeld()} logs=${logsHeld()})`); break; }
         }
         // 台自愈: 镐是 3x3 配方, 无台且造不出台 → break (craftRecipeLocal 只放臂展内随身台)
@@ -277,11 +304,29 @@ export default async function replenishKit(bot, ctx, opts = {}) {
             if (planksHeld() >= 4) { try { await skills.craftRecipeLocal(bot, 'crafting_table', 1); } catch (e) {} }
             if (cnt('crafting_table') === 0 && !tableNear()) { prog(`replenishKit: ④ break — 无台且造不出 (planks=${planksHeld()})`); break; }
         }
+
         // 石镐原料认全族 (stone_tool_materials tag): 深层上浮的 bot 常常一包 cobbled_deepslate 没一块 cobblestone
         const stoneMat = cnt('cobblestone') + cnt('cobbled_deepslate') + cnt('blackstone');
-        const wantStone = stoneMat >= 3;
-        if (!wantStone && planksHeld() < 3) { prog(`replenishKit: ④ break — 无 cobble 族且 planks=${planksHeld()}<3, 木镐也造不了`); break; }
-        const name = wantStone ? 'stone_pickaxe' : 'wooden_pickaxe';
+        // ★选造顺序 = fodder(廉价镐)先, tier 镐后: 方案A 凿石用石镐, 若先把铁/钻镐造满而无石镐 fodder, tunnel
+        //   就只能拿铁/钻镐凿石(白烧高级镐)。故先保 3 把石镐(到钻停石镐→钻镐自兼 tunnel), 再囤铁/钻 tier 镐。
+        let name = null;
+        if (needFodder) {
+            // 常态: 用廉价镐填 3 把数量底线(方案A tunnel 用它, 省 tier 镐)。停造(到铁停木/到钻停石)是防"囤"过量。
+            if (bt < 4 && stoneMat >= 3) name = 'stone_pickaxe';                      // 到钻前: 石镐 fodder
+            else if (bt < 3 && planksHeld() >= 3) name = 'wooden_pickaxe';            // 到铁前: 木镐 fodder
+            // ★review 修 (fodder 底线不可造→churn): 停造只防"囤过量", 不该让 bot 落到 <3 把镐困地下。tier 镐造不出
+            //   (缺锭/钻)时, 数量底线兜底放开廉价镐 — 防 pickless 压过"停造"。到钻缺钻时用石镐、到铁缺锭时用木镐凑满 3。
+            else if (needDia) name = 'diamond_pickaxe';                              // 有钻优先用钻镐填底线
+            else if (needIron) name = 'iron_pickaxe';                                // 有锭优先用铁镐填底线
+            else if (stoneMat >= 3) name = 'stone_pickaxe';                          // 兜底: 石镐凑满 3(防 pickless)
+            else if (planksHeld() >= 3) name = 'wooden_pickaxe';                     // 兜底: 木镐凑满 3
+        }
+        if (!name && needDia) name = 'diamond_pickaxe';                              // fodder 已够 → 囤高价 tier 镐(钻 3)
+        if (!name && needIron) name = 'iron_pickaxe';
+        if (!name) {   // 需补但无可造镐种(缺料 或 被 tier 停造挡住) → 老实 break, 缺口由采矿/冶炼链补
+            prog(`replenishKit: ④ break — 无可造镐种 (tier=${bt} picks=${picks()} 铁镐=${ironPicksN()} 钻镐=${diaPicksN()} cobble族=${stoneMat} planks=${planksHeld()} ingot=${cnt('iron_ingot')} diamond=${cnt('diamond')})`);
+            break;
+        }
         const pb = picks();
         try {
             await Promise.race([
@@ -290,11 +335,10 @@ export default async function replenishKit(bot, ctx, opts = {}) {
             ]);
         } catch (e) { prog(`replenishKit: ④ ${name} craft err ${e.message}`); }
         if (picks() <= pb) {
-            prog(`replenishKit: ④ ${name} craft NO delta (cobble=${cnt('cobblestone')} planks=${planksHeld()} stick=${cnt('stick')} tableInv=${cnt('crafting_table')} tableNear=${tableNear()}) — break, 不空转`);
+            prog(`replenishKit: ④ ${name} craft NO delta (cobble=${cnt('cobblestone')} planks=${planksHeld()} stick=${cnt('stick')} ingot=${cnt('iron_ingot')} diamond=${cnt('diamond')} tableInv=${cnt('crafting_table')} tableNear=${tableNear()}) — break, 不空转`);
             break;
         }
-        prog(`replenishKit: ④ crafted ${name} → picks=${picks()}`);
-        if (wantStone) { try { await skills.equip(bot, 'stone_pickaxe'); } catch (e) {} }
+        prog(`replenishKit: ④ crafted ${name} → picks=${picks()} (铁镐=${ironPicksN()} 钻镐=${diaPicksN()} tier=${bt})`);
     }
 
     // ── ⑤ 富余顺手补 stick>=24 (只花不伤不变量的板: 折棍后 planksEq 仍须 >=8) ─────────────
@@ -343,6 +387,6 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         } catch (e) {}
     }
 
-    const met = picks() >= 3 && planksEq() >= 64;   // ★3镐/64板 (宽迟滞令)
+    const met = picks() >= 3 && tierPickGoalMet() && planksEq() >= 64;   // ★3镐/64板 + tier 镐达标(铁4/钻3, 宽迟滞令)
     return settle(stop() ? 'interrupted' : (overBudget() ? 'budget-5min' : (met ? 'invariant-met' : 'partial')));
 }
