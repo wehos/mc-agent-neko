@@ -1066,6 +1066,8 @@ export class Agent {
                     // 心跳必须不死: 单拍异常记日志跳过。
                     try { await this.update(start - last); }
                     catch (e) { console.error('agent update tick error:', e); }
+                    // ★probe: 归因期计入本拍 update 墙钟(含 await, 但 modes/kernel 多为同步扫描)。
+                    if (this._probe) this._probe.updateMs += Date.now() - start;
                     let remaining = INTERVAL - (Date.now() - start);
                     if (remaining > 0) {
                         await new Promise((resolve) => setTimeout(resolve, remaining));
@@ -1073,13 +1075,136 @@ export class Agent {
                     last = start;
                 }
             }, INTERVAL);
+
+            // ★事件循环延迟探针 (Pattern-diagnostic, 默认开; 设 MC_ELOOP_PROBE=0 关闭)。
+            // 同循环上自测: 被同步阻塞 / 长 await 卡住时, 这个 100ms tick 自己迟到,
+            // drift = 实际间隔 - 100 = 事件循环被卡的时长。只在超阈值(>80ms)时 warn
+            // (平时零输出), grep "⏱ELOOP" 即可做修前/修后对比。
+            //
+            // ★2026-07-06 归因增强 (session#7): 卡顿是 mineflayer-chunk-parse 还是 bot-scan?
+            // 光测 drift 无法分辨。加三路轻量计时器(自上次 tick 起累积, tick 时读并清零):
+            //   chunkMs   = minecraft-protocol map_chunk 事件处理耗时(=prismarine-chunk column.load 同步解析)
+            //   viewMs    = CameraProc WorldView 的 chunkColumnLoad→column.toJson() 二次序列化(截图管线在主线程的税)
+            //   updateMs  = 本 agent update() 一拍(modes+kernel+world_model 扫描)耗时
+            //   chunks    = 本窗口加载的 chunk column 数
+            // ELOOP 触发时把这几个数一并打出 → 定量拆分 6.8s 里各占多少。
+            if (process.env.MC_ELOOP_PROBE !== '0') {
+                // 累积计数器(挂 this, update() 也写 updateMs)。
+                this._probe = { chunkMs: 0, viewMs: 0, updateMs: 0, chunks: 0, modesMs: 0, modesMax: 0, pfMs: 0, gcMs: 0, gcMax: 0 };
+                const _pb = this._probe;
+                // (0) GC 观测: 满视距下 findBlocks/chunk 大量 Block 分配 → GC 是"other"最大嫌疑之一。
+                //     PerformanceObserver('gc') 报每次 GC 暂停时长(major/minor), 累积到 gcMs / 记峰值 gcMax。
+                try {
+                    import('node:perf_hooks').then(({ PerformanceObserver }) => {
+                        const obs = new PerformanceObserver((list) => {
+                            for (const e of list.getEntries()) { _pb.gcMs += e.duration; if (e.duration > _pb.gcMax) _pb.gcMax = e.duration; }
+                        });
+                        obs.observe({ entryTypes: ['gc'] });
+                        if (obs.unref) obs.unref();
+                    }).catch(() => {});
+                } catch (e) {}
+                // (1) map_chunk 同步解析计时: 包 bot._client.emit, 只在 'map_chunk' 事件上量墙钟。
+                //     这段耗时 = mineflayer blocks.js addColumn→column.load(prismarine-chunk)的纯同步反序列化。
+                try {
+                    const _cli = this.bot && this.bot._client;
+                    if (_cli && typeof _cli.emit === 'function' && !_cli._probeWrapped) {
+                        const _rawEmit = _cli.emit.bind(_cli);
+                        _cli.emit = function (event, ...args) {
+                            if (event === 'map_chunk') {
+                                const t0 = Date.now();
+                                try { return _rawEmit(event, ...args); }
+                                finally { _pb.chunkMs += Date.now() - t0; _pb.chunks++; }
+                            }
+                            return _rawEmit(event, ...args);
+                        };
+                        _cli._probeWrapped = true;
+                    }
+                } catch (e) {}
+                // (1b) pathfinder A* 同步计时: 包 bot.pathfinder.getPathTo — monitorMovement 每 physicsTick
+                //      (20/s) 在 partial 路径上反复 compute(≤40ms/次), 满视距下搜索空间大 → 可持续占满事件循环。
+                //      也是 skills 里显式 getPathTo 的成本。累积到 pfMs。
+                try {
+                    const _pf = this.bot && this.bot.pathfinder;
+                    if (_pf && typeof _pf.getPathTo === 'function' && !_pf._probeWrapped) {
+                        const _rawGetPath = _pf.getPathTo.bind(_pf);
+                        _pf.getPathTo = function (...a) {
+                            const t0 = Date.now();
+                            try { return _rawGetPath(...a); }
+                            finally { _pb.pfMs = (_pb.pfMs || 0) + (Date.now() - t0); }
+                        };
+                        _pf._probeWrapped = true;
+                    }
+                } catch (e) {}
+                // (2) WorldView toJson 二次序列化计时: chunkColumnLoad 在 CameraProc 里触发 column.toJson()。
+                //     这里量的是"截图管线在主线程的额外税", 不含 map_chunk 本身(那走 client.emit)。
+                //     注意: 该 handler 由 CameraProc/WorldView 注册, 我们只在同一事件上加一个前后戳的旁路监听
+                //     无法直接测别人 handler 的耗时 → 改为量整个 chunkColumnLoad 事件派发窗口。
+                //     并加 (3) physicsTick 计时: mineflayer 每游戏刻(~20/s)emit physicsTick, physics 引擎 +
+                //     全部插件 handler(pathfinder compute 续算 / pvp / collectblock / auto-eat / armor)都挂在上面,
+                //     是"other"最大嫌疑。累积到 tickMs(注意含在 other 里, 只是拆出来看)。
+                try {
+                    const _bot = this.bot;
+                    if (_bot && typeof _bot.emit === 'function' && !_bot._probeCclWrapped) {
+                        const _rawBotEmit = _bot.emit.bind(_bot);
+                        _bot.emit = function (event, ...args) {
+                            if (event === 'chunkColumnLoad') {
+                                const t0 = Date.now();
+                                try { return _rawBotEmit(event, ...args); }
+                                finally { _pb.viewMs += Date.now() - t0; }
+                            }
+                            if (event === 'physicsTick') {
+                                const t0 = Date.now();
+                                try { return _rawBotEmit(event, ...args); }
+                                finally { _pb.tickMs = (_pb.tickMs || 0) + (Date.now() - t0); }
+                            }
+                            return _rawBotEmit(event, ...args);
+                        };
+                        _bot._probeCclWrapped = true;
+                    }
+                } catch (e) {}
+                let _elLast = Date.now();
+                this._eloopProbe = setInterval(() => {
+                    const nowEl = Date.now();
+                    const drift = nowEl - _elLast - 100;
+                    _elLast = nowEl;
+                    const cm = _pb.chunkMs, vm = _pb.viewMs, um = _pb.updateMs, cc = _pb.chunks, mm = _pb.modesMs, mx = _pb.modesMax, pf = _pb.pfMs || 0, tk = _pb.tickMs || 0, gc = Math.round(_pb.gcMs || 0), gx = Math.round(_pb.gcMax || 0);
+                    _pb.chunkMs = 0; _pb.viewMs = 0; _pb.updateMs = 0; _pb.chunks = 0; _pb.modesMs = 0; _pb.modesMax = 0; _pb.pfMs = 0; _pb.tickMs = 0; _pb.gcMs = 0; _pb.gcMax = 0;
+                    if (drift > 80) {
+                        // physTick 含 pathfinder compute 续算 + 全插件 physics handler。gc 独立(GC 暂停)。
+                        // other = drift 减去 chunk/update/physTick/gc = 真正未归类残余(截图/LLM/其他同步)。
+                        const other = Math.max(0, drift - cm - um - tk - gc);
+                        // ★归因: 大 other 卡顿时打出当前活动(skill/action) — 定位哪个技能同步阻塞。
+                        let act = '';
+                        try {
+                            if (other > 300) {
+                                const sk = this.bot._currentSkill || (this.actions && this.actions.currentActionLabel) || this.supervised_skill || '-';
+                                const exec = (this.actions && this.actions.executing) ? 'exec' : 'idle';
+                                act = ` act=${sk}/${exec}`;
+                            }
+                        } catch (e) {}
+                        console.warn(`⏱ELOOP stalled ${drift}ms @${new Date(nowEl).toISOString()} | chunkParse=${cm}ms botUpdate=${um}ms(modes=${mm}) physTick=${tk}ms gc=${gc}ms(max${gx}) pathGetTo=${pf}ms other=${other}ms chunks=${cc}${act}`);
+                    }
+                }, 100);
+                if (this._eloopProbe && this._eloopProbe.unref) this._eloopProbe.unref();
+            }
         }
 
         this.bot.emit('idle');
     }
 
     async update(delta) {
-        await this.bot.modes.update();
+        // ★probe: modes.update() 里 world_model 模式每 2s 做全套方块扫描(encScan/findBlocks/
+        //   landmark), 是 bot 侧最重的同步块。单独量它, 与 kernel.tick 区分。
+        const _pb = this._probe;
+        if (_pb) {
+            const _t0 = Date.now();
+            await this.bot.modes.update();
+            const _dm = Date.now() - _t0;
+            _pb.modesMs = (_pb.modesMs || 0) + _dm;
+            if (_dm > _pb.modesMax || !_pb.modesMax) _pb.modesMax = _dm;
+        } else {
+            await this.bot.modes.update();
+        }
         this.self_prompter.update(delta);
         // Framework v2 kernel tick (no-op while feature flag is OFF).
         if (this.framework) { try { await this.framework.tick(delta); } catch (e) {} }
