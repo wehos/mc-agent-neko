@@ -43,24 +43,6 @@
   },
   "log": [
     {
-      "ts": "2026-07-05T23:04:59.432Z",
-      "holder": "kernel:surviveNow",
-      "claimant": "mode:self_defense",
-      "ctx": "reflex self_defense wants to interrupt kernel:surviveNow",
-      "verdict": "claimant",
-      "source": "matrix",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-05T23:05:17.764Z",
-      "holder": "kernel:surviveNow",
-      "claimant": "mode:self_preservation",
-      "ctx": "reflex self_preservation wants to interrupt kernel:surviveNow",
-      "verdict": "claimant",
-      "source": "matrix",
-      "persisted": false
-    },
-    {
       "ts": "2026-07-05T23:06:31.465Z",
       "holder": "kernel:prepNether",
       "claimant": "mode:mobility",
@@ -2740,6 +2722,24 @@
       "ctx": "reflex torch_placing wants to interrupt kernel:replenishKit",
       "verdict": "holder",
       "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-06T03:21:38.329Z",
+      "holder": "kernel:nightShelter",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt kernel:nightShelter",
+      "verdict": "claimant",
+      "source": "matrix",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-06T03:21:43.623Z",
+      "holder": "kernel:*",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt kernel:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     }
   ]

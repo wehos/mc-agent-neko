@@ -23,6 +23,10 @@ $env:MC_FRAMEWORK_SHADOW = '0'
 # Restart-Agent 及各 keep-alive 都用裸名 'node' 启动 — 若 PATH 里没有 node, 整条链一个也起不来。
 $node22 = 'C:\Users\Administrator\nodejs22'
 if ((Test-Path (Join-Path $node22 'node.exe')) -and ($env:PATH -notlike "*$node22*")) { $env:PATH = "$node22;$env:PATH" }
+# ★2026-07-06 session#5: ore-oracle 离线扫描指向用户自开 LAN 世界「新的世界」的 region 目录
+# (专用服务器 C:\Users\Administrator\mc-server 已停役, ore-oracle.mjs 的默认值指向它已失效)。
+# 在此钉死, 子进程继承 — 与 MC_FRAMEWORK_* 同一"不许靠宿主 shell 碰运气"原则。
+$env:ORE_REGION = 'C:\Users\Administrator\Downloads\.minecraft\saves\新的世界\region'
 
 # ★T-0095 ATOMIC SINGLETON — replaces the scan-and-kill TOCTOU race below. Two watchdogs spawned
 # near-simultaneously (concurrent SessionStart ensure-stack hooks / a session recycle) each scanned
@@ -195,13 +199,16 @@ while ($true) {
     # ORACLE-DAEMON KEEP-ALIVE (2026-07-05 全知层): RCON 只读 /locate 滚动侦察当前维度关键结构
     # → oracle.json → modes.js 挂 bot._world.oracle → 提案/技能层全知决策。死了全知层静默失明,
     # 决策自动降级为纯扫描模式 (oracle=null), 所以这里保活但不致命。
-    $oracleAlive = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*oracle-daemon.mjs*' }
-    if (-not $oracleAlive) {
-        Start-Process -FilePath 'node' -ArgumentList 'oracle-daemon.mjs' -WorkingDirectory (Join-Path $proj 'bots\_supervisor') `
-            -RedirectStandardOutput (Join-Path $proj 'bots\_supervisor\oracle-daemon.out') `
-            -RedirectStandardError (Join-Path $proj 'bots\_supervisor\oracle-daemon.err') -WindowStyle Hidden
-        Add-Content $log "[$(Get-Date -Format o)] started oracle-daemon.mjs (全知侦察)"
-    }
+    # ★2026-07-06 session#5 DISABLED: 用户自开 LAN 世界无 RCON (25575 无人监听) — oracle-daemon
+    # 的 /locate 通道不可用, 保活只会 8s 超时空转刷错误。modes.js 读不到 oracle.json 自动降级
+    # (oracle=null)。回到有 RCON 的专用服务器时代再解除注释。
+    # $oracleAlive = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*oracle-daemon.mjs*' }
+    # if (-not $oracleAlive) {
+    #     Start-Process -FilePath 'node' -ArgumentList 'oracle-daemon.mjs' -WorkingDirectory (Join-Path $proj 'bots\_supervisor') `
+    #         -RedirectStandardOutput (Join-Path $proj 'bots\_supervisor\oracle-daemon.out') `
+    #         -RedirectStandardError (Join-Path $proj 'bots\_supervisor\oracle-daemon.err') -WindowStyle Hidden
+    #     Add-Content $log "[$(Get-Date -Format o)] started oracle-daemon.mjs (全知侦察)"
+    # }
     # ORE-ORACLE KEEP-ALIVE (2026-07-05 用户令2 矿石级全知): 离线扫 region 文件出真·最近钻石
     # → oracle-ores.json → bot._world.oracleOres → mineDiamonds 直奔坐标。只读世界文件。
     $oreAlive = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*ore-oracle*' }

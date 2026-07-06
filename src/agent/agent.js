@@ -191,34 +191,52 @@ export class Agent {
         convoManager.endAllConversations();
     }
 
-    // ★C344 (T-0071): assert /gamerule keepInventory true AND VERIFY it actually took, instead of the
-    // old "send it and assume success" self-deception (实锤 06-25 死后掉光物品 ⇒ 命令被静默拒, keepInv
-    // 仍 OFF)。mineflayer 不暴露 gamerule 当前值, 所以唯一可靠的运行时校验 = 监听服务器对该命令的回应:
-    //   • 成功 → translate key commands.gamerule.set, 文本含 "Game rule …" / "has been updated" / 中文
-    //     "游戏规则 … 更新"。记一行确认。
-    //   • 拒绝 → commands.help.failed / "do not have permission" / "Unknown or incomplete command"。立即
-    //     写 events.log 告警。
-    //   • 静默拒 (LAN 未开 allow-cheats 的典型) → 一条回应都没有 → 6s 超时后写同样告警。
-    // 告警行带明确"用户世界层操作"指引, 监工/用户据此处置。幂等: 旧探针未结束就先拆掉再挂新的。
+    // ★C344v2 (2026-07-06 session#5 红线整改): 旧版在每次 spawn 发 /gamerule keepInventory true —
+    // 那是【状态级】命令(改用户世界的 gamerule), 在"连接用户自开 LAN 世界"体制下越过红线
+    // (状态级零使用; 专用服务器时代它只是对齐服务器侧既有配置的幂等复设, 体制变了语义就变了)。
+    // v2 只发不带值的 /gamerule keepInventory —— 纯只读查询(信息级, 与 RCON /seed /locate 同类,
+    // 已授权), 服务器回 translate key commands.gamerule.query ("Gamerule keepInventory is currently
+    // set to: true/false")。查询同样需要 cheats 权限, 权限不足/静默拒 → 告警, 由用户在世界层处置。
+    //   • 查到 true → 写 keepinv.json (surviveNow 求死分支的硬前置, 24h TTL) — 合法接替旧 RCON
+    //     复验职责, 每次 spawn 自动刷新。
+    //   • 查到 false → 告警(每次死亡掉光全部物品), 明确指引: 是否开 keepInventory 是用户的决定,
+    //     bot 绝不自行 set; keepinv.json 写 value:false (诚实缓存, 求死分支自禁用)。
+    //   • 拒绝/6s 静默 → 告警, keepinv.json 不动(缺失/过期 = 求死分支自禁用, 安全默认)。
+    // 幂等: 旧探针未结束就先拆掉再挂新的。
     _assertKeepInventory() {
         const b = this.bot;
         if (!b) return;
         const evt = (line) => { try { fs.appendFileSync('bots/_supervisor/events.log', `[${new Date().toISOString()}] ${line}\n`); } catch (_e) {} };
+        const writeKeepinv = (val, why) => {
+            try {
+                fs.writeFileSync('bots/_supervisor/keepinv.json', JSON.stringify({
+                    _comment: 'keepInventory verification cache - hard precondition for surviveNow deliberate-death branch. Written by C344v2 read-only in-game query on every spawn (no RCON on user LAN world). Branch self-disables when stale >24h or value!=true.',
+                    value: val,
+                    verifiedVia: `in-game read-only query /gamerule keepInventory -> ${why}`,
+                    ts: Date.now(),
+                }, null, 2));
+            } catch (_e) {}
+        };
         // tear down any prior probe (e.g. a reconnect before the previous one timed out)
         if (this._keepInvProbe) { try { b.removeListener('messagestr', this._keepInvProbe.onMsg); } catch (_e) {} try { clearTimeout(this._keepInvProbe.timer); } catch (_e) {} this._keepInvProbe = null; }
         const probe = { settled: false, onMsg: null, timer: null };
-        const settle = (ok, why) => {
+        const settle = (verdict, why) => {   // verdict: true | false | null(无法查证)
             if (probe.settled) return;
             probe.settled = true;
             try { b.removeListener('messagestr', probe.onMsg); } catch (_e) {}
             try { clearTimeout(probe.timer); } catch (_e) {}
             this._keepInvProbe = null;
-            if (ok) {
-                console.log('★C344 keepInventory VERIFIED ON (T-0071):', why);
-                evt(`KEEPINV OK — /gamerule keepInventory true verified ON (${why})`);
+            if (verdict === true) {
+                console.log('★C344v2 keepInventory VERIFIED ON (read-only query):', why);
+                evt(`KEEPINV OK — query shows keepInventory=true (${why}); keepinv.json refreshed`);
+                writeKeepinv(true, why);
+            } else if (verdict === false) {
+                console.warn('★C344v2 keepInventory is OFF (read-only query):', why);
+                evt(`KEEPINV OFF — query shows keepInventory=false (${why}). Every death DROPS the whole kit. Bot will NOT set it itself (state-level command, red line). USER DECISION: type /gamerule keepInventory true in your client if you want death-cost≈0 semantics; otherwise supervisor must treat deaths as expensive.`);
+                writeKeepinv(false, why);
             } else {
-                console.warn('★C344 keepInventory NO-OP (T-0071):', why);
-                evt(`KEEPINV NO-OP — /gamerule keepInventory true did NOT take (${why}). Bot likely lacks op / LAN cheats OFF → every death drops the whole kit (iron→stone relapse). NEEDS WORLD-LEVEL ACTION: re-open the world to LAN with "Allow Cheats: ON" (or /op the bot, or set keepInventory at world creation).`);
+                console.warn('★C344v2 keepInventory UNVERIFIED:', why);
+                evt(`KEEPINV UNVERIFIED — read-only query got no usable answer (${why}). Bot likely lacks cheats permission on this LAN world. keepinv.json untouched → surviveNow death-branch stays disabled (safe default). USER ACTION if desired: re-open to LAN with "Allow Cheats: ON".`);
             }
         };
         probe.onMsg = (message, _pos, jsonMsg) => {
@@ -227,25 +245,25 @@ export class Agent {
                 const key = (jsonMsg && jsonMsg.translate) || '';
                 // only react to messages about THIS gamerule (avoid latching onto an unrelated /gamerule)
                 const aboutKeepInv = /keepInventory/i.test(txt) || /keepInventory/i.test(JSON.stringify(jsonMsg && jsonMsg.with || ''));
-                // success: vanilla "commands.gamerule.set" / EN "has been updated to true" / 中文 "更新为 true"
-                if (key === 'commands.gamerule.set' || (aboutKeepInv && /(has been updated|updated to true|更新为|已更新|已将.*更新)/i.test(txt))) {
-                    settle(true, key || txt.slice(0, 80));
-                    return;
+                // query answer: vanilla commands.gamerule.query — "Gamerule keepInventory is currently set to: true" / 中文 "…目前为：true"
+                if (aboutKeepInv && (key === 'commands.gamerule.query' || /(currently set to|目前为|当前.*为)/i.test(txt))) {
+                    const m = txt.match(/\b(true|false)\b\s*$/i) || txt.match(/\b(true|false)\b/i);
+                    if (m) { settle(m[1].toLowerCase() === 'true', key || txt.slice(0, 80)); return; }
                 }
                 // explicit rejection
                 if (key === 'commands.help.failed' || /(do not have permission|don't have permission|没有.*权限|无权)/i.test(txt)
                     || /(Unknown or incomplete command|Unknown command|未知.*命令|命令.*无效)/i.test(txt)) {
-                    settle(false, `rejected: ${(key || txt.slice(0, 80))}`);
+                    settle(null, `rejected: ${(key || txt.slice(0, 80))}`);
                     return;
                 }
             } catch (_e) {}
         };
         b.on('messagestr', probe.onMsg);
         // 6s silent-rejection timeout (LAN allow-cheats OFF ⇒ no response at all)
-        probe.timer = setTimeout(() => settle(false, 'no server response in 6s (silent reject — allow-cheats likely OFF)'), 6000);
+        probe.timer = setTimeout(() => settle(null, 'no server response in 6s (silent reject — allow-cheats likely OFF)'), 6000);
         this._keepInvProbe = probe;
-        try { b.chat('/gamerule keepInventory true'); console.log('★C344 sent /gamerule keepInventory true, awaiting server ack (T-0071)'); }
-        catch (e) { settle(false, `chat() threw: ${e && e.message}`); }
+        try { b.chat('/gamerule keepInventory'); console.log('★C344v2 sent read-only query /gamerule keepInventory, awaiting server answer'); }
+        catch (e) { settle(null, `chat() threw: ${e && e.message}`); }
     }
 
     // ★C333 (T-0065): see the call site in the spawn handler for the full rationale. One centralized

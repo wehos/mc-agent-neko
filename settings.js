@@ -1,10 +1,11 @@
 const settings = {
     "minecraft_version": "auto", // or specific version like "1.21.6"
     "host": "localhost", // or "localhost", "your.ip.address.here"
-    // ★2026-07-05 新机迁移: 世界从客户端 LAN(端口每次随机, findServers 只扫 49000-65000)改为本机
-    // 专用服务器固定 25565 (C:\Users\Administrator\mc-server, vanilla 1.21.1, offline-mode,
-    // keepInventory=true 已在服务器侧设置)。客户端 LAN 模式回退: 改回 -1 自动扫描。
-    "port": 25565,
+    // ★2026-07-06 session#5 (用户 11:05 裁定): 专用服务器时代结束 — 回连用户自开的客户端 LAN
+    // 世界「新的世界」, 端口 55916 显式钉死 (用户在场肉眼监督, 不再 -1 扫描/不再 25565)。
+    // 注意: LAN 世界无 RCON (oracle-daemon 已在 watchdog 停用), keepInventory 未验真前
+    // surviveNow 求死分支自动禁用 (keepinv.json 已归档)。
+    "port": 55916,
     "auth": "offline", // or "microsoft"
     "player_username": "", // real in-game name of the human owner the bot follows/serves. empty = auto-detect LAN host / single-player owner at runtime
 

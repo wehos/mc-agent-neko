@@ -382,8 +382,10 @@ async function runNavTo(bot, ctx, opts) {
     const p0 = bot.entity.position;
     try {
         L(`navTo START target=${opts.navTo.x},${opts.navTo.y},${opts.navTo.z} from=${Math.round(p0.x)},${Math.round(p0.y)},${Math.round(p0.z)} diff=${origDiff}`);
-        if (opts.peaceful) { bot.chat('/difficulty peaceful'); await sleep(1200); }
-        for (const c of (opts.cmds || [])) { L(`cmd ${c}`); try { bot.chat(c); } catch (e) {} await sleep(700); }
+        // ★2026-07-06 session#5 红线整改: peaceful(/difficulty)与 cmds(任意命令直通)是旧测试台
+        // 作弊通道 — 状态级零使用, 用户自开世界体制下硬闸拒绝, 只留日志可见。
+        if (opts.peaceful) { L('opts.peaceful REFUSED (state-level /difficulty is red-lined; running at world difficulty)'); }
+        if (opts.cmds && opts.cmds.length) { L(`opts.cmds REFUSED (${opts.cmds.length} raw commands dropped — state-level passthrough is red-lined)`); }
         try { const pick = bot.inventory.items().find(i => /(diamond|iron|stone|golden|wooden)_pickaxe/.test(i.name)); if (pick) { await bot.equip(pick, 'hand'); L(`equipped ${pick.name}`); } else L('no pickaxe!'); } catch (e) { L(`equip err ${e && e.message}`); }
         try { if (bot._mobility && bot._mobility.state === 'MAROONED') bot._mobility.state = 'FREE'; } catch (e) {}
         const res = await digNavTo(bot, ctx, opts.navTo, L);
@@ -393,7 +395,7 @@ async function runNavTo(bot, ctx, opts) {
         L(`navTo THREW ${e && e.message || e}`);
         return { reached: false, error: String(e && e.message || e) };
     } finally {
-        if (opts.peaceful) { try { bot.chat('/difficulty ' + origDiff); } catch (e) {} }
+        // (peaceful 已在入口硬闸拒绝, 不再有 /difficulty 设置, 也就无需恢复 — 同款模式一并清除)
         // ★2026-07-06 sticky 伏击洞 (review P3 实弹咬人): framework-v2 live 时无条件写
         //   sticky_skill.json={missionNether} 会在重启后被 bridge 重新武装, 抢占全部
         //   ws/kernel 派发 (迁锚行动被伏击实录)。框架旗下不写。
