@@ -40,6 +40,11 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     // assumption only holds on the sub-skill path (achieve ignores our return anyway); the
     // kernel needs a strike here so the cooldown releases the kind for pick re-acquisition.
     if (!hasIronPick()) { log(bot, '⛏️ mineDiamonds ABORT — no iron+ pickaxe (lost it?). Can\'t harvest diamond; failing dispatch so the kind cools down and a pick gets re-acquired.'); return false; }
+    // ★2026-07-06 孤镐护航闸 (两次实弹各烧一把铁镐): 只有铁镐没有石镐时, ~60 格下潜把
+    //   铁镐耗死在石头上, 钻矿都没摸到 — equipForBlock 需要包里有石镐才护得住铁镐。
+    //   诚实 false → 供应链先补石镐(REPLENISH ⓪.5/TOOL_UPKEEP), 铁镐只碰钻矿。
+    const stonePicksCt = (() => { try { return bot.inventory.items().filter(i => i.name === 'stone_pickaxe').length; } catch (e) { return 0; } })();
+    if (stonePicksCt === 0) { log(bot, '⛏️ mineDiamonds DEFER — 无石镐护航(孤铁镐下潜=烧死在石头上), 先补石镐再潜'); return false; }
 
     // ★PICK-RUNWAY GUARD (shared predicate skills.pickRunway — see skills.js). hasIronPick above
     // is the AFTER-the-fact check (pick already gone/lost); this is the BEFORE check: the LAST
