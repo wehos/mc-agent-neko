@@ -520,8 +520,32 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
             }
         }
         const placed = findTable();
-        if (placed) { try { stRegister('crafting_table', placed.position); } catch (e) {} }   // 放置必登记
+        if (placed) { try { stRegister('crafting_table', placed.position); bot._achieveLocalTablePlaced = placed.position.clone(); } catch (e) {} }   // 放置必登记 + ★#3 标记本地新放(craft 后收回, 复用/既有分支不置位)
         return !!placed;
+    };
+
+    // ★#3 (review-2026-07-06 满地工作台): craft 完收回本轮【就地新放】的工作台 — 只收
+    // placeTable 走到本地放置分支(523 置位 _achieveLocalTablePlaced)的那张; 走到复用共享站
+    // (448-457)或既有台(423)时不置位 → 不收(共享站要留)。安全前置: 夜间地表长途/围殴时不折返
+    // (宁可留一张登记站也别为收台送死); 收不了就留着当登记站(不算 litter)。
+    const reclaimLocalTable = async () => {
+        const pos = bot._achieveLocalTablePlaced;
+        if (!pos) return;
+        bot._achieveLocalTablePlaced = null;
+        try {
+            const _nightExposed = (() => { try { const t = bot.time.timeOfDay; return t >= 13000 && t <= 23000 && bot.entity.position.y >= 50 && !(bot._mobility && bot._mobility.enclosed); } catch (e) { return false; } })();
+            const d = Math.hypot(bot.entity.position.x - pos.x, bot.entity.position.y - pos.y, bot.entity.position.z - pos.z);
+            if ((_nightExposed && d > 2.5) || hostileNear(6)) { prog(`${tag}★#3 defer table reclaim (nightExposed/hostile) — leave registered station @${pos.x},${pos.y},${pos.z}`); return; }
+            const still = bot.blockAt(pos);
+            if (!still || still.name !== 'crafting_table') { try { stDeregister('crafting_table', pos); } catch (e) {} return; }
+            await Promise.race([
+                skills.collectBlock(bot, 'crafting_table', 1),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('reclaim-timeout')), 15000)),
+            ]).catch(() => {});
+            try { await skills.ensurePickupAt(bot, pos, { radius: 4 }); } catch (e) {}
+            try { const s2 = bot.blockAt(pos); if (!s2 || s2.name !== 'crafting_table') stDeregister('crafting_table', pos); } catch (e) {}
+            prog(`${tag}★#3 reclaimed local crafting_table @${pos.x},${pos.y},${pos.z} (carry+reuse, no litter)`);
+        } catch (e) {}
     };
 
     // ---- special collectors ----
@@ -708,6 +732,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
         // ingredient pass chops fresh wood for the actual item. (Once a table exists
         // nearby, placeTable just reuses it for free.)
         if (needsTable) {
+            bot._achieveLocalTablePlaced = null;   // ★#3: 每次 craft flow 起点重置; placeTable 本地放置分支会置位
             await step('place table', () => placeTable());
             if (!findTable()) return false;
         }
@@ -725,6 +750,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
             if (!findTable()) return false;
         }
         await step(`craft ${item} x${times}`, () => craftNow(times));
+        await reclaimLocalTable();   // ★#3 (满地工作台): 收回本轮就地新放的台(复用共享站不收)
         if (have() >= need) return true;
     }
 

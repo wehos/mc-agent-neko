@@ -67,6 +67,7 @@ export default async function craftChain(bot, ctx, preset) {
     // helmet/leggings/boots added for craftArmor's array-preset calls — armor recipes are
     // 3-wide so they NEED a placed table ('chestplate' already matched via 'chest').
     const needsTable = recipes.some(([n]) => /pickaxe|sword|_axe|shovel|hoe|furnace|shield|bed|chest|bow|helmet|leggings|boots/.test(n));
+    const _ccHadTableBefore = !!findTable();   // ★#3: 记录是否已有台 — 只收回本 dispatch【新放】的, 既有台留
     if (needsTable && !findTable()) {
         // Step to flatter open ground first — placeBlock times out
         // (blockUpdate never fires) when standing on uneven/leafy spots.
@@ -104,6 +105,21 @@ export default async function craftChain(bot, ctx, preset) {
     for (const [name, count] of recipes) {
         if (/_planks$/.test(name) || name === 'crafting_table') continue;
         if (await craftSmart(name, count || 1)) progressed++;
+    }
+    // ★#3 (review-2026-07-06 满地工作台): 全部 craft 完成后, 收回本 dispatch 就地【新放】的
+    // 工作台(既有台不收)→ 携带复用, 不留一地。台就在脚边(STEP2 就地放), 收回近乎零风险。
+    if (needsTable && !_ccHadTableBefore) {
+        const _ccT = findTable();
+        if (_ccT) {
+            try {
+                await Promise.race([
+                    skills.collectBlock(bot, 'crafting_table', 1),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('cc-reclaim-timeout')), 15000)),
+                ]).catch(() => {});
+                try { if (skills.ensurePickupAt) await skills.ensurePickupAt(bot, _ccT.position, { radius: 4 }); } catch (e) {}
+                log(bot, `★#3 reclaimed local crafting_table @${_ccT.position.x},${_ccT.position.y},${_ccT.position.z} (carry+reuse, no litter)`);
+            } catch (e) {}
+        }
     }
     log(bot, `craftChain(${typeof preset === 'string' ? preset : 'custom'}) done. crafted=${progressed} inv=${JSON.stringify(world.getInventoryCounts(bot))}`);
     // Zero successful crafts/placements this dispatch = a FAILED dispatch: return false so

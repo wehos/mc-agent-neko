@@ -9,6 +9,22 @@ import path from 'path';
 const PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
 const OAK_APPLE_BACKOFF = path.resolve(process.cwd(), 'bots', '_supervisor', 'oak_apple_backoff.json');
 const prog = (s) => { try { fs.appendFileSync(PROG, `[${new Date().toISOString()}] ${s}\n`); } catch (e) {} };
+// ★#3 (review-2026-07-06 满地工作台): prepNether 3 处就地放台(静态KIT 246/NO-REGEN剑 2564/
+// spare-pick 2636)此前既不登记也不收 → 满地散台。放台后登记到 stations.json, 让本文件 KIT step
+// 已有的"顺手收"(2666-2679, 8 格内无条件回收+注销)把它收回携带。纯追加(去重), 不改放台/craft。
+const STATIONS = path.resolve(process.cwd(), 'bots', '_supervisor', 'stations.json');
+const regStation = (bot, world, type) => {
+    try {
+        const blk = world.getNearestBlock(bot, type, 4);
+        if (!blk || !blk.position) return;
+        const p = blk.position;
+        let arr = [];
+        try { const a = JSON.parse(fs.readFileSync(STATIONS, 'utf8')); if (Array.isArray(a)) arr = a; } catch (e) {}
+        if (arr.some(s => s.type === type && s.x === p.x && s.y === p.y && s.z === p.z)) return;
+        arr.push({ type, x: p.x, y: p.y, z: p.z, t: Date.now() });
+        fs.writeFileSync(STATIONS, JSON.stringify(arr));
+    } catch (e) {}
+};
 const readOakAppleBackoff = () => {
     try {
         const rec = JSON.parse(fs.readFileSync(OAK_APPLE_BACKOFF, 'utf8'));
@@ -245,6 +261,7 @@ async function prepNetherInner(bot, ctx) {
             if (!world.getNearestBlock(bot, 'crafting_table', 4) && has('crafting_table') > 0) {
                 try { await skills.placeBlockNearby(bot, 'crafting_table', 2); } catch (e) { prog(`prepNether: ${reason} static table place err ${e.message}`); }
                 refresh();
+                regStation(bot, world, 'crafting_table');   // ★#3 登记 → KIT 顺手收回收(不留散台)
             }
             if (has('stick') < 1) {
                 const beforeStick = has('stick');
@@ -2562,6 +2579,7 @@ async function prepNetherInner(bot, ctx) {
             // skeleton @0.7b, sword=null armor=0; chronic "48%空手死"). Same place-then-craft as the pick.
             if (!world.getNearestBlock(bot, 'crafting_table', 4) && count('crafting_table') > 0) {
                 try { await skills.placeBlockNearby(bot, 'crafting_table', 2); } catch (e) { prog(`prepNether: NO-REGEN sword table place err ${e.message}`); }
+                regStation(bot, world, 'crafting_table');   // ★#3 登记 → KIT 顺手收回收
             }
             try { await skills.craftRecipeLocal(bot, 'stone_sword', 1); } catch (e) { prog(`prepNether: NO-REGEN static sword err ${e.message}`); }
             refresh();
@@ -2633,7 +2651,7 @@ async function prepNetherInner(bot, ctx) {
                     // 无台 → 2x2 先造(要 4 板)再落; 没木造不了 → break 交给下面 wood buffer 取木,
                     // 决不喂 craftRecipe 幽灵台。
                     if (cnt('crafting_table') === 0 && planksEq() >= 4) { try { await skills.craftRecipeLocal(bot, 'crafting_table', 1); } catch (e2) {} }
-                    if (cnt('crafting_table') > 0) { try { await skills.placeBlockNearby(bot, 'crafting_table', 2); } catch (e2) { prog(`prepNether: spare-pick table place err ${e2.message}`); } }
+                    if (cnt('crafting_table') > 0) { try { await skills.placeBlockNearby(bot, 'crafting_table', 2); } catch (e2) { prog(`prepNether: spare-pick table place err ${e2.message}`); } regStation(bot, world, 'crafting_table'); }   // ★#3 登记 → KIT 顺手收回收
                     if (!world.getNearestBlock(bot, 'crafting_table', 4)) {
                         prog(`prepNether: KIT — no reachable table in arm's reach (tableInv=${cnt('crafting_table')} planksEq=${planksEq()}) → skip ghost-table walk, wood first`);
                         break;
