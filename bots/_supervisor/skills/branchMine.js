@@ -103,11 +103,27 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             }
             const bp = oreBlock.position;
             const d3 = distToBlock(oreBlock);
-            const res = await bot.pathfinder.getPathTo(_bmReach, new BM_GOALS.GoalNear(bp.x, bp.y, bp.z, 2), 800);
+            // ★2026-07-06 与 C304 同修 (450f548 的第二处副本, 10:52 实录仍在旧逻辑拒矿):
+            //   穿石挖掘路径 800ms 算不完返 partial 被一刀切拒 = 包石矿全不可挖。
+            //   预算 2000ms; partial 有实质接近(<60% 原距)即放行。
+            const res = await bot.pathfinder.getPathTo(_bmReach, new BM_GOALS.GoalNear(bp.x, bp.y, bp.z, 2), 2000);
             const st = res ? res.status : 'null';
-            if (!res || res.status !== 'success') {
+            if (!res || (res.status !== 'success' && res.status !== 'partial')) {
                 _mineDBG(`★C305 ${oreBlock.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} REJECT status=${st} (no walk/dig path, no bridge)`);
                 return false;
+            }
+            if (res.status === 'partial') {
+                let remain = Infinity;
+                try {
+                    const pp = res.path && res.path.length ? res.path[res.path.length - 1] : null;
+                    if (pp) remain = Math.hypot(pp.x - bp.x, pp.y - bp.y, pp.z - bp.z);
+                } catch (e) {}
+                if (!(remain < d3 * 0.6)) {
+                    _mineDBG(`★C305 ${oreBlock.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} REJECT partial-no-progress (remain=${Number.isFinite(remain) ? remain.toFixed(1) : '?'})`);
+                    return false;
+                }
+                _mineDBG(`★C305 ${oreBlock.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} OK partial-progress (remain=${remain.toFixed(1)})`);
+                return true;
             }
             const len = (res.path && res.path.length) || 0;
             const budget = Math.max(8, Math.ceil(d3 * 2.5));
