@@ -263,6 +263,7 @@ export class Kernel {
                 const cur = String(this.bot._currentSkill || '');
                 const recovery = /feedUp|forage|villageHarvest|wheatFarm|smeltSafe|goBedSleep|escapePlan|surfaceUp|surviveNow/i.test(cur);
                 if (critical && !recovery && !this.bot.interrupt_code
+                    && Date.now() >= (this.bot._svnCooldownUntil || 0)   // 灰区冷却中解卷=白打断(08:00 实录: 解完没人接, REPLENISH 复派同技能 90s 循环)
                     && Date.now() - (this._lastDispatchAt || 0) > 60000
                     && Date.now() - (this._svnNudgeAt || 0) > 90000) {
                     this._svnNudgeAt = Date.now();
