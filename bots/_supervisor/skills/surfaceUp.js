@@ -340,6 +340,33 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
                         bot.dig(fresh, true),
                         new Promise((_, rej) => setTimeout(() => rej(new Error('dig-timeout')), timeoutMs)),
                     ]);
+                    // ★#8 (review-2026-07-06 穿砾石柱窒息, deaths 3/4): 上挖逃生若头顶是重力方块
+                    // (gravel/sand/concrete_powder), 挖掉支撑后它塌进刚清的格; 上升占用该格=埋头窒息。
+                    // 挖的是头顶及以上格(上升路径)时, 立刻把塌落物逐个清掉(等它 settle→挖), 直到该列
+                    // 耗尽, 再让上升逻辑占用。只影响上挖, 侧/下挖不触发。
+                    try {
+                        const GRAVITY = /^(gravel|sand|red_sand|.*concrete_powder|suspicious_gravel|suspicious_sand)$/;
+                        const dp = fresh.position;
+                        if (dp.y >= Math.floor(bot.entity.position.y) + 1
+                            && GRAVITY.test((bot.blockAt(dp.offset(0, 1, 0)) || {}).name || '')) {
+                            let cleared = 0;
+                            for (let k = 0; k < 8; k++) {
+                                if (bot.interrupt_code || bot.death_abort) break;
+                                await skills.wait(bot, 160);   // 等落沙下坠 settle 进 dp
+                                const settled = bot.blockAt(dp);
+                                if (!settled || settled.boundingBox !== 'block' || !GRAVITY.test(settled.name || '')) break;
+                                try { await bot.tool.equipForBlock(settled); } catch (e) {}
+                                try {
+                                    await Promise.race([
+                                        bot.dig(settled, true),
+                                        new Promise((_, rej) => setTimeout(() => rej(new Error('gravel-clear-timeout')), 4000)),
+                                    ]);
+                                    cleared++;
+                                } catch (e) { break; }
+                            }
+                            if (cleared) motion('surfaceUp.gravel_clear', { at: `${dp.x},${dp.y},${dp.z}`, cleared, why });
+                        }
+                    } catch (e) {}
                     return true;
                 } catch (e) {
                     try { bot.stopDigging(); } catch (_) {}
