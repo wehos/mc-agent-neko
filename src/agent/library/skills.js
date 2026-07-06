@@ -1028,11 +1028,27 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
             const eye = bot.entity.position.offset(0, 1.62, 0);
             const d3 = eye.distanceTo(bp.offset(0.5, 0.5, 0.5));
             const goal = new pf.goals.GoalNear(bp.x, bp.y, bp.z, 2);
-            const res = await bot.pathfinder.getPathTo(reachMoves, goal, 800);
+            // ★2026-07-06 决胜修 (00:27 实录 iron@4.8格 REJECT partial): 穿石挖掘路径 800ms
+            //   算不完 → 'partial' → 全部包石矿被拒, 只剩怪窝裸露矿可挖 = 通宵"贴矿采空"元凶。
+            //   预算 800→2000ms; partial 且终点有实质接近(<60% 原距)=在朝矿挖(非隔沟), 放行。
+            const res = await bot.pathfinder.getPathTo(reachMoves, goal, 2000);
             const st = res ? res.status : 'null';
-            if (!res || res.status !== 'success') {
+            if (!res || (res.status !== 'success' && res.status !== 'partial')) {
                 _mineDBG(`★C304 ${cand.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} REJECT status=${st} (no walk/dig path, no bridge)`);
                 return false;
+            }
+            if (res.status === 'partial') {
+                let remain = Infinity;
+                try {
+                    const pp = res.path && res.path.length ? res.path[res.path.length - 1] : null;
+                    if (pp) remain = Math.hypot(pp.x - bp.x, pp.y - bp.y, pp.z - bp.z);
+                } catch (e) {}
+                if (!(remain < d3 * 0.6)) {
+                    _mineDBG(`★C304 ${cand.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} REJECT partial-no-progress (remain=${Number.isFinite(remain) ? remain.toFixed(1) : '?'})`);
+                    return false;
+                }
+                _mineDBG(`★C304 ${cand.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} OK partial-progress (remain=${remain.toFixed(1)})`);
+                return true;
             }
             const len = (res.path && res.path.length) || 0;
             // generous slack so legit travel-to-ore / dig-to-vein isn't rejected; only the
