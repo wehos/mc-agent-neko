@@ -350,6 +350,44 @@ const EXEC = {
                 try { await ctx.skills.goToPosition(bot, h.position.x, h.position.y, h.position.z, 1); } catch (e) {}
                 try { bot.clearControlStates(); } catch (e) {}
                 try { await ctx.skills.wait(bot, 3000); } catch (e) {}
+            } else if (await (async () => {
+                // ★悬崖腿 (08:17 实录: 林冠区跳落柱位反复找不到, 终局保证脆): 本地形群山峭壁,
+                //   24 格内扫落差 >= hp+4 的崖沿 — 走过去迈出去, 比穿树冠立柱可靠。
+                try {
+                    const p0 = bot.entity.position.floored();
+                    const need = Math.ceil(bot.health) + 4;
+                    const solid = (b) => b && b.boundingBox === 'block';
+                    for (const dist of [8, 14, 20]) {
+                        for (let a = 0; a < 8; a++) {
+                            const rad = a * Math.PI / 4;
+                            const cx = Math.round(p0.x + Math.cos(rad) * dist);
+                            const cz = Math.round(p0.z + Math.sin(rad) * dist);
+                            // 找该柱地表: 从 bot 脚高 +4 向下扫第一实体块
+                            let surfY = null;
+                            for (let y = p0.y + 4; y >= p0.y - need - 24; y--) {
+                                const b = bot.blockAt(new ctx.Vec3(cx, y, cz));
+                                if (solid(b)) { surfY = y; break; }
+                            }
+                            const dropY = surfY === null ? 999 : (p0.y - 1 - surfY);   // 全空柱=崖底更深, 算合格
+                            if (dropY < need) continue;
+                            // 落点不悬水(水面缓冲不死)
+                            const landing = surfY === null ? null : bot.blockAt(new ctx.Vec3(cx, surfY + 1, cz));
+                            if (landing && /water/.test(landing.name || '')) continue;
+                            prog(`求死: 悬崖腿 → (${cx},${cz}) 落差~${dropY}`);
+                            try { await ctx.skills.goToPosition(bot, cx, null, cz, 1); } catch (e) {}
+                            try {
+                                bot.setControlState('forward', true);
+                                await ctx.skills.wait(bot, 1200);
+                                bot.clearControlStates();
+                            } catch (e) {}
+                            try { await ctx.skills.wait(bot, 3000); } catch (e) {}
+                            return true;   // 尝试过一处(死没死由外层 died() 判)
+                        }
+                    }
+                } catch (e) {}
+                return false;
+            })()) {
+                // 悬崖腿已尝试 — 外层循环重新评估 died()
             } else {
                 // 无怪: 高台跳落 (致死落差 ≈ hp+3, 加余量)。净空探测排除树叶/藤(评审:
                 // 树冠下 surfaceUp 空转); 无净空且已在地表 → 横移几格换柱位再探。
