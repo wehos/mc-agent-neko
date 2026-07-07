@@ -764,6 +764,32 @@ const modes_list = [
                 return best;
             } catch (e) { return null; }
         },
+        // ★2026-07-07 甲兵贴脸僵尸死战 (用户令 · 尽量精准): 穿戴护甲时, 僵尸类怪(zombie/husk/drowned,
+        // 含 zombie_villager)贴脸(<3.5b) → 站撸不逃、不夜宿, 让位 self_defense 的 shieldFight。
+        // 依据: 护甲把僵尸近战伤压得很低, 而"贴脸时逃跑"=被同速僵尸背刺(逃跑反挨打更亏), 站撸更省血。
+        // 精准边界:
+        //   · 仅"贴脸"生效 — 怪一旦离身(>3.5b)立即恢复常规逃跑/夜宿判定, 不追不冒进。
+        //   · 仅"穿戴"护甲(slot 5-8)成立 — 背包里的甲不减伤, 那时站撸=裸战送死, 不适用。
+        //   · 铁律例外(绝不越): 8格内有苦力怕(贴脸爆炸秒杀, 甲无效)→ 不适用, 交常规逃跑分支拉开距离;
+        //     hp≤4掉血/溺水/着火 硬地板由 arbiter.vitalNow 独立夺体逃命 — 顶着恐惧打, 但绝不站着自杀。
+        armoredZombieBrawl: function (bot) {
+            try {
+                if (!bot || !bot.entity) return false;
+                const p = bot.entity.position;
+                let creeperClose = false, zombiePointBlank = false;
+                for (const e of Object.values(bot.entities || {})) {
+                    if (!(e && e.position && e.name)) continue;
+                    const d = e.position.distanceTo(p);
+                    if (/creeper/i.test(e.name) && d < 8) { creeperClose = true; break; }   // 爆炸威胁优先, 直接不适用
+                    if (/zombie|husk|drowned/i.test(e.name) && d < 3.5) zombiePointBlank = true;
+                }
+                if (creeperClose || !zombiePointBlank) return false;
+                const armorRe = /_helmet$|_chestplate$|_leggings$|_boots$/;
+                const sl = bot.inventory.slots || [];
+                for (let i = 5; i <= 8; i++) { if (sl[i] && armorRe.test(sl[i].name || '')) return true; }   // 穿戴中才算甲
+                return false;
+            } catch (e) { return false; }
+        },
         shouldFlee: function (bot) {
             const hostiles = this.nearbyHostiles(bot);
             // ★2026-07-07 命令战斗覆盖 (见 commandedFightActive): 外部指令死战时, 只在真死局才逃
@@ -798,6 +824,9 @@ const modes_list = [
                     && _near8[0].position.distanceTo(bot.entity.position) < 4.5
                     && bot.inventory.items().some(i => /_sword$|_axe$/.test(i.name))) return false;
             }
+            // ★ARMORED ZOMBIE BRAWL (见 armoredZombieBrawl): 穿甲 + 僵尸类贴脸 → 死战不逃, 越过下方所有
+            // 胆怯档(无盾被远程 / hp<7 / 无盾打不过 / 僵尸群围殴)。仅贴脸生效, creeper/vitalNow 硬地板不越。
+            if (this.armoredZombieBrawl(bot)) return false;
             if (!_shield0 && _hurt && Object.values(bot.entities).some(e => e && e.position && /skeleton|stray/i.test(e.name || '') && e.position.distanceTo(bot.entity.position) < 16)) return true;
             if (hostiles.length === 0) return false;
             // CREEPER: never let one get close — meleeing it = it explodes = death.
@@ -937,6 +966,9 @@ const modes_list = [
             // 回答这个问题: 封闭=夜晚白天没区别,继续干活。近身威胁仍由 shouldFlee/
             // bunkerDown 的怪压分支兜底——enclosed 只豁免"无怪也要预防性蹲坑"。)
             if (bot._mobility && bot._mobility.enclosed) return false;
+            // ★甲兵贴脸僵尸死战 (见 armoredZombieBrawl): 穿甲 + 僵尸类贴脸 → 不夜宿封箱, 让位 self_defense
+            //   站撸(与 shouldFlee 同步, 否则夜里会先 bunkerDown 把仗躲掉)。仅贴脸生效, 离身即恢复常规夜宿。
+            if (this.armoredZombieBrawl(bot)) return false;
             // ★GEAR-AWARE (用户: 有铁剑+盾却被僵尸打死). The unconditional `return true` made
             // self_preservation bunker/flee EVERY night → self_defense (lower priority) never got
             // to fight → an EQUIPPED bot never used its sword+shield, just fled, and when the
