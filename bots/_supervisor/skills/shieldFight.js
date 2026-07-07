@@ -104,7 +104,10 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
             }
             continue;
         }
-        if (bot.health <= 6) break; // critical — let self_preservation flee/seal
+        // ★2026-07-07 命令战斗覆盖 (用户令): 外部指令死战时(bot._commandedFightUntil), 把 hp≤6 自断
+        //   下调到硬地板 hp≤4 — 顶着 hp<7 恐惧继续打, 但仍在 hp≤4 交还身体让 vitalNow/self_preservation 逃(硬地板不可越)。
+        const _cmdFight = !!(bot._commandedFightUntil && Date.now() < bot._commandedFightUntil);
+        if (bot.health <= (_cmdFight ? 4 : 6)) break; // critical — let self_preservation flee/seal
         // ★石棺扩展 (2026-07-03 00:19 实锤 @99,10,204: 困 1x1 石棺, 洞外 spider@d=4.1 —
         // melee 不在此检测里 → shield-rush goToPosition noPath 秒回 → 空转 ×150/s 直到
         // maxMs, self_defense 又立刻 re-engage = mobility/脱困永饿死): 同一"打不动就放手"

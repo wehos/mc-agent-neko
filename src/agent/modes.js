@@ -40,6 +40,14 @@ function surviveNowActive(bot) {
     try { return !!(bot && bot._surviveNowUntil && Date.now() < bot._surviveNowUntil); } catch (e) { return false; }
 }
 
+// ★2026-07-07 命令战斗覆盖 (用户令): 外部指令驱动战斗时置滚动戳 bot._commandedFightUntil
+// (ws_server.runSkill 对战斗技能置/finally 清)。self_preservation.shouldFlee 据此 override "胆怯档"
+// 逃跑(hp<7 / 无盾被远程 / 无盾打不过), 但仍对真死局逃: 苦力怕8格内(贴脸爆炸秒杀) 或 ≥3围殴(被磨死)。
+// 硬地板(arbiter.vitalNow: hp≤4掉血/溺水/着火)独立生效、不受此旗影响=顶着恐惧打但不自杀。
+function commandedFightActive(bot) {
+    try { return !!(bot && bot._commandedFightUntil && Date.now() < bot._commandedFightUntil); } catch (e) { return false; }
+}
+
 function famineBodyFreeze(agent, owner) {
     const bot = agent && agent.bot;
     if (!bot || !bot.entity) return false;
@@ -758,6 +766,13 @@ const modes_list = [
         },
         shouldFlee: function (bot) {
             const hostiles = this.nearbyHostiles(bot);
+            // ★2026-07-07 命令战斗覆盖 (见 commandedFightActive): 外部指令死战时, 只在真死局才逃
+            // (苦力怕8格内 或 ≥3围殴), 其余胆怯档(hp<7/无盾被远程/无盾打不过)全顶过去继续打。
+            // hp≤4掉血/溺水/着火 硬地板由 arbiter.vitalNow 独立处理, 不受此分支影响。
+            if (commandedFightActive(bot)) {
+                return hostiles.some(e => /creeper/i.test(e.name || '') && e.position.distanceTo(bot.entity.position) < 8)
+                    || hostiles.length >= 3;
+            }
             // RANGED THREAT (check FIRST — skeletons shoot from beyond the 10-block melee
             // bubble, so the nearbyHostiles check below would return false and we'd just stand
             // and get plinked from 14+ blocks: the repeated "shot by Skeleton" deaths). If a
@@ -6821,9 +6836,15 @@ class ModeController {
         // idle/interruptible gate and the active-mode break below. Without this, a
         // sticky skill keeps the agent non-idle ~100% of the time and the combat
         // blackbox only catches stray frames between skills.
+        // ★ELOOP per-mode 归因(诊断): 计时每个 mode.update(), 单拍 modes 总耗 >=80ms 时打出最慢的
+        //   几个 mode(把 ⏱ELOOP 的 modes= 82-1366ms 残留定位到具体 observer/reflex)。
+        //   仅计时+条件 warn, 不改控制流/错误隔离语义;MC_ELOOP_PROBE=0 关。
+        const _mProf = [];
         for (let mode of modes_list) {
             if (mode.always && mode.on && !mode.active) {
+                const _mt0 = Date.now();
                 try { await mode.update(_agent); } catch (e) {}
+                const _mdt = Date.now() - _mt0; if (_mdt >= 8) _mProf.push([mode.name, _mdt]);
             }
         }
         for (let mode of modes_list) {
@@ -6834,10 +6855,19 @@ class ModeController {
                 // 后面的 self_defense/auto_eat 全部饿死 (03:10 spider 贴脸 12s act="" 无人
                 // 接战的实锤形态), 且异常会穿透 agent.update() 的 while(true) 把整个
                 // update 循环永久杀死。单 mode 异常只废自己这一拍, 不许废掉应急链。
+                const _mt0 = Date.now();
                 try { await mode.update(_agent); }
                 catch (e) { console.error(`mode ${mode.name} update error:`, e); }
+                const _mdt = Date.now() - _mt0; if (_mdt >= 8) _mProf.push([mode.name, _mdt]);
             }
             if (mode.active) break;
+        }
+        if (process.env.MC_ELOOP_PROBE !== '0' && _mProf.length) {
+            const _tot = _mProf.reduce((s, x) => s + x[1], 0);
+            if (_tot >= 80) {
+                _mProf.sort((a, b) => b[1] - a[1]);
+                console.warn(`⏱MODES ${_tot}ms | ${_mProf.slice(0, 4).map(x => x[0] + '=' + x[1] + 'ms').join(' ')}`);
+            }
         }
     }
 

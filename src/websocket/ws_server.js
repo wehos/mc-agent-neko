@@ -531,6 +531,11 @@ class WSMessageServer {
         // the survival modes -> bot thrashes and dies). Tick modes still protect it.
         try { this.agent.supervised_skill = 'ws'; } catch (e) {}   // owner-tagged (truthy, same readers)
         try { if (this.agent.self_prompter && this.agent.self_prompter.isActive()) this.agent.self_prompter.stop(false); } catch (e) {}
+        // ★2026-07-07 命令战斗覆盖 (用户令): 外部指令跑战斗技能时置滚动戳, 让 modes.js self_preservation.
+        //   shouldFlee override 胆怯档逃跑(hp<7/无盾被远程), 但保留 苦力怕/≥3围殴/硬地板(vitalNow)。
+        //   窗口给足(>maxMs 默认 14s), finally 里清 → 只在这次命令战斗期间生效, 不外溢到自主战斗。
+        const _isCombatSkill = /^(shieldFight|attackEntity|huntEntity|defendSelf|attackNearest|killMob)$/i.test(skillName);
+        if (_isCombatSkill) { try { this.agent.bot._commandedFightUntil = Date.now() + 30000; } catch (e) {} }
         try {
             const skills = await import('../agent/library/skills.js');
             const result = await skills.customSkill(this.agent.bot, skillName, ...args);
@@ -549,6 +554,8 @@ class WSMessageServer {
             // an unconditional clear here would clobber a kernel dispatch's lock and
             // let the next run_skill/tick double-dispatch (the 23:58 concurrent-skill bug).
             try { if (this.agent.supervised_skill === 'ws') this.agent.supervised_skill = false; } catch (e) {}
+            // ★命令战斗覆盖: 技能结束即清战斗戳, shouldFlee 立刻恢复常规保命(不外溢到自主行为)。
+            if (_isCombatSkill) { try { this.agent.bot._commandedFightUntil = 0; } catch (e) {} }
             this._skillRunning = false; this._skillRunningName = null;
         }
     }
