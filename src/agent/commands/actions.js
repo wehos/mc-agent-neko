@@ -318,6 +318,39 @@ export const actionsList = [
             await skills.collectBlock(agent.bot, type, num);
         }, false, 10) // 10 minute timeout
     },
+    // ★2026-07-07 用户令: 提升内部 gpt-5.4-mini 的行动力 —— 把成量的监督技能(mineOres/chopWood/feedUp)
+    //   包成命令给它, 这样"mine iron"能贯彻到底(挖到缓冲, 而非 !collectBlocks 那样 collect 1 就收工)。
+    //   走 customSkill(=run_skill 同一入口), 由 runAsAction 纳入 ActionManager, admin 回合独占期内运行。
+    {
+        name: '!mineOres',
+        description: 'Mine a target ore to a healthy STOCKPILE — automatically descends to the correct depth band, tunnels, and collects until it has a useful buffer (NOT just one). ALWAYS prefer this over !collectBlocks for "mine iron/coal/gold/copper/diamonds": !collectBlocks only grabs a fixed count and will not go find the ore underground.',
+        params: {
+            'ore': { type: 'string', description: 'one of: iron, coal, gold, copper, diamonds' }
+        },
+        perform: runAsAction(async (agent, ore) => {
+            await skills.customSkill(agent.bot, 'mineOres', { ore: String(ore || 'iron').toLowerCase().trim() });
+        }, false, 10) // 10 minute timeout
+    },
+    {
+        name: '!getWood',
+        description: 'Find trees and chop wood until you have the requested number of logs (locates trees, paths to them, fells them, and collects the drops). Prefer this over !collectBlocks for gathering wood.',
+        params: {
+            'num': { type: 'int', description: 'number of logs to gather', domain: [1, 512] }
+        },
+        perform: runAsAction(async (agent, num) => {
+            await skills.customSkill(agent.bot, 'chopWood', Math.max(1, parseInt(num) || 8));
+        }, false, 10) // 10 minute timeout
+    },
+    {
+        name: '!getFood',
+        description: 'Solve hunger: forage, hunt animals, or eat stocked food until the food bar reaches the target level. Use whenever hungry or told to eat / get food.',
+        params: {
+            'target_food': { type: 'int', description: 'food level to reach (1-20), default 18', domain: [1, 20] }
+        },
+        perform: runAsAction(async (agent, target_food) => {
+            await skills.customSkill(agent.bot, 'feedUp', Math.max(1, Math.min(20, parseInt(target_food) || 18)));
+        }, false, 10) // 10 minute timeout
+    },
     {
         name: '!craftRecipe',
         description: 'Craft the given recipe a given number of times.',
