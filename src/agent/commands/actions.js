@@ -352,6 +352,45 @@ export const actionsList = [
         }, false, 10) // 10 minute timeout
     },
     {
+        name: '!smeltIron',
+        description: 'Smelt raw iron into iron ingots at a furnace (places/uses a furnace + fuel automatically). Use after mining iron, or when told to smelt iron.',
+        params: {
+            'num': { type: 'int', description: 'how many raw_iron to smelt', domain: [1, 128] }
+        },
+        perform: runAsAction(async (agent, num) => {
+            await skills.customSkill(agent.bot, 'smeltSafe', 'raw_iron', Math.max(1, parseInt(num) || 1));
+        }, false, 10)
+    },
+    {
+        name: '!digDownTo',
+        description: 'Safely dig straight down to a target Y level with hazard checks (avoids dropping into lava/caves). Use for "dig down to the iron/diamond layer" — iron≈y14, diamond≈y-54.',
+        params: {
+            'y': { type: 'int', description: 'target Y level to reach', domain: [-63, 320] }
+        },
+        perform: runAsAction(async (agent, y) => {
+            await skills.customSkill(agent.bot, 'mineDown', { targetY: parseInt(y) });
+        }, false, 10)
+    },
+    {
+        name: '!goSleep',
+        description: 'Go to a known bed (or place one) and sleep through the night to skip it. Use at night or when told to sleep.',
+        params: {},
+        perform: runAsAction(async (agent) => {
+            await skills.customSkill(agent.bot, 'goBedSleep');
+        }, false, 5)
+    },
+    {
+        name: '!getArmor',
+        description: 'Craft and equip a set of armor (smelts iron first if needed). Use when told to gear up / make armor.',
+        params: {
+            'tier': { type: 'string', description: 'iron or diamond (default iron)' }
+        },
+        perform: runAsAction(async (agent, tier) => {
+            const t = String(tier || 'iron').toLowerCase().includes('dia') ? 'diamond' : 'iron';
+            await skills.customSkill(agent.bot, 'craftArmor', { tier: t });
+        }, false, 10)
+    },
+    {
         name: '!craftRecipe',
         description: 'Craft the given recipe a given number of times.',
         params: {
