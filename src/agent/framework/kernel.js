@@ -240,7 +240,15 @@ export class Kernel {
         //   chat-loop 结束(agent.handleMessage 的 finally 清 bot._extIntentUntil)。这就是"外部意图=最高
         //   优先级、独占, 直到 gpt-5.4-mini 判定完成"。硬保命反射(modes vitalNow: 溺水/着火/岩浆/hp≤4)
         //   独立于内核、仍生效; 5min 戳是崩溃兜底。
-        if (this.bot._extIntentUntil && Date.now() < this.bot._extIntentUntil) return;
+        if (this.bot._extIntentUntil && Date.now() < this.bot._extIntentUntil) {
+            // ★2026-07-07 让位硬保命 (用户 Q2 "独占但让位硬保命" + 实观 bug: 命令让 LLM 死循环重试
+            //   一个做不到的任务(如无树可砍), 独占把求生压住 → bot 掉到 hp=1)。血粮危急时不再让位独占,
+            //   放行下面的 surviveNow 救命强派; 非危急才真正独占。硬保命永远高于任何外部命令。
+            const _hp = (typeof this.bot.health === 'number') ? this.bot.health : 20;
+            const _food = (typeof this.bot.food === 'number') ? this.bot.food : 20;
+            if (_hp > 6 && _food > 2) return;   // 非危急 → 外部意图独占, 内核让位
+            // 危急(hp<=6 或 food<=2) → 不 return, 继续走 surviveNow 强派救命
+        }
         const ms = mentalState(this.bot);
         this._trackAnchor();
         // 0) ★GRAY-ZONE force-commit: 唯一决策人钩子。首飞实录(2026-07-06 00:22): 僵局态
