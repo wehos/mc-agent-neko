@@ -94,14 +94,49 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
     }
     if (mode === 'seal') {
       if (SURFACE_SEAL_DISABLED) {
-        // ★封箱已禁用 (docs/shelter-mechanism-disabled.md): 不砌任何墙 — 停步 + 摘封顶旗 → 直落
-        //   PHASE 2 原地 hold。走到这里的只有真·seal 派发(NIGHT_SEAL)或 dig_one 判不可挖后的降级,
-        //   两种都是"没有可挖的安全下沉口袋"的场景 — 该原地坚守 + 受威胁让位反射, 不该砌那个把 bot
-        //   关在外面的破盒子。dig_one(挖三填一)可挖时已在上面挖成口袋, 根本不会走到这个分支。
-        try { bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop(); } catch (e) {}
-        try { bot.clearControlStates(); } catch (e) {}
-        setSealed(false);
-        log(bot, 'nightShelter: 地表封箱已禁用 — 原地 hold(不砌墙), 受威胁即让位反射/re-decide. (docs/shelter-mechanism-disabled.md)');
+        // ★封箱已禁用 (docs/shelter-mechanism-disabled.md): 不砌任何墙。但 seal 禁用后 "dig_one 不可行" 的
+        //   地形不再有保命落点(直落裸 hold = 露天挨打死循环, 对有镐 bot 一样成立)。★G1(2026-07-07 用户令):
+        //   ① 就地试挖三填一(digOneCapOne 徒手可挖 dirt/grass/sand/gravel, 自带 gravity/aquifer/y≤16 守卫);
+        //   ② 就地不成 → 扫最近"可挖软土地带" relocate 过去再挖(用户令: 寻找最近可挖地带);
+        //   ③ 扫不到(石台孤岛/含水层遍布)→ 老实 no-op hold(物理下限, 交 surviveNow/死亡出口)。绝不砌 wall-ring。
+        const SOFT_FLOOR = /^(dirt|coarse_dirt|rooted_dirt|grass_block|podzol|mycelium|sand|red_sand|gravel|clay|mud|moss_block|dirt_path|farmland)$/;
+        const softFloorUnder = (fx, fy, fz) => { try { const b = bot.blockAt(new Vec3(fx, fy - 1, fz)); return !!(b && SOFT_FLOOR.test(b.name || '')); } catch (e) { return false; } };
+        let dug = false;
+        if (!isDay() && !bot.interrupt_code && bot.health > 0) {
+            dug = await skills.digOneCapOne(bot).catch(() => false);   // ① 就地挖三填一
+            if (!dug && !bot.interrupt_code && bot.health > 0) {
+                // ② relocate: 由近及远环扫可站+脚下软土地带 (≤5b, 命中即停; bot 本已露天, 短途走位比裸站安全)
+                const here = bot.entity.position.floored();
+                let best = null;
+                outer:
+                for (let r = 1; r <= 5; r++) {
+                    for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
+                        if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;   // 只扫第 r 环
+                        const cx = here.x + dx, cz = here.z + dz;
+                        for (const dy of [0, -1, 1]) {
+                            const fy = here.y + dy;
+                            const feet = bot.blockAt(new Vec3(cx, fy, cz));
+                            const head = bot.blockAt(new Vec3(cx, fy + 1, cz));
+                            if (feet && feet.boundingBox === 'empty' && head && head.boundingBox === 'empty' && softFloorUnder(cx, fy, cz)) { best = { x: cx, y: fy, z: cz }; break outer; }
+                        }
+                    }
+                }
+                if (best) {
+                    log(bot, `nightShelter: 硬地/不可挖 → relocate 最近可挖软土 (${best.x},${best.y},${best.z}) 再挖三填一 (用户令).`);
+                    try { await skills.goToPosition(bot, best.x, best.y, best.z, 1); } catch (e) {}
+                    if (!bot.interrupt_code && bot.health > 0) dug = await skills.digOneCapOne(bot).catch(() => false);
+                }
+            }
+        }
+        if (dug) {
+            setSealed(true);
+            log(bot, 'nightShelter: 挖三填一 pocket sealed — seal 禁用后的保命落点 (非砌墙).');
+        } else {
+            try { bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop(); } catch (e) {}
+            try { bot.clearControlStates(); } catch (e) {}
+            setSealed(false);
+            log(bot, 'nightShelter: 封箱禁用 + dig_one 不可行(硬地/无软土可迁) — 原地 hold, 受威胁即让位反射/re-decide.');
+        }
       } else {
         const p = bot.entity.position.floored();
         // feet ring (y), head ring (y+1), ceiling (y+2) — shelter.js geometry.
@@ -249,9 +284,12 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
             log(bot, 'nightShelter: dragged >2b out of the sealed pocket (unstuck/instinct/knockback — motion log path.goal names the culprit) — shelter void, re-decide.');
             return false;
         }
-        if (bot.health < lastHp - 0.5 || hostileClose(4)) {
-            setSealed(false); // 封顶名存实亡 (还在挨打) = 拆封
-            log(bot, `nightShelter: taking hits in the "shelter" (hp ${Math.round(bot.health)}/${Math.round(lastHp)}, hostile<4=${hostileClose(4)}) — seal failed, re-decide.`);
+        // ★G3: 已封成的口袋(sealedNow)遇隔墙的怪【未掉血】应继续 hold(封顶本就该扛), 不再一见怪就 return false
+        //   → kernel 3-strike → 锁 5min 空转(sleep-path 审计的次级死环)。判据: 真掉血【总是】退; 仅未封成的裸 hold
+        //   遇怪近 4b 才早退交反射(裸站不是庇护, 该让 surviveNow/reflex 接管)。
+        if (bot.health < lastHp - 0.5 || (!sealedNow && hostileClose(4))) {
+            setSealed(false);
+            log(bot, `nightShelter: ${bot.health < lastHp - 0.5 ? 'taking hits in the "shelter"' : 'unsealed hold + hostile<4'} (hp ${Math.round(bot.health)}/${Math.round(lastHp)}, sealed=${sealedNow}) — re-decide.`);
             return false;
         }
         lastHp = bot.health;
