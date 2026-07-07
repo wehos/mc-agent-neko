@@ -22,6 +22,28 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
     const { skills, world, Vec3, log } = ctx;
     const maxMs = (opts && opts.maxMs) || 120000;
     const t0 = Date.now();
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+    // ★SURFACE WALL-BOX ("seal" / 封箱) DISABLED — 2026-07-07 (see docs/shelter-mechanism-disabled.md)
+    //   The user gave up on the surface seal after 4+ documented remediation rounds: it kept
+    //   leaving the bot standing OUTSIDE its own walls. Root cause: skills.placeBlock() path-
+    //   navigates the bot to reach each target face, so by the time the ring is finished the bot
+    //   has drifted off the anchor and the walls enclose an empty spot next to it (exactly the
+    //   screenshot the user sent). PHASE 1.5 ("self-inside 复核补墙") was the last attempt to fix
+    //   it and STILL wasn't enough. Decision (user 2026-07-07): "允许挖三填一，不允许封箱" —
+    //   KEEP the dig-down pocket (挖三填一 / mode 'dig_one'), KILL the surface box.
+    //
+    //   When disabled, mode 'seal' places NO blocks: it stops moving and falls straight to the
+    //   PHASE 2 hold loop (stand in place, eat if hungry, bail on any hit/hostile so the always-on
+    //   self-defense reflex + surviveNow's RELOCATE/DEATH take over). keepInventory is ON, so a
+    //   death here is cheap. This is the accepted tradeoff for never rebuilding the broken box.
+    //   NOTE the decision layer (modes.js computeNightPlan) still emits SEAL_FORT on purpose — see
+    //   that comment: SEAL_FORT@91 must keep out-ranking daytime BOOTSTRAP_KIT@90 (so a pickless
+    //   bot HOLDS at night instead of wandering to chop wood in the dark) and keeps the unstuck-
+    //   suppression gate (modes.js ~2650) recognizing the hold. Only the *building* is removed.
+    //
+    //   Escape hatch (restore the old wall-box): set env NEKO_ENABLE_SEAL_SHELTER=1 before launch.
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+    const SURFACE_SEAL_DISABLED = process.env.NEKO_ENABLE_SEAL_SHELTER !== '1';
     // ★材料优先级 (用户令 2026-07-07: 泥土 > 石头 > 其他): dirt 优先(便宜/可再生/不占镐料·建材),
     // 石系其次; 从不含木板 (木料是 recraft/工具的命脉, 不拿来砌墙)。
     const FILLER = ['dirt', 'coarse_dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'deepslate', 'tuff', 'andesite', 'granite', 'diorite'];
@@ -71,6 +93,16 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
         }
     }
     if (mode === 'seal') {
+      if (SURFACE_SEAL_DISABLED) {
+        // ★封箱已禁用 (docs/shelter-mechanism-disabled.md): 不砌任何墙 — 停步 + 摘封顶旗 → 直落
+        //   PHASE 2 原地 hold。走到这里的只有真·seal 派发(NIGHT_SEAL)或 dig_one 判不可挖后的降级,
+        //   两种都是"没有可挖的安全下沉口袋"的场景 — 该原地坚守 + 受威胁让位反射, 不该砌那个把 bot
+        //   关在外面的破盒子。dig_one(挖三填一)可挖时已在上面挖成口袋, 根本不会走到这个分支。
+        try { bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop(); } catch (e) {}
+        try { bot.clearControlStates(); } catch (e) {}
+        setSealed(false);
+        log(bot, 'nightShelter: 地表封箱已禁用 — 原地 hold(不砌墙), 受威胁即让位反射/re-decide. (docs/shelter-mechanism-disabled.md)');
+      } else {
         const p = bot.entity.position.floored();
         // feet ring (y), head ring (y+1), ceiling (y+2) — shelter.js geometry.
         const RING = [
@@ -141,6 +173,7 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
         // 自封守卫按设计给 PICKLESS bot 留最后一个 2 格出口 (mob=FREE pick=false ×1986 条)
         // — 合法的活命 hold, 但必须在观测面上与真封顶区分开。
         if (openLeft > 0) log(bot, `[nightShelter] HOLD(unsealed) open=${openLeft} guardSkip=${guardSkipped} pick=${hasPick()} filler=${filler() || 'none'} — 漏风坚守 (守卫留门/缺料), 非真封顶.`);
+      } // end else (SURFACE_SEAL_DISABLED off → original seal-in-place build)
     }
 
     // ── PHASE 1.5: ★SELF-INSIDE 强制 (用户令 2026-07-07 "强制要求自己在里面" + 实拍 bot 站在半拉
@@ -151,7 +184,10 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
     //    近由下方 hold 循环的 hostileClose 逃生舱负责)。先停步/清控, 免得补墙时又被 placeBlock 挪出。
     try { bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop(); } catch (e) {}
     try { bot.clearControlStates(); } catch (e) {}
-    {
+    // ★封箱已禁用时整段 PHASE 1.5 跳过 (docs/shelter-mechanism-disabled.md): 这里 RING2 会围着 bot
+    //   【当前】落点砌墙 — 正是"站外面"补救逻辑, 本身也在砌那个盒子。seal 关掉后它无对象且只会重建
+    //   被禁的墙, 所以只在 seal 启用时才跑。dig_one 挖成的口袋已被地形围合, 不需要它补墙。
+    if (!SURFACE_SEAL_DISABLED) {
         const _hasPick = () => { try { return bot.inventory.items().some(i => /_pickaxe$/.test(i.name || '')); } catch (e) { return false; } };
         const _mobSt = () => { try { return (bot._mobility && bot._mobility.state) || ''; } catch (e) { return ''; } };
         const q = bot.entity.position.floored();

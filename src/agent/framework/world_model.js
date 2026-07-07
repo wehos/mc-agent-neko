@@ -1235,9 +1235,14 @@ export function proposeTasks(world, bot) {
                        rationale: 'no bed/mining option — dig a 1-block cap shelter (挖三填一) for the night' });
                 break;
             case 'SEAL_FORT':
+                // ★SURFACE WALL-BOX DISABLED (user 2026-07-07, docs/shelter-mechanism-disabled.md):
+                //   we still dispatch nightShelter('seal') and keep NIGHT_SEAL@91 (priority must stay
+                //   above daytime BOOTSTRAP_KIT@90 so the bot HOLDS at night, not wander), but the skill's
+                //   'seal' mode no longer builds the wall ring — it holds in place instead (the box kept
+                //   leaving the bot standing OUTSIDE its own walls). See nightShelter.js SURFACE_SEAL_DISABLED.
                 push({ kind: TASK.NIGHT_SEAL, priority: 91, skill: 'nightShelter',
                        args: ['seal'],
-                       rationale: 'fallback — seal in place / wall off until daybreak' });
+                       rationale: 'hold in place until daybreak (surface wall-box disabled — no seal built)' });
                 break;
             default: break; // FIGHT / NONE → no proposal (self_defense / daytime)
         }

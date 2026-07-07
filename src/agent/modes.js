@@ -6095,7 +6095,19 @@ const modes_list = [
                     if (alreadyDeepEnclosed) return { decision: 'MINE_THROUGH_NIGHT', reason: `already deep/enclosed y=${y} pick=${picks} — keep mining, don't surface-bootstrap`, targetY: 12 };
                     if (bedAffordable) return { decision: 'GO_BED', reason: `bed@${_bedReachCost}b`, target: _bedLm };
                     if (digOneViable) return { decision: 'DIG_ONE_CAP', reason: `dig-one shelter y=${y}` };
-                    return { decision: 'SEAL_FORT', reason: 'seal in place (fallback)' };
+                    // ★SURFACE WALL-BOX ("seal"/封箱) DISABLED — user 2026-07-07 (docs/shelter-mechanism-disabled.md).
+                    //   This terminal fallback STILL returns SEAL_FORT on purpose — do NOT switch it to NONE:
+                    //     • SEAL_FORT@91 must keep out-ranking daytime BOOTSTRAP_KIT@90 (world_model §night switch),
+                    //       else a pickless/no-bed bot would get NO night proposal and wander off to chop wood in
+                    //       the dark instead of hunkering down;
+                    //     • the unstuck-suppression gate (~modes.js:2650) keys on the NIGHT_SEAL commitment to stop
+                    //       the watchdog dragging the bot out of its hold.
+                    //   What changed is the EXECUTOR, not the decision: nightShelter('seal') no longer BUILDS the
+                    //   wall ring (it kept leaving the bot standing OUTSIDE its own walls — placeBlock drift). It now
+                    //   just holds in place and bails on any hit, handing off to self-defense reflex / surviveNow
+                    //   (RELOCATE/DEATH, keepInventory ON). dig_one (挖三填一) above is untouched — user kept it.
+                    //   Net: this branch = "commit to HOLDING the night in place", not "wall yourself in".
+                    return { decision: 'SEAL_FORT', reason: 'hold in place — surface wall-box disabled (dig_one preferred when viable)' };
                 };
                 const nightPlan = computeNightPlan();
                 // ── computeOpening(): bootstrap-phase intent (SCOUT/WOOD_BUFFER/VILLAGE_HARVEST/DONE).
