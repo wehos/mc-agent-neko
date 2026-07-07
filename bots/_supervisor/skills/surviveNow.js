@@ -425,6 +425,7 @@ const EXEC = {
                             // 找该柱地表: 从 bot 脚高 +4 向下扫第一实体块
                             let surfY = null;
                             for (let y = p0.y + 4; y >= p0.y - need - 24; y--) {
+                                if (((p0.y + 4 - y) & 63) === 0) await new Promise(r => setImmediate(r));   // ★POP-B(ELOOP): chunk cliff-leg Y-scan(3×8×~50 三重扫的最内层)
                                 const b = bot.blockAt(new ctx.Vec3(cx, y, cz));
                                 if (solid(b)) { surfY = y; break; }
                             }

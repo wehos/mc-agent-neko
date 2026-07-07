@@ -1662,19 +1662,18 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                 return new Vec3(bx + 0.5, by, bz + 0.5);
             } catch (e) { return p; }
         };
+        // ★POP-B(ELOOP): hoist water/lava block-id 数组一次(勿 per-call 重建); riskyTree 水岸判改用
+        //   findBlocks(section palette 快跳 + native count:1 早退)替换 5×5×4≈100 次同步 blockAt 立方扫。
+        //   maxDistance:3 略覆盖旧盒(Chebyshev-2→Euclid≤3.4), 危险守卫偏安全侧(误判只是跳过一棵险树)。
+        const _wlIds = (() => { try { return Object.values(bot.registry.blocksByName).filter(b => /water|lava/.test(b.name || '')).map(b => b.id); } catch (e) { return []; } })();
         const riskyTree = (p, d) => {
             if (_criticalForageAllowed()) return '';
             const dy = p.y - bot.entity.position.y;
             if (d > 4.8 && dy > 5) return 'high-tree';
-            if (d > 4.8) {
-                for (let ox = -2; ox <= 2; ox++) {
-                    for (let oz = -2; oz <= 2; oz++) {
-                        for (let oy = -2; oy <= 1; oy++) {
-                            const b = bot.blockAt(new Vec3(Math.floor(p.x) + ox, Math.floor(p.y) + oy, Math.floor(p.z) + oz));
-                            if (b && /water|lava/.test(b.name || '')) return 'water-edge';
-                        }
-                    }
-                }
+            if (d > 4.8 && _wlIds.length) {
+                let hit = null;
+                try { hit = bot.findBlocks({ matching: _wlIds, point: new Vec3(Math.floor(p.x) + 0.5, Math.floor(p.y) + 0.5, Math.floor(p.z) + 0.5), maxDistance: 3, count: 1 }); } catch (e) { hit = null; }
+                if (hit && hit.length) return 'water-edge';
             }
             return '';
         };
@@ -1691,7 +1690,9 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             if (!cands.length) { // fallback: 单类型 getNearestBlock 兜底(与原逐类型 fallback 同效, 取任一最近)
                 for (const t of LOGS) { const b = world.getNearestBlock(bot, t, 40); if (b) { cands = [b.position]; break; } }
             }
+            let _yc = 0;
             for (const p of cands) {
+                if ((_yc++ & 1) === 0) await new Promise(r => setImmediate(r));   // ★POP-B(ELOOP): 每隔一个候选让出, 封顶 per-candidate blockAt 扇出(_trunkBase 40 + riskyTree)
                 const base = _trunkBase(p);                    // ★C297 resolve to trunk base (ground), not the detected canopy log
                 const key = `${Math.floor(base.x)},${Math.floor(base.y)},${Math.floor(base.z)}`;
                 if (Math.hypot(base.x - _ax, base.z - _az) > _leashR) continue;   // 缰绳源头过滤(树荒时放宽)
@@ -1722,6 +1723,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                     const _eye = () => bot.entity.position.offset(0, 1.6, 0);
                     let _cleared = 0;
                     for (let pass = 0; pass < 6 && !_see(); pass++) {
+                        if (pass > 0) await new Promise(r => setImmediate(r));   // ★POP-B(ELOOP): 分片叶洪泛(7×6×7≈294/pass × ≤6)
                         let best = null, bestD = 1e9;
                         const tp = _tk.position;
                         for (let dx = -3; dx <= 3; dx++) for (let dy = -1; dy <= 4; dy++) for (let dz = -3; dz <= 3; dz++) {

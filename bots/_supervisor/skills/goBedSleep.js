@@ -139,6 +139,13 @@ export default async function goBedSleep(bot, ctx) {
         placedThisRun = true;
     }
 
+    // ★P0-3(不睡觉根因): 先判 vanilla 拒睡盒(床 8h/5v 内有怪)再寻路。否则 approach 途中被 self_defense
+    //   中断, 函数在 145/149 就 return false 记一次"床不可达"假失败, 永远走不到下面 181 的敌对判定 →
+    //   床 3b 也睡不成 (用户实拍"不睡觉")。床区有怪时诚实让位(交 FIGHT/挖三填一), 不做注定被打断的
+    //   doomed approach。181 行原检查保留做 sleep 前二次兜底(等待期间怪靠近)。
+    if (hostileNearBed(bedBlock.position))
+        return bail('goBedSleep: hostiles within vanilla bed box (8h/5v) before approach — yield (fight/shelter first).');
+
     // 2) Close to interaction range.
     if (bot.entity.position.distanceTo(bedBlock.position) > 2.6) {
         try { await skills.goToPosition(bot, bedBlock.position.x, bedBlock.position.y, bedBlock.position.z, 2); } catch (e) {}
