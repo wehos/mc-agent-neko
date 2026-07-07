@@ -352,6 +352,31 @@ export async function craftRecipe(bot, itemName, num=1) {
     return true;
 }
 
+// ★2026-07-07 fix#1 (litter-in-pocket / 受限地形不敲台): 在 MAROONED/死角窄坑里破坏方块时,
+//   掉落物会被物理弹开 1-2 格落进寻路够不到的墙角 — 实录 replenishKit/mineDiamonds 反复
+//   "Broke crafting_table → Found path(success) → Unable to reach item, blacklisted 120s →
+//   Picked up 0" 攒了一地散台+散铁(用户截图实观)。留在原地【不敲】的台是可复用、不会 5min
+//   despawn 的实体方块, 严格优于一个够不到的散落物; 故受限地形一律跳过"敲碎回收", 台留原地,
+//   择机脱困后自然复用/再收。判据两路:
+//     ① mobility 子系统已判 MAROONED(exits 稀少) — 与 mineOres.marooned() 同源信号。
+//     ② 几何兜底(_mobility 未 populated 时): 数脚位四正交邻格里"人能站进去"的开口. 正常 1 宽
+//        隧道沿掘进向仍有前后 2 开口 → 不误伤 T-0079 随身台复用; 只有真·死角(≤1 开口)才触发,
+//        那里敲碎的掉落物必弹进不可达墙角。
+export function inConstrainedPocket(bot) {
+    try {
+        if (!bot || !bot.entity || !bot.entity.position) return false;
+        if (/MAROONED/.test((bot._mobility && bot._mobility.state) || '')) return true;
+        const base = bot.entity.position.floored();
+        let open = 0;
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const foot = bot.blockAt(base.offset(dx, 0, dz));
+            const head = bot.blockAt(base.offset(dx, 1, dz));
+            if (foot && foot.boundingBox !== 'block' && head && head.boundingBox !== 'block') open++;
+        }
+        return open <= 1;
+    } catch (e) { return false; }
+}
+
 export async function craftRecipeLocal(bot, itemName, num=1) {
     /**
      * Craft from the bot's current pocket. For 3x3 recipes, prefer placing the carried
@@ -439,11 +464,18 @@ export async function craftRecipeLocal(bot, itemName, num=1) {
         // free cobble+sticks. Done here while guard modes are still suppressed (no mode walks the bot off
         // mid-reclaim and re-strands it). Break the EXACT block we placed, sweep the drop, retry a few.
         if (placedTableFromCarry && placedTablePos) {
-            for (let t = 0; t < 3; t++) {
-                try { const blk = bot.blockAt(placedTablePos); if (blk && blk.name === 'crafting_table') await breakBlockAt(bot, placedTablePos.x, placedTablePos.y, placedTablePos.z); } catch (e) {}
-                try { await pickupNearbyItems(bot); } catch (e) {}
-                if ((world.getInventoryCounts(bot)['crafting_table'] || 0) > 0) break;
-                await new Promise(r => setTimeout(r, 200));
+            // ★fix#1: 受限地形(MAROONED/死角窄坑)不敲台 — 敲碎会把台弹进够不到的墙角(散落一地,
+            //   见 inConstrainedPocket 注释)。留台在原地: 可复用、不 despawn, 下一次 craftRecipeLocal
+            //   走 placeCraftingTableWithinReach 的"就近复用既有台"分支即原地续用, 不再重放/重敲。
+            if (inConstrainedPocket(bot)) {
+                log(bot, `Left crafting_table placed @${Math.floor(placedTablePos.x)},${Math.floor(placedTablePos.y)},${Math.floor(placedTablePos.z)} (constrained pocket — breaking it would scatter the drop out of reach; reuse in place).`);
+            } else {
+                for (let t = 0; t < 3; t++) {
+                    try { const blk = bot.blockAt(placedTablePos); if (blk && blk.name === 'crafting_table') await breakBlockAt(bot, placedTablePos.x, placedTablePos.y, placedTablePos.z); } catch (e) {}
+                    try { await pickupNearbyItems(bot); } catch (e) {}
+                    if ((world.getInventoryCounts(bot)['crafting_table'] || 0) > 0) break;
+                    await new Promise(r => setTimeout(r, 200));
+                }
             }
         }
         try { for (const m in prevModes) bot.modes.setOn(m, prevModes[m]); } catch (e) {}

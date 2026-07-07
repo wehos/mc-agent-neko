@@ -536,6 +536,9 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
             const _nightExposed = (() => { try { const t = bot.time.timeOfDay; return t >= 13000 && t <= 23000 && bot.entity.position.y >= 50 && !(bot._mobility && bot._mobility.enclosed); } catch (e) { return false; } })();
             const d = Math.hypot(bot.entity.position.x - pos.x, bot.entity.position.y - pos.y, bot.entity.position.z - pos.z);
             if ((_nightExposed && d > 2.5) || hostileNear(6)) { prog(`${tag}★#3 defer table reclaim (nightExposed/hostile) — leave registered station @${pos.x},${pos.y},${pos.z}`); return; }
+            // ★fix#1 受限地形不敲台 (litter-in-pocket): MAROONED/死角窄坑里敲碎会把台弹进够不到的墙角
+            //   (散落一地, 实录 replenishKit/mineDiamonds)。留着当登记站(不算 litter, 可复用/择机再收)。
+            if (skills.inConstrainedPocket && skills.inConstrainedPocket(bot)) { prog(`${tag}★fix#1 defer table reclaim (constrained pocket) — leave registered station @${pos.x},${pos.y},${pos.z}`); return; }
             const still = bot.blockAt(pos);
             if (!still || still.name !== 'crafting_table') { try { stDeregister('crafting_table', pos); } catch (e) {} return; }
             await Promise.race([

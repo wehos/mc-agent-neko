@@ -110,7 +110,11 @@ export default async function craftChain(bot, ctx, preset) {
     // 工作台(既有台不收)→ 携带复用, 不留一地。台就在脚边(STEP2 就地放), 收回近乎零风险。
     if (needsTable && !_ccHadTableBefore) {
         const _ccT = findTable();
-        if (_ccT) {
+        // ★fix#1 受限地形不敲台 (litter-in-pocket): MAROONED/死角窄坑里敲碎台会把掉落物弹进够不到
+        //   的墙角(散落一地)。留台原地 — 可复用、不 despawn, 严格优于一个够不到的散落物。
+        if (_ccT && skills.inConstrainedPocket && skills.inConstrainedPocket(bot)) {
+            log(bot, `★fix#1 受限地形不敲台 — 留台 @${_ccT.position.x},${_ccT.position.y},${_ccT.position.z}(敲碎会弹进够不到的墙角, 原地复用)`);
+        } else if (_ccT) {
             try {
                 await Promise.race([
                     skills.collectBlock(bot, 'crafting_table', 1),
