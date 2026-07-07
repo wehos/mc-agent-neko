@@ -690,6 +690,12 @@ export class Agent {
             // ★2026-07-07 用户令: 游戏聊天里提示"开始执行指令", 让人一眼知道 bot 正在跑 LLM/chat 任务(而非自主)。
             //   env DEBUG_CHAT=0 可关。self 消息会被 bot.on('chat') 的 self 过滤挡掉, 不回灌。
             try { if (message && String(process.env.DEBUG_CHAT || '1') !== '0') this.bot.chat('🎯 开始执行指令：' + String(message).replace(/\n/g, ' ').slice(0, 80)); } catch (e) {}
+            // ★2026-07-07 AUTO-PREEMPT for admin commands (用户实观 bug: 游戏内命"挖原木"但 bot 一直挖煤/
+            //   状态显示挖煤矿). WS 路的 preempt 在 ws_server, 但游戏内 chat 不经 ws_server → 没打断在跑的技能,
+            //   内核挖煤 skill 占着身体不让位 → LLM 的 !getWood 抢不到体。这里补上: admin 指令一进来就打断当前
+            //   技能(interrupt_code+停 dig/path/pvp), 让命令能接管。命令自身的动作走 _executeAction→clearBotLogs
+            //   会先清 interrupt_code, 不会自杀。仅在有技能占用时打断。
+            try { if (this.supervised_skill || this.bot._currentSkill) this.requestInterrupt(); } catch (e) {}
         }
 
         try {
