@@ -2588,6 +2588,12 @@ const modes_list = [
         last_time: Date.now(),
         max_stuck_time: 20,
         prev_dig_block: null,
+        rb_anchor: null,
+        rb_prevPos: null,
+        rb_sampleAt: 0,
+        rb_awaySince: 0,
+        rb_snaps: null,
+        rb_lastFireAt: 0,
         step_prev_location: null,
         step_prev_time: 0,
         step_guard_until: 0,
@@ -2709,6 +2715,111 @@ const modes_list = [
                 this.step_prev_location = null;
                 return; // don't get stuck when idle
             }
+            // ★rubber-band / 逆向幻影块探测 (2026-07-07 session#11 实录: 服务器认为 bot 脚位有块 —
+            // 用户客户端实拍半身陷在闪长岩里 — bot 本地世界却是 air → pathfinder 每次冲出 2-3 格,
+            // 1s 内被服务器纠正瞬移回锚点 (646.5,58,-219.5), 2 格顶棚又把跳跃封死在 +0.2 → 原地跳
+            // 2.5min。经典 stuck 判据 (位移<distance 持续 20s) 被"冲出去再拉回"不断重置, 永不升级;
+            // 被动 blockAt 重读也测不出 desync — 只有交互 (dig) 能逼服务器重发方块真相
+            // (mineDown forceUnghost 同款手法, 5c3bce6, 但那只覆盖 mineDown 自己的井道)。
+            // 判据: 60s 内 ≥3 次"离锚 >2.2b 后单采样步 ≥1.6b 瞬移回锚 <1.5b"(且当时在寻路),
+            // 且 path goal 距锚 >4b (真想走却走不掉)。合法作业的往返靠"离锚 >4s 即换锚清零"洗掉。
+            // 阈值经 10:01-10:02 act_trace 回放标定 (外冲实测 2.47-3.2b): away>2.5 会漏掉 1/3 外冲;
+            // ≤2b 的微动本来就归经典 stuck 判据 (distance=2 持续 20s) 管, 两者互补不重叠。
+            try {
+                const rbNow = Date.now();
+                const rp = bot.entity.position;
+                if (rbNow - (this.rb_sampleAt || 0) >= 300) {
+                    const rbPrev = this.rb_prevPos;
+                    const rbPrevAt = this.rb_sampleAt || rbNow;
+                    this.rb_prevPos = rp.clone();
+                    this.rb_sampleAt = rbNow;
+                    if (!this.rb_anchor) this.rb_anchor = rp.clone();
+                    const distA = Math.hypot(rp.x - this.rb_anchor.x, rp.z - this.rb_anchor.z) + Math.abs(rp.y - this.rb_anchor.y);
+                    if (distA > 2.2) {
+                        if (!this.rb_awaySince) this.rb_awaySince = rbNow;
+                        else if (rbNow - this.rb_awaySince > 4000) {
+                            // 真离开了 → 锚点跟随当前位置, 计数清零 (正常移动永不积累 snap)
+                            this.rb_anchor = rp.clone();
+                            this.rb_awaySince = 0;
+                            this.rb_snaps = [];
+                        }
+                    } else if (distA < 1.5) {
+                        if (this.rb_awaySince && rbPrev && (pathingNow || mobilityWorkNow)) {
+                            const rbJump = Math.hypot(rp.x - rbPrev.x, rp.z - rbPrev.z) + Math.abs(rp.y - rbPrev.y);
+                            if (rbJump >= 1.6 && rbNow - rbPrevAt <= 1600) {
+                                this.rb_snaps = (this.rb_snaps || []).filter(t => rbNow - t < 60000);
+                                this.rb_snaps.push(rbNow);
+                            }
+                        }
+                        this.rb_awaySince = 0;
+                    }
+                    const rbGoal = bot._lastPathGoalInfo;
+                    const rbGoalFar = !!(rbGoal && typeof rbGoal.x === 'number' && typeof rbGoal.z === 'number'
+                        && Math.hypot(rbGoal.x - this.rb_anchor.x, rbGoal.z - this.rb_anchor.z) > 4);
+                    if ((this.rb_snaps || []).length >= 3 && rbGoalFar && bot.entity.onGround
+                        && rbNow - (this.rb_lastFireAt || 0) > 90000) {
+                        const snapCount = this.rb_snaps.length;
+                        this.rb_snaps = [];
+                        this.rb_lastFireAt = rbNow;
+                        const anchorCell = this.rb_anchor.floored();
+                        execute(this, agent, async () => {
+                            // 交互式重同步: 对身体两格 + 朝 goal 的前方两格各戳一次 dig。客户端显示 air 的格
+                            // 用裸 bot.dig — 只有真 blockUpdate 才 resolve; 两边都真是 air 就永不 resolve,
+                            // 2s race 放弃 + stopDigging 清残留 (mineDown:329 同款)。客户端也显示实心的格
+                            // (窒息楔) 直接工具挖。戳完 300ms 等纠正包落地, 再补挖"戳后变实心"的真幽灵。
+                            const t0 = Date.now();
+                            try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
+                            try { bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop(); } catch (e) {}
+                            try { bot.clearControlStates(); } catch (e) {}
+                            const c = bot.entity.position.floored();
+                            const g = bot._lastPathGoalInfo;
+                            let fdx = 0, fdz = 0;
+                            if (g && typeof g.x === 'number' && typeof g.z === 'number') {
+                                const rx = g.x - (c.x + 0.5), rz = g.z - (c.z + 0.5);
+                                if (Math.abs(rx) >= Math.abs(rz)) fdx = Math.sign(rx) || 1; else fdz = Math.sign(rz) || 1;
+                            }
+                            const cells = [c, c.offset(0, 1, 0)];
+                            if (fdx || fdz) cells.push(c.offset(fdx, 0, fdz), c.offset(fdx, 1, fdz));
+                            const rbSkip = (b) => !b || /water|lava|bedrock|obsidian|_portal/.test(b.name || '');
+                            let rawPokes = 0, solidBreaks = 0;
+                            for (const cc of cells) {
+                                if (bot.interrupt_code) break;
+                                const b = bot.blockAt(cc);
+                                if (rbSkip(b)) continue;
+                                try { await bot.lookAt(cc.offset(0.5, 0.5, 0.5), true); } catch (e) {}
+                                if (b.boundingBox === 'block') {
+                                    try { if (bot.tool && bot.tool.equipForBlock) await bot.tool.equipForBlock(b); } catch (e) {}
+                                    try {
+                                        await Promise.race([bot.dig(b, true), new Promise((_, rej) => setTimeout(() => rej(new Error('rb-dig-timeout')), 4000))]);
+                                        solidBreaks++;
+                                    } catch (e) {} finally { try { bot.stopDigging(); } catch (e) {} }
+                                } else {
+                                    try {
+                                        const dp = bot.dig(b, true);
+                                        dp.catch(() => {});
+                                        await Promise.race([dp, new Promise(r => setTimeout(r, 2000))]);
+                                        rawPokes++;
+                                    } catch (e) {} finally { try { bot.stopDigging(); } catch (e) {} }
+                                }
+                            }
+                            await new Promise(r => setTimeout(r, 300));
+                            let lateBreaks = 0;
+                            for (const cc of cells) {
+                                if (bot.interrupt_code) break;
+                                const b2 = bot.blockAt(cc);
+                                if (b2 && b2.boundingBox === 'block' && !rbSkip(b2)) {
+                                    try { if ((await skills.breakBlockAt(bot, cc.x, cc.y, cc.z)) === true) lateBreaks++; } catch (e) {}
+                                }
+                            }
+                            try {
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [unstuck] rubber-band resync @${anchorCell.x},${anchorCell.y},${anchorCell.z} snaps=${snapCount} pokes=${rawPokes} solid=${solidBreaks} late=${lateBreaks} goal=${g ? `${Math.round(g.x)},${Math.round(g.z)}` : '-'} (${Date.now() - t0}ms)\n`);
+                            } catch (e) {}
+                        });
+                        return;
+                    }
+                }
+            } catch (e) {}
             const now = Date.now();
             try {
                 const cs = bot.controlState || {};
@@ -3165,6 +3276,10 @@ const modes_list = [
             this.stuck_time = 0;
             this.prev_dig_block = null;
             this.step_prev_location = null;
+            this.rb_anchor = null;
+            this.rb_prevPos = null;
+            this.rb_awaySince = 0;
+            this.rb_snaps = [];
         }
     },
     {
@@ -5348,6 +5463,21 @@ const modes_list = [
             const releaseJump = () => { if (this.jumpUntil) { this.jumpUntil = 0; try { bot.setControlState('jump', false); } catch (e) {} } };
             try {
                 if (!bot || !bot.entity || !bot.entity.position) return;
+                // ★2026-07-07 卡死修 Fix A ([[branchmine-stepwedge-returntrue-2026-07-07]]): branchMine 自持身体
+                // 平挖时让位。branchMine 有自己的 stepEdgeAssist + 恒-y 平挖(挖穿抬升石头, 不抬 y)前进; 本反射
+                // 在旁边乱跳/破天花板 + 用裸 bot.dig 抢 targetDigBlock → branchMine 前向挖 acquire 撞 'busy' 中止,
+                // 石头永不挖掉, 且注入 0.3b 摇摆重置双方 stale 计数 = 永动机 (session#12 钉死 623,52,-166 30min)。
+                // 仅对 /^branchMine/ 的 body move-lock 生效期完全 stand down(清跳+清 wedge 态), 让 branchMine 独占
+                // 平挖; 平挖恒 y 无新台阶可追 → 不会引入"挖平又冒 2 格"死锁。窄门控: surfaceUp/feedUp/chopWood/
+                // pathfinder-stepEdge 的 move-lock 不在此列, 行为不变; unstuck 自己的 step-edge 也不受影响。
+                {
+                    const _mvOwner = bot._bodyMoveLockOwner || '';
+                    if (/^branchMine/.test(_mvOwner) && bot._bodyMoveLockUntil && now < bot._bodyMoveLockUntil) {
+                        this.wedgeStart = 0; this.lastPos = null; this.resetStreak = 0; this._chStuckSince = 0;
+                        releaseJump();
+                        return;
+                    }
+                }
                 // ★CAPPED-HEAD BREAKER (用户 2026-06-20 实拍: 脚底薄水+头顶一块土+面前台阶,
                 // self_preservation 原地狂跳想出水却被头顶封住,出不来). 独立于下面所有门控(尤其
                 // SWIM 的 early-return)运行 —— 只要 bot 想上升(按jump/在水里/寻路在走)却被头顶一块
@@ -6633,6 +6763,7 @@ const modes_list = [
         wait: 2, // number of seconds to wait after noticing an item to pick it up
         prev_item: null,
         noticed_at: -1,
+        attempts: null, // Map<entityId, {n, until}> — 每个掉落物最多试 3 次
         update: async function (agent) {
             const bot = agent.bot;
             // ★安全 gate (消费世界模型 bot._world): 别为捡东西破掉保命/掩护。
@@ -6640,7 +6771,16 @@ const modes_list = [
             const w = bot._world;
             if (w && w.threat && (w.threat.actionable > 0 || w.threat.takingDamage)) { this.noticed_at = -1; return; }
             if (w && w.time && !w.time.isDay && w.cover && w.cover.coverReal) { this.noticed_at = -1; return; }
-            let item = world.getNearestEntityWhere(agent.bot, entity => entity.name === 'item', 8);
+            // ★放弃计数 (2026-07-07 session#11: 两个够不着的掉落物 A/B 让 prev_item 单槽去重乒乓失效,
+            // "Picking up item!" 无限刷屏反复抢身体, 叠在 rubber-band 卡死上加剧循环)。同一 entity id
+            // 试满 3 次仍在地上 → 拉黑 3min。捡到手的 entity 会消失, id 不复现, 黑名单无副作用。
+            if (!this.attempts) this.attempts = new Map();
+            const acNow = Date.now();
+            let item = world.getNearestEntityWhere(agent.bot, entity => {
+                if (entity.name !== 'item') return false;
+                const a = this.attempts.get(entity.id);
+                return !(a && a.n >= 3 && acNow < a.until);
+            }, 8);
             let empty_inv_slots = agent.bot.inventory.emptySlotCount();
             if (item && item !== this.prev_item && await world.isClearPath(agent.bot, item) && empty_inv_slots > 1) {
                 if (this.noticed_at === -1) {
@@ -6649,6 +6789,13 @@ const modes_list = [
                 if (Date.now() - this.noticed_at > this.wait * 1000) {
                     say(agent, `Picking up item!`);
                     this.prev_item = item;
+                    const rec = this.attempts.get(item.id) || { n: 0, until: 0 };
+                    rec.n++;
+                    rec.until = acNow + 180000;
+                    this.attempts.set(item.id, rec);
+                    if (this.attempts.size > 64) {
+                        for (const [k, v] of this.attempts) if (acNow > v.until) this.attempts.delete(k);
+                    }
                     execute(this, agent, async () => {
                         await skills.pickupNearbyItems(agent.bot);
                     });
