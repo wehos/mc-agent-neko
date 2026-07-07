@@ -139,7 +139,13 @@ export default async function replenishKit(bot, ctx, opts = {}) {
     //      (C362-broad 200 徒手破顶预算 × 90s 截断 = 20min 级互绞)。现在把 90s 作为 opts.maxMs
     //      交给 surfaceUp 自己到点收尾退出 (孤儿窗口≈0); 外层 race 放宽到 120s 只当兜底带,
     //      正常路径永远是技能先自退, race 不触发) ──────────────
-    if (!onSurface()) {
+    // ★2026-07-07 别把安全的地下 bot 顶到夜间地表送死 (用户实观: 地底安全→莫名跑地表→半个shelter→等死)。
+    //   步②③ 已有 night+hostile 守卫, 但上浮步①原先无条件执行=爬进夜怪堆, 且爬上去也因 night 跳过 chopWood
+    //   =纯送死。夜+近怪时跳过上浮, 留在地下用手里 log 折板/折棍/补镐(见 159-160: 地下仍可干活)。add-only。
+    if (!onSurface() && isNight() && hostilesNear(16) > 0) {
+        prog(`replenishKit: ① SKIP surfaceUp — night+hostiles16=${hostilesNear(16)} (安全地下别爬进夜怪堆送死; 地下补镐即可)`);
+    }
+    if (!onSurface() && !(isNight() && hostilesNear(16) > 0)) {
         if (stop() || overBudget()) return settle('stopped-before-surface');
         const yb = bot.entity.position.y;
         prog(`replenishKit: ① underground (y=${Math.round(yb)}) → surfaceUp target 63, budget 90s (skill-side deadline)`);

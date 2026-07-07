@@ -91,6 +91,29 @@ class WSMessageServer {
         // "process alive but task dead". Broadcast every 15s; the bridge persists the
         // latest snapshot to vitals.json for the watchdog/patrol to read.
         this.startVitalsTimer();
+        this.startDebugChatTimer();
+    }
+
+    // ★2026-07-07 用户调试请求: bot 每 5s 在游戏聊天里喊出当前在干什么 ("他在想什么")。
+    //   telemetry(15s→vitals.json/UI) 到不了游戏聊天, 这个直发 bot.chat。env DEBUG_CHAT=0 可关。
+    startDebugChatTimer() {
+        if (this.debugChatInterval) clearInterval(this.debugChatInterval);
+        if (String(process.env.DEBUG_CHAT || '1') === '0') return;
+        this.debugChatInterval = setInterval(() => {
+            try {
+                const bot = this.agent && this.agent.bot;
+                if (!bot || !bot.entity || !bot.entity.position || typeof bot.chat !== 'function') return;
+                const p = bot.entity.position;
+                const skill = this._skillRunningName || bot._currentSkill || 'idle';
+                const mob = ((bot._mobility && bot._mobility.state) || '?') + (bot._mobility && bot._mobility.enclosed ? '/ENC' : '');
+                let host = 0;
+                try { for (const id in bot.entities) { const e = bot.entities[id]; if (e && e.kind === 'Hostile mobs' && e.position && p.distanceTo(e.position) < 16) host++; } } catch (e) {}
+                const held = (bot.heldItem && bot.heldItem.name) || 'empty';
+                const night = (() => { try { const t = bot.time.timeOfDay; return (t >= 12542 && t <= 23459) ? 'night' : 'day'; } catch (e) { return '?'; } })();
+                const msg = `[dbg] ${skill} | ${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)} ${night} hp${Math.round(bot.health ?? -1)}/f${bot.food ?? -1} mob=${mob} host=${host} held=${held}`;
+                try { bot.chat(msg); } catch (e) {}
+            } catch (e) { /* debug chat must never hurt the agent */ }
+        }, 5000);
     }
 
     startVitalsTimer() {

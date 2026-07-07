@@ -65,6 +65,17 @@ function rationCount(bot) {
     } catch (e) { return 0; }
 }
 
+// ★2026-07-07 溺水中断助手 (P1-b): 站位真在水里且氧气实跌(<=14, 非浅涉)→ 长子技能应立即收官,
+//   让主循环 round-top 水情检查 break 到营救反射(self_preservation 浮出), 别再链下一个水中子技能(死亡 #11)。
+function inWaterOxygenLow(bot) {
+    try {
+        const p = bot.entity.position;
+        const wf = bot.blockAt(p), wh = bot.blockAt(p.offset(0, 1, 0));
+        const inWater = /water/.test((wf && wf.name) || '') || /water/.test((wh && wh.name) || '');
+        return inWater && typeof bot.oxygenLevel === 'number' && bot.oxygenLevel <= 14;
+    } catch (e) { return false; }
+}
+
 function snap(bot, ctx) {
     const p = bot.entity.position;
     const hostiles = [];
@@ -105,9 +116,17 @@ function snap(bot, ctx) {
     const contained = /POCKET|ENTOMBED|MAROONED|SEALED/.test(mobRaw) || enclosed;
     const a = bot._svnAnchor;
     const anchorMin = a ? Math.round((Date.now() - a.since) / 60000) : 0;
+    // ★2026-07-07 hasArmor (surface-death-loop 修复支撑): 穿戴(slot 5-8)或背包内任一甲件。
+    //   夜裸守卫(RELOCATE 不上地表 / SHELTER 分支)共用此判定。
+    const armorRe = /_helmet$|_chestplate$|_leggings$|_boots$/;
+    let hasArmor = false;
+    try {
+        hasArmor = (bot.inventory.slots || []).slice(5, 9).some(sl => sl && armorRe.test(sl.name || ''))
+            || items.some(i => armorRe.test(i.name || ''));
+    } catch (e) {}
     return {
         hp, food, tod, night, day: !night, dim, overworld, hostiles, hasNormal, hasAnyEdible,
-        hasShield, sword: sword ? sword.name : null, bed, bedDist, mobState: mobRaw, enclosed,
+        hasShield, hasArmor, sword: sword ? sword.name : null, bed, bedDist, mobState: mobRaw, enclosed,
         contained, anchorMin, pinned: a ? Date.now() - a.since > 300000 : false,
         respawnKnown: !!bed || spawnKnown(),
     };
@@ -157,6 +176,9 @@ function deathEligible(bot, ctx, s, failed) {
 
 function eligibleBranches(bot, ctx, s, failed) {
     const out = [];
+    // ★2026-07-07 幽灵床识破 (spiral#2 真根): goBedSleep 拿不到床时 EXEC.BED 置 bot._svnBedStaleUntil,
+    //   跨重生存活 → BED 让位、SHELTER 顶上, 不再走向幽灵床穿怪群送死。
+    const bedStale = (bot._svnBedStaleUntil || 0) > Date.now();
     // ⓪ REGEN: 满粮低血且威胁在外 — 自然回血就是正确答案(擦伤灰区), 站桩即产出
     if (!failed.has('REGEN') && s.hp < HP_FLOOR && s.food >= 18
         && !s.hostiles.some(h => h.d <= 16)) out.push('REGEN');   // >=18: 原版回血线 (17 会白站 75s)
@@ -164,7 +186,14 @@ function eligibleBranches(bot, ctx, s, failed) {
     // 无盾门槛收紧(死55实录: hp11 石剑硬换僵尸 3s 掉到 hp4): 无盾只在 hp>=14 且单怪时开打
     if (!failed.has('FIGHT') && s.hostiles.length && s.hostiles[0].d <= 14 && s.hp >= 8
         && (s.hasShield || (s.sword && s.hp >= 14 && s.hostiles.length === 1))) out.push('FIGHT');
-    if (!failed.has('BED') && s.night && s.bed && s.bedDist <= 64) out.push('BED');
+    if (!failed.has('BED') && s.night && s.bed && s.bedDist <= 64 && !bedStale) out.push('BED');
+    // ★SHELTER (surface-death-loop P1-a + spiral#2 拓宽): 夜里有威胁且"没有真正能睡的床"→就地封箱躲到天亮。
+    //   触发拓宽为 armor 无关: 满甲也扛不住 6 husk 围殴(死#32), 真判据="被围(>=3)或裸奔" + 床不可达
+    //   (无床 / >64b / BED失败过 / 幽灵床标记)。nightShelter 圆石充足即可, 破"走向幽灵床穿怪群"送死环。
+    // 触发判据: 夜里有任何威胁 + 没有真正能睡的床 → 就地封箱 (armor/怪数无关: 满甲也扛不住围殴 死#32;
+    //   2 husk 也能磨死已伤的甲 bot 死#35。能打的仗 FIGHT 在前已接管, 剩下的都该封箱不该上地表)。
+    if (!failed.has('SHELTER') && s.night && s.overworld && s.hostiles.length
+        && (!s.bed || s.bedDist > 64 || failed.has('BED') || bedStale)) out.push('SHELTER');
     // food<12(饿) 或 低血且 food<18(回血线下, 4:27 实录 hp5/food13 空树连败): 猎到 18 才能自然回血
     if (!failed.has('FORAGE') && s.day && s.overworld && (s.food < 12 || (s.hp < HP_FLOOR && s.food < 18))) out.push('FORAGE');
     if (!failed.has('RELOCATE') && (s.contained || s.pinned || s.hostiles.length)) out.push('RELOCATE');
@@ -178,6 +207,7 @@ const ACTION_DESC = {
     FIGHT: 'fight the nearby hostiles (shieldFight: shield-raise melee, per-mob-type logic)',
     BED: 'travel to the known bed and sleep through the night (skips night, hostiles gone at dawn)',
     FORAGE: 'daytime food errand via feedUp (eat stock / hunt / harvest, own safety gates)',
+    SHELTER: 'dig-in / seal a cap shelter right here and hold until dawn (naked night, no reachable bed — avoids the deadly surface climb)',
     RELOCATE: 'tunnel/climb out of this pocket and relocate >=8 blocks (escapePlan/surfaceUp/moveAway)',
     DEATH: 'deliberate death reset: keepInventory verified ON — respawn at bed/spawn with full hp+food, all items kept',
 };
@@ -282,8 +312,11 @@ const EXEC = {
     async BED(bot, ctx, s) {
         let r = null;
         try { r = await ctx.skills.customSkill(bot, 'goBedSleep'); } catch (e) {}
-        if (r && r.slept) return { slept: true };
-        if (r && r.placed) return { placed: true };
+        if (r && r.slept) { bot._svnBedStaleUntil = 0; return { slept: true }; }
+        if (r && r.placed) { bot._svnBedStaleUntil = 0; return { placed: true }; }
+        // ★2026-07-07 幽灵床识破: goBedSleep 拿不到床(landmark stale/无床/放不下) → 标记 180s, 跨重生存活,
+        //   让后续跳 BED、SHELTER 就地封箱, 不再走向幽灵床穿怪群送死(spiral#2 真根)。TTL 到期或成功入睡即清。
+        bot._svnBedStaleUntil = Date.now() + 180000;
         return null;
     },
 
@@ -296,6 +329,7 @@ const EXEC = {
         // 低血驱动的觅食要冲回血线(18), 纯饥饿驱动 14 够用
         const targetFood = (bot.health < HP_FLOOR) ? 18 : 14;
         try { await ctx.skills.customSkill(bot, 'feedUp', targetFood); } catch (e) {}
+        if (inWaterOxygenLow(bot)) prog('FORAGE: feedUp 后水中氧低 — 交主循环 round-top 让位营救');
         return (bot.food > f0 || rationCount(bot) > r0)
             ? { food: bot.food, gained: bot.food - f0, rations: rationCount(bot) - r0 } : null;
     },
@@ -305,18 +339,35 @@ const EXEC = {
         bot._plannedNoPickStoneUntil = Date.now() + 180000;   // 求生挖掘不触 bare_stone_alarm
         bot._svnStampedNoPick = true;                          // finally 里只清自己盖的戳
         try { await ctx.skills.customSkill(bot, 'escapePlan', { execute: true }); } catch (e) {}
+        // ★P1-b 溺水中断: escapePlan 可能把 bot 走进水里; 氧气真跌立即收官让营救反射接管(死亡 #11)。
+        if (inWaterOxygenLow(bot)) { prog('RELOCATE: escapePlan 后水中氧低 — 中断让位营救'); return null; }
         let moved = bot.entity.position.distanceTo(start);
-        if (moved < 8 && bot.entity.position.y < 55 && !bot.interrupt_code) {
+        // ★P0-b 夜裸不上地表 (surface-death-loop 修复): 无甲 bot 夜里被顶到地表 = 苦力怕/尸壳白给
+        //   (死亡 #8/#12)。夜+裸时跳过 surfaceUp 升顶, 落到 moveAway / 让位 BED·SHELTER·hold; 有甲或白天维持原样。
+        if (moved < 8 && bot.entity.position.y < 55 && !bot.interrupt_code && !(s.night && s.hostiles.length)) {
             try { await ctx.skills.customSkill(bot, 'surfaceUp', 63); } catch (e) {}
+            if (inWaterOxygenLow(bot)) { prog('RELOCATE: surfaceUp 后水中氧低 — 中断让位营救'); return null; }
             moved = bot.entity.position.distanceTo(start);
         }
         // 裸 moveAway 无地形安全门(死55实录: hp4 走 24 格踩进火/岩浆) — 危血不用它;
         // escapePlan/surfaceUp 自带 cellSafety, 保留。
         if (moved < 8 && !bot.interrupt_code && bot.health > 6) {
             try { await ctx.skills.moveAway(bot, 24); } catch (e) {}
+            if (inWaterOxygenLow(bot)) { prog('RELOCATE: moveAway 后水中氧低 — 中断让位营救'); return null; }
             moved = bot.entity.position.distanceTo(start);
         }
         return moved >= 8 ? { moved: Math.round(moved) } : null;
+    },
+
+    async SHELTER(bot, ctx, s) {
+        // ★P1-a 夜裸就地庇护: 挖三填一/封箱 hold 到天亮 (nightShelter 每轮查 interrupt/health, 圆石充足)。
+        //   返回 true = 已封顶/hold(真价值, 破地表送死环); false = 无料/挖不动 → 交 RELOCATE/DEATH。
+        let r = false;
+        try { r = await ctx.skills.customSkill(bot, 'nightShelter', 'dig_one'); } catch (e) {}
+        if (!r) return null;
+        let day = false;
+        try { day = !(bot.time.timeOfDay >= 12542 && bot.time.timeOfDay <= 23459); } catch (e) {}
+        return { sheltered: true, toDawn: day };
     },
 
     async DEATH(bot, ctx, s) {

@@ -592,7 +592,24 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
     // cancelled surfaceUp's climb goto instantly ("goal was changed before it could be
     // completed") — the bot then sat at y23 forever. Tick modes fighting us is the real
     // reason it couldn't surface, not pillarUp. Disable them while we climb; restore after.
-    const GUARD = ['mobility', 'self_preservation', 'self_defense', 'item_collecting', 'unstuck', 'hunting', 'cowardice', 'idle_staring', 'elbow_room', 'torch_placing', 'auto_eat'];
+    // ★2026-07-07 夜裸解冻 (surface-death-loop 修复 P0-a): 无甲 bot 被顶到夜间地表时, 全冻结
+    // self_defense/self_preservation = 站着被 husk/尸壳啃死 (死亡 #8/#12 承重杀手 — 爬升期反射全灭)。
+    // 夜(tod 12542-23459)且无甲时, 从 GUARD 摘掉这两个反射, 让打/逃反射能护体; 白天或有甲维持原
+    // 全冻结(爬升不被反射抢寻路)。配套下方两处 interrupt_code 清除也在夜裸时跳过(否则模式虽解冻
+    // 但抢体信号被每拍清掉=白解)。add-only: 条件 filter + 两个守卫, 非夜裸路径完全不变。
+    const _suTod = (() => { try { return bot.time.timeOfDay || 0; } catch (e) { return 0; } })();
+    const _suNight = _suTod >= 12542 && _suTod <= 23459;
+    const _suArmorRe = /_helmet$|_chestplate$|_leggings$|_boots$/;
+    const _suHasArmor = (() => {
+        try {
+            return (bot.inventory.slots || []).slice(5, 9).some(sl => sl && _suArmorRe.test(sl.name || ''))
+                || bot.inventory.items().some(i => _suArmorRe.test(i.name || ''));
+        } catch (e) { return false; }
+    })();
+    const _suNightNaked = _suNight && !_suHasArmor;
+    if (_suNightNaked) dbg('★夜裸: 保留 self_defense/self_preservation 护体 (不冻结, 不清 interrupt)');
+    const GUARD = ['mobility', 'self_preservation', 'self_defense', 'item_collecting', 'unstuck', 'hunting', 'cowardice', 'idle_staring', 'elbow_room', 'torch_placing', 'auto_eat']
+        .filter(m => !(_suNightNaked && (m === 'self_defense' || m === 'self_preservation')));
     const prevModes = {};
     try { for (const m of GUARD) if (bot.modes && bot.modes.exists && bot.modes.exists(m)) { prevModes[m] = bot.modes.isOn(m); bot.modes.setOn(m, false); } } catch (e) {}
     try { bot.clearControlStates(); } catch (e) {}
@@ -664,7 +681,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
             let assisted = false;
             while (!surfaceReady() && yNow() < legY && Date.now() - started < 30000 && !deadlineHit()) {
                 await skills.wait(bot, 700);
-                if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
+                if (!_suNightNaked && bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
                 const p = bot.entity.position.clone();
                 const moved = p.distanceTo(last);
                 const pathing = !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving());
@@ -691,7 +708,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
         // for the live "pathing but no controls / no movement" stair-edge stall.
         let stall = 0;
         while (!surfaceReady() && yNow() < targetY && stall < 4 && !deadlineHit()) {
-            if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
+            if (!_suNightNaked && bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
             const y0 = yNow();
             const legY = Math.min(y0 + 8, targetY);
             let err = '';
