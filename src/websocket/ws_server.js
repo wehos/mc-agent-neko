@@ -143,30 +143,23 @@ class WSMessageServer {
         // "process alive but task dead". Broadcast every 15s; the bridge persists the
         // latest snapshot to vitals.json for the watchdog/patrol to read.
         this.startVitalsTimer();
-        this.startDebugChatTimer();
         this.startStatusNLTimer();
     }
 
-    // ★2026-07-07 用户调试请求: bot 每 5s 在游戏聊天里喊出当前在干什么 ("他在想什么")。
-    //   telemetry(15s→vitals.json/UI) 到不了游戏聊天, 这个直发 bot.chat。env DEBUG_CHAT=0 可关。
-    startDebugChatTimer() {
-        if (this.debugChatInterval) clearInterval(this.debugChatInterval);
+    // ★2026-07-07 用户令 (取代原来每 5s 的 [dbg] 刷屏): 把"经 WS 与外部 LLM 往来的消息"(仅文本)
+    //   同步到游戏聊天, 方便肉眼 debug —— 出口=每条 bot_status_nl 的中文人话(startStatusNLTimer 调用),
+    //   入口=收到的外部指令 task/run_skill/cancel(handleMessage 调用)。不再周期性刷原始字段。
+    //   env DEBUG_CHAT=0 整体关闭。MC chat 单条上限 256, 超长截断; 全 try/catch, 聊天镜像绝不伤 agent。
+    _chatToMC(text) {
         if (String(process.env.DEBUG_CHAT || '1') === '0') return;
-        this.debugChatInterval = setInterval(() => {
-            try {
-                const bot = this.agent && this.agent.bot;
-                if (!bot || !bot.entity || !bot.entity.position || typeof bot.chat !== 'function') return;
-                const p = bot.entity.position;
-                const skill = this._skillRunningName || bot._currentSkill || 'idle';
-                const mob = ((bot._mobility && bot._mobility.state) || '?') + (bot._mobility && bot._mobility.enclosed ? '/ENC' : '');
-                let host = 0;
-                try { for (const id in bot.entities) { const e = bot.entities[id]; if (e && e.kind === 'Hostile mobs' && e.position && p.distanceTo(e.position) < 16) host++; } } catch (e) {}
-                const held = (bot.heldItem && bot.heldItem.name) || 'empty';
-                const night = (() => { try { const t = bot.time.timeOfDay; return (t >= 12542 && t <= 23459) ? 'night' : 'day'; } catch (e) { return '?'; } })();
-                const msg = `[dbg] ${skill} | ${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)} ${night} hp${Math.round(bot.health ?? -1)}/f${bot.food ?? -1} mob=${mob} host=${host} held=${held}`;
-                try { bot.chat(msg); } catch (e) {}
-            } catch (e) { /* debug chat must never hurt the agent */ }
-        }, 5000);
+        try {
+            const bot = this.agent && this.agent.bot;
+            if (!bot || typeof bot.chat !== 'function' || !bot.entity) return;
+            let s = String(text == null ? '' : text).replace(/[\r\n]+/g, ' ').trim();
+            if (!s) return;
+            if (s.length > 250) s = s.slice(0, 247) + '...';
+            bot.chat(s);
+        } catch (e) { /* chat mirror must never hurt the agent */ }
     }
 
     // ★2026-07-07 外部 LLM 集成 — 出口: 每 10s 广播一条中文自然语言状态 (bot_status_nl)。
@@ -180,7 +173,9 @@ class WSMessageServer {
             try {
                 const bot = this.agent && this.agent.bot;
                 if (!bot || !bot.entity || !bot.entity.position) return;
-                this.broadcast({ type: 'bot_status_nl', ts: Date.now(), ...this._statusNL(bot) });
+                const nl = this._statusNL(bot);
+                this.broadcast({ type: 'bot_status_nl', ts: Date.now(), ...nl });
+                this._chatToMC(nl.text);   // ★用户令: 发给外部 LLM 的人话同步进游戏聊天(仅文本, 无图片)
             } catch (e) { /* NL status must never hurt the agent */ }
         }, ms);
     }
@@ -387,6 +382,14 @@ class WSMessageServer {
             });
             return;
         }
+
+        // ★2026-07-07 用户令: 把收到的外部 LLM 指令(仅文本)同步到游戏聊天, 便于 debug。
+        //   ping/query_inventory 是心跳/快照噪声, 不镜像。
+        try {
+            if (data.type === 'task') this._chatToMC(`◀外部指令[task] ${data.task}`);
+            else if (data.type === 'run_skill') this._chatToMC(`◀外部指令[run_skill] ${data.skill}(${JSON.stringify(data.args || [])})`);
+            else if (data.type === 'cancel_skill') this._chatToMC(`◀外部指令[cancel] ${data.reason || ''}`);
+        } catch (e) { /* incoming chat mirror must never hurt the agent */ }
 
         switch (data.type) {
             case 'task':
@@ -1095,10 +1098,6 @@ class WSMessageServer {
         if (this.vitalsInterval) {
             clearInterval(this.vitalsInterval);
             this.vitalsInterval = null;
-        }
-        if (this.debugChatInterval) {
-            clearInterval(this.debugChatInterval);
-            this.debugChatInterval = null;
         }
         if (this.statusNLInterval) {
             clearInterval(this.statusNLInterval);
