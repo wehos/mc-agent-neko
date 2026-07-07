@@ -123,8 +123,13 @@ export class Agent {
         
         this.bot.on('chat', (username, message) => {
             if (serverProxy.getNumOtherAgents() > 0) return;
-            // only respond to open chat messages when there are no other agents
-            respondFunc(username, message);
+            // ★TEMP (用户令 2026-07-07, 见 docs/ingame-chat-as-admin.md): 游戏内 chat 一律视为 admin
+            //   指令喂给 agent (临时措施) —— 让人能直接在 MC 聊天里命令 bot, 且走与 WS task 相同的
+            //   admin 完成/独占优先级机制。★必须先滤掉 bot 自己的消息: NL 镜像/◀外部指令 都是 bot.chat,
+            //   会作为 'chat' 事件被自己听到; admin 化后 respondFunc 的 self 过滤(username===this.name)
+            //   若 MC 用户名≠agent 名则漏网 → 这里双重滤(name + bot.username)防自我回灌成死循环。
+            if (username === this.name || (this.bot && username === this.bot.username)) return;
+            respondFunc('admin', message);
         });
 
         // Set up auto-eat
@@ -675,6 +680,13 @@ export class Agent {
         // empty string. Reset on every entry.
         let lastConversationReply = '';
 
+        // ★2026-07-07 外部意图独占 (用户令): admin 指令(WS task / 游戏内 chat)由内部 gpt-5.4-mini 执行
+        //   期间, 内核完全让位——不派发自己的提案(夜挖/FREE_PLAY)也不 force 灰区求生——直到本 chat-loop
+        //   结束(下方 finally 清)。这实现"外部意图=最高优先级、独占, 直到 gpt-5.4-mini 判定任务完成"。
+        //   kernel._survivalTick 读 bot._extIntentUntil 决定让位。5min 是崩溃兜底(正常由 finally 清)。
+        //   硬保命反射(modes vitalNow: 溺水/着火/岩浆/hp≤4)独立于内核、仍生效。
+        if (source === 'admin') { try { this.bot._extIntentUntil = Date.now() + 300000; } catch (e) {} }
+
         try {
             await this.checkTaskDone();
             if (!source || !message) {
@@ -840,6 +852,8 @@ export class Agent {
             // admin players, and the second invocation of nested handleMessage
             // calls where the outer call already consumed the slot).
             if (source === 'admin') {
+                // ★外部意图独占: 本 admin chat-loop 结束(gpt-5.4-mini 判定完成)→ 释放让位戳, 内核恢复自主派发。
+                try { this.bot._extIntentUntil = 0; } catch (e) {}
                 try {
                     // The mini LLM often emits just '\t' when it has no
                     // narrative to add (see neko.json's "respond with just

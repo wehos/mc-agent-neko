@@ -235,6 +235,12 @@ export class Kernel {
 
     // ── survival ───────────────────────────────────────────────────────────
     async _survivalTick() {
+        // ★2026-07-07 外部意图独占 (用户令): admin 指令(WS task / 游戏内 chat)由内部 gpt-5.4-mini 执行
+        //   期间, 内核完全让位 —— 不派发任何提案(夜挖/FREE_PLAY), 也不 force 灰区求生 —— 直到那个
+        //   chat-loop 结束(agent.handleMessage 的 finally 清 bot._extIntentUntil)。这就是"外部意图=最高
+        //   优先级、独占, 直到 gpt-5.4-mini 判定完成"。硬保命反射(modes vitalNow: 溺水/着火/岩浆/hp≤4)
+        //   独立于内核、仍生效; 5min 戳是崩溃兜底。
+        if (this.bot._extIntentUntil && Date.now() < this.bot._extIntentUntil) return;
         const ms = mentalState(this.bot);
         this._trackAnchor();
         // 0) ★GRAY-ZONE force-commit: 唯一决策人钩子。首飞实录(2026-07-06 00:22): 僵局态
