@@ -76,6 +76,25 @@ function inWaterOxygenLow(bot) {
     } catch (e) { return false; }
 }
 
+// ★2026-07-08 用户令 "对末影人不要过度反应": 末影人中立, 未激怒前不算威胁 — 否则一只乱传送的
+// 末影人被 isHostile 计入 s.hostiles → 战术官选 RELOCATE "break contact with enderman"(实拍
+// 15:36:48 host=1)白折腾。判据=它刚打了我们(近战, 5格内 3s 内掉血), sticky ~10s(挂
+// bot._endThreatUntil, 与 feedUp 同一判据/同一 Map)。被激怒/正在打我们时照常进 hostiles(掉血
+// 3s 内翻回)→ 保命不受影响。不动 mcdata.isHostile → self_defense 仍对被激怒末影人还手。
+function endermanIsThreat(bot, e) {
+    try {
+        if (!e || !e.position || !bot || !bot.entity) return false;
+        let m = bot._endThreatUntil;
+        if (!(m instanceof Map)) { m = new Map(); bot._endThreatUntil = m; }
+        const now = Date.now();
+        if (m.size > 32) { for (const [k, v] of m) { if (v < now) m.delete(k); } }
+        if ((now - (bot.lastDamageTime || 0) < 3000) && e.position.distanceTo(bot.entity.position) < 5) m.set(e.id, now + 10000);
+        const until = m.get(e.id) || 0;
+        if (until <= now) { if (until) m.delete(e.id); return false; }
+        return true;
+    } catch (err) { return false; }
+}
+
 function snap(bot, ctx) {
     const p = bot.entity.position;
     const hostiles = [];
@@ -84,6 +103,7 @@ function snap(bot, ctx) {
             if (!e || e === bot.entity || !e.position) continue;
             let hostile = false;
             try { hostile = ctx.mc.isHostile(e); } catch (e2) {}
+            if (hostile && /^enderman$/i.test(e.name || '') && !endermanIsThreat(bot, e)) hostile = false;   // 中立末影人不进 hostiles(未激怒)
             if (!hostile) continue;
             const d = e.position.distanceTo(p);
             if (d <= 24) hostiles.push({ id: e.id, name: e.name || '?', d: +d.toFixed(1), dy: Math.round(e.position.y - p.y), entity: e });
@@ -148,6 +168,7 @@ function hostileIdsWithin(bot, ctx, range) {
             if (!e || e === bot.entity || !e.position) continue;
             let hostile = false;
             try { hostile = ctx.mc.isHostile(e); } catch (e2) {}
+            if (hostile && /^enderman$/i.test(e.name || '') && !endermanIsThreat(bot, e)) hostile = false;   // 同 snap: 中立末影人不算
             if (hostile && e.position.distanceTo(p) <= range) ids.add(e.id);
         }
     } catch (e) {}

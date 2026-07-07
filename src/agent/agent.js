@@ -4,11 +4,12 @@ import { VisionInterpreter } from './vision/vision_interpreter.js';
 import { Prompter } from '../models/prompter.js';
 import { initModes } from './modes.js';
 import { initBot } from '../utils/mcdata.js';
-import { containsCommand, commandExists, executeCommand, truncCommandMessage, isAction, blacklistCommands } from './commands/index.js';
+import { containsCommand, commandExists, executeCommand, truncCommandMessage, truncCommandMessageMulti, parseCommandStrings, isAction, blacklistCommands } from './commands/index.js';
 import { ActionManager } from './action_manager.js';
 import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
 import { SelfPrompter } from './self_prompter.js';
+import { AdminMission } from './admin_mission.js';
 import { createFramework } from './framework/index.js';
 import { installVineUnstick } from './library/vine_unstick.js';
 import convoManager from './conversation.js';
@@ -60,6 +61,12 @@ export class Agent {
         this.npc = new NPCContoller(this);
         this.memory_bank = new MemoryBank();
         this.self_prompter = new SelfPrompter(this);
+        // ★2026-07-07 ADMIN MISSION (用户令): every admin command (WS 'task' + in-game chat) becomes a
+        //   persistent highest-priority self-prompt mission (done/overridden/impossible/survival).
+        //   Default ON; set MC_ADMIN_MISSION=0 to instantly revert to the legacy one-shot admin path
+        //   (every touched hot path is gated on this._missionEnabled → flag-OFF = today's behavior).
+        this._missionEnabled = process.env.MC_ADMIN_MISSION !== '0';
+        this.adminMission = new AdminMission(this);
         convoManager.initAgent(this);
         await this.prompter.initExamples();
 
@@ -129,6 +136,13 @@ export class Agent {
             //   会作为 'chat' 事件被自己听到; admin 化后 respondFunc 的 self 过滤(username===this.name)
             //   若 MC 用户名≠agent 名则漏网 → 这里双重滤(name + bot.username)防自我回灌成死循环。
             if (username === this.name || (this.bot && username === this.bot.username)) return;
+            // ★2026-07-07 ADMIN MISSION: in-game chat becomes a persistent mission too (origin='chat',
+            //   no wire task_id → local teardown only, no task_finished frame). The line-above double
+            //   self-filter still guards mission-emitted banners/status chat from re-entry.
+            if (this._missionEnabled && this.adminMission) {
+                this.adminMission.submit({ text: message, taskId: null, origin: 'chat' });
+                return;
+            }
             respondFunc('admin', message);
         });
 
@@ -188,8 +202,33 @@ export class Agent {
         this.bot.interrupt_code = false;
     }
 
+    // ★2026-07-08 (用户令: 给 admin 回合把 cooldown 降到 0、允许多命令一回合). 复用 bot._extIntentUntil
+    //   作为"外部意图(admin 指令 / mission)独占中"的信号 —— begin()/tick() 续期, end()/finally 清零,
+    //   覆盖 admin 首轮 + mission 全程 self-prompt 轮(即用户实观的 !inventory/!getWood 连环慢轮)。
+    //   两个提速开关各自独立、可秒回退:
+    //     • MC_ADMIN_NO_COOLDOWN(prompter.checkCooldown 读) —— 独占期免 profile 3s 冷却。
+    //     • MC_ADMIN_MULTICMD(下方 handleMessage 读)     —— 独占期一回复可连发多命令、按序执行。
+    _extIntentActive() {
+        try { return !!(this.bot && this.bot._extIntentUntil && Date.now() < this.bot._extIntentUntil); }
+        catch (e) { return false; }
+    }
+    _adminMultiCmdActive() {
+        if (process.env.MC_ADMIN_MULTICMD === '0') return false;
+        return this._extIntentActive();
+    }
+    _adminMultiCmdMax() {
+        const n = parseInt(process.env.MC_ADMIN_MULTICMD_MAX, 10);
+        return (Number.isFinite(n) && n > 0) ? n : 6;   // 单回合执行命令上限, 防失控连发
+    }
+
     shutUp() {
         this.shut_up = true;
+        // ★2026-07-07 ADMIN MISSION: a human "shut up" is a legitimate abort — route it through the
+        //   single end() funnel (clears extIntent, fires exactly one task_finished) BEFORE the raw
+        //   self_prompter.stop, so a mission can't leak (extIntent pinned / no terminal frame).
+        if (this._missionEnabled && this.adminMission && this.adminMission.isActive()) {
+            this.adminMission.end('aborted', 'shut_up');
+        }
         if (this.self_prompter.isActive()) {
             this.self_prompter.stop(false);
         }
@@ -336,10 +375,19 @@ export class Agent {
             serverProxy.login();
             
             // Set skin for profile, requires Fabric Tailor. (https://modrinth.com/mod/fabrictailor)
-            if (this.prompter.profile.skin)
-                this.bot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
-            else
+            // ★本地皮肤支持 (session#14 用户令: 固定皮肤每次登录都套上):
+            //   - 本地 PNG 走 `/skin set upload <variant> <路径>` —— FabricTailor 读取"服务器"
+            //     (= 本机 LAN 宿主) 上的文件, 经 MineSkin 生成带签名材质 (实测 ~4s, 免 API key)。
+            //   - http(s):// 仍走 `/skin set URL` —— 仅限 fabrictailor.json texture_allowed_domains 白名单域。
+            //   variant(model) 缺省 classic。皮肤文件与路径见 neko.json 的 "skin" 字段。
+            const skin = this.prompter.profile.skin;
+            if (skin && skin.path) {
+                const variant = skin.model || 'classic';
+                const verb = /^https?:\/\//i.test(skin.path) ? 'URL' : 'upload';
+                this.bot.chat(`/skin set ${verb} ${variant} ${skin.path}`);
+            } else {
                 this.bot.chat(`/skin clear`);
+            }
         });
 
         const spawnTimeoutDuration = settings.spawn_timeout || 30;
@@ -476,11 +524,23 @@ export class Agent {
             // dialog LLM is informed regardless of pending state.
             try {
                 const deathCause = this._inferDamageCause();
+                // ★2026-07-07 用户令: 死亡告警【默认 keep（物品保留）】。旧文案硬编码"物品已掉落原地"是错的
+                //   (本世界 keepInventory 一直 ON)。改为: 只有 keepinv.json 【明确且新鲜(24h内)核实为 false】才
+                //   报"掉落"; 其余一切(核实为 true / 缺失 / 过期 / 无法核实)一律默认"保留"。当前世界丢了作弊权限、
+                //   /gamerule 查询被拒(见 events.log)无法核实 —— 用户决定先乐观默认保留, 根治(恢复查询权限)回头再说。
+                let verifiedDrop = false;
+                try {
+                    const kv = JSON.parse(fs.readFileSync('bots/_supervisor/keepinv.json', 'utf8'));
+                    if (kv && kv.value === false && kv.ts && Date.now() - kv.ts < 86400000) verifiedDrop = true;
+                } catch (e) { /* 缺失/过期/不可读 → 默认 keep */ }
+                const text = verifiedDrop ? '角色阵亡，物品已掉落原地，即将重生。'
+                    : '角色阵亡（死亡不掉落，物品已保留），即将重生。';
                 wsServer.broadcast({
                     type: 'alert',
                     severity: 'critical',
-                    text: '角色阵亡。物品已掉落原地，即将重生。',
+                    text,
                     hp: 0,
+                    keepInventory: !verifiedDrop,   // 默认 true(保留); 仅新鲜核实为 false 才 false
                     cause: deathCause,
                     timestamp: Date.now(),
                 });
@@ -488,14 +548,22 @@ export class Agent {
                 console.warn('death alert broadcast failed:', e);
             }
 
-            // Report task interruption due to death
-            wsServer.onTaskCompleted({
-                status: 'interrupted',
-                message: '任务因死亡而中断',
-                score: 0,
-                reason: 'death'
-            });
-            
+            // ★2026-07-07 ADMIN MISSION: death is a survival interrupt, not a task end. Keep the
+            //   mission live and resume after respawn (monitorRespawn suppresses the sticky grind);
+            //   only when the death budget is exhausted does the mission fire ONE terminal frame.
+            //   The unconditional critical 'alert' above still informs the dialog LLM of every death.
+            if (this._missionEnabled && this.adminMission && this.adminMission.isActive()) {
+                try { this.adminMission.noteDeath(); } catch (e) { console.error('adminMission.noteDeath:', e); }
+            } else {
+                // Report task interruption due to death (legacy one-shot path)
+                wsServer.onTaskCompleted({
+                    status: 'interrupted',
+                    message: '任务因死亡而中断',
+                    score: 0,
+                    reason: 'death'
+                });
+            }
+
             // Monitor respawn to ensure bot position is valid after death
             this.monitorRespawn();
         });
@@ -619,12 +687,18 @@ export class Agent {
         
         // Always send task_finished message when bot disconnects
         try {
-            wsServer.onTaskCompleted({
-                status: 'interrupted',
-                message: '任务中断',
-                score: 0,
-                reason: reason
-            });
+            // ★2026-07-07 ADMIN MISSION: route a mission through end() so the terminal frame echoes
+            //   the mission's own task_id (correct correlation across reconnect/restart), exactly once.
+            if (this._missionEnabled && this.adminMission && this.adminMission.isActive()) {
+                this.adminMission.end('aborted', reason);
+            } else {
+                wsServer.onTaskCompleted({
+                    status: 'interrupted',
+                    message: '任务中断',
+                    score: 0,
+                    reason: reason
+                });
+            }
             console.log('Task interrupted due to bot disconnection, task_finished message sent');
         } catch (error) {
             console.error('Failed to send task interruption message:', error);
@@ -644,7 +718,7 @@ export class Agent {
         const maxDelay = 10000; // Maximum 10 seconds between retries
         const jitter = Math.random() * 1000; // Add up to 1 second random jitter
         const delay = Math.min(exponentialDelay, maxDelay) + jitter;
-        
+
         console.log(`Waiting ${Math.round(delay / 1000)} seconds before reconnection...`);
         
         setTimeout(async () => {
@@ -672,6 +746,25 @@ export class Agent {
     }
     }
 
+    // ★2026-07-08 用户令: 软卡顿的兜底【重连, 不是退进程】。当"先脱困、15s 还没解决"的阶梯走到
+    //   头时调这里: 干净地掐掉当前连接 → 走既有的 'end' → handleBotDisconnection → 重连流程重进
+    //   世界。重进世界能清掉客户端侧楔死(卡方块/寻路死锁/挖掘挂死), 而 agent 进程、历史、任务全都
+    //   活着——比 process.exit 温和得多, 也是用户要的行为。绝不 process.exit。
+    reconnectNow(reason = 'stuck') {
+        if (this._disconnectHandled) return;   // a real disconnect/reconnect is already in flight
+        if (this._reconnectNowInFlight) return; // don't stack self-triggered reconnects
+        this._reconnectNowInFlight = true;
+        setTimeout(() => { this._reconnectNowInFlight = false; }, 30000); // clear the guard well after reconnect settles
+        console.log(`♻️ reconnectNow(${reason}) — dropping connection to break a wedge (NO process exit)`);
+        try {
+            // bot.quit fires 'end' → handleBotDisconnection → reconnect (existing path).
+            this.bot.quit(String(reason));
+        } catch (e) {
+            // If quit throws (bot already half-dead), drive the disconnection handler directly.
+            try { this.handleBotDisconnection(reason); } catch (e2) {}
+        }
+    }
+
     async handleMessage(source, message, max_responses=null) {
         // ``lastConversationReply`` is the most recent free-text reply the
         // agent emitted while servicing this message — used by the WS bridge
@@ -685,7 +778,12 @@ export class Agent {
         //   结束(下方 finally 清)。这实现"外部意图=最高优先级、独占, 直到 gpt-5.4-mini 判定任务完成"。
         //   kernel._survivalTick 读 bot._extIntentUntil 决定让位。5min 是崩溃兜底(正常由 finally 清)。
         //   硬保命反射(modes vitalNow: 溺水/着火/岩浆/hp≤4)独立于内核、仍生效。
-        if (source === 'admin') {
+        // ★2026-07-07 ADMIN MISSION: when the turn is controller-managed (AdminMission.begin ran
+        //   handleMessage), the mission owns extIntent + the 🎯 banner + the preempt — skip this
+        //   one-shot setup to avoid a double banner/preempt. Flag-OFF (or a non-mission admin turn)
+        //   runs today's block byte-for-byte.
+        const _missionManagedTurn = this._missionEnabled && this.adminMission && this.adminMission.turnManaged;
+        if (source === 'admin' && !_missionManagedTurn) {
             try { this.bot._extIntentUntil = Date.now() + 300000; } catch (e) {}
             // ★2026-07-07 用户令: 游戏聊天里提示"开始执行指令", 让人一眼知道 bot 正在跑 LLM/chat 任务(而非自主)。
             //   env DEBUG_CHAT=0 可关。self 消息会被 bot.on('chat') 的 self 过滤挡掉, 不回灌。
@@ -792,53 +890,105 @@ export class Agent {
                 let command_name = containsCommand(res);
 
                 if (command_name) { // contains query or command
-                    res = truncCommandMessage(res); // everything after the command is ignored
-                    this.history.add(this.name, res);
+                    // ★2026-07-08 (用户令): admin/mission 独占回合(_extIntentActive) + MC_ADMIN_MULTICMD!=0
+                    //   时, 一条回复里的多条命令按序全部执行, 削减 LLM 往返; 否则(自主/普通回合, 或本回复
+                    //   只有一条命令)走下方 else —— 与旧版逐字节一致的"每回合一条命令"路径。
+                    const cmd_batch = this._adminMultiCmdActive() ? parseCommandStrings(res) : null;
 
-                    if (!commandExists(command_name)) {
-                        this.history.add('system', `Command ${command_name} does not exist.`);
-                        console.warn('Agent hallucinated command:', command_name)
-                        continue;
-                    }
+                    if (cmd_batch && cmd_batch.length > 1) {
+                        const trimmed = truncCommandMessageMulti(res); // 保留到末条命令, 丢弃其后散文
+                        this.history.add(this.name, trimmed);
+                        let pre_message = res.substring(0, res.indexOf(cmd_batch[0])).trim();
 
-                    if (checkInterrupt()) break;
-                    this.self_prompter.handleUserPromptedCmd(self_prompt, isAction(command_name));
-
-                    let pre_message = res.substring(0, res.indexOf(command_name)).trim();
-
-                    if (settings.show_command_syntax === "full") {
-                        this.routeResponse(source, res);
-                    }
-                    else if (settings.show_command_syntax === "shortened") {
-                        // show only "used !commandname"
-                        let chat_message = `*used ${command_name.substring(1)}*`;
+                        if (settings.show_command_syntax === "full") {
+                            this.routeResponse(source, trimmed);
+                        }
+                        else if (settings.show_command_syntax === "shortened") {
+                            let names = cmd_batch.map(c => (containsCommand(c) || '!?').substring(1)).join(' ');
+                            let chat_message = `*used ${names}*`;
+                            if (pre_message.length > 0)
+                                chat_message = `${pre_message}  ${chat_message}`;
+                            this.routeResponse(source, chat_message);
+                        }
+                        else {
+                            if (pre_message.length > 0)
+                                this.routeResponse(source, pre_message);
+                        }
                         if (pre_message.length > 0)
-                            chat_message = `${pre_message}  ${chat_message}`;
-                        this.routeResponse(source, chat_message);
+                            lastConversationReply = pre_message;
+
+                        const MAX_BATCH = this._adminMultiCmdMax();
+                        let batch_broke = false;
+                        for (let ci = 0; ci < cmd_batch.length && ci < MAX_BATCH; ci++) {
+                            const cstr = cmd_batch[ci];
+                            const cname = containsCommand(cstr);
+                            if (!cname || !commandExists(cname)) {
+                                this.history.add('system', `Command ${cname || cstr} does not exist.`);
+                                console.warn('Agent hallucinated command:', cname || cstr);
+                                continue;   // 跳过坏命令, 不中断整批
+                            }
+                            if (checkInterrupt()) { batch_broke = true; break; }
+                            this.self_prompter.handleUserPromptedCmd(self_prompt, isAction(cname));
+                            let execute_res = await executeCommand(this, cstr);
+                            console.log('Agent executed (batch):', cname, 'and got:', execute_res);
+                            used_command = true;
+                            if (execute_res)
+                                this.history.add('system', execute_res);
+                            else { batch_broke = true; break; }   // 动作被打断(falsy) → 停批, 交回上层
+                        }
+                        if (cmd_batch.length > MAX_BATCH)
+                            this.history.add('system', `(Only the first ${MAX_BATCH} commands ran this turn; re-issue the rest if still needed.)`);
+                        if (batch_broke) break;
                     }
-                    else {
-                        // no command at all
-                        if (pre_message.trim().length > 0)
-                            this.routeResponse(source, pre_message);
+                    else { // single command per turn — legacy behavior, unchanged
+                        res = truncCommandMessage(res); // everything after the command is ignored
+                        this.history.add(this.name, res);
+
+                        if (!commandExists(command_name)) {
+                            this.history.add('system', `Command ${command_name} does not exist.`);
+                            console.warn('Agent hallucinated command:', command_name)
+                            continue;
+                        }
+
+                        if (checkInterrupt()) break;
+                        this.self_prompter.handleUserPromptedCmd(self_prompt, isAction(command_name));
+
+                        let pre_message = res.substring(0, res.indexOf(command_name)).trim();
+
+                        if (settings.show_command_syntax === "full") {
+                            this.routeResponse(source, res);
+                        }
+                        else if (settings.show_command_syntax === "shortened") {
+                            // show only "used !commandname"
+                            let chat_message = `*used ${command_name.substring(1)}*`;
+                            if (pre_message.length > 0)
+                                chat_message = `${pre_message}  ${chat_message}`;
+                            this.routeResponse(source, chat_message);
+                        }
+                        else {
+                            // no command at all
+                            if (pre_message.trim().length > 0)
+                                this.routeResponse(source, pre_message);
+                        }
+
+                        // Track the natural-language portion the agent emitted
+                        // alongside its command so a "I'll grab some logs !collectBlocks(...)"
+                        // turn still yields useful text in the final task_finished
+                        // frame even though the loop continues after the command.
+                        if (pre_message.length > 0) {
+                            lastConversationReply = pre_message;
+                        }
+
+                        let execute_res = await executeCommand(this, res);
+
+                        console.log('Agent executed:', command_name, 'and got:', execute_res);
+                        used_command = true;
+
+                        if (execute_res)
+                            this.history.add('system', execute_res);
+                        else
+                            break;
                     }
-
-                    // Track the natural-language portion the agent emitted
-                    // alongside its command so a "I'll grab some logs !collectBlocks(...)"
-                    // turn still yields useful text in the final task_finished
-                    // frame even though the loop continues after the command.
-                    if (pre_message.length > 0) {
-                        lastConversationReply = pre_message;
-                    }
-
-                    let execute_res = await executeCommand(this, res);
-
-                    console.log('Agent executed:', command_name, 'and got:', execute_res);
-                    used_command = true;
-
-                    if (execute_res)
-                        this.history.add('system', execute_res);
-                    else
-                        break;
                 }
                 else { // conversation response
                     this.history.add(this.name, res);
@@ -862,7 +1012,10 @@ export class Agent {
             // currentTask is null (covers regular in-game chat from real
             // admin players, and the second invocation of nested handleMessage
             // calls where the outer call already consumed the slot).
-            if (source === 'admin') {
+            // ★2026-07-07 ADMIN MISSION: for a controller-managed turn, extIntent + completion are
+            //   owned by AdminMission.end() (fires exactly once at TRUE mission end, not per-turn).
+            //   So skip this legacy one-shot completion entirely. Flag-OFF path unchanged.
+            if (source === 'admin' && !_missionManagedTurn) {
                 // ★外部意图独占: 本 admin chat-loop 结束(gpt-5.4-mini 判定完成)→ 释放让位戳, 内核恢复自主派发。
                 try { this.bot._extIntentUntil = 0; } catch (e) {}
                 // ★用户令: 提示指令回合结束、回到自主行动。
@@ -1061,9 +1214,10 @@ export class Agent {
         this.npc.init();
 
         if (firstStart) {
-            // Framework v2 kernel (survival/companion decision loop). Feature-flagged
-            // OFF by default — when disabled tick() is a no-op and the existing
-            // missionNether path is untouched. See docs/framework-v2-scaffold.md.
+            // Framework v2 kernel (survival/companion decision loop). ON by default
+            // (2026-07-07 用户令: 默认自主 framework + admin 独占优先) — when disabled
+            // (MC_FRAMEWORK_V2=0) tick() is a no-op and the existing missionNether path
+            // is untouched. See docs/framework-v2-scaffold.md.
             // observe:true turns on S3-shadow logging (proposer vs live skill → framework-shadow.log)
             // WITHOUT enabling the decision loop — gathers parity data before any live cutover.
             //
@@ -1073,8 +1227,11 @@ export class Agent {
             //      MC_FRAMEWORK_V2=1        → enable the kernel decision loop (also read in kernel.js)
             //      MC_FRAMEWORK_SHADOW=0    → let it actually DISPATCH skills (else it only shadow-logs)
             //    So `MC_FRAMEWORK_V2=1 MC_FRAMEWORK_SHADOW=0` = live tier-chain driving.
-            const _fwEnabled = process.env.MC_FRAMEWORK_V2 === '1';
-            const _fwShadow = process.env.MC_FRAMEWORK_SHADOW !== '0'; // shadow ON unless explicitly disabled
+            // ★2026-07-07 用户令: framework 默认 ON + 默认 LIVE 派发 (baseline 空转不再是默认)。
+            //   admin 指令仍最高优先 —— "外部意图独占"(_extIntentUntil) + 入口 auto-preempt 压制 framework;
+            //   硬保命(溺水/着火/岩浆/血粮危急)凌驾一切。关自主用 MC_FRAMEWORK_V2=0; 只影子用 MC_FRAMEWORK_SHADOW=1。
+            const _fwEnabled = process.env.MC_FRAMEWORK_V2 !== '0';    // ON unless explicitly disabled (=0)
+            const _fwShadow = process.env.MC_FRAMEWORK_SHADOW === '1'; // LIVE unless explicitly shadow-only (=1)
             try {
                 this.framework = createFramework(this, { observe: true, enabled: _fwEnabled, shadow: _fwShadow });
                 if (_fwEnabled) console.log(`🧠 framework-v2 kernel ENABLED (${_fwShadow ? 'SHADOW — logs only' : 'LIVE — driving skills'})`);
@@ -1233,6 +1390,9 @@ export class Agent {
             await this.bot.modes.update();
         }
         this.self_prompter.update(delta);
+        // ★2026-07-07 ADMIN MISSION housekeeping (rolling extIntent while ACTIVE + deadline +
+        //   re-arm after an external stop). Wrapped so a throw can never stall the heartbeat loop.
+        if (this._missionEnabled && this.adminMission) { try { this.adminMission.tick(delta); } catch (e) { console.error('adminMission.tick:', e); } }
         // Framework v2 kernel tick (no-op while feature flag is OFF).
         if (this.framework) { try { await this.framework.tick(delta); } catch (e) {} }
         await this.checkTaskDone();
@@ -1285,7 +1445,14 @@ export class Agent {
                 // runs its bounded corpse-run to reclaim dropped gear. Re-entry-guarded in
                 // runSkill, so a concurrent bridge resend is harmless.
                 try {
-                    if (fs.existsSync('bots/_supervisor/sticky_skill.json')) {
+                    if (this._missionEnabled && this.adminMission && this.adminMission.isActive()) {
+                        // ★2026-07-07 ADMIN MISSION owns the body — do NOT re-arm an unrelated sticky
+                        //   grind (it would seize the body and starve the mission forever, the
+                        //   red-team's most dangerous find). The mission self-heals via
+                        //   self_prompter.update() / adminMission.tick() after the in-place respawn.
+                        console.log('[adminMission] respawn: mission active — suppressing sticky_skill re-arm');
+                        try { this.adminMission.resumeAfterSupervised(); } catch (e) {}
+                    } else if (fs.existsSync('bots/_supervisor/sticky_skill.json')) {
                         const sticky = JSON.parse(fs.readFileSync('bots/_supervisor/sticky_skill.json', 'utf8'));
                         if (sticky && sticky.skill) {
                             // Single-shot re-arm: if a supervised skill is still running it'll
@@ -1456,12 +1623,18 @@ export class Agent {
         // Send task_finished message before killing the process
         if (!this.taskCompleted) {
             try {
-                wsServer.onTaskCompleted({
-                    status: 'interrupted',
-                    message: '任务中断',
-                    score: 0,
-                    reason: msg
-                });
+                // ★2026-07-07 ADMIN MISSION: end() fires the frame SYNCHRONOUSLY (before its await),
+                //   so a mission's terminal frame still goes out ahead of process.exit below.
+                if (this._missionEnabled && this.adminMission && this.adminMission.isActive()) {
+                    this.adminMission.end('aborted', msg);
+                } else {
+                    wsServer.onTaskCompleted({
+                        status: 'interrupted',
+                        message: '任务中断',
+                        score: 0,
+                        reason: msg
+                    });
+                }
                 console.log('Task interrupted due to agent restart, task_finished message sent');
             } catch (error) {
                 console.error('Failed to send task interruption message:', error);

@@ -12,6 +12,8 @@ import { canClutchWater } from './framework/tools/lava_guard.js';
 // 身体所有权仲裁 (Phase 1, 设计稿 bots/_supervisor/arbitration-design.md): execute() 是
 // 反射抢身体的唯一入口, 在这里挂接入点 A + 所有权令牌。
 import { resolve as arbitrate, setBodyOwner, releaseBodyOwner, currentOwner as arbiterCurrentOwner, vitalNow as arbiterVitalNow } from './framework/arbiter.js';
+// ★2026-07-08 用户令: auto_eat 的「补血 vs 补体力」开关 (临时禁用饥饿/食物本能)。见 contracts.foodInstinctsEnabled。
+import { foodInstinctsEnabled } from './framework/contracts.js';
 
 const FAMINE_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_|rotten_flesh|spider_eye/;
 const NORMAL_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_/;
@@ -959,6 +961,21 @@ const modes_list = [
             // checked at task boundaries and missed nightfall during a long chop/mine (the
             // "挖着挖着天黑被偷袭" window). Underground (y<50) is already safe; daytime handled by isDay.
             if (this.isDay(bot)) return false;
+            // ★ADMIN OVERRIDE (用户令 2026-07-08 "如果晚上 admin 要求挖矿, 可覆盖保命本能 / admin 命令可
+            //   覆盖夜间保命本能"): while an admin command/mission is driving (bot._extIntentUntil — set
+            //   ONLY for source==='admin' + AdminMission, NOT random player chat), the PROACTIVE night
+            //   shelter instinct YIELDS — the bot keeps doing what admin asked (e.g. mine at night)
+            //   instead of preventively bunkering. Mirror the kernel's exact mission yield-floor
+            //   (kernel.js:243-258) so modes ↔ kernel agree: yield only while NOT critical
+            //   (hp>11/food>7 in a mission, hp>6/food>2 for a one-shot admin turn); below that the
+            //   reflex reasserts and shelters. Hard floor (vitalNow: 溺水/着火/岩浆/hp≤4) + REACTIVE
+            //   defenses (shouldFlee / creeper dodge) are UNAFFECTED — they fire regardless of admin.
+            if (bot._extIntentUntil && Date.now() < bot._extIntentUntil) {
+                const _hp = (typeof bot.health === 'number') ? bot.health : 20;
+                const _food = (typeof bot.food === 'number') ? bot.food : 20;
+                const _missionActive = !!(bot._adminMission && bot._adminMission.active);
+                if (_hp > (_missionActive ? 11 : 6) && _food > (_missionActive ? 7 : 2)) return false;
+            }
             if (bot.entity.position.y < 50) return false;
             // ★ENCLOSED override (用户: "全知视角判断是否处在封闭地穴——是的话夜里不需要
             // 停"。y<50 是"地下=安全"的代理变量,漏掉了 y≥50 的崖体隧道/封闭洞——bot 在
@@ -1197,19 +1214,22 @@ const modes_list = [
             // ★ALREADY-IN-A-CAVE: NO self-sealing (用户: "夜里在矿底下能不能别再封路了?
             // 封路后就出不来" — the bot sealed itself inside a deep cliff hole at night,
             // then spent the whole next day bare-hand chewing its own caps back out,
-            // re-sealing them again each dusk: a self-built tomb-door loop). If there is
-            // already NATURAL cover overhead (solid blocks within 5 above head height)
-            // and no hostile within 6, we are in a cave/pit — the terrain IS the bunker.
-            // Stay put; do not place a single block.
+            // re-sealing them again each dusk: a self-built tomb-door loop). If we are
+            // ALREADY in a genuinely sealed box (close roof + 4 walls), the terrain IS the
+            // bunker — stay put, place nothing.
+            // ★用户实录 (07-08 "树下乘凉等死"): the old gate keyed the dwell on LOOSE overhead
+            // cover (ANY solid block 2-6 above) → a leaf canopy / a ledge / one block overhead
+            // with OPEN SIDES counted as "sheltered", so the bot dwelled under it and NEVER dug
+            // the 挖三填一 pocket — then a mob walked in from the open side and meleed it dead
+            // (death_log 07-07T15:44, coveredAbove:2, zombie@1.8m; also idled 8min @hp20/food20).
+            // Whether the thing overhead is a leaf or solid is IRRELEVANT — open sides = "a ledge
+            // the swarm walks under" (T-0067), NOT shelter. So mirror the hold decision: only a
+            // REAL sealedNightBox earns the passive dwell; not-really-boxed → fall through and
+            // actually dig the pocket.
             try {
                 const pC = bot.entity.position;
-                let covered = false;
-                for (let dyC = 2; dyC <= 6; dyC++) {
-                    const bC = bot.blockAt(pC.offset(0, dyC, 0));
-                    if (bC && bC.boundingBox === 'block') { covered = true; break; }
-                }
                 const nightHold = this.coveredNightHoldStatus(bot);
-                const quietCovered = covered && !this.nearbyHostiles(bot).some(e => e.position && e.position.distanceTo(pC) < 6);
+                const quietCovered = this.sealedNightBox(bot) && !this.nearbyHostiles(bot).some(e => e.position && e.position.distanceTo(pC) < 6);
                 if (nightHold.hold || quietCovered) {
                     // DWELL, don't fast-return: an instant return re-fires the mode every
                     // ~300ms ("Nightfall securing" spam round 3) and the interrupt storm
@@ -1218,7 +1238,7 @@ const modes_list = [
                         this._nightDwellAt = Date.now();
                         try {
                             fs.appendFileSync('bots/_supervisor/progress.txt',
-                                `[${new Date().toISOString()}] [self_preservation] night bunker dwell: covered=true hold=${nightHold.hold} hp=${Math.round(bot.health)} food=${bot.food} hostiles=${this.nearbyHostiles(bot).length} closest=${Number.isFinite(nightHold.closest) ? nightHold.closest.toFixed(1) : '-'} creeper=${Number.isFinite(nightHold.creeperDist) ? nightHold.creeperDist.toFixed(1) : '-'}\n`);
+                                `[${new Date().toISOString()}] [self_preservation] night bunker dwell: sealedBox=true hold=${nightHold.hold} hp=${Math.round(bot.health)} food=${bot.food} hostiles=${this.nearbyHostiles(bot).length} closest=${Number.isFinite(nightHold.closest) ? nightHold.closest.toFixed(1) : '-'} creeper=${Number.isFinite(nightHold.creeperDist) ? nightHold.creeperDist.toFixed(1) : '-'}\n`);
                         } catch (e) {}
                     }
                     // ★Pattern1 分段可醒 dwell: 保留"不快返"的防刷屏语义(见上注释), 但危险
@@ -1691,10 +1711,34 @@ const modes_list = [
                 // deep water (the mining case); surface/river swims use the y≥55 branch, unaffected.
                 const drowning = bot.oxygenLevel !== undefined && bot.oxygenLevel <= 14;
                 const y0 = Math.floor(bot.entity.position.y);
-                // Only defer to the pathfinder when it is ACTIVELY moving (a real path is
-                // executing). A goal that's set-but-stuck must NOT block the swim reflex,
-                // or the bot bobs in place forever behind a dead goal.
-                const pathing = bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving();
+                // ★用户令 (2026-07-08): goto 期间不因"在水里"就触发 get-out 本能 —— 随寻路走,
+                // 只有真【淹掉血】才允许 get-out 抢身自救。("只要不淹死就行;只有淹掉血才触发 get out")
+                //   drowningDamage = oxygenLevel≤0: mineflayer 氧气触 0 后每秒扣 HP = "淹掉血"。这是
+                //     goto 期间唯一解除"随寻路走"让位、放行 surface get-out 自救的门槛。
+                //   gotoActive = 寻路正在驱动身体。旧 `pathing` 直取 isMoving()(=path.length>0),但它
+                //     在重规划 / 换 movement 集 / unstick 窗口会瞬断为 false(goToGoal 全程常见),叠加旧
+                //     `pathing && !drowning` 让位一旦氧≤14(drowning) 就失效 → surface get-out 在行军途中
+                //     抢身把 bot 拽回岸边、打断 goto(用户实观)。改: 记住 pathfinder 最近真正跟路的时刻,
+                //     给一个短 grace 窗把这些秒级空档桥接过去(unstick 一轮 ~2-2.5s,5s 足够覆)。真正废弃
+                //     的死 goal 不再产生 isMoving → 窗口自然衰减 → get-out 恢复(保留原"set-but-stuck 死
+                //     goal 不得永久压制 swim 反射"的约束,不会永远 bob 在死 goal 后面)。
+                const drowningDamage = bot.oxygenLevel !== undefined && bot.oxygenLevel <= 0;
+                const _pfMoving = !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving());
+                if (_pfMoving) bot._swimPathMovingAt = Date.now();
+                const gotoActive = _pfMoving || (!!bot._swimPathMovingAt && (Date.now() - bot._swimPathMovingAt) < 5000);
+                // ★安全网 (用户令 2026-07-08 采纳): goto 让位分支 [B] 只按住 jump 骑水面 —— 但若被实心
+                // 顶盖罩在水下(y≥55, jump 顶不上去), 一路让位会把氧白白按到 0 才交还 get-out, 比旧码
+                // (氧≤14 就交给 [C]) 少 ~10s 逃生窗, 远岸下会淹死(验证 skeptic 实锤的窄角落)。补: 当
+                // hold-jump 被【实测证明顶不动】(本拍相对上一拍净上浮 <0.05 格) 且 氧气临界(≤8) 时判
+                // jumpFutile, 提前解除让位 → 落到下面 surface get-out([C]) 抢回逃生窗游岸/破顶/找竖井。
+                //   为何不误伤正常横渡: 开阔水面 jump 恒有效(持续上浮 → _rising=true; 或已到水面头出水
+                //   → 回氧 → 氧根本跌不到 8), 二者任一都令 jumpFutile=false, 故只在"顶盖罩水下将溺"这个
+                //   用户已认可的角落生效, 不违背"只有淹掉血才触发 get out"的正常横渡语义。y<55 罩顶归上面
+                //   deep 分支 [A](氧≤14 抢身), 本网只补 y≥55 的顶盖水下。
+                const _posY = bot.entity.position.y;
+                const _rising = _posY > ((bot._swimPrevY === undefined ? _posY : bot._swimPrevY) + 0.05);
+                bot._swimPrevY = _posY;
+                const _jumpFutile = bot.oxygenLevel !== undefined && bot.oxygenLevel <= 8 && !_rising;
                 if (drowning && y0 < 55) {
                     // DEEP & out of air (flooded tunnel / aquifer): no shore to swim to.
                     // The OLD code only towered straight UP toward the distant surface —
@@ -1766,10 +1810,16 @@ const modes_list = [
                         try { bot.clearControlStates(); } catch (e) {}
                     });
                 }
-                else if (pathing && !drowning) {
-                    // Deliberately swimming somewhere under pathfinder control (e.g.
-                    // crossing a river toward a goal). Don't hijack — just hold jump so we
-                    // ride the SURFACE instead of sinking and bleeding oxygen mid-crossing.
+                else if (gotoActive && !drowningDamage && !_jumpFutile) {
+                    // ★用户令: 寻路在驱动、没在淹血、且 hold-jump 确能自救(非顶盖罩死) → 绝不 hijack 去
+                    // get-out("In water — getting out")。只按住 jump 骑水面(不下沉、头出水面持续回氧),
+                    // 方向/路径全交给 pathfinder。氧气真见底扣血(drowningDamage)、或 hold-jump 被实测顶
+                    // 不动且氧临界(_jumpFutile, 见上安全网)时本分支才失效,落到下面 surface get-out 接管
+                    // —— 即"只有淹掉血才触发 get out"的正常语义 + 顶盖将溺的窄角落保命。这覆盖旧 `pathing
+                    // && !drowning`(crossing a river toward a goal 不 hijack),并把触发门从"氧≤14"放宽到
+                    // "真扣血",同时用 gotoActive 的 grace 窗消除 isMoving() 闪断导致的误抢身。
+                    // 注: 上面的 deep 溺水自救分支(drowning && y0<55,"heading for air")不受影响、照常在
+                    // 氧≤14 抢身 —— 那是深水将溺的保命反射(y<55),关它会违背"只要不淹死就行"。
                     bot.setControlState('jump', true);
                 }
                 else if (y0 >= 55 && !combatHasPriority(bot)) {
@@ -3254,18 +3304,32 @@ const modes_list = [
                 say(agent, 'I\'m stuck!');
                 this.stuck_time = 0;
                 execute(this, agent, async () => {
-                    // With smart timeout (10s if stuck, 60s if moving), give it 65s total
-                    const crashTimeout = setTimeout(() => { 
-                        agent.cleanKill("Got stuck and couldn't get unstuck") 
-                    }, 65000); // 65 seconds to allow pathfinding timeout to work
+                    // ★2026-07-08 用户令 —— 软卡顿处理阶梯: 先脱困, 15s 还没解决【才重连】(绝不 process.exit)。
+                    //   旧行为: 给 moveAway 65s, 内部楔死就 cleanKill→process.exit, 整个 agent 莫名其妙退出。
+                    //   新行为: 记下卡住点 → 试 moveAway; 15s 后若"仍在原地"(既没脱出也没被别的门救走) →
+                    //   agent.reconnectNow() 掉线重进世界(清客户端楔死), 进程/记忆/任务全活着。
+                    //   moveAway 若在 15s 内成功 → 取消定时器, "I'm free."。若报错(困水/无法通行)不立即
+                    //   重连——留给 15s 定时器按"是否仍卡在原地"裁决(与其它脱困门/存活层留出机会)。
+                    const stuckPos = bot.entity.position.clone();
+                    let freed = false;
+                    const reconnectTimer = setTimeout(() => {
+                        if (freed) return;
+                        let moved = false;
+                        try { moved = !!(bot.entity && bot.entity.position.distanceTo(stuckPos) > 1.5); } catch (e) {}
+                        if (moved) return; // 已经挪开了 = 已脱困, 不重连
+                        try { fs.appendFileSync('bots/_supervisor/progress.txt',
+                            `[${new Date().toISOString()}] [stuck] unstuck failed >15s @${Math.floor(stuckPos.x)},${Math.floor(stuckPos.y)},${Math.floor(stuckPos.z)} — reconnecting (NO process exit)\n`); } catch (e) {}
+                        say(agent, 'Still stuck after 15s — reconnecting to rejoin the world.');
+                        try { agent.reconnectNow('stuck-unrecoverable'); } catch (e) {}
+                    }, 15000); // 15s 脱困窗口, 到点仍卡在原地才重连
                     try {
                         await skills.moveAway(bot, 5);
-                        clearTimeout(crashTimeout);
+                        freed = true;
+                        clearTimeout(reconnectTimer);
                         say(agent, 'I\'m free.');
                     } catch (err) {
-                        clearTimeout(crashTimeout);
-                        say(agent, `Failed to get unstuck: ${err.message}. May be trapped in water or impassable terrain.`);
-                        // Don't crash immediately, let agent try to handle the situation
+                        // 不立即重连、不 clearTimeout —— 让 15s 定时器按"是否仍卡在原地"裁决。
+                        say(agent, `Failed to get unstuck: ${err.message}. Will reconnect if still stuck at 15s.`);
                     }
                 });
             }
@@ -6725,7 +6789,14 @@ const modes_list = [
         last_eat: 0,
         update: async function (agent) {
             const bot = agent.bot;
-            if (bot.food <= 17 && Date.now() - this.last_eat > 8000) {
+            // ★2026-07-08 用户令: auto_eat 只服务「补血」(让 HP 能自然回复), 不服务「补体力」(把饥饿条填满)。
+            //   MC 机制: food>=18 才自然回血。所以食物本能禁用时, 只在「受伤(hp<20) 且 饥饿条<18 导致回不了
+            //   血」时才吃背包食物, 把 food 顶过 18 让 HP 回复, 到线即停 —— 绝不为填满饥饿条而吃; health 满
+            //   或 food>=18(已能回血) 都不吃。食物本能启用(MC_FOOD_INSTINCTS=1)时回退原逻辑(food<=17 就吃,
+            //   主动维持饥饿条)。见 contracts.foodInstinctsEnabled / docs/food-instincts-disabled.md。
+            const regenOnly = !foodInstinctsEnabled();
+            const shouldEat = regenOnly ? (bot.health < 20 && bot.food < 18) : (bot.food <= 17);
+            if (shouldEat && Date.now() - this.last_eat > 8000) {
                 let food = bot.inventory.items().find(i => /cooked_|_bread|^bread$|apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_/.test(i.name));
                 // EMERGENCY TIER — rotten flesh / raw meats / spider eye. The hp3/food0
                 // deadlock (post-#267): feedUp found no animals all day, but the bot HAD

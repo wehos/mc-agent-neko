@@ -25,36 +25,39 @@ export class ActionManager {
 
     async stop() {
         if (!this.executing) return;
-        
+
         let waitTime = 0;
         const checkInterval = 300; // Check every 300ms
         const logInterval = 2000; // Only log every 2 seconds to reduce spam
-        const maxWaitTime = 10000; // 10 seconds max
+        // ★2026-07-08 用户令: 软卡顿阶梯 = 先脱困(这里靠 requestInterrupt 循环打断) 15s,
+        //   到点仍没停【才重连】(不再 cleanKill→process.exit)。
+        const maxWaitTime = 15000; // 15s interrupt window before escalating
         let lastLogTime = 0;
-        
-        const timeout = setTimeout(() => {
-            this.agent.cleanKill('Code execution refused stop after 10 seconds. Killing process.');
-        }, maxWaitTime);
-        
+
         while (this.executing && waitTime < maxWaitTime) {
             this.agent.requestInterrupt();
-            
+
             // Only log occasionally to avoid spam
             if (waitTime - lastLogTime >= logInterval) {
                 console.log(`Waiting for code to finish executing... (${(waitTime / 1000).toFixed(1)}s)`);
                 lastLogTime = waitTime;
             }
-            
+
             await new Promise(resolve => setTimeout(resolve, checkInterval));
             waitTime += checkInterval;
         }
-        
-        clearTimeout(timeout);
-        
+
         if (this.executing) {
-            console.warn('Code did not stop after 10 seconds, force killing...');
+            // ★2026-07-08 用户令: 动作 15s 拒绝停止【绝不 process.exit】。强制放行(置 executing=false,
+            //   让重连后的新动作能跑) + reconnectNow 重进世界。挂死的旧动作攥着旧 bot, 重连后对旧 bot
+            //   的操作自然空转/被拒, 其 catch 也会再次置 executing=false, 无害。
+            console.warn('Code did not stop after 15s — forcing release + reconnect (NO process exit).');
+            this.executing = false;
+            this.currentActionLabel = '';
+            this.currentActionFn = null;
+            try { this.agent.reconnectNow('action-refused-stop'); } catch (e) {}
         }
-    } 
+    }
 
     cancelResume() {
         this.resume_func = null;
@@ -94,9 +97,13 @@ export class ActionManager {
                     this.cancelResume(); // likely cause of repetition
                 }
                 if (this.recent_action_counter > 5) {
-                    console.error('Infinite action loop detected, shutting down.');
-                    this.agent.cleanKill('Infinite action loop detected, shutting down.');
-                    return { success: false, message: 'Infinite action loop detected, shutting down.', interrupted: false, timedout: false };
+                    // ★2026-07-08 用户令: 动作打转【不再 cleanKill→process.exit】。counter>3 已 cancelResume
+                    //   试图断掉重复源; 到 >5 仍在死循环 → reconnectNow 重进世界打断它, 进程照常活着。
+                    console.error('Infinite action loop detected — cancelling resume + reconnect (NO process exit).');
+                    this.cancelResume();
+                    this.recent_action_counter = 0;
+                    try { this.agent.reconnectNow('infinite-action-loop'); } catch (e) {}
+                    return { success: false, message: 'Infinite action loop detected, reconnecting.', interrupted: true, timedout: false };
                 }
             }
             this.last_action_time = Date.now();

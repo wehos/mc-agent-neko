@@ -216,7 +216,41 @@ export const LANE_CONFLICT = Object.freeze({
 // Feature flag default
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Framework is OFF by default — the existing missionNether path keeps working
- *  until kernel submodules are filled in. Flip via createFramework({enabled:true})
- *  or env MC_FRAMEWORK_V2=1. */
-export const FRAMEWORK_ENABLED_DEFAULT = false;
+/** Framework is ON by default (2026-07-07 用户令: 默认自主 framework + admin 独占优先).
+ *  Opt out with env MC_FRAMEWORK_V2=0 (baseline modes+LLM) or createFramework({enabled:false}). */
+export const FRAMEWORK_ENABLED_DEFAULT = true;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★2026-07-08 用户令 — 临时禁用「饥饿 / 种田 / 食物」本能 (food / hunger / farming)
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Whether the bot's PROACTIVE food / hunger / farming instincts are active.
+ *
+ * The user reported the bot "接到命令后像疯了一样到处乱逛" (wanders around frantically
+ * after a command) and asked to TEMPORARILY disable everything that sends it roaming to
+ * get food or tend crops. When this returns false the following are suppressed:
+ *   • proactive foraging / hunting-for-food  (GET_FOOD → feedUp)          world_model.proposeTasks
+ *   • sustainable wheat farming              (OPP_WHEAT_FARM → wheatFarm)          〃
+ *   • village crop harvesting                (OPENING_VILLAGE → villageHarvest)    〃
+ *   • the food-STAT gray-zone survival kick  (food < SVN_FOOD_FLOOR)      kernel._grayZoneSignal
+ *   • auto_eat topping up the HUNGER bar     (bot.food <= 17)             modes.js auto_eat
+ * See docs/food-instincts-disabled.md for the full inventory + rationale + re-enable steps.
+ *
+ * ★保命不受影响 (用户令: "只关注补血, 全面放弃对体力的关注"): HP-based survival stays fully live —
+ *   surviveNow @ hp<12, self_preservation, vitalNow hard floors, and auto_eat's 补血 branch
+ *   (eat from the bag ONLY to unblock HP regen, hp<20 && food<18). Only hunger-bar management
+ *   ("补体力") and the farming roam are turned off.
+ *
+ * ★DELIBERATE DEFAULT = DISABLED. Unlike the migration flags (MC_FRAMEWORK_V2 …, whose flag-OFF
+ *   is byte-identical legacy behavior), this one defaults OFF because the user wants the disable
+ *   to be the LIVE state right now and to hold across EVERY restart path — start-neko.ps1,
+ *   start-neko-direct.bat, and a watchdog auto-restart that inherits whatever env the already-
+ *   running watchdog pinned (which won't include this var). A code default is the only thing that
+ *   can't be missed. RE-ENABLE the original behavior with:  MC_FOOD_INSTINCTS=1  (then restart).
+ *   Any other value — including unset — means DISABLED.
+ *
+ * Pure env read, no module-level mutable state (HANDOFF red line) → hot-reload / restart safe.
+ */
+export function foodInstinctsEnabled() {
+    return process.env.MC_FOOD_INSTINCTS === '1';
+}

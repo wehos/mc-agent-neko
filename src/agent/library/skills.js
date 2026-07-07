@@ -7,6 +7,7 @@ import { unclimbVines } from './vine_unstick.js';
 import settings from "../../../settings.js";
 import path from 'path';
 import { pathToFileURL } from 'url';
+import { safeToDigBlock } from '../framework/tools/lava_guard.js';   // 岩浆/水裁判 (试装 into safeDig)
 
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
 const useDelay = blockPlaceDelay > 0;
@@ -937,7 +938,7 @@ async function equipForDig(bot, block) {
 // THE one block-break primitive. Walk adjacent if needed, verify eye→block-centre reach
 // (≤4.6 — past that bot.dig swings at air forever on out-of-reach / leaf-occluded blocks),
 // equip the right tool, dig with a hard time backstop, and STOP the swing on failure.
-// Returns 'ok' | 'gone' | 'unreachable' | 'timeout' | 'error'. Caller decides cleanup
+// Returns 'ok' | 'gone' | 'unreachable' | 'occluded' | 'fluidguard' | 'timeout' | 'error'. Caller decides cleanup
 // (exclude, expand neighbours, relocate, ...). Opts: maxMs dig backstop, approach (path
 // closer), equip (run equipForDig — false if caller already equipped), pickup (vacuum drop).
 // ★Pattern-3 共享 interrupt-race: 把任意长 await(bot.dig / 自定义 promise)裹成"reflex 置了
@@ -1011,6 +1012,21 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
         if (requireLOS) {
             const _los = (() => { try { return bot.canSeeBlock(cur); } catch (e) { return true; } })();
             if (!_los) return 'occluded';
+        }
+        // ★岩浆/水裁判 试装 (2026-07-07 用户令): DIG-lane fluid precondition. Before opening this
+        // cell, ask the fluid guard whether breaking it would flood the bot's pocket — lava at any
+        // depth, or water while underground (the sealed drown-pocket, deaths #112/#200). If so, refuse
+        // THIS block and return 'fluidguard': the main loop skips+excludes it, harvestConnectedVein
+        // drops it from the vein — same handling as 'occluded', so no caller change needed. The judge
+        // is conservative (only face-adjacent fluid within a few blocks of the bot) and fail-open
+        // (safeToDigBlock never throws upward), so it can't wedge mining. Observable in mine_dbg.log.
+        // Off-switch: env MC_DIG_FLUID_GUARD=0.
+        if (process.env.MC_DIG_FLUID_GUARD !== '0') {
+            const _fg = safeToDigBlock(bot, cur);
+            if (_fg && _fg.ok === false) {
+                try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★FLUIDGUARD skip ${cur.name}@${cur.position.x},${cur.position.y},${cur.position.z} — ${_fg.reason}\n`); } catch (e) {}
+                return 'fluidguard';
+            }
         }
         if (equip) await equipForDig(bot, cur);
         // ★Shorter timeout for normal blocks: a mineral/block we CAN'T actually break (wedged in
@@ -3681,9 +3697,37 @@ export async function goToNearestEntity(bot, entityType, min_distance=2, range=6
         return false;
     }
     let distance = bot.entity.position.distanceTo(entity.position);
-    log(bot, `Found ${entityType} ${distance} blocks away.`);
-    await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z, min_distance);
-    return true;
+    log(bot, `Found ${entityType} ${Math.round(distance)} blocks away.`);
+    // ★2026-07-08 修"追不上的怪 → 反复 !searchForEntity/!newAction 空转"(用户实观: 命令杀蜘蛛, 蜘蛛在
+    //   崖上/洞里/水面 —— 原实现直奔怪的【精确 Y】(GoalNear x,y,z), 那个 Y 到不了 → 每次 goToPosition 都
+    //   "Unable to reach" → 上游 LLM 反复重开同一场空猎, 且旧实现【无条件 return true】谎报成功。改为:
+    //   ① 先直奔(同层怪, 常见情形就够了); ② 到不了则重扫一次(怪会动/已死)再【水平逼近】(GoalNearXZ, 无视
+    //   Y, 走到怪脚下那一柱的可走高度) —— 正是外部 LLM 手写进任务文本的 "small horizontal waypoints at safe
+    //   ground height rather than exact entity Y" 那套; ③ 如实返回是否真的靠近, 让上游能据实收手/换招。
+    const near = (ent) => {
+        try { return !!(ent && ent.position && bot.entity.position.distanceTo(ent.position) <= min_distance + 2); }
+        catch (e) { return false; }
+    };
+    const reached = await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z, min_distance);
+    if (reached || near(entity)) return true;
+    // exact-Y 直奔失败 → 重扫最近的同类(可能已移动/被杀), 再水平逼近它当前所在的柱。
+    entity = world.getNearestEntityWhere(bot, e => e.name === entityType, range);
+    if (!entity) {
+        log(bot, `${entityType} no longer within ${range} blocks.`);
+        return false;
+    }
+    const ep = entity.position;
+    log(bot, `Direct path failed (exact height unreachable) — approaching ${entityType} horizontally.`);
+    try {
+        await goToGoal(bot, new pf.goals.GoalNearXZ(ep.x, ep.z, Math.max(2, min_distance)));
+    } catch (e) {
+        log(bot, `Approach error: ${e && e.message || e}.`);
+    }
+    if (near(entity)) return true;
+    let d = '?';
+    try { d = Math.round(bot.entity.position.distanceTo(entity.position)); } catch (e) {}
+    log(bot, `Could not reach ${entityType} (still ${d} blocks away — likely on terrain the bot can't path to).`);
+    return false;
 }
 
 export async function goToPlayer(bot, username, distance=3) {

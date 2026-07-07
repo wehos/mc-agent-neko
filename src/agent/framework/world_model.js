@@ -17,7 +17,7 @@
  * precise coords (blueprint §C hard constraint).
  */
 
-import { EMPTY_WORLD, PROPOSAL_KIND } from './contracts.js';
+import { EMPTY_WORLD, PROPOSAL_KIND, foodInstinctsEnabled } from './contracts.js';
 import { readFileSync, appendFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -599,6 +599,14 @@ export function proposeTasks(world, bot) {
     const dim = dimOf(bot);
     const overworld = dim === 'overworld';
 
+    // ── ★2026-07-08 用户令: 临时禁用「饥饿/种田/食物」本能 (乱逛源) ──────────────────────
+    //    foodInstincts=false 时不 push 任何主动觅食(GET_FOOD/feedUp)、种麦(OPP_WHEAT_FARM/
+    //    wheatFarm)、村庄采集(OPENING_VILLAGE/villageHarvest) 提案 —— 这些正是"接到命令后到处
+    //    乱逛"的来源。保命(HP)链、夜链、tier 链、auto_eat 补血分支均不受影响。
+    //    回头恢复: 设 MC_FOOD_INSTINCTS=1 重启。见 contracts.foodInstinctsEnabled /
+    //    docs/food-instincts-disabled.md。
+    const foodInstincts = foodInstinctsEnabled();
+
     // ★危血禁下深矿 (T-0098续 / 06-25T12:31 实锤: hp8 food17 被 GO_UNDERGROUND@45 派 mineDown,
     //   从 y62 下潜 48 层到 y14,全程不回血(food<18=低于 MC 自然回血线),遇地下僵尸 dist1 裸甲一击死).
     //   下深矿要有血量 buffer 应对地下怪偷袭: hp<8 一律危险; hp 8-11 仅在能回血(food>=18,边下边回)放行;
@@ -741,7 +749,7 @@ export function proposeTasks(world, bot) {
     // 囤肉档(@55/@35)只在面包经济未建立时放行 (无面包且无 farm 锚); 危机档(@88 food≤6)
     // 永远在。顺手收由 OPP animal splice + 路过击杀天然覆盖。
     const _breadStaple = invCount(bot, /^bread$/) >= 1 || !!(w.farm && Number.isFinite(w.farm.x));
-    if (overworld && (vitals.food < FOOD_STOCK || !kit.foodSufficient || rationsNow < 2)
+    if (foodInstincts && overworld && (vitals.food < FOOD_STOCK || !kit.foodSufficient || rationsNow < 2)
         && (!nightExposed || canEatInPlace)
         && (vitals.food <= 6 || !_breadStaple)) {
         const pri = vitals.food <= 6 ? 88 : (vitals.food < 12 ? 55 : 35);
@@ -773,7 +781,7 @@ export function proposeTasks(world, bot) {
     const breadDeficit = invCount(bot, /^bread$/) < dynamicBreadTarget(bot, w);
     // ★review 修 (farm 50→65 越过 MIGRATE@60): 死区/不宜居/卡地形/无木生物群系(migration.recommend)时
     //   farm 必须让位迁移 — 否则揣着种子的 bot 会在该逃离的地形上原地种田而非撤离。加 !migration.recommend 门。
-    if (overworld && time.phase === 'day' && !migration.recommend && !(threat.actionable > 0) && vitals.food > 6 && canFarmNow && breadDeficit
+    if (foodInstincts && overworld && time.phase === 'day' && !migration.recommend && !(threat.actionable > 0) && vitals.food > 6 && canFarmNow && breadDeficit
         && (!bot || Date.now() >= (bot._wheatFarmCooldownUntil || 0))) {
         push({ kind: PROPOSAL_KIND.OPP_WHEAT_FARM, priority: 65, skill: 'wheatFarm',
                args: [{ breadTarget: dynamicBreadTarget(bot, w) }],
@@ -1117,7 +1125,7 @@ export function proposeTasks(world, bot) {
     //    crisis food@88). villageHarvest still hard-defers on hostiles>2 / hp<=4, so this never
     //    walks a one-hp bot into a mob; it only unblocks the village run a stray creeper was vetoing.
     const opening = w.opening || {};
-    if (overworld && opening.phase === 'VILLAGE_HARVEST' && vitals.food <= 6 && time.phase === 'day'
+    if (foodInstincts && overworld && opening.phase === 'VILLAGE_HARVEST' && vitals.food <= 6 && time.phase === 'day'
         && w.landmarks && w.landmarks.village && Number(w.landmarks.village.dist) <= 28) {
         push({ kind: TASK.OPENING_VILLAGE, priority: 89, skill: 'villageHarvest',
                rationale: `STARVING (food=${vitals.food}) next to a known village @${Math.round(w.landmarks.village.dist)}b — harvest it for food now (only reachable food source; villageHarvest self-defers if truly unsafe)` });
@@ -1142,7 +1150,8 @@ export function proposeTasks(world, bot) {
                        hints: { woodTarget: WOOD_BUFFER, wood: woodUnits(bot) } });
                 break;
             case 'VILLAGE_HARVEST':
-                push({ kind: TASK.OPENING_VILLAGE, priority: 67, skill: 'villageHarvest',
+                // ★2026-07-08 用户令: 食物本能禁用时不派村庄采集 (foodInstincts gate)。
+                if (foodInstincts) push({ kind: TASK.OPENING_VILLAGE, priority: 67, skill: 'villageHarvest',
                        rationale: 'known nearby village — harvest crops/loot before the kit gets急需' });
                 break;
             default: break; // DONE / undefined → no opening proposal

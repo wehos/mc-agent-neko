@@ -107,6 +107,26 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     const isDusk = () => { const t = (bot.time && bot.time.timeOfDay) || 0; return t >= 12000 && t <= 13000; };
     const HOSTILE = /zombie|skeleton|creeper|spider|witch|enderman|drowned|husk|phantom|slime|pillager|vindicator|stray|bogged/i;
     const RANGED = /skeleton|stray|pillager|witch/i;
+    // ★2026-07-08 用户令 "对末影人不要过度反应": 末影人是中立怪 — 未被激怒(凝视/攻击)前无害,
+    // 却被 HOSTILE 正则当成常驻敌对 → 一只在 8-22b 乱传送的末影人 guard-stop 掉全部觅食(实拍
+    // 15:36:42 "feedUp: guard stop hostile=true" → "no food source found" → 60s 空转)。只在【真被
+    // 激怒】时才算威胁, 判据用权威信号: 它刚打了我们(末影人只近战, 5格内此刻掉血必是它归因)。
+    // sticky ~10s(挂 bot._endThreatUntil, 非模块态 → 热加载存活)防它传送闪烁。self_defense
+    // (mcdata.isHostile, 掉血才扩程 5→12)不动 → 被激怒/正在打我们的末影人照样还手。
+    // (metadata[17] 早触发信号未经证实, 本版只用掉血判据; 详见校验工作流对抗结论。)
+    const endermanIsThreat = (e) => {
+        try {
+            if (!e || !e.position || !bot.entity) return false;
+            let m = bot._endThreatUntil;
+            if (!(m instanceof Map)) { m = new Map(); bot._endThreatUntil = m; }
+            const now = Date.now();
+            if (m.size > 32) { for (const [k, v] of m) { if (v < now) m.delete(k); } }
+            if ((now - (bot.lastDamageTime || 0) < 3000) && e.position.distanceTo(bot.entity.position) < 5) m.set(e.id, now + 10000);
+            const until = m.get(e.id) || 0;
+            if (until <= now) { if (until) m.delete(e.id); return false; }
+            return true;
+        } catch (err) { return false; }
+    };
     // C34 同款可达性过滤: 近战怪隔≥5格高差物理够不到,不算威胁(荫蔽怪窝里 10格内
     // "常驻怪"让守卫永远 break,feedUp 的觅食分支全部饿死)
     const hostileNear = (r = 10) => !!world.getNearestEntityWhere(bot, e => {
@@ -115,6 +135,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         const d = e.position.distanceTo(bot.entity.position);
         const daylightPassiveSpider = /^spider$/i.test(name) && !isNight() && d > 6 && bot.health >= 9 && has('stone_sword');
         if (daylightPassiveSpider) return false;
+        if (/^enderman$/i.test(name) && !endermanIsThreat(e)) return false;   // 中立末影人不 guard-stop 觅食(未激怒)
         return RANGED.test(name) || Math.abs(e.position.y - bot.entity.position.y) < 5;
     }, r);
     const motionPos = () => {

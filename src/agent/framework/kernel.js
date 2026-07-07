@@ -17,7 +17,7 @@
  */
 
 import fs from 'fs';
-import { AGENT_MODE, FRAMEWORK_ENABLED_DEFAULT } from './contracts.js';
+import { AGENT_MODE, FRAMEWORK_ENABLED_DEFAULT, foodInstinctsEnabled } from './contracts.js';
 import { getWorld, mentalState, proposeTasks, commitGoal } from './world_model.js';
 import { pending as pendingInstincts } from './instinct.js';
 import { resolve as arbitrate, setBodyOwner, releaseBodyOwner, vitalNow as arbiterVitalNow } from './arbiter.js';
@@ -220,7 +220,11 @@ export class Kernel {
             if (bot._diedAt && Date.now() - bot._diedAt < 20000) return null;
             if (bot.isSleeping) return null;
             if (hp < SVN_HP_FLOOR) return `hp${Math.round(hp)}<${SVN_HP_FLOOR}`;
-            if (food < SVN_FOOD_FLOOR) return `food${food}<${SVN_FOOD_FLOOR}`;
+            // ★2026-07-08 用户令: 临时"全面放弃对体力(饥饿)的关注" — 食物本能禁用时不再因低饥饿触发
+            //   灰区求生(那会强派 surviveNow 去觅食=乱逛)。HP 灰区(hp<12)、锚点僵局、硬保命(vitalNow)
+            //   与 hp<=6/food<=2 危急强派 全部不变 → 只补血不补体力。回头恢复: MC_FOOD_INSTINCTS=1。
+            //   见 contracts.foodInstinctsEnabled / docs/food-instincts-disabled.md。
+            if (foodInstinctsEnabled() && food < SVN_FOOD_FLOOR) return `food${food}<${SVN_FOOD_FLOOR}`;
             const a = bot._svnAnchor;
             if (a && Date.now() - a.since > SVN_ANCHOR_MS) {
                 // 夜间健康驻守(蓄意夜宿/封箱 = 本仓库鼓励行为)不算僵局 — 锚独触发要么白天,
@@ -246,8 +250,17 @@ export class Kernel {
             //   放行下面的 surviveNow 救命强派; 非危急才真正独占。硬保命永远高于任何外部命令。
             const _hp = (typeof this.bot.health === 'number') ? this.bot.health : 20;
             const _food = (typeof this.bot.food === 'number') ? this.bot.food : 20;
-            if (_hp > 6 && _food > 2) return;   // 非危急 → 外部意图独占, 内核让位
-            // 危急(hp<=6 或 food<=2) → 不 return, 继续走 surviveNow 强派救命
+            // ★2026-07-07 ADMIN MISSION 让位地板 (red-team 关键修): admin 任务把 _extIntentUntil 每 300ms
+            //   续命, 内核整段让位。若地板停在 hp>6/food>2, 任务会把 bot 长时间卡在 7-11血/3-7粮 的"死区"
+            //   —— 内核灰区求生(确定性: 吃>打>床>觅食>挖墙>求死重置)在此区间不触发, 重演旧 hp=1 惨死。
+            //   任务期间把让位地板抬到 hp>11/food>7: 进入 7-11血/3-7粮 即不再让位, 放行下面的灰区强派
+            //   surviveNow(它 gz-truthy 时在提案市场之前 force-dispatch 并 return, 故不破坏"任务独占 vs
+            //   自主提案")。硬地板 vitalNow 与 hp<=6/food<=2 危急强派恒不变 —— 保命永远赢。
+            const _missionActive = !!(this.bot._adminMission && this.bot._adminMission.active);
+            const _hpFloor = _missionActive ? 11 : 6;
+            const _foodFloor = _missionActive ? 7 : 2;
+            if (_hp > _hpFloor && _food > _foodFloor) return;   // 非危急 → 外部意图独占, 内核让位
+            // 危急 → 不 return, 继续走 surviveNow 强派救命
         }
         const ms = mentalState(this.bot);
         this._trackAnchor();
@@ -276,9 +289,14 @@ export class Kernel {
                     && !(this.bot._diedAt && Date.now() - this.bot._diedAt < 20000);
                 const cur = String(this.bot._currentSkill || '');
                 const recovery = /feedUp|forage|villageHarvest|wheatFarm|smeltSafe|goBedSleep|escapePlan|surfaceUp|surviveNow/i.test(cur);
+                // ★2026-07-07 ADMIN MISSION: a mission can churn back-to-back sub-60s supervised
+                //   skills, so the ">=60s since last dispatch" gate would never open and the critical
+                //   rescue could never reclaim the body. Relax that one precondition while a mission
+                //   is active (mission-gated → flag-OFF / no-mission behavior byte-identical).
+                const _missionActive = !!(this.bot._adminMission && this.bot._adminMission.active);
                 if (critical && !recovery && !this.bot.interrupt_code
                     && Date.now() >= (this.bot._svnCooldownUntil || 0)   // 灰区冷却中解卷=白打断(08:00 实录: 解完没人接, REPLENISH 复派同技能 90s 循环)
-                    && Date.now() - (this._lastDispatchAt || 0) > 60000
+                    && (_missionActive || Date.now() - (this._lastDispatchAt || 0) > 60000)
                     && Date.now() - (this._svnNudgeAt || 0) > 90000) {
                     this._svnNudgeAt = Date.now();
                     this.bot.interrupt_code = true;

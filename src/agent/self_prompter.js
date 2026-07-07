@@ -10,6 +10,10 @@ export class SelfPrompter {
         this.prompt = '';
         this.idle_time = 0;
         this.cooldown = 2000;
+        // ★2026-07-07 owner hook: when an AdminMission drives this loop it sets `owner=this`, so the
+        //   MAX_NO_COMMAND branch hands off to owner.onNoProgress() (done/impossible/continue
+        //   adjudication) instead of blindly STOPPING — a mission must not silently self-terminate.
+        this.owner = null;
     }
 
     start(prompt) {
@@ -63,18 +67,38 @@ export class SelfPrompter {
         let no_command_count = 0;
         const MAX_NO_COMMAND = 3;
         while (!this.interrupt) {
+            // ★PARK (no strike) while a supervised skill owns the body: handleMessage('system')
+            //   early-returns false under supervised_skill (agent.js), so without this park each
+            //   such turn burns a MAX_NO_COMMAND strike → a legit supervised skill doing the work
+            //   would false-trip "give up" in ~6s. The skill's own progress IS progress.
+            if (this.agent.supervised_skill) {
+                await new Promise(r => setTimeout(r, this.cooldown));
+                continue;
+            }
             const msg = `You are self-prompting with the goal: '${this.prompt}'. Your next response MUST contain a command with this syntax: !commandName. Respond:`;
-            
+
             let used_command = await this.agent.handleMessage('system', msg, -1);
             if (!used_command) {
                 no_command_count++;
                 if (no_command_count >= MAX_NO_COMMAND) {
+                    if (this.owner) {
+                        // ★owned by an AdminMission: DON'T blindly stop. Hand off to the owner's
+                        //   adjudication (done → !endGoal / impossible → !cannotComplete / continue).
+                        //   Release the loop first so owner.onNoProgress() may restart it cleanly.
+                        this.loop_active = false;
+                        this.interrupt = false;
+                        try { await this.owner.onNoProgress(); } catch (e) { console.error('onNoProgress error:', e); }
+                        return;
+                    }
                     let out = `Agent did not use command in the last ${MAX_NO_COMMAND} auto-prompts. Stopping auto-prompting.`;
                     this.agent.openChat(out);
                     console.warn(out);
                     this.state = STOPPED;
                     break;
                 }
+                // ★cooldown even on a no-command turn (was a busy-spin: the no-command branch
+                //   looped with no delay, hammering the LLM when responses came back fast).
+                await new Promise(r => setTimeout(r, this.cooldown));
             }
             else {
                 no_command_count = 0;

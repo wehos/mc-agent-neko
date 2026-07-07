@@ -2,7 +2,7 @@ import { WebSocketServer } from 'ws';
 import { serverProxy } from '../agent/mindserver_proxy.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ★2026-07-07 外部 LLM 双向集成 — 出口: 10s 中文自然语言汇报 (bot_status_nl)。
+// ★2026-07-07 外部 LLM 双向集成 — 出口: 15s 中文自然语言汇报 (bot_status_nl)。
 //   映射表把「机器字段」翻成人话。KIND = kernel 提案目标语义 (bot._commitment.kind,
 //   比 skill 名更能说明"在干嘛"); SKILL = 当前叶子技能 (bot._currentSkill, 更即时);
 //   umbrella 技能 (prepNether/missionNether/…) 故意不进 SKILL 表 → 回落 KIND 表,
@@ -122,6 +122,12 @@ class WSMessageServer {
             // Send current inventory if agent is online
             this.sendInitialInventory(ws);
 
+            // ★2026-07-07 用户令: 给刚连上的客户端补发一帧"当前状态人话" (bot_status_nl)。
+            //   周期 timer 只在状态"变化"时广播(全局 dedup _lastNLText), 所以一个在稳态中途接入的
+            //   外部 LLM 本来会一直收不到"当前在干嘛", 直到状态下次变 —— 稳态下可能好几分钟空白。
+            //   这里对这个新连接单独绕过 dedup 发一帧当前态(不写 _lastNLText、不镜像游戏聊天)。
+            this._sendCurrentStatusNL(ws);
+
             ws.on('message', (data) => {
                 try {
                     this.handleMessage(JSON.parse(data.toString()));
@@ -182,24 +188,49 @@ class WSMessageServer {
         } catch (e) { /* chat mirror must never hurt the agent */ }
     }
 
-    // ★2026-07-07 外部 LLM 集成 — 出口: 每 10s 广播一条中文自然语言状态 (bot_status_nl)。
-    //   与 vitals(硬字段) 并行, 专给外部 LLM 读"人话"。env STATUS_NL=0 关, STATUS_NL_MS 调间隔。
+    // ★2026-07-07 外部 LLM 集成 — 出口: 每 15s 广播一条中文自然语言状态 (bot_status_nl)。
+    //   与 vitals(硬字段, 同 15s) 并行, 专给外部 LLM 读"人话"。env STATUS_NL=0 关, STATUS_NL_MS 调间隔。
     //   照 vitals/debugChat 的"telemetry must never hurt the agent"范式全 try/catch。
     startStatusNLTimer() {
         if (this.statusNLInterval) clearInterval(this.statusNLInterval);
         if (String(process.env.STATUS_NL || '1') === '0') return;
-        const ms = Math.max(2000, parseInt(process.env.STATUS_NL_MS || '10000', 10) || 10000);
+        const ms = Math.max(2000, parseInt(process.env.STATUS_NL_MS || '15000', 10) || 15000);
         this.statusNLInterval = setInterval(() => {
             try {
                 const bot = this.agent && this.agent.bot;
                 if (!bot || !bot.entity || !bot.entity.position) return;
                 const nl = this._statusNL(bot);
+                // ★2026-07-07 用户令 (空闲去抖): 挖矿间隙等【几秒内的短暂空隙】不该翻成"停下" —— 否则抖动被
+                //   下游 LLM 反复叙述成"本喵刚停下了"。idle 必须【持续 >= STATUS_NL_IDLE_MS(默认 8s)】才切到
+                //   空闲态; 未够时长就跳过本次广播, 保留上一条(动作/目标)状态。活动一恢复即清零计时。
+                //   STATUS_NL_IDLE_MS=0 关闭去抖(空闲立刻上报)。
+                if (nl.idle) {
+                    if (!this._idleSince) this._idleSince = Date.now();
+                    const _raw = parseInt(process.env.STATUS_NL_IDLE_MS ?? '8000', 10);
+                    const _db = Number.isFinite(_raw) ? Math.max(0, _raw) : 8000;
+                    if (Date.now() - this._idleSince < _db) return;   // 短暂空隙 → 先不报"停下"
+                } else {
+                    this._idleSince = 0;
+                }
                 if (nl.text === this._lastNLText) return;   // ★去重(用户令): 状态没变就不发, 消除刷屏
                 this._lastNLText = nl.text;
                 this.broadcast({ type: 'bot_status_nl', ts: Date.now(), ...nl });
                 this._chatToMC(nl.text);   // ★用户令: 发给外部 LLM 的人话同步进游戏聊天(仅文本, 无图片)
             } catch (e) { /* NL status must never hurt the agent */ }
         }, ms);
+    }
+
+    // ★2026-07-07 用户令: 把"当前状态人话"单发给一个指定客户端(新连接补发用), 绕过周期广播的全局
+    //   dedup —— 不读写 _lastNLText, 也不镜像游戏聊天(免得每次重连都刷一条 MC chat)。与周期 timer
+    //   同样尊重 STATUS_NL=0 总开关, 且照 "telemetry must never hurt the agent" 全 try/catch。
+    _sendCurrentStatusNL(ws) {
+        try {
+            if (String(process.env.STATUS_NL || '1') === '0') return;
+            const bot = this.agent && this.agent.bot;
+            if (!bot || !bot.entity || !bot.entity.position) return;
+            const nl = this._statusNL(bot);
+            ws.send(JSON.stringify({ type: 'bot_status_nl', ts: Date.now(), ...nl }));
+        } catch (e) { /* connect-time NL snapshot must never hurt the agent */ }
     }
 
     // Build the Chinese status object — LEADS WITH THE ACTUAL PHYSICAL ACTION read from the
@@ -216,6 +247,16 @@ class WSMessageServer {
         const cmt = bot._commitment || null;
         const kind = (cmt && cmt.kind) || null;
         const skill = this._skillRunningName || bot._currentSkill || (cmt && cmt.skill) || null;
+        // ★2026-07-08 ADMIN MISSION 真实性修复 (用户实观: 命令追蜘蛛却报"挖矿过夜"): 任务态下身体听的是
+        //   mission(外部/chat 指令, 如 "kill a spider"), 而 kernel 的 _commitment.kind 只是被搁置的后台目标 ——
+        //   拿它当"在干嘛"会谎报。任务活跃时目标短语改由 mission 取(取不出→null→退回真实动作/中性兜底),
+        //   绝不再断言那个不相干的 kernel 目标; mission 原文另放进返回对象供下游 LLM 精确叙述。
+        let missionText = null;
+        try {
+            const am = this.agent && this.agent.adminMission;
+            if (am && typeof am.isActive === 'function' && am.isActive() && am.mission && am.mission.text)
+                missionText = am.mission.text;
+        } catch (e) {}
 
         // nearby hostiles (< 16b): count + up to 3 distinct Chinese names
         let hostiles = 0; const names = [];
@@ -235,7 +276,7 @@ class WSMessageServer {
         const foodTxt = food >= 18 ? '吃得饱' : food >= 12 ? '食物中等' : food >= 6 ? '有点饿' : '很饿';
         const svnActive = (bot._surviveNowUntil && Date.now() < bot._surviveNowUntil)
             || skill === 'surviveNow' || kind === 'SURVIVE_NOW';
-        const goal = this._goalPhrase(kind, skill);   // 短目标短语, 或 null
+        const goal = missionText ? this._missionGoalPhrase(missionText) : this._goalPhrase(kind, skill);   // 短目标短语, 或 null
 
         // ★ACTUAL physical action from live bot state (truthful, ordered by specificity).
         let act = null;
@@ -247,9 +288,12 @@ class WSMessageServer {
                 //   报目标、块作附注 —— 否则"挖了几百石头"看着像在囤石头(实为穿石找矿, 用户实观)。
                 const bn = bot.targetDigBlock.name;
                 const isTarget = /_ore$|_log$|_wood$|_stem$|obsidian|ancient_debris|glowstone|_leaves$|amethyst|wheat|carrot|potato|beetroot|melon|pumpkin/.test(bn);
+                // ★用户令(粒度): 动作+原因。目标块(矿/木/庄稼)自解释, 报动作即可; 填充块(石/土/深板岩…)
+                //   是手段不是目的 —— 有目标就报"目标（挖开X开路）", 没目标也补个"（清路）", 免得裸"在挖石头"
+                //   看着像在囤石头(用户实观: 实为穿石开路)。
                 act = /(_log|_wood|_stem)$/.test(bn) ? '在砍树'
                     : isTarget ? `在挖${blockCN(bn)}`
-                    : (goal ? `在${goal}（挖开${blockCN(bn)}开路）` : `在挖${blockCN(bn)}`);
+                    : (goal ? `在${goal}（挖开${blockCN(bn)}开路）` : `在挖${blockCN(bn)}（清路）`);
             }
             else if (bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()) act = goal ? `在赶路，去${goal}` : '在赶路';
         } catch (e) {}
@@ -258,6 +302,7 @@ class WSMessageServer {
         if (svnActive) head = act ? `${act}（保命中）` : '情况紧张，在保命自救（找吃的/避险/等，尽快脱困）';
         else if (act) head = act;                       // 有真动作 → 直接报动作
         else if (goal) head = `在${goal}`;              // 没动作(hold/idle) → 报正在为之等待的目标(如 躲夜等天亮)
+        else if (missionText) head = '在按指令行动';     // ★任务态但此刻无具体动作/目标短语 → 中性但不谎报"空闲"
         else head = '暂时空闲，在想下一步';
 
         // ★2026-07-07 用户令: 状态前缀标出模式 —— 🎯[按指令]=正在跑外部/chat 指令(admin 独占 或 run_skill),
@@ -270,7 +315,12 @@ class WSMessageServer {
         text += hostiles > 0 ? `，附近有${hostiles}只怪${names.length ? `（${names.join('、')}）` : ''}` : '，周围没怪';
         text += `，${night ? '夜里' : '白天'}。`;
 
-        return { text, kind, skill, hp, food, hostiles, night, dim };   // ★不含坐标(LLM 不需要)
+        // ★idle 标志: 纯空闲兜底(非 保命/真动作/目标 hold) = head 落到 '暂时空闲'。供 startStatusNLTimer
+        //   的"空闲去抖"用 —— 只有空闲持续够久才报"停下", 短暂空隙不报。
+        //   ★任务态视为"在做事"(非空闲) —— 免得任务中途的短暂空隙被去抖成"停下"。
+        const isIdle = !svnActive && !act && !goal && !missionText;
+        // ★任务态: 抹掉不相干的 kernel kind(否则下游 LLM 又照它叙述成"在挖矿"), 改附 mission 原文让其精确叙述。
+        return { text, kind: missionText ? null : kind, skill, hp, food, hostiles, night, dim, idle: isIdle, mission: missionText || undefined };   // ★不含坐标(LLM 不需要)
     }
 
     // Short GOAL phrase (what it's trying to achieve) — context / idle-fallback only, never the
@@ -280,6 +330,20 @@ class WSMessageServer {
         if (kind && STATUS_KIND_CN[kind]) return STATUS_KIND_CN[kind];
         if (skill && STATUS_SKILL_CN[skill]) return STATUS_SKILL_CN[skill];
         return null;
+    }
+
+    // ★2026-07-08 任务态目标短语: 从 mission 原文(自由文本, 如 "Goal: kill a spider. Equip stone_sword…")
+    //   提炼一句短短语当"在干嘛"。去掉 "Goal:/Task:" 前缀与引号, 取第一小句并截断。取不出返回 null →
+    //   调用方退回真实动作/中性兜底。刻意不翻译(下游叙述 LLM 会用返回对象里的 mission 原文润色成中文)。
+    _missionGoalPhrase(text) {
+        try {
+            let s = String(text || '').replace(/[\r\n]+/g, ' ').replace(/["“”'`]/g, '').trim();
+            s = s.replace(/^\s*(goal|task|objective|mission)\s*[:：\-]\s*/i, '');
+            s = s.split(/[.。;；!！?？\n]/)[0].trim();
+            if (!s) return null;
+            if (s.length > 20) s = s.slice(0, 20).trim() + '…';
+            return s;
+        } catch (e) { return null; }
     }
 
     startVitalsTimer() {
@@ -437,6 +501,16 @@ class WSMessageServer {
                 // back to a fragile FIFO drop counter that mis-attributes
                 // completions whenever a task takes longer than the
                 // plugin-side ``task_timeout_seconds``.
+                // ★2026-07-07 ADMIN MISSION (用户令): when MC_ADMIN_MISSION is on, an external task
+                // becomes a persistent highest-priority mission (self-prompt until done/impossible/
+                // overridden/survival-interrupt). The controller owns the preempt + task_id +
+                // completion, so route straight to it and skip the legacy one-shot inject below.
+                if (this.agent && this.agent._missionEnabled && this.agent.adminMission) {
+                    try { this.agent.adminMission.submit({ text: data.task, taskId: data.task_id, origin: 'ws' }); }
+                    catch (e) { console.error('adminMission.submit failed:', e); }
+                    break;
+                }
+                // ── legacy one-shot path (flag OFF) ──
                 // ★2026-07-07 AUTO-PREEMPT: an external NL command is highest priority — if a
                 // skill is running, interrupt it so the injected admin turn's body actions
                 // aren't blocked by the BodyGate. Sync interrupt only (no await): the LLM turn's
@@ -569,7 +643,17 @@ class WSMessageServer {
         // issuing !goToBed/!moveAway on death/hurt (which preempts the skill AND
         // the survival modes -> bot thrashes and dies). Tick modes still protect it.
         try { this.agent.supervised_skill = 'ws'; } catch (e) {}   // owner-tagged (truthy, same readers)
-        try { if (this.agent.self_prompter && this.agent.self_prompter.isActive()) this.agent.self_prompter.stop(false); } catch (e) {}
+        // ★2026-07-07 ADMIN MISSION: if a mission is active, PARK its self-prompt loop (stopLoop —
+        //   interrupt only, state stays ACTIVE) instead of stop(false). A blind stop(false) sets
+        //   state=STOPPED, which the mission would otherwise have to disambiguate from "done"; parking
+        //   keeps it ACTIVE so it self-heals when this supervised skill releases (resumeAfterSupervised).
+        try {
+            if (this.agent._missionEnabled && this.agent.adminMission && this.agent.adminMission.isActive()) {
+                this.agent.adminMission.suspendForSupervised();
+            } else if (this.agent.self_prompter && this.agent.self_prompter.isActive()) {
+                this.agent.self_prompter.stop(false);
+            }
+        } catch (e) {}
         // ★2026-07-07 命令战斗覆盖 (用户令): 外部指令跑战斗技能时置滚动戳, 让 modes.js self_preservation.
         //   shouldFlee override 胆怯档逃跑(hp<7/无盾被远程), 但保留 苦力怕/≥3围殴/硬地板(vitalNow)。
         //   窗口给足(>maxMs 默认 14s), finally 里清 → 只在这次命令战斗期间生效, 不外溢到自主战斗。
@@ -596,6 +680,8 @@ class WSMessageServer {
             // ★命令战斗覆盖: 技能结束即清战斗戳, shouldFlee 立刻恢复常规保命(不外溢到自主行为)。
             if (_isCombatSkill) { try { this.agent.bot._commandedFightUntil = 0; } catch (e) {} }
             this._skillRunning = false; this._skillRunningName = null;
+            // ★2026-07-07 ADMIN MISSION: resume the parked mission loop now the supervised skill released.
+            try { if (this.agent._missionEnabled && this.agent.adminMission && this.agent.adminMission.isActive()) this.agent.adminMission.resumeAfterSupervised(); } catch (e) {}
         }
     }
 
@@ -625,6 +711,26 @@ class WSMessageServer {
             inventory: inventory,
             ts: Date.now(),
         });
+    }
+
+    // ★2026-07-07 ADMIN MISSION bookkeeping. A mission (AdminMission) owns its task_id EXPLICITLY —
+    //   these two methods replace injectMessage + markChatTaskComplete for the mission path and
+    //   NEVER touch injectedTaskIdQueue (missions are serialized; the FIFO is a legacy-only concern),
+    //   which structurally eliminates every FIFO-desync / wrong-id-echo class. beginMissionTask records
+    //   the active mission; finishMission fires EXACTLY ONE task_finished with the passed id.
+    beginMissionTask(text, taskId, origin) {
+        this.currentTask = text;
+        this.currentTaskId = (typeof taskId === 'string' && taskId) ? taskId : null;
+        this.taskStartTime = Date.now();
+        this.taskCompleted = false;
+        this.lastTaskCompletionTime = null;
+        console.log(`🎯 mission begin (${origin || 'ws'}) task_id=${this.currentTaskId || '-'}: ${String(text).slice(0, 80)}`);
+    }
+    finishMission(taskId, status, message) {
+        const id = (typeof taskId === 'string' && taskId) ? taskId : null;
+        this.onTaskCompleted({ status, message, score: null, reason: `mission ${status}`, task_id: id, mission_end: true });
+        this.currentTask = null;
+        this.currentTaskId = null;
     }
 
     injectMessage(message, taskId) {
@@ -808,6 +914,28 @@ class WSMessageServer {
 
     // Method to be called when task completion is detected by agent
     onTaskCompleted(completionData) {
+        // ★2026-07-07 mission single-fire backstop (defense-in-depth beyond AdminMission.end()'s
+        //   idempotent state guard). Two guarded races: (a) a duplicate mission-end frame for the
+        //   same id within 10s; (b) a trailing raw 'interrupted' frame (death/disconnect) landing
+        //   right after a mission just fired its terminal frame → the plugin would double-report.
+        try {
+            const cd = completionData || {};
+            const now = Date.now();
+            if (cd.mission_end) {
+                if ((cd.task_id && cd.task_id === this._lastFiredMissionId && now - (this._lastFiredMissionAt || 0) < 10000)
+                    || (!cd.task_id && this._missionJustEndedAt && now - this._missionJustEndedAt < 5000)) {
+                    console.log('onTaskCompleted: duplicate mission-end suppressed');
+                    return;
+                }
+                this._lastFiredMissionId = cd.task_id || null;
+                this._lastFiredMissionAt = now;
+                this._missionJustEndedAt = now;
+            } else if (this._missionJustEndedAt && now - this._missionJustEndedAt < 5000) {
+                console.log('onTaskCompleted: trailing frame suppressed (mission just ended)');
+                return;
+            }
+        } catch (e) { /* dedup must never block a real completion */ }
+
         this.taskCompleted = true;
         this.lastTaskCompletionTime = Date.now();
 
@@ -898,6 +1026,12 @@ class WSMessageServer {
 
     // Enhanced task completion broadcasting with retry mechanism
     broadcastTaskCompletion(data, retryCount = 0) {
+        // ★2026-07-07 用户令: task_finished 走这条(带重试)独立通道, 不经 broadcast() —— 在此把原文
+        //   镜像进公屏 chat (完成日志: '进入' 有 ◀外部指令, 现在 '完成' 有 ▶task_finished, 闭环)。
+        //   仅首发镜像(retryCount===0), 重试不重复刷屏。全 try/catch, 绝不伤 agent。
+        if (retryCount === 0) {
+            try { this._chatToMC('▶' + JSON.stringify(data)); } catch (e) { /* completion mirror must never hurt the agent */ }
+        }
         const maxRetries = 3;
         const message = JSON.stringify(data);
         let sentCount = 0;
@@ -932,12 +1066,41 @@ class WSMessageServer {
     }
 
     // Method to broadcast agent responses back to WebSocket clients
+    // ★2026-07-07 用户令 (节流): 任务态 self-prompt ~2s 一回合 → agent 叙述(log)洪流, 公屏+WS 两边都被刷屏。
+    //   log 出口是 WS 帧与公屏镜像的同源 (broadcast() 里对 'log' 做镜像), 所以在这里一处节流即同时覆盖两面。
+    //   leading+trailing 节流 + 相邻去重: 每 LOG_MIN_MS 至多发一条, 窗口内只保留最新一条并在窗口末尾补发(尾随)
+    //   → 频率降到每 ~LOG_MIN_MS 一条, 但最后一句叙述不丢。重要帧 (skill_result/cancel_result/error/alert/
+    //   task_finished) 不经这里, 完全不受影响。env LOG_MIN_MS=0 关闭节流 (回到每条都发)。
     broadcastAgentResponse(response) {
-        console.error('🤖Broadcasting log message:', response);
-        this.broadcast({
-            type: 'log',
-            message: response
-        });
+        const emit = (msg) => {
+            this._lastLogAt = Date.now();
+            this._lastLogText = msg;
+            console.error('🤖Broadcasting log message:', msg);
+            this.broadcast({ type: 'log', message: msg });
+        };
+        // ★2026-07-07 用户实观 (下游 admin LLM "复读"): 一条心跳/卡死循环会每 ~30s 重发【一模一样】的 log
+        //   (modes.js:2494 'Nightfall — securing till dawn' 夜守心跳 → openChat → 这里)。send-on-change
+        //   去重(始终生效, 与 bot_status_nl 同范式): 与【上一条已发】完全相同的 log 直接丢 → 下游只叙述一次,
+        //   状态真变了(或换过别的 log 后再复现)才再发。30s 间隔 > 节流窗, 旧的"仅窗口内去重"逮不到它,
+        //   故改成无条件同文去重, 放在节流之前 (LOG_MIN_MS=0 关节流时也照样去重复读)。
+        if (response === this._lastLogText) return;
+        const minMs = parseInt(process.env.LOG_MIN_MS || '6000', 10);
+        if (!Number.isFinite(minMs) || minMs <= 0) { emit(response); return; }
+        this._pendingLog = response;   // keep the LATEST distinct message for the trailing send (coalesce)
+        const since = Date.now() - (this._lastLogAt || 0);
+        if (since >= minMs) {
+            // leading edge — the window is open, send immediately
+            if (this._logTimer) { clearTimeout(this._logTimer); this._logTimer = null; }
+            const m = this._pendingLog; this._pendingLog = null; emit(m);
+        } else if (!this._logTimer) {
+            // trailing edge — schedule the latest to go out when the window reopens
+            this._logTimer = setTimeout(() => {
+                this._logTimer = null;
+                if (this._pendingLog != null) { const m = this._pendingLog; this._pendingLog = null; emit(m); }
+            }, minMs - since);
+            if (this._logTimer && this._logTimer.unref) this._logTimer.unref();
+        }
+        // else: a trailing send is already scheduled; _pendingLog was updated to the latest above.
 
         // Note: Task completion detection is now handled by agent.js checkTaskDone()
         // This prevents duplicate detection and ensures consistency
@@ -1100,6 +1263,26 @@ class WSMessageServer {
     }
 
     broadcast(data) {
+        // ★2026-07-07 用户令: 每条对外(→外部 LLM)的 WS 消息原文都镜像进公屏 chat, 供肉眼 debug
+        //   ('▶'=出站, 对应 handleMessage 里 '◀'=入站)。用户令: 公屏只留「可读往来」——
+        //   ◀命令 / ▶命令结果(skill_result/cancel_result/task_finished) / log(agent 叙述) / error /
+        //   bot_status_nl 人话状态。以下「数字流+噪声」不镜像公屏 (WS 照发不变, 只是不刷公屏):
+        //   · pong        = 心跳回复噪声 (对称: 入站 ping/query_inventory 也不镜像)。
+        //   · bot_status_nl = 已在 startStatusNLTimer 里以「人话」镜像, 跳过免同条状态出现两遍。
+        //   · screenshot  = 用户令: 截图不转发公屏 (base64 大图, 公屏也看不了图)。
+        //   · vitals      = 用户令: 每 15s 一坨硬字段数字, 太吵 (要人话看 bot_status_nl 即可)。
+        //   · inventory   = 用户令: 按需库存数字回执, 不刷公屏。
+        //   task_finished 走 broadcastTaskCompletion 独立通道, 在那边单独镜像 (不经这里)。
+        //   全 try/catch, 镜像绝不伤 agent; DEBUG_CHAT=0 可一并全关。
+        try {
+            const t = data && data.type;
+            const noMirror = (t === 'pong' || t === 'bot_status_nl' || t === 'screenshot'
+                || t === 'vitals' || t === 'inventory');
+            if (t && !noMirror) {
+                this._chatToMC('▶' + JSON.stringify(data));
+            }
+        } catch (e) { /* outbound chat mirror must never hurt the agent */ }
+
         const message = JSON.stringify(data);
         let sentCount = 0;
         let failedCount = 0;

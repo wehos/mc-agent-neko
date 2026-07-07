@@ -495,6 +495,11 @@ export const actionsList = [
             'selfPrompt': { type: 'string', description: 'The goal prompt.' },
         },
         perform: async function (agent, prompt) {
+            // ★2026-07-07 ADMIN MISSION owns the shared self_prompter singleton while active — don't
+            //   fork a second goal on top of it (it would race the mission for the loop/body).
+            if (agent._missionEnabled && agent.adminMission && agent.adminMission.isActive()) {
+                return 'An admin task is already in progress; ignoring !goal.';
+            }
             if (convoManager.inConversation()) {
                 agent.self_prompter.setPromptPaused(prompt);
             }
@@ -505,10 +510,32 @@ export const actionsList = [
     },
     {
         name: '!endGoal',
-        description: 'Call when you have accomplished your goal. It will stop self-prompting and the current action. ',
+        description: 'Call when you have accomplished your goal / assigned task. It will stop self-prompting and the current action. ',
         perform: async function (agent) {
+            // ★2026-07-07 ADMIN MISSION: this is the DONE signal. End the mission (fires exactly one
+            //   task_finished status=ok). Falls back to legacy self-prompt stop for a plain !goal.
+            if (agent._missionEnabled && agent.adminMission && agent.adminMission.isActive()) {
+                await agent.adminMission.end('done');
+                return 'Mission complete.';
+            }
             agent.self_prompter.stop();
             return 'Self-prompting stopped.';
+        }
+    },
+    {
+        name: '!cannotComplete',
+        description: 'Call ONLY when the current assigned task is genuinely impossible to complete (e.g. a required resource does not exist anywhere reachable, or a needed tool cannot be obtained). Reports failure with your reason and stops. Do NOT use this for a task that is merely slow or hard.',
+        params: {
+            'reason': { type: 'string', description: 'A short reason why the task cannot be completed.' },
+        },
+        perform: async function (agent, reason) {
+            // ★2026-07-07 ADMIN MISSION: the IMPOSSIBLE signal. End the mission (task_finished status=failed).
+            if (agent._missionEnabled && agent.adminMission && agent.adminMission.isActive()) {
+                await agent.adminMission.end('impossible', reason);
+                return 'Marked the task as impossible.';
+            }
+            if (agent.self_prompter && !agent.self_prompter.isStopped()) agent.self_prompter.stop();
+            return 'No active task.';
         }
     },
     {

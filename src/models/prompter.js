@@ -222,8 +222,16 @@ export class Prompter {
     }
 
     async checkCooldown() {
+        // ★2026-07-08 (用户令): admin/mission 独占回合(agent._extIntentActive)免 profile 冷却 —— 指令期间
+        //   的多轮 LLM 调用(!inventory/!getWood…)不再被 3s 节流, 快速连跑; 自主/普通回合仍按冷却节流。
+        //   信号复用 bot._extIntentUntil(begin/tick 续期, end 清; 覆盖 admin 首轮 + mission 全程 self-prompt
+        //   轮)。env MC_ADMIN_NO_COOLDOWN=0 秒回退到全局冷却。模型 API 延迟本身即天然限速, 不会空转。
         let elapsed = Date.now() - this.last_prompt_time;
-        if (elapsed < this.cooldown && this.cooldown > 0) {
+        let adminFast = false;
+        if (process.env.MC_ADMIN_NO_COOLDOWN !== '0') {
+            try { adminFast = !!(this.agent && this.agent._extIntentActive && this.agent._extIntentActive()); } catch (e) {}
+        }
+        if (!adminFast && elapsed < this.cooldown && this.cooldown > 0) {
             await new Promise(r => setTimeout(r, this.cooldown - elapsed));
         }
         this.last_prompt_time = Date.now();

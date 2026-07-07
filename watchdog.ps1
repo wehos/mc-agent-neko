@@ -19,6 +19,11 @@ $log = Join-Path $proj 'watchdog.log'
 # 本进程 env; 若靠宿主 shell 碰运气继承, 一次重启就把确定性 kernel 链静默关回 LLM baseline。
 $env:MC_FRAMEWORK_V2 = '1'
 $env:MC_FRAMEWORK_SHADOW = '0'
+# ★2026-07-08 用户令: 临时禁用「饥饿/种田/食物」本能 (bot 接到命令后到处乱逛的源头)。与 MC_FRAMEWORK_*
+# 同理在 watchdog 自身 env 钉死 → Restart-Agent 的子进程继承, 自动重启后仍禁用。代码默认亦为禁用。
+# ⚠ 注意: 修改本行后必须重启 watchdog 进程本身 (已在跑的 watchdog env 不会因改文件而变); 或直接靠代码默认。
+# 回头恢复: 改成 '1' (或删除本行) 并重启 watchdog。详见 docs/food-instincts-disabled.md。
+$env:MC_FOOD_INSTINCTS = '0'
 # ★2026-07-05 新机: node 装在 zip 目录而非系统 PATH (与 start-neko.ps1 同一路径约定)。
 # Restart-Agent 及各 keep-alive 都用裸名 'node' 启动 — 若 PATH 里没有 node, 整条链一个也起不来。
 $node22 = 'C:\Users\Administrator\nodejs22'

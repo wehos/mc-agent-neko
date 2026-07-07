@@ -3,20 +3,22 @@
 # then runs the mindcraft/neko agent.
 #
 # Usage:
-#   .\start-neko.ps1                      # baseline: modes + LLM brain (framework-v2 OFF)
-#   .\start-neko.ps1 -Framework           # LIVE: framework-v2 tier chain DRIVES the bot (speedrun brain)
+#   .\start-neko.ps1                      # DEFAULT: framework-v2 LIVE drives the bot + admin 指令独占优先
 #   .\start-neko.ps1 -FrameworkShadow     # framework-v2 enabled but SHADOW-only (logs decisions, doesn't act)
+#   .\start-neko.ps1 -Baseline            # opt out: baseline modes + LLM brain, framework-v2 OFF (老空转模式)
 #   .\start-neko.ps1 -ScreenshotMs 5000   # also stream periodic POV screenshots every 5s (vision feed)
 #
 # Framework-v2 (P1): the deterministic progression engine (wood->stone->iron->diamond->...).
-#   -Framework       => MC_FRAMEWORK_V2=1 + MC_FRAMEWORK_SHADOW=0 (kernel dispatches skills)
-#   -FrameworkShadow => MC_FRAMEWORK_V2=1 only (kernel logs to bots/_supervisor/framework-shadow.log, no dispatch)
+#   ★2026-07-07 用户令: 默认既开 framework 自主, 又听 admin —— admin 指令通过"外部意图独占"压过
+#     framework 自主派发(硬保命凌驾一切)。默认 => MC_FRAMEWORK_V2=1 + MC_FRAMEWORK_SHADOW=0。
+#   -Baseline        => MC_FRAMEWORK_V2=0 (kernel off, 只跑 modes + LLM)
+#   -FrameworkShadow => MC_FRAMEWORK_V2=1 + MC_FRAMEWORK_SHADOW=1 (kernel logs to framework-shadow.log, no dispatch)
 #   Watch decisions live:  Get-Content .\bots\_supervisor\framework-shadow.log -Wait -Tail 20
 #
 # Vision: on-demand vision is always enabled (settings.allow_vision). -ScreenshotMs>0 adds the
 #   continuous ws_server POV camera feed (heavier; isolated child renderer).
 param(
-    [switch]$Framework,
+    [switch]$Baseline,
     [switch]$FrameworkShadow,
     [int]$ScreenshotMs = 0
 )
@@ -28,19 +30,28 @@ if (-not (Test-Path (Join-Path $node22 'node.exe'))) {
 }
 $env:PATH = "$node22;$env:PATH"
 
-if ($Framework) {
-    $env:MC_FRAMEWORK_V2 = '1'
-    $env:MC_FRAMEWORK_SHADOW = '0'
-    Write-Host "framework-v2: LIVE (tier chain drives the bot)"
+if ($Baseline) {
+    # explicit opt-out: kernel off (baseline modes + LLM brain, old idle-prone mode)
+    $env:MC_FRAMEWORK_V2 = '0'
+    Remove-Item Env:MC_FRAMEWORK_SHADOW -ErrorAction SilentlyContinue
+    Write-Host "framework-v2: OFF (baseline modes + LLM — 只在被 admin 指令驱动时行动)"
 } elseif ($FrameworkShadow) {
     $env:MC_FRAMEWORK_V2 = '1'
     $env:MC_FRAMEWORK_SHADOW = '1'
     Write-Host "framework-v2: SHADOW (logs decisions to bots/_supervisor/framework-shadow.log, no dispatch)"
 } else {
-    # explicit safe default: kernel off (baseline modes + LLM)
-    Remove-Item Env:MC_FRAMEWORK_V2 -ErrorAction SilentlyContinue
-    Remove-Item Env:MC_FRAMEWORK_SHADOW -ErrorAction SilentlyContinue
+    # ★2026-07-07 用户令 default: framework LIVE 自主 + admin 独占优先 (explicit, not relying on unset)
+    $env:MC_FRAMEWORK_V2 = '1'
+    $env:MC_FRAMEWORK_SHADOW = '0'
+    Write-Host "framework-v2: LIVE (自主 tier chain 驱动 bot; admin 指令独占优先, 硬保命凌驾一切)"
 }
+
+# ★2026-07-08 用户令: 临时禁用「饥饿/种田/食物」本能 (bot 接到命令后到处乱逛的源头 — 主动觅食/种麦/
+#   村庄采集提案 + 灰区低饥饿求生; auto_eat 改为只补血不补体力)。代码默认亦为禁用, 这里显式钉死以求跨
+#   watchdog 自动重启也一致。回头有空要恢复: 改成 '1' (或删除本行), 并重启 watchdog + bot。
+#   详见 docs/food-instincts-disabled.md。
+$env:MC_FOOD_INSTINCTS = '0'
+Write-Host "food/hunger/farming instincts: DISABLED (MC_FOOD_INSTINCTS=0 — 只补血不补体力; 设 1 恢复)"
 
 # In-proc vision kill switch ON by default (2026-07-02 task#12): the lazy Camera path is
 # BROKEN — prismarine-viewer's entity meshes need global.THREE which nothing sets in-proc,

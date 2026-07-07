@@ -181,6 +181,34 @@ export function truncCommandMessage(message) {
     return message;
 }
 
+// ★2026-07-08 (用户令: admin/mission 回合允许多命令一回合) —— 抽出一条回复里【全部】命令(按序),
+//   如 "先看看 !inventory 再 !getWood(20)" → ['!inventory', '!getWood(20)']。每个元素都是单条命令
+//   子串, 可直接喂给 executeCommand (它内部用非全局 commandRegex 只解析首条)。默认单命令路径不用它,
+//   语义不变; 仅 handleMessage 的外部意图独占回合按序执行本数组。
+export function parseCommandStrings(message) {
+    const g = new RegExp(commandRegex.source, 'g');
+    const out = [];
+    let m;
+    while ((m = g.exec(message)) !== null) {
+        out.push(m[0]);
+        if (m.index === g.lastIndex) g.lastIndex++;   // 防零长匹配死循环
+    }
+    return out;
+}
+
+// truncCommandMessage 的多命令版: 保留到【最后】一条命令结束(只丢弃末条命令之后的散文/注释),
+// 用作多命令回合里写回 history 的 assistant 文本。
+export function truncCommandMessageMulti(message) {
+    const g = new RegExp(commandRegex.source, 'g');
+    let last = null, m;
+    while ((m = g.exec(message)) !== null) {
+        last = m;
+        if (m.index === g.lastIndex) g.lastIndex++;
+    }
+    if (last) return message.substring(0, last.index + last[0].length);
+    return message;
+}
+
 export function isAction(name) {
     return actionsList.find(action => action.name === name) !== undefined;
 }
@@ -242,7 +270,8 @@ export function getCommandDocs(agent) {
     }
     let docs = `\n*COMMAND DOCS\n You can use the following commands to perform actions and get information about the world. 
     Use the commands with the syntax: !commandName or !commandName("arg1", 1.2, ...) if the command takes arguments.\n
-    Do not use codeblocks. Use double quotes for strings. Only use one command in each response, trailing commands and comments will be ignored.\n`;
+    Do not use codeblocks. Use double quotes for strings.
+    Normally use ONE command per response and wait for its result. BUT when you are working on a commanded task and are certain of a short fixed sequence of steps (e.g. gather then craft then smelt), you MAY chain several commands in one response — they run in order — to finish faster. If you must SEE a command's result before deciding the next step, use just one. Trailing prose after the last command is ignored.\n`;
     for (let command of commandList) {
         if (agent.blocked_actions.includes(command.name)) {
             continue;
