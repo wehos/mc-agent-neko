@@ -73,6 +73,73 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     const WATERY = new Set(['water', 'flowing_water']);
     const inWater = () => [bot.entity.position, bot.entity.position.offset(0, 1, 0), bot.entity.position.offset(0, -1, 0)]
         .some(c => { const b = blk(c); return b && WATERY.has(b.name); });
+    // ★2026-07-07 用户令 "1铁镐可下地, 但边挖边补镐": 下矿途中【就地(不上浮)】把顺路挖到的铁转成
+    // 备用铁镐, 让唯一能挖钻的镐永远有替补(石镐挖不了钻矿)。触发(用户定 2 选 1): (a)最好那把铁镐
+    // 耐久<50% 且够料造≥1把; (b)已攒够 2 把镐的料(铁单位≥6)。每次开造尽量多造, 上限 3 把新镐, 且
+    // 不超过 tier 目标 4 把(spec-pickaxe-stockpile)。就地链: smeltSafe 自放炉冶炼 raw_iron→锭,
+    // craftRecipeLocal 自放台锻 iron_pickaxe(二者本就自带炉/台回收, 不喂幽灵设施, 不上浮)。安全:
+    // 冶炼+锻造要静止 ~30s+ → 战斗/低血/水下/近怪 不开工; 60s 节流; 永不 throw, 失败不中断下潜。
+    const IRON_PICK_TARGET = 4;
+    // ★节流状态挂 bot(非函数局部): mineDiamonds 每次重派都新建闭包, 局部 var 会归 0 → 60s 节流
+    // 跨派发失效, 每趟首次必补(~20-30s 冻结)。挂 bot._lastPickCraftAt 让节流真正跨派发生效。
+    const HOSTILE_NEAR_CRAFT = /zombie|skeleton|creeper|spider|witch|enderman|drowned|husk|stray|slime|silverfish|cave_spider|warden|phantom|pillager|vindicator/i;
+    const hostileNearCraft = (r = 10) => { try { return Object.values(bot.entities).some(e => e && e.position && e.name && HOSTILE_NEAR_CRAFT.test(e.name) && e.position.distanceTo(bot.entity.position) < r); } catch (e) { return false; } };
+    const maybeReplenishIronPick = async () => {
+        try {
+            const now = Date.now();
+            if (now - (bot._lastPickCraftAt || 0) < 60000) return false;   // 60s 节流(跨派发)
+            if (bot.interrupt_code) return false;
+            const rawIron = has('raw_iron'), ingots = has('iron_ingot');
+            const ironUnits = rawIron + ingots;                  // 每把 iron_pickaxe = 3 铁单位 + 2 棍
+            const sticks = has('stick');
+            const cobble = has('cobblestone') + has('cobbled_deepslate');
+            const ironPicks = (() => { try { return bot.inventory.items().filter(i => i.name === 'iron_pickaxe'); } catch (e) { return []; } })();
+            const effIronPicks = ironPicks.length;
+            if (effIronPicks >= IRON_PICK_TARGET) return false;   // 已到囤镐目标, 别无限冶炼
+            const affordable = Math.min(Math.floor(ironUnits / 3), Math.floor(sticks / 2));
+            if (affordable < 1) return false;                     // 连一把料都不够
+            const remainPct = (i) => { const m = i.maxDurability || 0, u = (typeof i.durabilityUsed === 'number') ? i.durabilityUsed : 0; return m > 0 ? (m - u) / m : 1; };
+            const bestPct = effIronPicks ? Math.max(...ironPicks.map(remainPct)) : 0;
+            const lowDura = bestPct < 0.5 && affordable >= 1;     // 触发 (a)
+            const stockpiled = affordable >= 2;                   // 触发 (b): 攒够 2 把料
+            if (!lowDura && !stockpiled) return false;
+            const picksToMake = Math.min(3, affordable, IRON_PICK_TARGET - effIronPicks);
+            if (picksToMake < 1) return false;
+            const needIngots = 3 * picksToMake;
+            // 就地前置: 若需冶炼(锭不够), 必须能自放炉(有炉物品或够 8 cobble) 且有燃料(煤/木炭);
+            // 备不出炉或没燃料就本轮不补(留给上浮补给链兜底), 免空转烧 60s 节流槽。
+            const fuel = has('coal') + has('charcoal');
+            if (needIngots > ingots && rawIron > 0 && (fuel < 1 || (has('furnace') < 1 && cobble < 8))) return false;
+            // 锻造前置: iron_pickaxe 需 3x3 工作台 — 身上有随身台或邻近有台才开工(craftRecipeLocal
+            // 会自放随身台+回收), 无台就本轮不补, 免白烧节流槽。
+            const tableOk = has('crafting_table') >= 1 || (() => { try { return !!world.getNearestBlock(bot, 'crafting_table', 4); } catch (e) { return false; } })();
+            if (!tableOk) return false;
+            // 安全闸: 冶炼+锻造全程静止, 别在战斗/低血/水下/近怪时开工
+            if ((bot.health || 20) < 12) return false;
+            if (inWater()) return false;
+            if (hostileNearCraft(10)) return false;
+            bot._lastPickCraftAt = now;   // 先占坑防重入(即便本轮部分失败也隔 60s 再试, 跨派发)
+            log(bot, `⛏️边挖边补镐: 触发=${lowDura ? '耐久' + Math.round(bestPct * 100) + '%' : '囤料'} 铁镐${effIronPicks}/${IRON_PICK_TARGET} 铁单位${ironUnits}(raw${rawIron}+锭${ingots}) 棍${sticks} → 就地造≤${picksToMake}把 y=${yNow()}`);
+            try { bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop(); } catch (e) {}
+            try { bot.clearControlStates(); } catch (e) {}
+            // ① 冶炼: 补足锻造所需铁锭
+            if (needIngots > has('iron_ingot') && has('raw_iron') > 0) {
+                const smeltN = Math.min(has('raw_iron'), needIngots - has('iron_ingot'));
+                try { await skills.customSkill(bot, 'smeltSafe', 'raw_iron', smeltN); }
+                catch (e) { log(bot, `⛏️边挖边补镐: 冶炼 err ${e && e.message}`); }
+            }
+            if (bot.interrupt_code) return false;
+            // ② 锻造: 按【冶炼后实际锭/棍】收敛把数, 就地自放台
+            const makeNow = Math.min(picksToMake, Math.floor(has('iron_ingot') / 3), Math.floor(has('stick') / 2));
+            if (makeNow < 1) { log(bot, `⛏️边挖边补镐: 冶炼后锭仍不足(锭${has('iron_ingot')}) → 本轮跳过锻造`); return false; }
+            const before = (() => { try { return bot.inventory.items().filter(i => i.name === 'iron_pickaxe').length; } catch (e) { return effIronPicks; } })();
+            try { await skills.craftRecipeLocal(bot, 'iron_pickaxe', makeNow); }
+            catch (e) { try { await skills.craftRecipe(bot, 'iron_pickaxe', makeNow); } catch (e2) { log(bot, `⛏️边挖边补镐: 锻造 err ${e2 && e2.message}`); } }
+            const after = (() => { try { return bot.inventory.items().filter(i => i.name === 'iron_pickaxe').length; } catch (e) { return before; } })();
+            log(bot, `⛏️边挖边补镐: 就地锻造 铁镐 ${before}→${after} (本轮拟造 ${makeNow}) y=${yNow()}`);
+            return after > before;
+        } catch (e) { return false; }
+    };
     const toDryLand = async () => {
         for (let r = 0; r < 6 && inWater(); r++) {
             const p = bot.entity.position.floored();
@@ -184,6 +251,10 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     let guard = 0, stalls = 0, drownStrikes = 0;
     while (yNow() > TARGET_Y && guard++ < 250) {
         if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
+        // ★边挖边补镐 (用户令): BEFORE the pick-runway abort — a dying lone pick with iron on hand
+        // should be replenished in place, not force a climb-out. Crafts a fresh iron pick so the
+        // pickRunway check below sees a healthy pick and the descent continues.
+        await maybeReplenishIronPick();
         // ★PICK-RUNWAY: never dig the shaft deeper on a dying lone pick — the remaining
         // uses are the climb-out budget. Banking hasn't run yet, so in-hand delta is exact.
         const pickStop = pickRunwayStop();
@@ -322,6 +393,10 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
         // ★Re-check the pickaxe mid-mining: it can break (durability) or be lost to a death+
         // respawn while this loop runs. Keep digging the diamond layer pickaxe-less = useless.
         if (!hasIronPick()) { log(bot, '⛏️ pickaxe gone mid-dive — stop mining (achieve re-acquires).'); break; }
+        // ★边挖边补镐 (用户令): top up spare iron picks in place from opportunistically-mined iron
+        // BEFORE the pick-runway abort, so a dying pick with material on hand restores itself and
+        // mining continues instead of aborting the dive.
+        await maybeReplenishIronPick();
         // ★PICK-RUNWAY: same pre-emptive stop mid-mining (collectBlock/branchMine below grind the
         // pick on stone too). Progress counts banked deposits from THIS dispatch, not the stock.
         const pickStop = pickRunwayStop();
