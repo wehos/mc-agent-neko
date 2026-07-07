@@ -98,7 +98,14 @@ export class Agent {
             "Set the difficulty to",
             "Teleported ",
             "Set the weather to",
-            "Gamerule "
+            "Gamerule ",
+            // ★2026-07-08 修: /命令 的服务器回执前缀 — 别把它当 admin 任务喂给 agent (见 bot.on('chat') 兜底闸)。
+            "Gave ",
+            "Given ",
+            "Applied the effect",
+            "Set the world spawn",
+            "Saved the game",
+            "Summoned new"
         ];
         
         const respondFunc = async (username, message) => {
@@ -141,6 +148,19 @@ export class Agent {
             //   (bot 自己的命令语法是 !command, 从不以 / 开头, 故此闸不会误挡 bot 指令。)
             if (typeof message === 'string' && /^\s*\//.test(message)) {
                 console.log(`[chat] 忽略斜杠作弊命令(非 admin 指令): ${String(message).slice(0, 60)}`);
+                return;
+            }
+            // ★2026-07-08 修 (用户报: /give 后 bot 冒 "开始执行指令"): /命令 的服务器回执 ("Gave 25 [Dirt]
+            //   to Neko" / "Teleported …" 等) 会作为伪 chat 冒出来 —— slash 闸挡不住 (回执不以 / 开头, bot 收到
+            //   的是命令的"结果"而非你输入的 /命令)。两道闸: (a) 只认真在线玩家发的话 — 命令回执没有对应
+            //   bot.players 条目 (vanilla LAN 世界玩家名即真名, 不会误挡真人); (b) 复用 ignore_messages 前缀表
+            //   兜底 (已补 "Gave " 等回执前缀), 覆盖回执被归属到某在线玩家名的少见情形。
+            if (!username || !this.bot.players || !this.bot.players[username]) {
+                console.log(`[chat] 忽略非在线玩家消息(疑似命令回执): ${String(message).slice(0, 60)}`);
+                return;
+            }
+            if (message === '' || (typeof message === 'string' && ignore_messages.some((m) => message.startsWith(m)))) {
+                console.log(`[chat] 忽略服务器命令回执: ${String(message).slice(0, 60)}`);
                 return;
             }
             // ★2026-07-07 ADMIN MISSION: in-game chat becomes a persistent mission too (origin='chat',
