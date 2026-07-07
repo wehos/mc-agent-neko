@@ -685,7 +685,12 @@ export class Agent {
         //   结束(下方 finally 清)。这实现"外部意图=最高优先级、独占, 直到 gpt-5.4-mini 判定任务完成"。
         //   kernel._survivalTick 读 bot._extIntentUntil 决定让位。5min 是崩溃兜底(正常由 finally 清)。
         //   硬保命反射(modes vitalNow: 溺水/着火/岩浆/hp≤4)独立于内核、仍生效。
-        if (source === 'admin') { try { this.bot._extIntentUntil = Date.now() + 300000; } catch (e) {} }
+        if (source === 'admin') {
+            try { this.bot._extIntentUntil = Date.now() + 300000; } catch (e) {}
+            // ★2026-07-07 用户令: 游戏聊天里提示"开始执行指令", 让人一眼知道 bot 正在跑 LLM/chat 任务(而非自主)。
+            //   env DEBUG_CHAT=0 可关。self 消息会被 bot.on('chat') 的 self 过滤挡掉, 不回灌。
+            try { if (message && String(process.env.DEBUG_CHAT || '1') !== '0') this.bot.chat('🎯 开始执行指令：' + String(message).replace(/\n/g, ' ').slice(0, 80)); } catch (e) {}
+        }
 
         try {
             await this.checkTaskDone();
@@ -854,6 +859,8 @@ export class Agent {
             if (source === 'admin') {
                 // ★外部意图独占: 本 admin chat-loop 结束(gpt-5.4-mini 判定完成)→ 释放让位戳, 内核恢复自主派发。
                 try { this.bot._extIntentUntil = 0; } catch (e) {}
+                // ★用户令: 提示指令回合结束、回到自主行动。
+                try { if (String(process.env.DEBUG_CHAT || '1') !== '0') this.bot.chat('✅ 指令完成，回到自主行动'); } catch (e) {}
                 try {
                     // The mini LLM often emits just '\t' when it has no
                     // narrative to add (see neko.json's "respond with just

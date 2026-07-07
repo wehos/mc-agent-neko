@@ -260,7 +260,11 @@ class WSMessageServer {
         else if (goal) head = `在${goal}`;              // 没动作(hold/idle) → 报正在为之等待的目标(如 躲夜等天亮)
         else head = '暂时空闲，在想下一步';
 
-        let text = head + '，' + hpTxt + '、' + foodTxt;
+        // ★2026-07-07 用户令: 状态前缀标出模式 —— 🎯[按指令]=正在跑外部/chat 指令(admin 独占 或 run_skill),
+        //   🤖[自主]=内核自主行动。让人(和外部 LLM)一眼知道 bot 现在听谁的。
+        const onCommand = (bot._extIntentUntil && Date.now() < bot._extIntentUntil)
+            || (this.agent && this.agent.supervised_skill === 'ws');
+        let text = (onCommand ? '🎯[按指令] ' : '🤖[自主] ') + head + '，' + hpTxt + '、' + foodTxt;
         if (dim === 'the_nether') text += '，在下界';
         else if (dim === 'the_end') text += '，在末地';
         text += hostiles > 0 ? `，附近有${hostiles}只怪${names.length ? `（${names.join('、')}）` : ''}` : '，周围没怪';
