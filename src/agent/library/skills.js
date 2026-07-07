@@ -908,6 +908,30 @@ async function equipForDig(bot, block) {
 // Returns 'ok' | 'gone' | 'unreachable' | 'timeout' | 'error'. Caller decides cleanup
 // (exclude, expand neighbours, relocate, ...). Opts: maxMs dig backstop, approach (path
 // closer), equip (run equipForDig — false if caller already equipped), pickup (vacuum drop).
+// ★Pattern-3 共享 interrupt-race: 把任意长 await(bot.dig / 自定义 promise)裹成"reflex 置了
+// bot.interrupt_code(或死亡)时 ≤pollMs 内可被抢占"——否则 body 会一直忽略到 await 自然结束。
+// 与 safeDig(948-955)/breakBlockAt 同款 idiom:200ms 轮询 + finally 清理。timeoutMs<=0 = 纯
+// interrupt-race(不封顶);>0 加上限。onAbort(默认 stopDigging)在中止时 unwind 底层操作。
+// 返回 'ok'|'timeout'|'error'(不抛),调用点可直接 `if (await ... !== 'ok')` 分支。
+export async function raceInterrupt(bot, work, { pollMs = 200, timeoutMs = 0, onAbort } = {}) {
+    let _iv = null, _to = null;
+    const arms = [Promise.resolve(work)];
+    arms.push(new Promise((_, rej) => {
+        _iv = setInterval(() => { try { if (bot.interrupt_code || bot.health <= 0) rej(new Error('interrupted')); } catch (e) {} }, pollMs);
+    }));
+    if (timeoutMs > 0) arms.push(new Promise((_, rej) => { _to = setTimeout(() => rej(new Error('timeout')), timeoutMs); }));
+    try {
+        await Promise.race(arms);
+        return 'ok';
+    } catch (e) {
+        try { (onAbort || (() => { try { bot.stopDigging(); } catch (_) {} }))(); } catch (_) {}
+        return (e && e.message === 'timeout') ? 'timeout' : 'error';
+    } finally {
+        if (_iv) clearInterval(_iv);
+        if (_to) clearTimeout(_to);
+    }
+}
+
 async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = true, pickup = false, requireLOS = false } = {}) {
     const dead = (b) => !b || b.boundingBox === 'empty' || b.name === 'air';
     if (dead(block)) return 'gone';
@@ -918,6 +942,28 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
         if (reachOf() > 4.6) return 'unreachable';
         const cur = bot.blockAt(block.position);
         if (dead(cur)) return 'gone';
+        // ★#1 (用户 2026-07-07: 挖仅 1 格外的矿要站在当前脚下方块正中——否则贴边/侧身站着挖, 挖完
+        //   身子迈不进空出来的坑, 或够矿的姿势别扭). 目标水平相邻(≤1.6b)且自己明显偏离脚下方块中心
+        //   (>0.33b)时, 先滑到方块正中再挖。只近距+ORE(requireLOS)触发(远处 approach 已定位), 手动
+        //   nudge 上限 1.2s 不缠斗, 结束清控制; bot.dig 会自行重新看向目标, 居中不改可达/LOS。
+        if (requireLOS && approach && bot.entity.onGround) {
+            const _m0 = bot.entity.position;
+            const _horiz = Math.hypot((block.position.x + 0.5) - _m0.x, (block.position.z + 0.5) - _m0.z);
+            const _cx = Math.floor(_m0.x) + 0.5, _cz = Math.floor(_m0.z) + 0.5;
+            const _off = Math.hypot(_m0.x - _cx, _m0.z - _cz);
+            if (_horiz <= 1.6 && _off > 0.33) {
+                const _t0 = Date.now();
+                try {
+                    while (Date.now() - _t0 < 1200 && !bot.interrupt_code) {
+                        const _m = bot.entity.position;
+                        if (Math.hypot(_cx - _m.x, _cz - _m.z) < 0.16) break;
+                        try { await bot.lookAt(new Vec3(_cx, _m.y + 1.62, _cz), true); } catch (e) {}
+                        try { bot.setControlState('forward', true); } catch (e) {}
+                        await new Promise(r => setTimeout(r, 80));
+                    }
+                } finally { try { bot.clearControlStates(); } catch (e) {} }
+            }
+        }
         // ★C337+ (2026-07-06 用户实拍: 站墙前把墙后下方的铁隔墙挖掉, 然后卡墙乱挥镐子过不去):
         // anti-x-ray LOS gate, opt-in via requireLOS (collectBlock passes it for ORE). Enforce
         // line-of-sight to the ore at ANY distance — canSeeBlock raycasts eye→block-centre and is
@@ -4384,8 +4430,10 @@ export async function digOneCapOne(bot) {
     // oak_planks(漏 spruce 等), fallback 抓"任意固体"会选中 spruce_planks → 工作台旁乱堆木板(真凶,
     // 初诊误判在 modes.js)。扩充贱料清单 + fallback 拆两段: 先任意非木贱料, 只有木料时才用(裸生
     // 封顶保命 — modes.js:1175 保护的 wood-only seal 不能断)。cap(④)与侧墙(⑤ 4376)共用 capName。
+    // ★材料优先级 (用户令 2026-07-07: 泥土 > 石头 > 其他): dirt/coarse_dirt 优先, 石系其次;
+    //   木料仍是最末位 fallback(下方 _nonWood/_wood 两段), 仅裸生保命才用。
     const _CAP_PREFS = [
-        'cobblestone', 'cobbled_deepslate', 'stone', 'dirt', 'coarse_dirt', 'deepslate',
+        'dirt', 'coarse_dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'deepslate',
         'andesite', 'diorite', 'granite', 'netherrack', 'tuff', 'sandstone', 'red_sandstone', 'terracotta',
     ];
     let capName = _CAP_PREFS.find(n => (inv[n] || 0) > 0);

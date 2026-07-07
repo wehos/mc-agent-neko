@@ -890,7 +890,10 @@ const modes_list = [
                         : ((headB && headB.boundingBox === 'block') ? headB : null);
                     if (hasPick && tgt && bot.canDigBlock && bot.canDigBlock(tgt)) {
                         try { await bot.lookAt(tgt.position.offset(0.5, 0.5, 0.5), true); } catch (e) {}
-                        try { await bot.dig(tgt); } catch (e) {}
+                        // ★Pattern3: 裸 bot.dig 在 self_preservation 反射串行体内 → 长挖会冻住整条 modes
+                        //   循环 + 下一拍(最长 15s)。裹 raceInterrupt:死亡/取消 ≤200ms 抢占, 5s 封顶(canDigBlock
+                        //   已保证可挖, 逼角翻越有镐时 <1s, 5s 极宽裕)。
+                        try { await skills.raceInterrupt(bot, bot.dig(tgt), { timeoutMs: 5000 }); } catch (e) {}
                     }
                 } catch (e) {}
             }
@@ -1171,7 +1174,14 @@ const modes_list = [
                                 `[${new Date().toISOString()}] [self_preservation] night bunker dwell: covered=true hold=${nightHold.hold} hp=${Math.round(bot.health)} food=${bot.food} hostiles=${this.nearbyHostiles(bot).length} closest=${Number.isFinite(nightHold.closest) ? nightHold.closest.toFixed(1) : '-'} creeper=${Number.isFinite(nightHold.creeperDist) ? nightHold.creeperDist.toFixed(1) : '-'}\n`);
                         } catch (e) {}
                     }
-                    await new Promise(r => setTimeout(r, 5000));
+                    // ★Pattern1 分段可醒 dwell: 保留"不快返"的防刷屏语义(见上注释), 但危险
+                    // (creeper 靠近 / 挨打 / 取消 / 死亡)时 ≤250ms 内跳出重评, 不再盲停 5s 眼瞎。
+                    for (let _t = 0; _t < 5000; _t += 250) {
+                        await new Promise(r => setTimeout(r, 250));
+                        if (bot.interrupt_code || bot.health <= 0) break;
+                        if (this.nearestCreeper(bot, 8)) break;
+                        if (Date.now() - (bot.lastDamageTime || 0) < 300) break;
+                    }
                     return;
                 }
             } catch (e) {}
@@ -1305,7 +1315,10 @@ const modes_list = [
                         const q = bot.entity.position.floored();
                         for (const cell of [q.offset(dx, 1, dz), q.offset(dx, 0, dz)]) {
                             const b = bot.blockAt(cell);
-                            if (b && !OPENISH.includes(b.name)) { try { await bot.dig(b); } catch (e) {} }
+                            // ★Pattern3: 反射串行体内裸 dig(裸生凿向天然顶盖)→ 徒手挖石可 7.5s/格 × 多格 =
+                            //   长冻 modes 循环。裹 raceInterrupt:死亡/取消 ≤200ms 抢占, 8000ms 封顶(= safeDig
+                            //   非硬块上限, 徒手石破 7.5s 仍能完成, 只截真卡死)。
+                            if (b && !OPENISH.includes(b.name)) { try { await skills.raceInterrupt(bot, bot.dig(b), { timeoutMs: 8000 }); } catch (e) {} }
                         }
                         try { await skills.goToPosition(bot, q.x + dx, q.y, q.z + dz, 0); } catch (e) {}
                     }
@@ -1358,7 +1371,13 @@ const modes_list = [
                         } catch (e) {}
                     }
                     try { bot.clearControlStates(); } catch (e) {}
-                    await new Promise(r => setTimeout(r, 3000));
+                    // ★Pattern1 分段可醒 hold: 危险(creeper/挨打/取消/死亡)时 ≤250ms 跳出重评, 不盲停 3s。
+                    for (let _t = 0; _t < 3000; _t += 250) {
+                        await new Promise(r => setTimeout(r, 250));
+                        if (bot.interrupt_code || bot.health <= 0) break;
+                        if (this.nearestCreeper(bot, 8)) break;
+                        if (Date.now() - (bot.lastDamageTime || 0) < 300) break;
+                    }
                     return;
                 }
                 // seal failed with no mobs in sight → back off 45s (see cooldown at entry)
@@ -1423,7 +1442,16 @@ const modes_list = [
                     if (bot.oxygenLevel !== undefined && bot.oxygenLevel <= 6) break;
                     const hs = this.nearbyHostiles(bot);
                     const cr = this.nearestCreeper(bot, 12);
-                    if (hs.length === 0 && !cr) { try { bot.clearControlStates(); } catch (e) {} await new Promise(r => setTimeout(r, 1000)); continue; } // no mob → stop & keep watch (do NOT return = bunker-thrash)
+                    if (hs.length === 0 && !cr) { // no mob → stop & keep watch (do NOT return = bunker-thrash)
+                        try { bot.clearControlStates(); } catch (e) {}
+                        // ★Pattern1 分段可醒 watch: 怪一出现 ≤250ms 内重入循环接战, 不盲停 1s。
+                        for (let _t = 0; _t < 1000; _t += 250) {
+                            await new Promise(r => setTimeout(r, 250));
+                            if (bot.interrupt_code || bot.health <= 0) break;
+                            if (this.nearestCreeper(bot, 12) || this.nearbyHostiles(bot).length) break;
+                        }
+                        continue;
+                    }
                     // ★Do NOT clearControlStates here. The old per-iteration clear stopped forward/
                     // sprint right before fleeMove's lookAt(await) ran with forward=false — a stutter
                     // every cycle that cut average speed so a plain zombie caught the naked bot (died
@@ -4584,32 +4612,46 @@ const modes_list = [
                         // only road-out that fall-killed #106 chasing an elevated target). When the
                         // locked target is above us and the foot-ahead is a solid STEP whose head/above
                         // can be cleared, climb the step instead of tunnelling under it.
+                        // ★STEP-UP FIX (live "狂挖泥土" 用户实拍: 每步把身前 2 格一起挖掉,身前台阶
+                        // 永远还是 2 格): the old march cleared the 2-high cell ahead — digging BOTH the
+                        // foot-level and head-level block — so on a RISING slope it carved the step down to
+                        // its own foot level and walked forward at the SAME Y; the hill kept rising, the next
+                        // face was again 2-high, and it burrowed dirt horizontally forever, never gaining the
+                        // 1 block it needed to jump up. Fix: whenever a SOLID STEP is ahead (foot-ahead solid)
+                        // and we're not headed clearly downhill, CLIMB it — keep the foot-ahead block as the
+                        // step, clear head/above, and jump ONTO it (feet rise 1). Only when the climb is capped
+                        // (unbreakable above) do we fall back to the horizontal clear, and even then we NEVER
+                        // dig away a climbable step's foot block. (Generalises the old C307-A climb, which only
+                        // fired toward a log target it already knew was elevated — bot._marchTargetY.)
+                        const _footAhead = bot.blockAt(m2.offset(sx, 0, sz));
+                        const _stepSolid = _footAhead && _footAhead.boundingBox === 'block' && !/bedrock|water|lava/.test(_footAhead.name || '');
                         const _tgtY = bot._marchTargetY;
-                        if (Number.isFinite(_tgtY) && _tgtY > m2.y + 0.5) {
-                            const _footAhead = bot.blockAt(m2.offset(sx, 0, sz));
-                            const _stepSolid = _footAhead && _footAhead.boundingBox === 'block' && !/bedrock|water|lava/.test(_footAhead.name || '');
-                            if (_stepSolid) {
-                                let _climbBlocked = false;
-                                // clear head-ahead (dy1), above-ahead (dy2) and own-above (dy2) so there is room to rise onto the step
-                                for (const c of [m2.offset(sx, 1, sz), m2.offset(sx, 2, sz), m2.offset(0, 2, 0)]) {
-                                    const b = bot.blockAt(c);
-                                    if (b && b.boundingBox === 'block' && !/bedrock|water|lava/.test(b.name)) {
-                                        if (!canMarchDig(b)) { _climbBlocked = true; break; }
-                                        await guardedDig(b, 'MAROONED-climb');
-                                    }
-                                }
-                                if (!_climbBlocked) {
-                                    try { await bot.lookAt(m2.offset(sx + 0.5, 1.2, sz + 0.5), true); } catch (e) {}
-                                    bot.setControlState('forward', true);
-                                    bot.setControlState('jump', true);
-                                    await new Promise(r => setTimeout(r, 420));
-                                    try { bot.clearControlStates(); } catch (e) {}
-                                    if (bot.entity.position.floored().y > m2.y) continue;   // rose a level → re-evaluate from higher up
+                        const _tgtBelow = Number.isFinite(_tgtY) && _tgtY < m2.y - 1.5;   // target clearly downhill → tunnel through, don't climb over
+                        let _climbedStep = false;
+                        if (_stepSolid && !_tgtBelow) {
+                            let _climbBlocked = false;
+                            // clear head-ahead (dy1), above-ahead (dy2) and own-above (dy2) so there is room to rise onto the step
+                            for (const c of [m2.offset(sx, 1, sz), m2.offset(sx, 2, sz), m2.offset(0, 2, 0)]) {
+                                const b = bot.blockAt(c);
+                                if (b && b.boundingBox === 'block' && !/bedrock|water|lava/.test(b.name)) {
+                                    if (!canMarchDig(b)) { _climbBlocked = true; break; }
+                                    await guardedDig(b, 'MAROONED-climb');
                                 }
                             }
+                            if (!_climbBlocked) {
+                                _climbedStep = true;   // keep the foot-ahead block as the step — never dual-dig it away below
+                                try { await bot.lookAt(m2.offset(sx + 0.5, 1.2, sz + 0.5), true); } catch (e) {}
+                                bot.setControlState('forward', true);
+                                bot.setControlState('jump', true);
+                                await new Promise(r => setTimeout(r, 420));
+                                try { bot.clearControlStates(); } catch (e) {}
+                                if (bot.entity.position.floored().y > m2.y) continue;   // rose a level → re-evaluate from higher up
+                            }
                         }
-                        // clear the 2-high cell ahead
-                        for (const c of [m2.offset(sx, 1, sz), m2.offset(sx, 0, sz)]) {
+                        // clear the cell ahead. A climbable step keeps its foot block (we jump ONTO it);
+                        // only carve the foot-level block when we're NOT stepping up (flat / tunnel-through).
+                        const _clearCells = _climbedStep ? [m2.offset(sx, 1, sz)] : [m2.offset(sx, 1, sz), m2.offset(sx, 0, sz)];
+                        for (const c of _clearCells) {
                             const b = bot.blockAt(c);
                             if (b && b.boundingBox === 'block' && !/bedrock|water|lava/.test(b.name)) {
                                 if (!canMarchDig(b)) { stoneBlocked = b; break; }
@@ -5348,6 +5390,20 @@ const modes_list = [
                         const fCeil = bot.blockAt(fl.offset(dx, 2, dz));
                         if (breakable(fCeil)) { obstr = fCeil; break; }    // 台阶上方天花板挡住钻过
                     }
+                    // ★#2 (用户 2026-07-07 实拍截图: 蓝线路径把 bot 塞进只有 1 格高的横向缝——脚能进、
+                    //   头顶前方一块方块挡住 → 顶着走不动). 上面的 loop 只处理"前方脚位是实心台阶"的登高;
+                    //   这里处理"前方脚位可走(空)+前方头位实心"的 1 格高通道: 破前方头顶那块使路径变 2 高。
+                    //   只朝 bot yaw 前向的那一个 cardinal 破(不乱挖侧墙/身后), 需前方有地板(不踩空)+非液体。
+                    if (!obstr) {
+                        const _yaw = bot.entity.yaw;
+                        const _fxx = -Math.sin(_yaw), _fzz = -Math.cos(_yaw);
+                        const [_fdx, _fdz] = Math.abs(_fxx) >= Math.abs(_fzz) ? [Math.sign(_fxx) || 1, 0] : [0, Math.sign(_fzz) || 1];
+                        const _floorAhead = bot.blockAt(fl.offset(_fdx, -1, _fdz));
+                        const _footAhead = bot.blockAt(fl.offset(_fdx, 0, _fdz));
+                        const _headAhead = bot.blockAt(fl.offset(_fdx, 1, _fdz));
+                        const _walkFoot = _footAhead && _footAhead.boundingBox !== 'block' && !/water|lava/.test(_footAhead.name || '');
+                        if (_floorAhead && _floorAhead.boundingBox === 'block' && _walkFoot && breakable(_headAhead)) obstr = _headAhead;
+                    }
                     if (obstr) {
                         this._digBusy = true;
                         const ob = obstr;
@@ -5381,6 +5437,65 @@ const modes_list = [
                     try { fs.appendFileSync('bots/_supervisor/progress.txt', `[${new Date().toISOString()}] [edge_unstick] wedged ${Math.round(stalled)}ms (jump-fail, replan #${this.resetStreak}${this.resetStreak >= 2 ? ' +back-off relocate' : ''}) @${p.x.toFixed(1)},${Math.round(p.y)},${p.z.toFixed(1)}\n`); } catch (e) {}
                     this.wedgeStart = 0;
                 }
+            } catch (e) {}
+        }
+    },
+    {
+        name: 'pf_dig_watchdog',
+        description: 'Backstop the ONE dig case no reflex covers: a PATHFINDER-driven destructive dig (isMoving + targetDigBlock) hung on the SAME block with zero body progress. mineflayer-pathfinder digs path blocks via an UN-timed bot.dig (index.js:507) and its own 3.5s stuck-timer (index.js:655) is bypassed while digging (lastNodeTime keeps resetting), so a block the router mis-approved (occluded / bare-hand hard / server-rejected) grinds forever = 用户"贴墙挥半天挖不到". edge_unstick BAILS on targetDigBlock (its 5343 gate) and reflex_watchdog only kicks at 15min → this is the seconds-timescale filler. Abort the hung dig + drop the goal so the DRIVER (goToPosition / a mode) replans a route that does not hinge on that block.',
+        interrupts: [],
+        on: true,
+        active: false,
+        always: true,   // pure supervisor: must tick even while a hung dig wedges everything below it
+        lastTick: 0, tgtKey: null, tgtSince: 0, tgtPos: null, lastFireAt: 0, sameSpotFires: 0, lastSpotKey: null, spotWindowAt: 0,
+        update: async function (agent) {
+            const bot = agent.bot;
+            const now = Date.now();
+            if (now - this.lastTick < 250) return;   // ~4Hz, matches edge_unstick
+            this.lastTick = now;
+            try {
+                if (!bot || !bot.entity || !bot.entity.position) return;
+                const tdb = bot.targetDigBlock;
+                const pfMoving = !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving());
+                // ★Gate 1 — pathfinder-driven ONLY. safeDig's own digs (skills.js:975) run with the
+                // pathfinder IDLE (goToPosition returned before the dig) and self-cap at 8s; a mode's
+                // raceInterrupt digs (modes.js:896/1321) are timeout-wrapped. Requiring isMoving()
+                // isolates the un-backstopped pathfinder-toBreak dig and touches nothing already bounded.
+                if (!tdb || !tdb.position || !pfMoving) { this.tgtKey = null; this.tgtSince = 0; return; }
+                // ★Gate 2 — never preempt confinement recovery or the MAROONED march (step-aware climb
+                // at 4604-4649 owns its own guardedDig; POCKET/ENTOMBED have their mobility dig-out).
+                const mob = (bot._mobility && bot._mobility.state) || '';
+                if (/POCKET|ENTOMBED|MAROONED/.test(mob)) { this.tgtKey = null; this.tgtSince = 0; return; }
+                // ★Gate 3 — leave deliberate long breaks alone (nether-portal obsidian ~9.4s w/ diamond).
+                if (/obsidian|ancient_debris|reinforced|bedrock/.test(tdb.name || '')) { this.tgtKey = null; this.tgtSince = 0; return; }
+                const bp = tdb.position;
+                const key = `${bp.x},${bp.y},${bp.z}`;
+                if (this.tgtKey !== key) { this.tgtKey = key; this.tgtSince = now; this.tgtPos = bot.entity.position.clone(); return; }
+                const heldMs = now - this.tgtSince;
+                const movedXZ = this.tgtPos ? Math.hypot(bot.entity.position.x - this.tgtPos.x, bot.entity.position.z - this.tgtPos.z) : 0;
+                // ★Threshold — SAME block, body static, ≥9s. The slowest LEGIT single break the router
+                // would ever attempt is bare-hand stone (7.5s); 9s clears it with margin, so only a dig
+                // that genuinely never completes trips this. A normal multi-block travel-dig advances
+                // to a new toBreak block within a second (key changes → timer resets → never fires).
+                if (heldMs < 9000 || movedXZ > 0.6) return;
+                if (now - this.lastFireAt < 3000) return;   // at most once/3s — leave room for the driver's own replan
+                this.lastFireAt = now;
+                // Release: same gentle unwedge reflex_watchdog's pin-breaker uses, at a 9s dig timescale.
+                try { bot.stopDigging(); } catch (e) {}
+                try { bot.pathfinder.setGoal(null); } catch (e) {}
+                try { bot.clearControlStates(); } catch (e) {}
+                // ★Escalate only if the router keeps re-selecting the SAME dead block (3× in 30s): cancel
+                // the driving skill so it picks a different target (mirrors reflex_watchdog's forced kick).
+                if (this.lastSpotKey === key && now - (this.spotWindowAt || 0) < 45000) this.sameSpotFires++;
+                else { this.sameSpotFires = 1; this.spotWindowAt = now; }
+                this.lastSpotKey = key;
+                let escalated = false;
+                if (this.sameSpotFires >= 3) { try { bot.interrupt_code = true; } catch (e) {} escalated = true; this.sameSpotFires = 0; }
+                this.tgtKey = null; this.tgtSince = 0;
+                try {
+                    fs.appendFileSync('bots/_supervisor/progress.txt',
+                        `[${new Date().toISOString()}] [pf_dig_watchdog] hung pathfinder dig ${tdb.name}@${key} (${Math.round(heldMs)}ms, body moved ${movedXZ.toFixed(2)}b, mob=${mob || 'FREE'}) — stopDig + drop goal${escalated ? ' + CANCEL skill (3× same dead block)' : ''}\n`);
+                } catch (e) {}
             } catch (e) {}
         }
     },
@@ -5954,6 +6069,13 @@ const modes_list = [
                     if (phase !== 'dusk' && phase !== 'night') return { decision: 'NONE' };
                     if (commitToFight) return { decision: 'FIGHT', reason: `point-blank melee d=${Number.isFinite(closest) ? closest.toFixed(1) : '?'}` };
                     if (smeltIronWarranted) return { decision: 'SMELT_IRON', reason: `${_ironIngotsDec >= 3 ? _ironIngotsDec + ' ingots' : _rawIronDec + ' raw_iron'} + no iron pick — lock in iron tier (persistent + iron sword/shield)`, targetY: y };
+                    // ★用户令 2026-07-07 (求死重生落点就在床边却跑去挖夜矿): a bed within arm's reach
+                    //   (respawn point / a just-built bed) BEATS mining the night — sleeping skips straight to
+                    //   dawn, dodging the night-danger + no-food death loop. Only when the bed is ADJACENT
+                    //   (≤6b) and affordable (bedAffordable already = reachable + no actionable threat + not a
+                    //   deep-no-climb); a FAR bed still yields to MINE_THROUGH_NIGHT (progress bias unchanged).
+                    if (bedAffordable && _bedLm && Number.isFinite(_bedLm.dist) && _bedLm.dist <= 6)
+                        return { decision: 'GO_BED', reason: `bed adjacent ${_bedLm.dist}b — sleep to dawn over night-mining`, target: _bedLm };
                     if (canMineWholeNight) return { decision: 'MINE_THROUGH_NIGHT', reason: `pickBudget=${picksBudget}>=${cfg.mineNightPickBudget}`, targetY: 12 };
                     if (alreadyDeepEnclosed) return { decision: 'MINE_THROUGH_NIGHT', reason: `already deep/enclosed y=${y} pick=${picks} — keep mining, don't surface-bootstrap`, targetY: 12 };
                     if (bedAffordable) return { decision: 'GO_BED', reason: `bed@${_bedReachCost}b`, target: _bedLm };

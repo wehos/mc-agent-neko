@@ -22,7 +22,9 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
     const { skills, world, Vec3, log } = ctx;
     const maxMs = (opts && opts.maxMs) || 120000;
     const t0 = Date.now();
-    const FILLER = ['cobblestone', 'cobbled_deepslate', 'dirt', 'tuff', 'andesite', 'stone', 'granite', 'diorite'];
+    // ★材料优先级 (用户令 2026-07-07: 泥土 > 石头 > 其他): dirt 优先(便宜/可再生/不占镐料·建材),
+    // 石系其次; 从不含木板 (木料是 recraft/工具的命脉, 不拿来砌墙)。
+    const FILLER = ['dirt', 'coarse_dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'deepslate', 'tuff', 'andesite', 'granite', 'diorite'];
     const filler = () => FILLER.find(n => (world.getInventoryCounts(bot)[n] || 0) > 0);
     // modes.js refreshes bot._world every ~2s; phase 'day' is exactly what isGoalDone
     // uses to release NIGHT_DIG_ONE/NIGHT_SEAL, so skill and proposer share one truth.
@@ -139,6 +141,54 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
         // 自封守卫按设计给 PICKLESS bot 留最后一个 2 格出口 (mob=FREE pick=false ×1986 条)
         // — 合法的活命 hold, 但必须在观测面上与真封顶区分开。
         if (openLeft > 0) log(bot, `[nightShelter] HOLD(unsealed) open=${openLeft} guardSkip=${guardSkipped} pick=${hasPick()} filler=${filler() || 'none'} — 漏风坚守 (守卫留门/缺料), 非真封顶.`);
+    }
+
+    // ── PHASE 1.5: ★SELF-INSIDE 强制 (用户令 2026-07-07 "强制要求自己在里面" + 实拍 bot 站在半拉
+    //    堡垒【外面】): 上面 seal/dig_one 以进场落点为中心围墙, 但 placeBlock 为够到目标格会把 bot
+    //    挪开 (它会走到能触到目标面的位置) → 墙围在旧格, bot 站到了外面。这里以 bot 的【当前】落点
+    //    为中心复核围合: 4 向脚/头出口 + 顶仍开的就补上, 保证 bot 一定在盒子里。沿用同样守卫:
+    //    ENTOMBED/SEALED 跳过 (本就出不去, 别加深棺材); 无镐时不封死最后一个水平出口 (避免自埋, 敌
+    //    近由下方 hold 循环的 hostileClose 逃生舱负责)。先停步/清控, 免得补墙时又被 placeBlock 挪出。
+    try { bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop(); } catch (e) {}
+    try { bot.clearControlStates(); } catch (e) {}
+    {
+        const _hasPick = () => { try { return bot.inventory.items().some(i => /_pickaxe$/.test(i.name || '')); } catch (e) { return false; } };
+        const _mobSt = () => { try { return (bot._mobility && bot._mobility.state) || ''; } catch (e) { return ''; } };
+        const q = bot.entity.position.floored();
+        // a horizontal direction is an OPEN exit only if BOTH the feet cell AND the head cell are non-solid
+        const _openExits = () => {
+            let n = 0;
+            for (const [ex, ez] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                const fb = bot.blockAt(new Vec3(q.x + ex, q.y, q.z + ez));
+                const hb = bot.blockAt(new Vec3(q.x + ex, q.y + 1, q.z + ez));
+                if (!(fb && fb.boundingBox === 'block') && !(hb && hb.boundingBox === 'block')) n++;
+            }
+            return n;
+        };
+        if (!/ENTOMBED|SEALED/.test(_mobSt())) {
+            const RING2 = [
+                [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1],
+                [1, 1, 0], [-1, 1, 0], [0, 1, 1], [0, 1, -1],
+                [0, 2, 0],
+            ];
+            let fixed = 0;
+            for (const [dx, dy, dz] of RING2) {
+                if (bot.interrupt_code || bot.health <= 0) break;
+                const c = new Vec3(q.x + dx, q.y + dy, q.z + dz);
+                const b = bot.blockAt(c);
+                if (b && b.boundingBox === 'block') continue;               // already walled by terrain / earlier seal
+                if (!_hasPick() && dy < 2 && _openExits() <= 1) continue;   // pickless: keep the last exit open (no self-entomb)
+                const f = filler();
+                if (!f) continue;                                          // out of dirt/stone — nothing to close it with
+                await skills.placeBlock(bot, f, c.x, c.y, c.z, 'bottom', true).catch(() => {});
+                const after = bot.blockAt(c);
+                if (after && after.boundingBox === 'block') fixed++;
+            }
+            if (fixed > 0) {
+                setSealed(_openExits() === 0);
+                log(bot, `nightShelter: ★self-inside 复核补墙 ${fixed} 格 @${q.x},${q.y},${q.z} exits=${_openExits()} — 把 bot 关进盒子 (非站外面).`);
+            }
+        }
     }
 
     // ── PHASE 2: hold until day (EVERY iteration checks interrupt + death, red line) ──

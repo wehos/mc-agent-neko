@@ -11,6 +11,7 @@ import minecraftData from 'minecraft-data';
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const VITALS = path.join(DIR, 'vitals.json');
 const OUT = path.join(DIR, 'oracle-ores.json');
+const CLEARED = path.join(DIR, 'ore-cleared.json');
 const LOG = path.join(DIR, 'ore-oracle.log');
 const REGION = process.env.ORE_REGION || 'C:/Users/Administrator/mc-server/world/region';
 const log = (m) => { try { fs.appendFileSync(LOG, `[${new Date().toISOString()}] ${m}\n`); } catch (e) {} };
@@ -46,6 +47,23 @@ const RESCAN_DIST = 48;      // bot 移动超此距离才重扫 (扫描是重操
 const POLL_MS = 60000;
 let lastScan = null;
 
+// ★幻影铁活锁修 (oracle-phantom-iron-activelock, 2026-07-06): mineOres 走到 oracle 坐标后
+//   collectBlock 扫 64b live 零命中会把该邻域中心写入 ore-cleared.json — 磁盘 region 落后于
+//   LAN live 世界的幻影铁/煤。出表前滤掉这些中心 r 内候选, oracle 不再把 bot 反复导向已证实
+//   为空的鬼坐标。仅 iron/coal (钻石读数准, 且用户令: 钻石路径不动); 2h TTL 自然回收。
+function loadCleared() {
+    try {
+        const cj = JSON.parse(fs.readFileSync(CLEARED, 'utf8'));
+        const cutoff = Date.now() - 2 * 3600 * 1000;
+        return ((cj && cj.cleared) || []).filter(c => c && (c.ts || 0) > cutoff);
+    } catch (e) { return []; }
+}
+function dropCleared(list, fam, cleared) {
+    if (!cleared.length || !Array.isArray(list)) return list;
+    return list.filter(o => !cleared.some(c => c && c.ore === fam
+        && Math.hypot((c.x || 0) - o.x, (c.y || 0) - o.y, (c.z || 0) - o.z) <= (c.r || 48)));
+}
+
 async function scan() {
     let vit;
     try { vit = JSON.parse(fs.readFileSync(VITALS, 'utf8')); } catch (e) { return; }
@@ -58,6 +76,14 @@ async function scan() {
         try {
             const j = JSON.parse(fs.readFileSync(OUT, 'utf8'));
             j.ts = Date.now();
+            // ★驻点也滤幻影: 活锁场景恰是 bot 驻点(<48b), 若只 bump ts 则 oracle 侧过滤永不生效。
+            //   已切片名单(top-24/16)可能被滤空 → 消费方转盲挖真采, 待 bot 移动>48b 全重扫再复原。
+            const cleared = loadCleared();
+            if (cleared.length) {
+                j.iron = dropCleared(j.iron, 'iron', cleared);
+                j.ironDeep = dropCleared(j.ironDeep, 'iron', cleared);
+                j.coal = dropCleared(j.coal, 'coal', cleared);
+            }
             fs.writeFileSync(OUT, JSON.stringify(j));
         } catch (e) {}
         return;
@@ -106,6 +132,16 @@ async function scan() {
                     }
                 }
             }
+        }
+    }
+    // ★幻影铁活锁修: 滤掉已证实为空的邻域(iron/coal), 在切片前做 → 邻域外的真矿能补进 top-24/16。
+    const cleared = loadCleared();
+    if (cleared.length) {
+        for (const fam of ['iron', 'coal']) {
+            const before0 = found[fam].length;
+            found[fam] = dropCleared(found[fam], fam, cleared);
+            const dropped = before0 - found[fam].length;
+            if (dropped) log(`cleared-filter ${fam}: -${dropped} 幻影 (${cleared.filter(c => c.ore === fam).length} 中心)`);
         }
     }
     const byDist = (a, b) => Math.hypot(a.x - vit.x, a.y - vit.y, a.z - vit.z) - Math.hypot(b.x - vit.x, b.y - vit.y, b.z - vit.z);
