@@ -344,6 +344,20 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
         for (const c of cells) {
             const b = bot.blockAt(c);
             if (!open(b)) {
+                // ★C305-B REACH GUARD (2026-07-07 用户实拍"他又隔着墙挖掉了煤、而且没捡"): carve 是
+                // directMineOre 对"扫到但直挖门(386: distToBlock<=4.6 && canSee)不过"的矿的站位开凿
+                // fallback，本意"在矿的相邻格【就地】凿出 1x2 站位再步入"(369 注释: local cut-in only)。
+                // 但 digBlock(271) 全函数【无任何距离/canSee 守卫】(对照 386/417 直挖都有 4.6+canSee)，
+                // 而 C305 准入门(127)用相对判据 remain<d3*0.6 放行了 11-13 格外的远矿 → bot 站原地对
+                // 够不着的方块下镐，Fabric 服务端 reach 宽松真破 = x-ray 挖穿(红线)+掉煤进够不着的坑
+                // 没捡。守卫: 只有该站位格在臂展(眼高 1.62 → 方块中心 ≤4.6)内才开凿; 远矿 → carve fail
+                // → caller `continue`(不再 goToPosition, 顺带掐断喂假 MAROONED 的 noPath churn) → bot
+                // 继续沿隧道掘进自然暴露它。近处包石矿的站位格本就 ≤4.6, 不受影响 = 不因噎废食拒正常矿。
+                const reach = bot.entity.position.offset(0, 1.62, 0).distanceTo(c.offset(0.5, 0.5, 0.5));
+                if (reach > 4.6) {
+                    motion('branchMine.carve.skip', { reason: 'C305-B-out-of-reach', target: blockObj(b), cell: { x: c.x, y: c.y, z: c.z }, reach: +reach.toFixed(1) });
+                    return false;
+                }
                 const r = await digBlock(b, 'ore-window', 9000);
                 if (r !== 'ok' && r !== 'gone') return false;
             }
@@ -515,6 +529,14 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
                 return false;
             }
         }
+        // ★2026-07-07 卡死修 Fix A ([[branchmine-stepwedge-returntrue-2026-07-07]]): 前向格 foot/head 的
+        // 恒-y "平挖"(挖穿抬升的石头, 不抬 y) 必须独占身体 —— 否则 kernel edge_unstick 反射会用裸 bot.dig
+        // 抢 targetDigBlock, branchMine 的 digBlock.acquire 撞 'busy' 900ms 后放弃 → 石头永不挖掉, 隧道原地
+        // 楔死 (session#12 钉死 623,52,-166 干耗 30min)。挖之前就置 body move-lock, edge_unstick 见
+        // /^branchMine/ 持锁即完全 stand down (见 modes.js edge_unstick); 锁横跨"挖+走"(下方 587 沿用同
+        // owner, 635 finally 释放)。平挖恒 y → 无"挖平又冒新 2 格台阶"的死锁 (用户实测禁区)。
+        bot._bodyMoveLockOwner = `branchMine:${label || 'step'}`;
+        bot._bodyMoveLockUntil = Date.now() + 11000;
         for (const c of [footPos, headPos]) {
             const b = bot.blockAt(c);
             if (b && !open(b)) {
@@ -522,6 +544,7 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
                 if (r !== 'ok' && r !== 'gone') {
                     log(bot, `branchMine ${label}: failed clearing ${b.name}@${c.x},${c.y},${c.z} => ${r}`);
                     motion('branchMine.step.end', { label, ok: false, reason: `clear-${r}`, block: blockObj(b), target: { x: feet.x, y: feet.y, z: feet.z } });
+                    if (bot._bodyMoveLockOwner === `branchMine:${label || 'step'}`) { bot._bodyMoveLockOwner = null; bot._bodyMoveLockUntil = 0; }
                     return false;
                 }
             }
@@ -741,7 +764,10 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
         try {
             const me = bot.entity.position.floored();
             // Prefer iron when in/near the iron band; otherwise aim at any ore on offer.
-            const wantIron = Math.floor(bot.entity.position.y) <= 40;
+            // ★2026-07-07 用户令 "下地过程中只要附近有铁就要继续挖": 把偏好铁的深度从 y≤40 放宽到
+            // y≤55, 让下潜到钻石层的整个下段(而非只在最底)都优先啃顺路的铁, 喂"边挖边补镐"的料。
+            // wantIron 无铁时仍回退全 ORES(761), 不会因偏好铁而放着别的矿不挖; C305-B 臂展守卫防隔墙。
+            const wantIron = Math.floor(bot.entity.position.y) <= 55;
             const scan = world.getNearestBlocks(bot, wantIron ? IRON_ORES : ORES, 16, 24) || [];
             let pool = scan.filter(b => b && (wantIron ? IRON_ORES : ORES).includes(b.name));
             if (wantIron && pool.length === 0) pool = (world.getNearestBlocks(bot, ORES, 16, 24) || []).filter(b => b && ORES.includes(b.name));
@@ -777,7 +803,7 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
         return true;
     };
 
-    let stale = 0;
+    let stale = 0, blockedNoProgress = false;
     for (let i = 0; i < length; i++) {
         if (bot.interrupt_code) break;
         const lowFoodStop = lowFoodEssentialStop(`tunnel-step ${i + 1}/${length}`);
@@ -795,9 +821,14 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
         // seams get exposed/mined, not just the ore the spine happens to slice through.
         if ((i + 1) % RIB_EVERY === 0) { if ((await ribGlance()) === false) return false; if (bot.interrupt_code) break; }
         const np = bot.entity.position.floored();
-        if (`${np.x},${np.z}` === beforePos) { stale++; if (stale >= 4) { log(bot, 'tunnel blocked, stopping'); break; } }
+        if (`${np.x},${np.z}` === beforePos) { stale++; if (stale >= 4) { log(bot, 'tunnel blocked, stopping'); blockedNoProgress = true; break; } }
         else stale = 0;
     }
     log(bot, `branchMine done. y=${Math.floor(bot.entity.position.y)} inv=${JSON.stringify(world.getInventoryCounts(bot))}`);
-    return true;
+    // ★2026-07-07 卡死修 Fix B ([[branchmine-stepwedge-returntrue-2026-07-07]]): 隧道 stale≥4 楔死 break 时
+    // 旧代码无条件 return true 谎报成功 → kernel 无 dispatch 冷却, 立即重派同一个到不了的目标 = 每~2s 一轮
+    // 永动机 (实录钉在 623,52,-166 干耗 30min, food 崩)。改为按真实进度返回: 楔死无进度时 return runProgress()
+    // (无矿获得 且 无下降 且 tunnelStepsOk===0 → false) → kernel 认失败, 冷却+换派发, 不再原地热重派打转。
+    // 正常跑满 length / 有进度 仍 true。
+    return blockedNoProgress ? runProgress() : true;
 }
