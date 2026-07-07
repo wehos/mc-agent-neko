@@ -43,6 +43,14 @@ export default async function mineDown(bot, ctx, opts = {}) {
     const bn = (x, y, z) => { try { return bot.blockAt(new Vec3(x, y, z)); } catch { return null; } };
     const nm = (b) => (b && b.name) || 'air';
 
+    // ★P2-8b GHOST PREVENTION (2026-07-07): a fresh respawn/teleport can start this low-level
+    // (no-pathfinder) descent before the client chunk cache has synced with the server — the walk
+    // then physically collides with blocks the client renders as air (the ghost-block wedge, live
+    // 06:01Z "walked into it as 'air'"). Let the local columns finish loading first. waitForChunksToLoad
+    // is an instant no-op if they're already loaded, and self-caps at 10s; a 3s outer race keeps a
+    // partial load from stalling the whole dispatch. Best-effort — never blocks the skill on failure.
+    try { await Promise.race([bot.waitForChunksToLoad(), new Promise(r => setTimeout(r, 3000))]); } catch (e) {}
+
     // Heading: prefer away from the nearest hostile (don't dig toward a mob); else +x.
     let sx = 1, sz = 0;
     try {
@@ -69,7 +77,41 @@ export default async function mineDown(bot, ctx, opts = {}) {
             // down — already at band (y<=targetY+2) the descent heading is moot (the at-band delegate
             // below hands off to branchMine, which has its own per-cell fluid guards), so stale fluid
             // memories from earlier descents must not block lateral mining at the band.
-            else if (bot.entity.position.y > targetY + 2) { log_('all 4 headings fluid/wedge-aborted near here — refusing, higher layer should relocate first'); return { failed: true, abort: 'all headings flooded/wedged nearby' }; }
+            else if (bot.entity.position.y > targetY + 2) {
+                // ★P2-8c RELOCATE-THEN-RETRY (lever #1, 2026-07-07): every cardinal near here is
+                // fluid/wedge-aborted → the descent CANNOT start from this cell, and honest-failing
+                // just let the kernel re-dispatch onto the SAME dead cell (the ~40-50s发呆 loop). The
+                // skill's own log begged "higher layer should relocate first" but nobody did it — so do
+                // it HERE: move to fresh ground (>~6b clears the per-spot heading memory, which keys on
+                // hypot<8) and re-derive a clean heading, then fall through to the descent this dispatch.
+                // Guarded: only proceed if we actually moved AND landed on solid, dry footing AND a clean
+                // cardinal opened up; otherwise honest-fail as before (the 3-strike cooldown still backs us).
+                // reviewer#1: bound relocate hopping — ≤2 relocations per rolling 3-min window, else
+                // honest-fail. Without this the per-spot heading memory (hypot<8) can't catch a bot that
+                // hops ≥6b each time, so it would street-walk across a bad region (the 逛街 failure family).
+                let rb = bot._mdRelocateBudget;
+                if (!rb || Date.now() - rb.at > 180000) rb = bot._mdRelocateBudget = { at: Date.now(), count: 0 };
+                if (rb.count >= 2) { log_(`relocate budget spent (${rb.count}/2 in <3min) — honest fail, higher layer should reposition`); return { failed: true, abort: 'all headings flooded/wedged; relocate budget spent' }; }
+                const before = bot.entity.position.clone();
+                try { await skills.moveAway(bot, 10); } catch (e) {}
+                const p2 = bot.entity.position;
+                const movedB = Math.hypot(p2.x - before.x, p2.z - before.z);
+                const feetB = bn(Math.floor(p2.x), Math.floor(p2.y) - 1, Math.floor(p2.z));
+                const footingOk = feetB && feetB.boundingBox === 'block' && !FLUID.test(nm(feetB)) && !!bot.entity.onGround;
+                const avoid2 = bot._mineDownFluidAvoid.filter(a => Date.now() - a.at < 600000 && Math.hypot(a.x - p2.x, a.z - p2.z) < 8);
+                const clean2 = [[1, 0], [0, 1], [-1, 0], [0, -1]].find(([cx, cz]) => !avoid2.some(a => a.sx === cx && a.sz === cz));
+                if (movedB >= 6 && footingOk && clean2) {
+                    sx = clean2[0]; sz = clean2[1];
+                    rb.count++; rb.at = Date.now();
+                    // suppress the bed-anchor pull below for ~90s — else it immediately pathfinds us
+                    // right back to the all-aborted anchor cell we just escaped and lever#1 is a no-op.
+                    try { bot._mdSkipBedAnchorUntil = Date.now() + 90000; } catch (e) {}
+                    log_(`relocated ${movedB.toFixed(1)}b to fresh ground @${Math.round(p2.x)},${Math.round(p2.z)} — retry descent heading=${sx},${sz} (lever#1, relocate ${rb.count}/2)`);
+                } else {
+                    log_(`relocate failed (moved=${movedB.toFixed(1)}b footingOk=${footingOk} cleanHeading=${!!clean2}) — honest fail, higher layer should reposition`);
+                    return { failed: true, abort: 'all headings flooded/wedged; relocate failed' };
+                }
+            }
             else { log_('all 4 headings fluid/wedge-aborted near here — but already at band; branchMine delegate owns fluid safety laterally'); }
         }
     } catch (e) {}
@@ -90,7 +132,17 @@ export default async function mineDown(bot, ctx, opts = {}) {
         const lmB = bot._world && bot._world.landmarks && bot._world.landmarks.bed;
         if (lmB && Number.isFinite(lmB.x)) {
             const dB = Math.hypot(lmB.x - bot.entity.position.x, lmB.z - bot.entity.position.z);
-            if (dB > 10 && dB <= 48) {
+            const skipBed = bot._mdSkipBedAnchorUntil && Date.now() < bot._mdSkipBedAnchorUntil;
+            // reviewer#2: the pull is a near-SURFACE entrance step. dB is horizontal-only, so once the bot
+            // has committed to a shaft below the bed level it would otherwise re-fire forever and yank a
+            // mid-descent bot sideways/up back over the anchor. Don't pull home once we're >4b below the bed.
+            const belowBed = Number.isFinite(lmB.y) && bot.entity.position.y < lmB.y - 4;
+            if (skipBed) {
+                // ★lever#1 exception: the anchor cell was all-headings-aborted and we relocated off it.
+                // Honor that relocation (mine the fresh shaft) instead of yo-yoing back to the dead cell.
+                // Narrow, logged, time-boxed override of 用户令 "隧道直通床区" — only when the anchor is undiggable.
+                log_('bed-anchor pull skipped — recently relocated off an all-aborted anchor cell (lever#1); mining the fresh shaft');
+            } else if (!belowBed && dB > 10 && dB <= 48) {
                 log_(`bed-first entrance: 床锚 ${Math.round(dB)}b — 井口设在家 (用户令: 隧道直通床区)`);
                 await Promise.race([
                     skills.goToPosition(bot, lmB.x, null, lmB.z, 6),
@@ -232,6 +284,55 @@ export default async function mineDown(bot, ctx, opts = {}) {
         }
         return false;
     };
+    // ★P2-8b ACTIVE GHOST-BUSTER (2026-07-07): the ORIGINAL recovery ① below re-reads the forward
+    // column via bot.world.getBlock / bot.blockAt — but those read the SAME client chunk cache the
+    // walk just wedged against, so a client-air/server-solid ghost re-reads as 'air' forever, ①
+    // never fires, and we burn the heading straight into the blacklist (live 05:53Z & 06:01Z: every
+    // dispatch aborted, GO_UNDERGROUND/DUSK_MINE_NIGHT into 5-min cooldown, bot发呆 in the trench).
+    // Passive re-reads can't detect a desync — only INTERACTION forces the server to resend truth.
+    // So: (a) back off ~0.5b to physically unwedge AND regain line-of-sight down-forward (a jammed
+    // 1-wide body can't aim at the step it must break); guarded to only reverse onto a safe standing
+    // cell (solid floor, open feet/head, no fluid) so we never back off a ledge or into water/lava.
+    // (b) let ~250ms of block_change corrections land. (c) dig each forward cell — tool-aware
+    // breakBlockAt for cells the client shows solid; a RAW bot.dig for cells it shows 'air' (breakBlockAt
+    // refuses air, but a raw dig makes the server break the true ghost block and emit the corrective
+    // update). Returns count of confirmed solid breaks. Bounded, best-effort, never throws.
+    const forceUnghost = async (fx, cy, fz) => {
+        if (bot.interrupt_code) return 0;   // ★yield fast to a supervisor cancel — don't hold the body in recovery
+        try {
+            const p0 = bot.entity.position;
+            const bx = Math.floor(p0.x) - sx, bz = Math.floor(p0.z) - sz, by = Math.floor(p0.y);
+            const bFloor = bn(bx, by - 1, bz), bFeet = bn(bx, by, bz), bHead = bn(bx, by + 1, bz);
+            const openCell = (b) => !b || /^(air|cave_air|void_air)$/.test(nm(b));
+            if (bFloor && bFloor.boundingBox === 'block' && !FLUID.test(nm(bFloor)) && openCell(bFeet) && openCell(bHead)) {
+                await bot.lookAt(new Vec3(bx + 0.5, by + 0.5, bz + 0.5), true);
+                bot.setControlState('back', true);
+                const t0 = Date.now();
+                while (Date.now() - t0 < 600 && Math.hypot(bot.entity.position.x - p0.x, bot.entity.position.z - p0.z) < 0.5) await new Promise(r => setTimeout(r, 60));
+                try { bot.setControlState('back', false); } catch (e) {}
+            }
+        } catch (e) { try { bot.setControlState('back', false); } catch (e2) {} }
+        await new Promise(r => setTimeout(r, 250));   // settle: let the server's block_change corrections apply
+        let cleared = 0;
+        for (const dy of [1, 0, -1]) {
+            if (bot.interrupt_code) break;
+            const b = bn(fx, cy + dy, fz);
+            if (!b || FLUID.test(nm(b)) || UNBREAKABLE.test(nm(b))) continue;
+            try { await bot.lookAt(new Vec3(fx + 0.5, cy + dy + 0.5, fz + 0.5), true); } catch (e) {}
+            if (b.boundingBox === 'block') {
+                try { if ((await skills.breakBlockAt(bot, fx, cy + dy, fz)) === true) cleared++; } catch (e) {}
+            } else {
+                // client shows air but the body is wedged here → dig the ghost the server still has.
+                // The dig resolves only on a real blockUpdate; if the cell is truly air on both sides it
+                // never resolves, so the 2s race abandons it — stopDigging() then clears the leaked
+                // targetDigBlock / swingInterval / blockUpdate listener so it can't fight the next walk.
+                try { const dp = bot.dig(b, true); dp.catch(() => {}); await Promise.race([dp, new Promise(r => setTimeout(r, 2000))]); }
+                catch (e) {}
+                finally { try { bot.stopDigging(); } catch (e) {} }
+            }
+        }
+        return cleared;
+    };
     const wedgeRecover = async (fx, cy, fz) => {
         const p = bot.entity.position;
         // ④ 同点第 3 次楔死 (跨派发记忆, TTL 10min) → moveAway 8b + 诚实 fail
@@ -245,6 +346,23 @@ export default async function mineDown(bot, ctx, opts = {}) {
                 return 'wedge-final';
             }
         } catch (e) {}
+        // ⓪ ★P2-8b: force a real server re-sync BEFORE the passive re-read/blacklist below. After it,
+        // re-read the forward step — the raw air-dig + settle may have opened it even when breakBlockAt
+        // reported nothing (server-solid ghost cleared via the corrective block_change). Counts against
+        // the same 2/dispatch budget as the sidestep so it can never loop unbounded.
+        if (wedgeRecoveries < 2) {
+            const cleared = await forceUnghost(fx, cy, fz);
+            const f2 = bn(fx, cy - 1, fz), h2 = bn(fx, cy, fz);
+            // truly-empty only: a slab/stairs/snow_layer (boundingBox!=='block') still physically wedges a
+            // 1.8-tall body, so DON'T count it as open — else a non-ghost wedge burns both budgets re-walking it.
+            const open2 = (b2) => !b2 || /^(air|cave_air|void_air)$/.test(nm(b2));
+            if (cleared > 0 || (open2(f2) && open2(h2))) {
+                wedgeRecoveries++;
+                try { bot._mdWedgeBlacklist = (bot._mdWedgeBlacklist || []).filter(e2 => !(e2.x === fx && e2.z === fz && Math.abs(e2.y - cy) <= 3)); } catch (e) {}
+                log_(`ghost-buster: resync cleared=${cleared} fwdOpen=${open2(f2) && open2(h2)} — retry same heading (recovery ${wedgeRecoveries}/2)`);
+                return 'retry';
+            }
+        }
         // ① 撞墙格重查询: 客户端说 air 但物理撞墙 → bot.world/blockAt 重读, 实为实心 = ghost 已刷新, 补挖后同向重试
         let ghostDug = 0;
         for (const dy of [1, 0, -1]) {
@@ -258,7 +376,7 @@ export default async function mineDown(bot, ctx, opts = {}) {
         }
         if (ghostDug > 0) {
             // 补挖成功 = 该列已打通, 摘除旧黑名单条目, 否则 retry 同向下一步立刻撞自己的黑名单白烧 sidestep 预算
-            try { bot._mdWedgeBlacklist = (bot._mdWedgeBlacklist || []).filter(e2 => !(e2.x === fx && e2.z === fz && Math.abs(e2.y - cy) <= 2)); } catch (e) {}
+            try { bot._mdWedgeBlacklist = (bot._mdWedgeBlacklist || []).filter(e2 => !(e2.x === fx && e2.z === fz && Math.abs(e2.y - cy) <= 3)); } catch (e) {}
             log_(`wedge re-dig cleared ${ghostDug} ghost block(s) — blacklist entry removed, retry same heading`);
             return 'retry';
         }
