@@ -242,7 +242,15 @@ class WSMessageServer {
         try {
             if (bot.isSleeping) act = '在床上睡觉';
             else if (bot.pvp && bot.pvp.target && bot.pvp.target.name) act = `在打${STATUS_MOB_CN[bot.pvp.target.name] || '怪'}`;
-            else if (bot.targetDigBlock && bot.targetDigBlock.name) act = `在挖${blockCN(bot.targetDigBlock.name)}`;
+            else if (bot.targetDigBlock && bot.targetDigBlock.name) {
+                // ★目标块(矿/木/庄稼)自解释 → "在挖X"; 填充块(石/土/深板岩…)是下矿开路的手段,
+                //   报目标、块作附注 —— 否则"挖了几百石头"看着像在囤石头(实为穿石找矿, 用户实观)。
+                const bn = bot.targetDigBlock.name;
+                const isTarget = /_ore$|_log$|_wood$|_stem$|obsidian|ancient_debris|glowstone|_leaves$|amethyst|wheat|carrot|potato|beetroot|melon|pumpkin/.test(bn);
+                act = /(_log|_wood|_stem)$/.test(bn) ? '在砍树'
+                    : isTarget ? `在挖${blockCN(bn)}`
+                    : (goal ? `在${goal}（挖开${blockCN(bn)}开路）` : `在挖${blockCN(bn)}`);
+            }
             else if (bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()) act = goal ? `在赶路，去${goal}` : '在赶路';
         } catch (e) {}
 
