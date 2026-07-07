@@ -1,5 +1,57 @@
 import { WebSocketServer } from 'ws';
 import { serverProxy } from '../agent/mindserver_proxy.js';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★2026-07-07 外部 LLM 双向集成 — 出口: 10s 中文自然语言汇报 (bot_status_nl)。
+//   映射表把「机器字段」翻成人话。KIND = kernel 提案目标语义 (bot._commitment.kind,
+//   比 skill 名更能说明"在干嘛"); SKILL = 当前叶子技能 (bot._currentSkill, 更即时);
+//   umbrella 技能 (prepNether/missionNether/…) 故意不进 SKILL 表 → 回落 KIND 表,
+//   免得又汇报成用户嫌弃的 "prepNether" 废话。MOB = 近敌中文名。
+// ─────────────────────────────────────────────────────────────────────────────
+const STATUS_MOB_CN = {
+    zombie: '僵尸', husk: '尸壳', zombie_villager: '僵尸村民', drowned: '溺尸',
+    skeleton: '骷髅', stray: '流浪者', bogged: '沼骸', creeper: '苦力怕',
+    spider: '蜘蛛', cave_spider: '洞穴蜘蛛', enderman: '末影人', witch: '女巫',
+    phantom: '幻翼', slime: '史莱姆', pillager: '掠夺者', vindicator: '卫道士',
+    evoker: '唤魔者', ravager: '劫掠兽', vex: '恼鬼', breeze: '旋风人',
+    blaze: '烈焰人', ghast: '恶魂', magma_cube: '岩浆怪', piglin: '猪灵',
+    piglin_brute: '猪灵蛮兵', hoglin: '疣猪兽', zoglin: '僵尸疣猪兽',
+    wither_skeleton: '凋灵骷髅', silverfish: '蠹虫', endermite: '末影螨',
+    warden: '监守者', shulker: '潜影贝', guardian: '守卫者', elder_guardian: '远古守卫者',
+};
+// KIND → 人话。空串 = y 相关, 在 _activityPhrase 里按当前 y 拼深度带。
+const STATUS_KIND_CN = {
+    BOOTSTRAP_KIT: '在凑最基础的装备（找木头→工作台→木镐→石镐）',
+    STONE_KIT_READY: '在补齐石器工具', REPLENISH_KIT: '在补木料和备用镐',
+    TOOL_UPKEEP: '在补充、修理工具', GET_FOOD: '在解决吃饭（找或做食物）',
+    FORAGE_SURFACE: '在地面觅食', VILLAGE_HARVEST: '在收割小麦',
+    OPP_WHEAT_FARM: '在打理小麦农田', OPP_HUNT_ANIMAL: '在打猎弄点肉',
+    OPENING_VILLAGE: '在村庄搜刮补给', OPP_SEIZE_VILLAGE: '在村庄搜刮补给',
+    OPENING_SCOUT: '在开局侦查周边', OPP_TRADER_LEAD: '在找流浪商人换东西',
+    OPP_MINE_VEIN_ORE: '在就近采一条矿脉', GET_ARMOR: '在打造并穿上护甲',
+    GET_IRON_ARMOR_SET: '在凑齐整套铁甲', GET_DIAMOND_ARMOR: '在打造钻石护甲',
+    GET_IRON_TOOLS: '在做铁工具', GET_BED: '在弄一张床', GO_BED: '在去睡觉过夜',
+    DUSK_GO_BED: '天快黑了，在去睡觉', GO_UNDERGROUND: '', DUSK_MINE_NIGHT: '',
+    MINE_THROUGH_NIGHT: '', NIGHT_SMELT_IRON: '在熔炉边炼铁过夜',
+    SMELT_IRON: '在熔炉边炼铁', GET_DIAMOND: '', GET_DIAMOND_GEAR: '在做钻石装备',
+    MIGRATE: '在转移到更合适的地方', BANK_GEAR: '在整理、存放装备',
+    BUILD_HOME: '在盖据点', GET_PORTAL_KIT: '在备下界传送门材料（黑曜石等）',
+    ENTER_NETHER: '在进入、搭下界传送门', GET_BLAZE_RODS: '在下界打烈焰人拿烈焰棒',
+    HUNT_PEARLS: '在找末影人拿末影珍珠', CRAFT_EYES: '在合成末影之眼',
+    GO_END: '在前往末地', SEAL_FORT: '在要塞封点、清怪', SLAY_DRAGON: '在打末影龙',
+    NIGHT_SEAL: '在就地封顶躲夜', NIGHT_DIG_ONE: '在挖个坑封起来躲夜',
+    SURVIVAL_NIGHT: '在想办法安全过夜', SURFACE_RESCUE: '在自救上浮脱困',
+    FREE_PLAY: '暂时没硬性目标，在自由探索',
+};
+// 叶子 SKILL → 人话 (比 kind 更即时)。umbrella/survival 技能不列 (回落 kind / survival 覆盖)。
+const STATUS_SKILL_CN = {
+    chopWood: '在砍树、收集木头', collectBlock: '在采集方块', mineOres: '在挖矿找矿石',
+    mineDown: '在向下挖矿', branchMine: '在分支挖矿', feedUp: '在弄吃的（觅食/打猎/吃存粮）',
+    forage: '在觅食', villageHarvest: '在收割小麦', wheatFarm: '在打理小麦',
+    smeltSafe: '在熔炉边冶炼', smelt: '在熔炉边冶炼', goBedSleep: '在去睡觉过夜',
+    nightShelter: '在就地挖坑封顶躲夜', surfaceUp: '在往地面爬', escapePlan: '在脱困、找路出去',
+    moveAway: '在挪开到安全位置', craftPickaxe: '在做镐子', replenishKit: '在补木料和备用镐',
+};
 // NOTE (local deploy): `Camera` (camera.js) import removed — it was never used here
 // (the screenshot path uses the lazily-loaded CameraProc), and statically importing
 // camera.js pulls in node-canvas-webgl + prismarine-viewer + headless-gl, whose
@@ -92,6 +144,7 @@ class WSMessageServer {
         // latest snapshot to vitals.json for the watchdog/patrol to read.
         this.startVitalsTimer();
         this.startDebugChatTimer();
+        this.startStatusNLTimer();
     }
 
     // ★2026-07-07 用户调试请求: bot 每 5s 在游戏聊天里喊出当前在干什么 ("他在想什么")。
@@ -114,6 +167,88 @@ class WSMessageServer {
                 try { bot.chat(msg); } catch (e) {}
             } catch (e) { /* debug chat must never hurt the agent */ }
         }, 5000);
+    }
+
+    // ★2026-07-07 外部 LLM 集成 — 出口: 每 10s 广播一条中文自然语言状态 (bot_status_nl)。
+    //   与 vitals(硬字段) 并行, 专给外部 LLM 读"人话"。env STATUS_NL=0 关, STATUS_NL_MS 调间隔。
+    //   照 vitals/debugChat 的"telemetry must never hurt the agent"范式全 try/catch。
+    startStatusNLTimer() {
+        if (this.statusNLInterval) clearInterval(this.statusNLInterval);
+        if (String(process.env.STATUS_NL || '1') === '0') return;
+        const ms = Math.max(2000, parseInt(process.env.STATUS_NL_MS || '10000', 10) || 10000);
+        this.statusNLInterval = setInterval(() => {
+            try {
+                const bot = this.agent && this.agent.bot;
+                if (!bot || !bot.entity || !bot.entity.position) return;
+                this.broadcast({ type: 'bot_status_nl', ts: Date.now(), ...this._statusNL(bot) });
+            } catch (e) { /* NL status must never hurt the agent */ }
+        }, ms);
+    }
+
+    // Build the fine-grained Chinese status object. Prefers the committed GOAL kind
+    // (bot._commitment.kind — "what it's trying to achieve") over the raw skill name,
+    // with the live leaf skill (bot._currentSkill) refining it, plus a survival overlay
+    // and threat/vitals in human bands. Returns {text, ...fields} for the broadcast.
+    _statusNL(bot) {
+        const p = bot.entity.position;
+        const x = Math.round(p.x), y = Math.round(p.y), z = Math.round(p.z);
+        const hp = Math.round(bot.health ?? 0);
+        const food = bot.food ?? 0;
+        const tod = (() => { try { return bot.time.timeOfDay || 0; } catch (e) { return 0; } })();
+        const night = tod >= 12542 && tod <= 23459;
+        const dim = (bot.game && bot.game.dimension) || 'overworld';
+        const cmt = bot._commitment || null;
+        const kind = (cmt && cmt.kind) || null;
+        const skill = this._skillRunningName || bot._currentSkill || (cmt && cmt.skill) || null;
+
+        // nearby hostiles (< 16b): count + up to 3 distinct Chinese names
+        let hostiles = 0; const names = [];
+        try {
+            for (const id in bot.entities) {
+                const e = bot.entities[id];
+                if (e && e.kind === 'Hostile mobs' && e.position && p.distanceTo(e.position) < 16) {
+                    hostiles++;
+                    const nm = STATUS_MOB_CN[e.name] || e.name;
+                    if (nm && names.indexOf(nm) < 0 && names.length < 3) names.push(nm);
+                }
+            }
+        } catch (e) {}
+
+        const hpTxt = hp >= 20 ? '血是满的' : hp >= 15 ? '血挺足' : hp >= 10 ? '半血左右' : hp >= 6 ? '血不多了' : '快没血了';
+        const foodTxt = food >= 18 ? '吃得很饱' : food >= 12 ? '食物中等' : food >= 6 ? '有点饿' : '很饿了';
+        const svnActive = (bot._surviveNowUntil && Date.now() < bot._surviveNowUntil)
+            || skill === 'surviveNow' || kind === 'SURVIVE_NOW';
+
+        const act = svnActive
+            ? '情况紧张，我在保命自救（吃东西/打怪/挖坑避险/找床过夜，尽快脱困）'
+            : this._activityPhrase(kind, skill, y);
+
+        const dimSuffix = dim === 'the_nether' ? '（下界）' : dim === 'the_end' ? '（末地）' : '';
+        const hostSuffix = hostiles > 0
+            ? `，附近有 ${hostiles} 只怪${names.length ? `（${names.join('、')}）` : ''}`
+            : '，周围没怪';
+        const text = `${act}。现在在 ${x},${y},${z}${dimSuffix}，${night ? '夜里' : '白天'}，${hpTxt}、${foodTxt}${hostSuffix}。`;
+
+        return { text, kind, skill, pos: [x, y, z], hp, food, hostiles, night, dim };
+    }
+
+    _activityPhrase(kind, skill, y) {
+        // 1) leaf skill (most immediate) — but umbrella skills aren't in the table → fall to kind
+        if (skill && STATUS_SKILL_CN[skill]) return `我${STATUS_SKILL_CN[skill]}`;
+        // 2) y-dependent mining goals: name the depth band
+        if (kind === 'GET_DIAMOND') return `我在 y${y} 挖钻石`;
+        if (kind === 'GO_UNDERGROUND' || kind === 'DUSK_MINE_NIGHT' || kind === 'MINE_THROUGH_NIGHT') {
+            const band = y < 0 ? '钻石带' : y <= 20 ? '铁/煤带' : '浅层';
+            return `我在 y${y} 下矿挖矿石（${band}）`;
+        }
+        // 3) goal kind → human phrase
+        if (kind && STATUS_KIND_CN[kind]) return `我${STATUS_KIND_CN[kind]}`;
+        // 4) fallbacks: never emit a bare machine token — and never surface an umbrella
+        //    skill name (prepNether/… is exactly the "废话" the user rejected).
+        const umbrella = /^(prepNether|missionNether|autoProgress|achieve|diagBusy)$/.test(skill || '');
+        if (skill && !umbrella) return `我在执行「${skill}」`;
+        if (kind) return `我在推进目标「${kind}」`;
+        return '我在按计划推进（凑装备、找资源）';
     }
 
     startVitalsTimer() {
@@ -263,6 +398,13 @@ class WSMessageServer {
                 // back to a fragile FIFO drop counter that mis-attributes
                 // completions whenever a task takes longer than the
                 // plugin-side ``task_timeout_seconds``.
+                // ★2026-07-07 AUTO-PREEMPT: an external NL command is highest priority — if a
+                // skill is running, interrupt it so the injected admin turn's body actions
+                // aren't blocked by the BodyGate. Sync interrupt only (no await): the LLM turn's
+                // network latency is the unwind window; hard-safety reflexes stay always-on.
+                if (this._skillRunning || (this.agent && this.agent.supervised_skill)) {
+                    this._interruptRunning(`external task 抢占 ${this._skillRunningName || this.agent.supervised_skill}`);
+                }
                 this.injectMessage(data.task, data.task_id);
                 break;
             case 'ping':
@@ -297,12 +439,12 @@ class WSMessageServer {
         }
     }
 
-    cancelSkill(reason) {
+    // Raise every stop signal a long-running skill polls, so it unwinds in ms.
+    // Shared by cancel_skill (supervisor) and the external-command auto-preempt
+    // path so both interrupt identically.
+    _interruptRunning(reason) {
         const bot = this.agent && this.agent.bot;
-        if (!bot) {
-            this.broadcast({ type: 'cancel_result', ok: false, error: 'no agent online', reason });
-            return;
-        }
+        if (!bot) return false;
         try { bot.interrupt_code = true; } catch (e) {}
         try { bot._chopGen = (bot._chopGen || 0) + 1; } catch (e) {}
         try { bot._supervisorCancelAt = Date.now(); } catch (e) {}
@@ -316,13 +458,34 @@ class WSMessageServer {
         try { bot.stopDigging(); } catch (e) {}
         try { bot.collectBlock && bot.collectBlock.cancelTask && bot.collectBlock.cancelTask(); } catch (e) {}
         try { bot.pvp && bot.pvp.stop && bot.pvp.stop(); } catch (e) {}
-        console.log(`🧯 cancel_skill: ${reason}`);
+        console.log(`🧯 interrupt: ${reason}`);
+        return true;
+    }
+
+    cancelSkill(reason) {
+        if (!this._interruptRunning(reason)) {
+            this.broadcast({ type: 'cancel_result', ok: false, error: 'no agent online', reason });
+            return;
+        }
         this.broadcast({
             type: 'cancel_result',
             ok: true,
             reason,
             running: this._skillRunningName || null,
         });
+    }
+
+    // ★2026-07-07 外部 LLM 集成 — 入口 auto-preempt: 外部指令 = 最高优先级。收到 run_skill/
+    //   task 时若正忙, 打断当前技能并等它解卷(锁清空), 再让外部指令接管。硬保命反射(vitalNow:
+    //   溺水/着火/岩浆/hp≤4)始终在 modes tick 上跑、无视 supervised → "凌驾提案+求生, 让位硬保命"。
+    //   返回 true = 锁已清可派发; false = 4s 内没解卷(罕见), 调用方放弃避免双技能抢寻路。
+    async _preemptForExternal(reason) {
+        this._interruptRunning(reason);
+        const deadline = Date.now() + 4000;
+        while (Date.now() < deadline && (this._skillRunning || (this.agent && this.agent.supervised_skill))) {
+            await new Promise(r => setTimeout(r, 150));
+        }
+        return !(this._skillRunning || (this.agent && this.agent.supervised_skill));
     }
 
     async runSkill(skillName, args) {
@@ -340,11 +503,21 @@ class WSMessageServer {
         // (owner-tagged 'kernel'; we tag 'ws'). Check BOTH, or a run_skill landing mid-kernel-
         // dispatch runs two supervised skills that fight over the same bot.pathfinder,
         // exactly like the WS-blip double-achieveLoop case above.
+        // ★2026-07-07 AUTO-PREEMPT (was: reject-if-busy): an external command is highest
+        // priority, so a busy bot gets its current skill (ws or kernel dispatch) interrupted
+        // and we take over once it unwinds. If it won't release within the window we bail
+        // rather than run two supervised skills that fight over the same bot.pathfinder
+        // (the original re-entry hazard this guard existed for).
         if (this._skillRunning || this.agent.supervised_skill) {
-            const who = this._skillRunningName || 'kernel dispatch';
-            console.log(`🛠️ run_skill ${skillName} REJECTED — '${who}' already running`);
-            this.broadcast({ type: 'skill_result', skill: skillName, ok: false, error: `busy: ${who} already running` });
-            return;
+            const who = this._skillRunningName || this.agent.supervised_skill || 'current activity';
+            console.log(`🛠️ run_skill ${skillName} 抢占 '${who}' (external command = highest priority)`);
+            const cleared = await this._preemptForExternal(`external run_skill ${skillName} 抢占 ${who}`);
+            if (!cleared) {
+                const still = this._skillRunningName || this.agent.supervised_skill || 'unknown';
+                console.log(`🛠️ run_skill ${skillName} — 抢占超时, '${still}' 仍占用, 放弃(避免双技能抢寻路)`);
+                this.broadcast({ type: 'skill_result', skill: skillName, ok: false, error: `preempt timeout: ${still} still running` });
+                return;
+            }
         }
         this._skillRunning = true; this._skillRunningName = skillName;
         console.log(`🛠️ run_skill direct: ${skillName}(${JSON.stringify(args)})`);
@@ -915,6 +1088,14 @@ class WSMessageServer {
         if (this.vitalsInterval) {
             clearInterval(this.vitalsInterval);
             this.vitalsInterval = null;
+        }
+        if (this.debugChatInterval) {
+            clearInterval(this.debugChatInterval);
+            this.debugChatInterval = null;
+        }
+        if (this.statusNLInterval) {
+            clearInterval(this.statusNLInterval);
+            this.statusNLInterval = null;
         }
         if (this.wss) {
             this.wss.close();
