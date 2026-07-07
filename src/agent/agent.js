@@ -136,6 +136,13 @@ export class Agent {
             //   会作为 'chat' 事件被自己听到; admin 化后 respondFunc 的 self 过滤(username===this.name)
             //   若 MC 用户名≠agent 名则漏网 → 这里双重滤(name + bot.username)防自我回灌成死循环。
             if (username === this.name || (this.bot && username === this.bot.username)) return;
+            // ★2026-07-08 用户令: 斜杠开头的是 MC 作弊/命令 (/tp /give /gamemode /time …), 由服务器执行,
+            //   不是给 bot 的指令 —— 绝不喂进 admin/chat 解读路径, 否则会被当成一条任务去"执行"。就地丢弃。
+            //   (bot 自己的命令语法是 !command, 从不以 / 开头, 故此闸不会误挡 bot 指令。)
+            if (typeof message === 'string' && /^\s*\//.test(message)) {
+                console.log(`[chat] 忽略斜杠作弊命令(非 admin 指令): ${String(message).slice(0, 60)}`);
+                return;
+            }
             // ★2026-07-07 ADMIN MISSION: in-game chat becomes a persistent mission too (origin='chat',
             //   no wire task_id → local teardown only, no task_finished frame). The line-above double
             //   self-filter still guards mission-emitted banners/status chat from re-entry.
@@ -778,11 +785,12 @@ export class Agent {
         //   结束(下方 finally 清)。这实现"外部意图=最高优先级、独占, 直到 gpt-5.4-mini 判定任务完成"。
         //   kernel._survivalTick 读 bot._extIntentUntil 决定让位。5min 是崩溃兜底(正常由 finally 清)。
         //   硬保命反射(modes vitalNow: 溺水/着火/岩浆/hp≤4)独立于内核、仍生效。
-        // ★2026-07-07 ADMIN MISSION: when the turn is controller-managed (AdminMission.begin ran
+        // ★2026-07-07 ADMIN MISSION: when the turn is controller-managed (AdminMission._drive ran
         //   handleMessage), the mission owns extIntent + the 🎯 banner + the preempt — skip this
         //   one-shot setup to avoid a double banner/preempt. Flag-OFF (or a non-mission admin turn)
         //   runs today's block byte-for-byte.
         const _missionManagedTurn = this._missionEnabled && this.adminMission && this.adminMission.turnManaged;
+        const _entryMissionEpoch = (this._missionEnabled && this.adminMission) ? (this.adminMission._epoch || 0) : 0;
         if (source === 'admin' && !_missionManagedTurn) {
             try { this.bot._extIntentUntil = Date.now() + 300000; } catch (e) {}
             // ★2026-07-07 用户令: 游戏聊天里提示"开始执行指令", 让人一眼知道 bot 正在跑 LLM/chat 任务(而非自主)。
@@ -857,7 +865,7 @@ export class Agent {
             message = await handleEnglishTranslation(message);
             console.log('received message from', source, ':', message);
 
-            const checkInterrupt = () => this.self_prompter.shouldInterrupt(self_prompt) || this.shut_up || convoManager.responseScheduledFor(source);
+            const checkInterrupt = () => this.self_prompter.shouldInterrupt(self_prompt) || this.shut_up || convoManager.responseScheduledFor(source) || (this._missionEnabled && this.adminMission && (this.adminMission._epoch || 0) !== _entryMissionEpoch);
 
             let behavior_log = this.bot.modes.flushBehaviorLog().trim();
             if (behavior_log.length > 0) {

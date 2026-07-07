@@ -19,7 +19,7 @@
  *   MC_ADMIN_MISSION_MAX_MS(默认 30min 挂钟, 有进展则续)、MC_ADMIN_MISSION_DEATH_BUDGET(默认 3,
  *   =0 则死亡即中止)。exactly-once task_finished 由 end() 的幂等闸(state!==RUNNING 即 no-op)保证。
  *
- * 红线遵循: 无模块级可变状态(_submitLock 挂实例); telemetry/banner 全 try/catch, 绝不伤 agent。
+ * 红线遵循: 无模块级可变状态(_epoch/_lastBanner 挂实例); telemetry/banner 全 try/catch, 绝不伤 agent。
  */
 
 import { wsServer } from '../websocket/ws_server.js';
@@ -39,7 +39,7 @@ export class AdminMission {
         this.state = IDLE;
         this.mission = null;          // {text, taskId, origin('ws'|'chat'), startedAt, deadlineAt, deaths}
         this.turnManaged = false;     // true while THIS controller's own handleMessage('admin') turn runs
-        this._submitLock = Promise.resolve();   // instance-level serialization (no module-level mutable state)
+        this._epoch = 0;                        // generation counter — supersede token; bumped on each new handoff
         this._lastBanner = { text: '', at: 0 }; // anti-reflexive self-chat guard
         this._lastProgressCheckAt = 0;
         this._lastProgressSig = '';
@@ -60,12 +60,12 @@ export class AdminMission {
         try { const b = this._bot(); if (b) b._adminMission = { active: this.state === RUNNING }; } catch (e) {}
     }
 
-    // ── entry: a new admin command (serialized so two fast tasks never interleave) ───────────────
+    // ── entry: a new admin command ─────────────────────────────────────────────
+    // No lock: the mission handoff (_handoff) is synchronous/atomic on the JS thread, and the long
+    // drive runs UNLOCKED so a LATER submit can preempt a mid-drive mission instead of queueing.
     submit(input) {
-        const run = () => this._submit(input || {});
-        const p = this._submitLock.then(run, run);
-        this._submitLock = p.catch(() => {});   // never let a rejection wedge the chain
-        return p;
+        try { return this._submit(input || {}); }
+        catch (e) { console.error('[adminMission] submit error:', e && e.message || e); }
     }
 
     async _submit({ text, taskId, origin }) {
@@ -80,17 +80,22 @@ export class AdminMission {
                 return;
             }
             // Anti-reflexive guard: never spawn a mission from the bot's own leaked banner/status chat.
-            if (this._isReflexive(text)) {
+            if (this._isReflexive(text, origin)) {
                 console.log(`[adminMission] ignored reflexive self-chat: ${text.slice(0, 60)}`);
                 return;
             }
-            await this.begin({ text, taskId: (typeof taskId === 'string' && taskId) ? taskId : null, origin: origin || 'ws' });
+            // Synchronous handoff installs the new mission (superseding any old one atomically), then
+            // the UNLOCKED drive runs the long phase so a later submit can preempt it mid-flight.
+            const mine = this._handoff({ text, taskId: (typeof taskId === 'string' && taskId) ? taskId : null, origin: origin || 'ws' });
+            await this._drive(mine);
         } catch (e) {
             console.error('[adminMission] submit error:', e && e.message || e);
         }
     }
 
-    _isReflexive(text) {
+    _isReflexive(text, origin) {
+        // ws frames are external (never the bot's own chat) → never reflexive.
+        if (origin === 'ws') return false;
         try {
             const now = Date.now();
             if (this._lastBanner.text && now - this._lastBanner.at < 5000) {
@@ -101,30 +106,38 @@ export class AdminMission {
                 && now - this.mission.startedAt < 5000) return true;
             // our own emitted chat: banners (🎯/✅/🔄/⚠️/⏱/⛔), NL status (🤖/🎯[按指令]), mirror (◀), inv (📦)
             if (/^(🎯|✅|🔄|⚠️|⏱|⛔|🤖|◀|📦)/.test(text)) return true;
-            if (/开始执行指令|指令完成|回到自主行动|切换任务|任务(无法完成|超时|中断|中止)/.test(text)) return true;
         } catch (e) {}
         return false;
     }
 
-    // ── begin a mission ─────────────────────────────────────────────────────────
-    async begin(mine0) {
+    // ── install a mission (SYNCHRONOUS handoff — no await anywhere; atomic on the JS thread) ───────
+    _handoff(mine0) {
         const now = Date.now();
         const mine = { text: mine0.text, taskId: mine0.taskId, origin: mine0.origin,
             startedAt: now, deadlineAt: now + this._maxMs, deaths: 0 };
-        // Supersede any running mission FIRST — fires the OLD taskId exactly once.
-        if (this.state === RUNNING) { await this.end('superseded', 'new task'); }
-        // Ensure the shared self_prompter is fully down before we take it over (a stray !goal loop, etc.).
-        try { await this.agent.self_prompter.stop(false); } catch (e) {}
-        // Wrest the body BEFORE any further await (fixes the override handoff stall).
+        // Supersede any running mission FIRST — fires the OLD taskId exactly once. keepLoop so the OLD
+        // end() does NOT tear down the shared loop the incoming mission is about to own.
+        if (this.state === RUNNING) this.end('superseded', 'new task', { keepLoop: true });
+        this._epoch++;                                   // bump generation → breaks any in-flight OLD turn via checkInterrupt
+        // Wrest the body BEFORE any await (fixes the override handoff stall).
         try { this.agent.requestInterrupt(); } catch (e) {}
 
         this.mission = mine;
         this.state = RUNNING;
         this._syncMirror();
-        try { const b = this._bot(); if (b) b._extIntentUntil = Date.now() + MISSION_EXTINTENT_MS; } catch (e) {}
+        try { const b = this._bot(); if (b) b._extIntentUntil = now + MISSION_EXTINTENT_MS; } catch (e) {}
         try { wsServer.beginMissionTask(mine.text, mine.taskId, mine.origin); } catch (e) {}
         this._emitBanner('🎯 开始执行指令：' + mine.text.replace(/\n/g, ' ').slice(0, 80));
         console.log(`[adminMission] BEGIN (${mine.origin}) task_id=${mine.taskId || '-'}: ${mine.text.slice(0, 80)}`);
+        return mine;
+    }
+
+    // ── the UNLOCKED long phase (a later submit can preempt this mid-flight) ───────────────────────
+    async _drive(mine) {
+        // Fix H4: force the OLD skill to release the body before we run the initial turn.
+        try { await this._preemptBody(2000); } catch (e) {}
+        // Ensure the shared self_prompter is fully down before we take it over (parity with old begin).
+        try { await this.agent.self_prompter.stop(false); } catch (e) {}
 
         // Initial turn — mission-managed so handleMessage skips its one-shot admin blocks.
         this.turnManaged = true;
@@ -136,12 +149,24 @@ export class AdminMission {
             this.turnManaged = false;
         }
         // Only engage the persistent loop if this mission is STILL the active one (the LLM may have
-        // already !endGoal'd a trivial task inside the initial turn → state IDLE → don't restart).
+        // already !endGoal'd a trivial task inside the initial turn → state IDLE → don't restart; or a
+        // later submit may have superseded it → this.mission !== mine → don't restart).
         if (this.state === RUNNING && this.mission === mine) {
             try {
                 this.agent.self_prompter.owner = this;
                 this.agent.self_prompter.start(mine.text);
             } catch (e) { console.error('[adminMission] self_prompter.start error:', e && e.message || e); }
+        }
+    }
+
+    // ── force the currently-running skill to release the body (mirror ws_server._preemptForExternal) ─
+    async _preemptBody(maxMs) {
+        const deadline = Date.now() + (maxMs || 2000);
+        while (Date.now() < deadline) {
+            const b = this._bot();
+            if (!this.agent.supervised_skill && !(b && b._currentSkill)) break;
+            try { this.agent.requestInterrupt(); } catch (e) {}
+            await new Promise(r => setTimeout(r, 150));
         }
     }
 
@@ -241,7 +266,7 @@ export class AdminMission {
     }
 
     // ── the single idempotent termination funnel ────────────────────────────────────────────────
-    async end(reason, detail) {
+    async end(reason, detail, opts = {}) {
         if (this.state !== RUNNING) return;   // first cause wins; any racing second cause no-ops
         this.state = ENDING;
         const m = this.mission;
@@ -264,8 +289,10 @@ export class AdminMission {
         this.mission = null;
         this.state = IDLE;
         this._syncMirror();
-        // Fully unwind the loop + stop actions (async; safe after the frame).
-        try { await this.agent.self_prompter.stop(true); } catch (e) {}
+        // Fully unwind the loop + stop actions (async; safe after the frame). During a supersede the
+        // incoming handoff owns loop teardown — the OLD end() must NOT run its own (up to 15s)
+        // actions.stop()/loop teardown, which could later stomp the NEW mission's freshly-started loop.
+        if (!opts.keepLoop) { try { await this.agent.self_prompter.stop(true); } catch (e) {} }
     }
 
     // ── outcome mapping ─────────────────────────────────────────────────────────

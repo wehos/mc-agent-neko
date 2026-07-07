@@ -81,11 +81,16 @@ export class History {
 
     async save() {
         try {
+            // AdminMission is intentionally in-memory only — a crashed mid-mission task is DROPPED
+            // (matches the "no memory / no revival" contract) instead of auto-restarting via
+            // self_prompter.handleLoad. While a mission runs, self_prompter mirrors the mission text
+            // in ACTIVE state; we scrub it from the persisted snapshot so restart comes up headless.
+            const _mActive = !!(this.agent && this.agent._missionEnabled && this.agent.adminMission && this.agent.adminMission.isActive());
             const data = {
                 memory: this.memory,
                 turns: this.turns,
-                self_prompting_state: this.agent.self_prompter.state,
-                self_prompt: this.agent.self_prompter.isStopped() ? null : this.agent.self_prompter.prompt,
+                self_prompting_state: _mActive ? 0 : this.agent.self_prompter.state,   // 0 === SelfPrompter STOPPED
+                self_prompt: (_mActive || this.agent.self_prompter.isStopped()) ? null : this.agent.self_prompter.prompt,
                 taskStart: this.agent.task.taskStartTime,
                 last_sender: this.agent.last_sender
             };
