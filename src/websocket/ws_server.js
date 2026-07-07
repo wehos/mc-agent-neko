@@ -19,39 +19,59 @@ const STATUS_MOB_CN = {
     wither_skeleton: '凋灵骷髅', silverfish: '蠹虫', endermite: '末影螨',
     warden: '监守者', shulker: '潜影贝', guardian: '守卫者', elder_guardian: '远古守卫者',
 };
-// KIND → 人话。空串 = y 相关, 在 _activityPhrase 里按当前 y 拼深度带。
+// ★KIND → 目标短语("在做什么"的目标, 非动作断言)。真·物理动作(挖/打/走/睡)由 _statusNL 从 live
+//   bot 态(targetDigBlock/pvp.target/isMoving/isSleeping)取, 这里只作上下文/idle 兜底 —— 修
+//   "说挖坑封顶实际没干"(封箱已禁用)那类失真: 描述实际动作, 不再断言 skill 名对应的假动作。
 const STATUS_KIND_CN = {
-    BOOTSTRAP_KIT: '在凑最基础的装备（找木头→工作台→木镐→石镐）',
-    STONE_KIT_READY: '在补齐石器工具', REPLENISH_KIT: '在补木料和备用镐',
-    TOOL_UPKEEP: '在补充、修理工具', GET_FOOD: '在解决吃饭（找或做食物）',
-    FORAGE_SURFACE: '在地面觅食', VILLAGE_HARVEST: '在收割小麦',
-    OPP_WHEAT_FARM: '在打理小麦农田', OPP_HUNT_ANIMAL: '在打猎弄点肉',
-    OPENING_VILLAGE: '在村庄搜刮补给', OPP_SEIZE_VILLAGE: '在村庄搜刮补给',
-    OPENING_SCOUT: '在开局侦查周边', OPP_TRADER_LEAD: '在找流浪商人换东西',
-    OPP_MINE_VEIN_ORE: '在就近采一条矿脉', GET_ARMOR: '在打造并穿上护甲',
-    GET_IRON_ARMOR_SET: '在凑齐整套铁甲', GET_DIAMOND_ARMOR: '在打造钻石护甲',
-    GET_IRON_TOOLS: '在做铁工具', GET_BED: '在弄一张床', GO_BED: '在去睡觉过夜',
-    DUSK_GO_BED: '天快黑了，在去睡觉', GO_UNDERGROUND: '', DUSK_MINE_NIGHT: '',
-    MINE_THROUGH_NIGHT: '', NIGHT_SMELT_IRON: '在熔炉边炼铁过夜',
-    SMELT_IRON: '在熔炉边炼铁', GET_DIAMOND: '', GET_DIAMOND_GEAR: '在做钻石装备',
-    MIGRATE: '在转移到更合适的地方', BANK_GEAR: '在整理、存放装备',
-    BUILD_HOME: '在盖据点', GET_PORTAL_KIT: '在备下界传送门材料（黑曜石等）',
-    ENTER_NETHER: '在进入、搭下界传送门', GET_BLAZE_RODS: '在下界打烈焰人拿烈焰棒',
-    HUNT_PEARLS: '在找末影人拿末影珍珠', CRAFT_EYES: '在合成末影之眼',
-    GO_END: '在前往末地', SEAL_FORT: '在要塞封点、清怪', SLAY_DRAGON: '在打末影龙',
-    NIGHT_SEAL: '在就地封顶躲夜', NIGHT_DIG_ONE: '在挖个坑封起来躲夜',
-    SURVIVAL_NIGHT: '在想办法安全过夜', SURFACE_RESCUE: '在自救上浮脱困',
-    FREE_PLAY: '暂时没硬性目标，在自由探索',
+    BOOTSTRAP_KIT: '凑基础装备', STONE_KIT_READY: '补石器工具', REPLENISH_KIT: '补木料和镐',
+    TOOL_UPKEEP: '修补工具', GET_FOOD: '找吃的', FORAGE_SURFACE: '地面觅食',
+    VILLAGE_HARVEST: '收小麦', OPP_WHEAT_FARM: '打理麦田', OPP_HUNT_ANIMAL: '打猎',
+    OPENING_VILLAGE: '搜刮村庄', OPP_SEIZE_VILLAGE: '搜刮村庄', OPENING_SCOUT: '侦查周边',
+    OPP_TRADER_LEAD: '找流浪商人', OPP_MINE_VEIN_ORE: '采矿脉', GET_ARMOR: '做护甲',
+    GET_IRON_ARMOR_SET: '凑整套铁甲', GET_DIAMOND_ARMOR: '做钻石甲', GET_IRON_TOOLS: '做铁工具',
+    GET_BED: '弄张床', GO_BED: '睡觉过夜', DUSK_GO_BED: '睡觉过夜',
+    GO_UNDERGROUND: '下矿找铁/煤', DUSK_MINE_NIGHT: '挖矿过夜', MINE_THROUGH_NIGHT: '挖矿过夜',
+    NIGHT_SMELT_IRON: '炼铁', SMELT_IRON: '炼铁', GET_DIAMOND: '找钻石', GET_DIAMOND_GEAR: '做钻石装备',
+    MIGRATE: '换个地方', BANK_GEAR: '整理装备', BUILD_HOME: '盖据点',
+    GET_PORTAL_KIT: '备下界门材料', ENTER_NETHER: '搭下界门', GET_BLAZE_RODS: '打烈焰人拿棒',
+    HUNT_PEARLS: '找末影珍珠', CRAFT_EYES: '合成末影之眼', GO_END: '去末地',
+    SEAL_FORT: '清要塞', SLAY_DRAGON: '打末影龙',
+    NIGHT_SEAL: '躲夜等天亮', NIGHT_DIG_ONE: '躲夜等天亮', SURVIVAL_NIGHT: '躲夜等天亮',
+    SURFACE_RESCUE: '自救上浮', FREE_PLAY: '自由探索',
 };
-// 叶子 SKILL → 人话 (比 kind 更即时)。umbrella/survival 技能不列 (回落 kind / survival 覆盖)。
+// 叶子 SKILL → 目标短语 (kind 为空时兜底)。umbrella 技能不列。
 const STATUS_SKILL_CN = {
-    chopWood: '在砍树、收集木头', collectBlock: '在采集方块', mineOres: '在挖矿找矿石',
-    mineDown: '在向下挖矿', branchMine: '在分支挖矿', feedUp: '在弄吃的（觅食/打猎/吃存粮）',
-    forage: '在觅食', villageHarvest: '在收割小麦', wheatFarm: '在打理小麦',
-    smeltSafe: '在熔炉边冶炼', smelt: '在熔炉边冶炼', goBedSleep: '在去睡觉过夜',
-    nightShelter: '在就地挖坑封顶躲夜', surfaceUp: '在往地面爬', escapePlan: '在脱困、找路出去',
-    moveAway: '在挪开到安全位置', craftPickaxe: '在做镐子', replenishKit: '在补木料和备用镐',
+    chopWood: '找木头', collectBlock: '采集方块', mineOres: '挖矿', mineDown: '下挖',
+    branchMine: '分支挖矿', feedUp: '找吃的', forage: '觅食', villageHarvest: '收小麦',
+    wheatFarm: '打理麦田', smeltSafe: '冶炼', smelt: '冶炼', goBedSleep: '睡觉过夜',
+    nightShelter: '躲夜等天亮', surfaceUp: '上地面', escapePlan: '脱困', moveAway: '避开',
+    craftPickaxe: '做镐', replenishKit: '补料补镐',
 };
+// dig 目标方块 → 中文 (用于"在挖X")。ore/log 走正则族, 其余给通名。
+function blockCN(name) {
+    const n = String(name || '');
+    if (/diamond_ore/.test(n)) return '钻石矿';
+    if (/iron_ore/.test(n)) return '铁矿';
+    if (/coal_ore/.test(n)) return '煤矿';
+    if (/gold_ore/.test(n)) return '金矿';
+    if (/copper_ore/.test(n)) return '铜矿';
+    if (/redstone_ore/.test(n)) return '红石矿';
+    if (/lapis_ore/.test(n)) return '青金石矿';
+    if (/emerald_ore/.test(n)) return '绿宝石矿';
+    if (/(_log|_wood|_stem)$/.test(n)) return '树';
+    if (/leaves/.test(n)) return '树叶';
+    if (/deepslate$|deepslate_/.test(n)) return '深板岩';
+    if (/cobblestone/.test(n)) return '圆石';
+    if (/^stone$|andesite|diorite|granite|tuff|calcite/.test(n)) return '石头';
+    if (/dirt|grass_block|mud|podzol|coarse/.test(n)) return '泥土';
+    if (/gravel/.test(n)) return '沙砾';
+    if (/sand/.test(n)) return '沙子';
+    if (/obsidian/.test(n)) return '黑曜石';
+    if (/netherrack/.test(n)) return '下界岩';
+    if (/water/.test(n)) return '水';
+    if (/wheat|carrot|potato|beetroot|melon|pumpkin|crop/.test(n)) return '庄稼';
+    return name ? '方块' : '';
+}
 // NOTE (local deploy): `Camera` (camera.js) import removed — it was never used here
 // (the screenshot path uses the lazily-loaded CameraProc), and statically importing
 // camera.js pulls in node-canvas-webgl + prismarine-viewer + headless-gl, whose
@@ -174,19 +194,20 @@ class WSMessageServer {
                 const bot = this.agent && this.agent.bot;
                 if (!bot || !bot.entity || !bot.entity.position) return;
                 const nl = this._statusNL(bot);
+                if (nl.text === this._lastNLText) return;   // ★去重(用户令): 状态没变就不发, 消除刷屏
+                this._lastNLText = nl.text;
                 this.broadcast({ type: 'bot_status_nl', ts: Date.now(), ...nl });
                 this._chatToMC(nl.text);   // ★用户令: 发给外部 LLM 的人话同步进游戏聊天(仅文本, 无图片)
             } catch (e) { /* NL status must never hurt the agent */ }
         }, ms);
     }
 
-    // Build the fine-grained Chinese status object. Prefers the committed GOAL kind
-    // (bot._commitment.kind — "what it's trying to achieve") over the raw skill name,
-    // with the live leaf skill (bot._currentSkill) refining it, plus a survival overlay
-    // and threat/vitals in human bands. Returns {text, ...fields} for the broadcast.
+    // Build the Chinese status object — LEADS WITH THE ACTUAL PHYSICAL ACTION read from the
+    // live bot (dig / fight / move / sleep), so it reflects what the bot is REALLY doing, not a
+    // skill-name label that may be a no-op (e.g. nightShelter after 封箱 was disabled just HOLDS —
+    // the old text wrongly said "挖坑封顶"). The committed goal (kind) is used only as context or
+    // as the idle/holding fallback. No coordinates (the LLM doesn't need them). Returns {text,...}.
     _statusNL(bot) {
-        const p = bot.entity.position;
-        const x = Math.round(p.x), y = Math.round(p.y), z = Math.round(p.z);
         const hp = Math.round(bot.health ?? 0);
         const food = bot.food ?? 0;
         const tod = (() => { try { return bot.time.timeOfDay || 0; } catch (e) { return 0; } })();
@@ -199,9 +220,10 @@ class WSMessageServer {
         // nearby hostiles (< 16b): count + up to 3 distinct Chinese names
         let hostiles = 0; const names = [];
         try {
-            for (const id in bot.entities) {
+            const bp = bot.entity && bot.entity.position;
+            if (bp) for (const id in bot.entities) {
                 const e = bot.entities[id];
-                if (e && e.kind === 'Hostile mobs' && e.position && p.distanceTo(e.position) < 16) {
+                if (e && e.kind === 'Hostile mobs' && e.position && bp.distanceTo(e.position) < 16) {
                     hostiles++;
                     const nm = STATUS_MOB_CN[e.name] || e.name;
                     if (nm && names.indexOf(nm) < 0 && names.length < 3) names.push(nm);
@@ -209,41 +231,43 @@ class WSMessageServer {
             }
         } catch (e) {}
 
-        const hpTxt = hp >= 20 ? '血是满的' : hp >= 15 ? '血挺足' : hp >= 10 ? '半血左右' : hp >= 6 ? '血不多了' : '快没血了';
-        const foodTxt = food >= 18 ? '吃得很饱' : food >= 12 ? '食物中等' : food >= 6 ? '有点饿' : '很饿了';
+        const hpTxt = hp >= 20 ? '血满' : hp >= 15 ? '血挺足' : hp >= 10 ? '半血' : hp >= 6 ? '血不多' : '快没血';
+        const foodTxt = food >= 18 ? '吃得饱' : food >= 12 ? '食物中等' : food >= 6 ? '有点饿' : '很饿';
         const svnActive = (bot._surviveNowUntil && Date.now() < bot._surviveNowUntil)
             || skill === 'surviveNow' || kind === 'SURVIVE_NOW';
+        const goal = this._goalPhrase(kind, skill);   // 短目标短语, 或 null
 
-        const act = svnActive
-            ? '情况紧张，我在保命自救（吃东西/打怪/挖坑避险/找床过夜，尽快脱困）'
-            : this._activityPhrase(kind, skill, y);
+        // ★ACTUAL physical action from live bot state (truthful, ordered by specificity).
+        let act = null;
+        try {
+            if (bot.isSleeping) act = '在床上睡觉';
+            else if (bot.pvp && bot.pvp.target && bot.pvp.target.name) act = `在打${STATUS_MOB_CN[bot.pvp.target.name] || '怪'}`;
+            else if (bot.targetDigBlock && bot.targetDigBlock.name) act = `在挖${blockCN(bot.targetDigBlock.name)}`;
+            else if (bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()) act = goal ? `在赶路，去${goal}` : '在赶路';
+        } catch (e) {}
 
-        const dimSuffix = dim === 'the_nether' ? '（下界）' : dim === 'the_end' ? '（末地）' : '';
-        const hostSuffix = hostiles > 0
-            ? `，附近有 ${hostiles} 只怪${names.length ? `（${names.join('、')}）` : ''}`
-            : '，周围没怪';
-        const text = `${act}。现在在 ${x},${y},${z}${dimSuffix}，${night ? '夜里' : '白天'}，${hpTxt}、${foodTxt}${hostSuffix}。`;
+        let head;
+        if (svnActive) head = act ? `${act}（保命中）` : '情况紧张，在保命自救（找吃的/避险/等，尽快脱困）';
+        else if (act) head = act;                       // 有真动作 → 直接报动作
+        else if (goal) head = `在${goal}`;              // 没动作(hold/idle) → 报正在为之等待的目标(如 躲夜等天亮)
+        else head = '暂时空闲，在想下一步';
 
-        return { text, kind, skill, pos: [x, y, z], hp, food, hostiles, night, dim };
+        let text = head + '，' + hpTxt + '、' + foodTxt;
+        if (dim === 'the_nether') text += '，在下界';
+        else if (dim === 'the_end') text += '，在末地';
+        text += hostiles > 0 ? `，附近有${hostiles}只怪${names.length ? `（${names.join('、')}）` : ''}` : '，周围没怪';
+        text += `，${night ? '夜里' : '白天'}。`;
+
+        return { text, kind, skill, hp, food, hostiles, night, dim };   // ★不含坐标(LLM 不需要)
     }
 
-    _activityPhrase(kind, skill, y) {
-        // 1) leaf skill (most immediate) — but umbrella skills aren't in the table → fall to kind
-        if (skill && STATUS_SKILL_CN[skill]) return `我${STATUS_SKILL_CN[skill]}`;
-        // 2) y-dependent mining goals: name the depth band
-        if (kind === 'GET_DIAMOND') return `我在 y${y} 挖钻石`;
-        if (kind === 'GO_UNDERGROUND' || kind === 'DUSK_MINE_NIGHT' || kind === 'MINE_THROUGH_NIGHT') {
-            const band = y < 0 ? '钻石带' : y <= 20 ? '铁/煤带' : '浅层';
-            return `我在 y${y} 下矿挖矿石（${band}）`;
-        }
-        // 3) goal kind → human phrase
-        if (kind && STATUS_KIND_CN[kind]) return `我${STATUS_KIND_CN[kind]}`;
-        // 4) fallbacks: never emit a bare machine token — and never surface an umbrella
-        //    skill name (prepNether/… is exactly the "废话" the user rejected).
-        const umbrella = /^(prepNether|missionNether|autoProgress|achieve|diagBusy)$/.test(skill || '');
-        if (skill && !umbrella) return `我在执行「${skill}」`;
-        if (kind) return `我在推进目标「${kind}」`;
-        return '我在按计划推进（凑装备、找资源）';
+    // Short GOAL phrase (what it's trying to achieve) — context / idle-fallback only, never the
+    // asserted physical action. Umbrella skills (prepNether/…) fall through to null so the head
+    // becomes the actual action or a plain '空闲', never the "prepNether" 废话.
+    _goalPhrase(kind, skill) {
+        if (kind && STATUS_KIND_CN[kind]) return STATUS_KIND_CN[kind];
+        if (skill && STATUS_SKILL_CN[skill]) return STATUS_SKILL_CN[skill];
+        return null;
     }
 
     startVitalsTimer() {
