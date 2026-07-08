@@ -23,7 +23,13 @@ export class SkillLibrary {
         this.embedding_model = embedding_model;
         this.skill_docs_embeddings = {};
         this.skill_docs = null;
-        this.always_show_skills = ['skills.placeBlock', 'skills.wait', 'skills.breakBlockAt']
+        // ★ pillarUp pinned: the "挖点泥土垫起来继续挖木头 / 垫高够到上方方块" admin primitive.
+        // Live incident 2026-07-09: embedding retrieval didn't rank pillarUp into the top-5
+        // relevant docs for that task, so the coder never saw it and hand-rolled a dirt-dig
+        // routine that walked DOWNHILL (y 68→64), then falsely reported "垫高后仍无法够到足够木头"
+        // without ever towering. Force-showing it keeps the tested MLG-tower in the coder's
+        // vocabulary for any pillar/reach-above task.
+        this.always_show_skills = ['skills.placeBlock', 'skills.wait', 'skills.breakBlockAt', 'skills.pillarUp']
     }
     async initSkillLibrary() {
         const skillDocs = getSkillDocs();

@@ -188,6 +188,17 @@ while ($true) {
         Remove-Item (Join-Path $proj 'watchdog.stop') -Force
         break
     }
+    # ── ★MANUAL NEW-WORLD RESET (2026-07-09): 用户手动强制"这是新世界"的逃生口。自动检测(下方)靠
+    #    .mca mtime + 新鲜度/去抖, 真·换世界要晚 ~1-6min 才确认; 期间 bot 带旧世界认知(道具栏/坐标)
+    #    乱跑。用户 New-Item new-world.flag 即可立刻 full-reset(清 landmarks/记忆/turns…)+重启, 不等
+    #    去抖。镜像 watchdog.stop 的 flag 模式 (即使 agent 卡死/watchdog 假死重启也生效)。──
+    $nwFlag = Join-Path $proj 'new-world.flag'
+    if (Test-Path $nwFlag) {
+        Add-Content $log "[$(Get-Date -Format o)] ★new-world.flag found — forcing full world reset + restart (manual)"
+        Remove-Item $nwFlag -Force -ErrorAction SilentlyContinue
+        Restart-Agent "MANUAL new-world.flag — cleared stale world state" -ClearWorld
+        continue
+    }
     # ── ★NEW-WORLD AUTO-RESET (2026-07-08): 用户开新世界时旧世界的 landmarks/bed/chest/oracle/记忆
     #    坐标全失效 → bot 朝不存在的旧坐标白跑。new-world-reset.mjs 用 ore-oracle 同款判据 (saves 下
     #    .mca 最新 mtime = 当前世界) 检测切换; 变了就 kill→clear→relaunch (fresh boot 才甩得掉
