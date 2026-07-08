@@ -178,10 +178,12 @@ export class Prompter {
                 msg.role !== 'system' && msg.content.includes('!newAction(')
             )?.content?.match(/!newAction\((.*?)\)/)?.[1] || '';
 
-            prompt = prompt.replaceAll(
-                '$CODE_DOCS',
-                await this.skill_libary.getRelevantSkillDocs(code_task_content, settings.relevant_docs_count)
-            );
+            // Relevant `skills.*`/`world.*` primitives + the custom-skill catalog, so the
+            // coding model reaches for a tested procedure (realNetherPortal, chopWood, …)
+            // instead of re-deriving it inside newAction. Catalog is best-effort ('' on failure).
+            let code_docs = await this.skill_libary.getRelevantSkillDocs(code_task_content, settings.relevant_docs_count);
+            try { code_docs += this.skill_libary.getCustomSkillManifest(); } catch (e) {}
+            prompt = prompt.replaceAll('$CODE_DOCS', code_docs);
         }
         if (prompt.includes('$EXAMPLES') && examples !== null)
             prompt = prompt.replaceAll('$EXAMPLES', await examples.createExampleMessage(messages));

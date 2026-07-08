@@ -1403,6 +1403,19 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
     let _tunnelTries = 0;
     const _TUNNEL_MAX_TRIES = 4;
 
+    // ★TARGET STICKINESS (2026-07-09 用户令"同类复用"): 根治 obsidian/collectBlocks "原地乱跳" —
+    //   admin 挖黑曜石走 LLM 自驱 `!collectBlocks("obsidian",N)`, 每回合重发一次 collectBlock,
+    //   每次重挑【最近的一块】当目标 → 目标坐标每 ~0.8s 漂一格 (mine_motion 实录 goal z 364→360),
+    //   新 goToPosition 把上一回合在途导航掐断 ("The goal was changed before it could be completed!"),
+    //   身体钉死原地只剩 step-edge/jump 微控制抖动。修: 把上次锁定的目标块记在 bot 上, 同 bot 同类
+    //   采集只要那块【仍存在/同类/未挖掉/未 exclude/非雷区/非刷怪笼】就复用它当首选目标, 一条路走到底;
+    //   挖掉/gone/证不可达即清, 下轮重挑并重新粘住。跨 collectBlock 调用持久 = 堵住回合间的目标 churn。
+    const _stickyKey = blocktypes.join('|');
+    if (!bot._collectSticky || bot._collectSticky.key !== _stickyKey) {
+        // 换了采集类型 → 旧粘滞作废 (别把上一目标误带进新类型)
+        if (bot._collectSticky && bot._collectSticky.key !== _stickyKey) bot._collectSticky = null;
+    }
+
     const movements = new pf.Movements(bot);
     movements.dontMineUnderFallingBlock = false;
     movements.dontCreateFlow = true;
@@ -1633,6 +1646,41 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
         }
 
         if (blocks.length === 0) {
+            // ★RAW-NEAREST FALLBACK (2026-07-09): findBlocks 的类型快扫偶尔吐空集 —— 半空/孤立的
+            //   单块(门框黑曜石就是活例: y63 半空, 脚下邻格是空气/门, chunk 追踪时序一飘就漏)会
+            //   被扫空, 于是 admin「挖最近黑曜石」每回合 collectBlocks 报"无附近", 逼 LLM 手写
+            //   newAction(world.getNearestBlock + bot.dig)兜底才挖得到。这里在放弃前先用裸最近扫描
+            //   (无 safeToBreak/findBlocks 时序依赖)在近距内兜一块: 够得到就走 safeDig(approach→
+            //   reach→dig, 与手写 newAction 等价), 省掉 LLM 兜底。死区/刷怪笼/exclude/工具仍守。
+            let _raw = null;
+            for (const n of blocktypes) {
+                try { const b = world.getNearestBlock(bot, n, 8); if (b && b.position) { _raw = b; break; } } catch (e) {}
+            }
+            if (_raw && collected < num) {
+                const _p = _raw.position;
+                const _exd = exclude && exclude.some(q => q.x === _p.x && q.y === _p.y && q.z === _p.z);
+                if (!_exd && !_inDeathZone(_p) && !_nearSpawner(_p) && !isLiquid) {
+                    log(bot, `↪ scan empty but ${_raw.name}@${_p.x},${_p.y},${_p.z} within reach — direct-dig fallback.`);
+                    try {
+                        await bot.tool.equipForBlock(_raw);
+                        const _id = bot.heldItem ? bot.heldItem.type : null;
+                        if (!_raw.canHarvest(_id)) {
+                            log(bot, `Don't have right tools to harvest ${_raw.name} — need a better pickaxe.`);
+                            break;
+                        }
+                        const r = await safeDig(bot, _raw, { maxMs: 15000, equip: false, requireLOS: false });
+                        if (r === 'ok') {
+                            try { await goToPosition(bot, _p.x, _p.y, _p.z, 1); } catch (e) {}
+                            await pickupNearbyItems(bot);
+                            collected++;
+                            bot._collectSticky = null;
+                            continue;   // 挖掉一块 → 重扫; 下一块最近的自然进候选或裸兜底, maxAttempts 收口
+                        }
+                        log(bot, `⚠️ direct-dig fallback ${_raw.name} → ${r}; give up scan.`);
+                    } catch (e) { log(bot, `direct-dig fallback err: ${e.message}`); }
+                    break;
+                }
+            }
             if (collected === 0)
                 log(bot, `No ${blockType} nearby to collect.`);
             else
@@ -1676,6 +1724,22 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
             remapped.sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position));
             if (remapped.length) blocks = remapped;
         }
+        // ★TARGET STICKINESS 前置: 上次锁定的目标块若仍有效, 提到候选队首 → 下面 blocks[0] /
+        //   vein 选择自然复用它, 不再每 pass 重挑最近 (堵回合间 goal churn)。仍有效判据: 该坐标
+        //   仍是本次要采的同类方块, 且不在死区/刷怪笼/exclude 名单。失效 → 立即清粘滞, 走常规最近。
+        if (bot._collectSticky && bot._collectSticky.key === _stickyKey && bot._collectSticky.pos) {
+            const _sp = bot._collectSticky.pos;
+            const _sv = new Vec3(_sp.x, _sp.y, _sp.z);
+            const _sb = bot.blockAt(_sv);
+            const _excluded = exclude && exclude.some(p => p.x === _sp.x && p.y === _sp.y && p.z === _sp.z);
+            const _stillValid = _sb && blocktypes.includes(_sb.name)
+                && !_inDeathZone(_sv) && !_nearSpawner(_sv) && !_excluded;
+            if (_stillValid) {
+                blocks = [_sb, ...blocks.filter(b => !(b.position.x === _sp.x && b.position.y === _sp.y && b.position.z === _sp.z))];
+            } else {
+                bot._collectSticky = null;   // 目标没了/被排除/换区 → 松手, 重挑
+            }
+        }
         // ★C304 ORE: pick the nearest candidate that is genuinely reachable via a short walk/dig
         // path (no bridging across gaps). Skip+exclude unreachable ones so we don't lock onto — and
         // x-ray-mine through — an ore across a ravine/wall. Non-ore (logs/dirt/stone) unchanged: nearest.
@@ -1702,6 +1766,10 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
         } else {
             block = blocks[0];
         }
+        // ★TARGET STICKINESS 记账: 锁定本轮目标, 下一次 collectBlock(同类)优先复用它 → 目标恒定,
+        //   goToPosition 一条路走到底不被回合重发打断。挖掉(success)/gone/证不可达时下面清。
+        if (block && block.position)
+            bot._collectSticky = { key: _stickyKey, pos: { x: block.position.x, y: block.position.y, z: block.position.z }, ts: Date.now() };
         try {
         await bot.tool.equipForBlock(block);
         // ★Never harvest WOOD with a SWORD (chops slowly + burns the sword durability we need
@@ -1772,11 +1840,14 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
                         try { await pickupNearbyItems(bot, 12); } catch (e) {}
                     }
                     success = true;
+                    bot._collectSticky = null;   // ★挖到了 → 松手, 下轮粘住下一块最近的
                 } else if (r === 'gone') {
+                    bot._collectSticky = null;   // ★目标消失 → 松手重挑
                     continue; // vanished before we dug — move on
                 } else {
                     log(bot, `⚠️ ${block.name} ${r} — skip+exclude, next.`);
                     exclude.push(block.position);
+                    bot._collectSticky = null;   // ★证不可达/挖不动 → 松手, 别再粘同一块
                     continue;
                 }
             }
@@ -3780,13 +3851,51 @@ export async function goToGoal(bot, goal) {
 
     const doorCheckInterval = startDoorInterval(bot);
     const totalStartTime = Date.now();
-    const totalTimeout = 60000; // 60s total timeout
-    const phaseStuckTimeout = 3000; // 3s stuck detection per phase
-    const maxUnstickAttempts = 3;
-    
+    // ★进度感知长途修 (用户令 2026-07-09 "这么普通的越野也吃 3 次 unstick 就 bail"): 老逻辑两处硬墙 —
+    //   (a) maxUnstickAttempts=3 是【整趟终身计数】: bot.pathfinder.goto 一次走到底, 山地每物理楔住 3s 耗
+    //       一次 unstick, 累计 3 次就抛"到不了" —— 哪怕两次楔住之间已走了上百格(成功脱困也从不清零)。
+    //   (b) totalTimeout=60s 是绝对墙钟, 长途本就不够。
+    //   改成【进度感知】: 只要朝目标有实质推进(距目标缩短 ≥PROGRESS_EPS)就把 unstick 预算清零 —— cap 语义从
+    //   "整趟累计 3 次"变成"连续 3 次无推进 = 真被困"; 并把绝对超时换成"无推进超时"(推进就续命), 另加宽松硬顶
+    //   防病态死循环。normal 越野(单调靠近)永不再误 bail; 真被困(20s 挪不动)才照常放弃。
+    const noProgressTimeout = 20000; // 只在【连续 20s 零推进】才判失败 (推进会重置计时)
+    const hardTimeout = 180000;      // 绝对安全顶 (防病态无限循环; 正常长途远够用)
+    const phaseStuckTimeout = 3000;  // 3s stuck detection per phase
+    const maxUnstickAttempts = 3;    // 现语义: 【连续】无推进 unstick 上限 (有推进即清零)
+
     let currentMovements = nonDestructiveMovements;
     let isDestructive = false;
     let unstickAttempts = 0;
+
+    // ── 进度感知 unstick 预算 (见上方常量注释) ──────────────────────────────────
+    // 进度度量: 能从 goal 读到 x/y/z 就用【到目标的直线距离缩短】(GoalNear/GoalBlock, 即 goToCoordinates
+    // 的常规路径); 复合目标无坐标时退化用【身体净位移】兜底。bot.entity.position 是 Vec3, .clone()/.distanceTo
+    // 现成可用, 无需额外 import。
+    const _goalPos = (typeof goal.x === 'number' && typeof goal.y === 'number' && typeof goal.z === 'number')
+        ? { x: goal.x, y: goal.y, z: goal.z } : null;
+    const _distToGoal = () => {
+        if (!_goalPos) return null;
+        try { const p = bot.entity.position; const dx = p.x - _goalPos.x, dy = p.y - _goalPos.y, dz = p.z - _goalPos.z; return Math.sqrt(dx * dx + dy * dy + dz * dz); }
+        catch (e) { return null; }
+    };
+    const PROGRESS_EPS = 1.5;   // 靠近目标 ≥1.5b (或复合目标兜底: 净位移 ≥1.5b) 记为一次推进
+    let _bestDist = _distToGoal();          // 距目标历史最优(最小); null → 用位移兜底
+    let _lastAnchor = null; try { _lastAnchor = bot.entity.position.clone(); } catch (e) {}
+    let lastProgressAt = Date.now();
+    const markProgress = () => {
+        let progressed = false;
+        const cur = _distToGoal();
+        if (cur != null && _bestDist != null) {
+            if (cur < _bestDist - PROGRESS_EPS) { _bestDist = cur; progressed = true; }   // 比历史最近还近 → 真推进(绕路回摆不算)
+        } else {
+            try { const p = bot.entity.position; if (_lastAnchor && p.distanceTo(_lastAnchor) >= PROGRESS_EPS) { progressed = true; _lastAnchor = p.clone(); } } catch (e) {}
+        }
+        if (progressed) {
+            if (unstickAttempts > 0) motionAudit(bot, 'path.progress_reset', { seq: navSeq, clearedAttempts: unstickAttempts, dist: cur != null ? +cur.toFixed(1) : undefined, goal: goalInfo });
+            unstickAttempts = 0;
+            lastProgressAt = Date.now();
+        }
+    };
 
     // Determine initial path type
     const pathfind_timeout = 1000;
@@ -3868,10 +3977,11 @@ export async function goToGoal(bot, goal) {
     }
 
     try {
-        while (Date.now() - totalStartTime < totalTimeout) {
+        while (Date.now() - lastProgressAt < noProgressTimeout && Date.now() - totalStartTime < hardTimeout) {
             if (bot.interrupt_code) {
                 throw new Error('Navigation interrupted');
             }
+            markProgress();   // ★朝目标有推进 → 清零 unstick 预算 + 续命 no-progress 计时 (长途越野不再累计误 bail)
 
             const result = await executePathfindingPhase(
                 bot, goal, currentMovements, phaseStuckTimeout, doorCheckInterval,
@@ -3977,8 +4087,11 @@ export async function goToGoal(bot, goal) {
         clearInterval(doorCheckInterval);
         bot.pathfinder.setGoal(null);
         
+        const _bailReason = (Date.now() - totalStartTime >= hardTimeout)
+            ? `hit the ${Math.round(hardTimeout / 1000)}s hard cap`
+            : `made no progress toward the goal for ${Math.round(noProgressTimeout / 1000)}s (${unstickAttempts} consecutive unstick attempts failed)`;
         const betterError = new Error(
-            `Cannot reach destination after ${unstickAttempts} unstick attempts. ` +
+            `Cannot reach destination: ${_bailReason}. ` +
             `You may be trapped or the path is blocked. Try a different target.`
         );
         betterError.name = 'PathfindingFailed';
@@ -5206,6 +5319,29 @@ export async function pillarUp(bot, targetY = null, opts = {}) {
         const h = bot.blockAt(bot.entity.position.floored().offset(0, 1, 0));
         return !h || h.boundingBox !== 'block';
     };
+    // ★C361: a jump-place lifts the feet ~1 block, which raises the 1.8-tall body
+    // into feet+2 — so a solid block at feet+2 (a low 2-high tunnel ceiling) caps
+    // the jump and the place never fires, even though feet+1 (head) is open. That
+    // is the "Under-foot place delayed → placed 0" entombment observed at
+    // (-155,54,383): bot boxed in a 2-high pocket with stone at (0,2,0), pillarUp
+    // spins 6 no-op tries and gives up. Mine BOTH overhead cells (feet+1, feet+2)
+    // before placing so the tower can escape a 2-high tunnel, not just an open
+    // shaft. breakBlockAt refuses obsidian/bedrock, so an undiggable ceiling still
+    // stops us (headOpen() below then breaks the loop); open-air pillaring is
+    // unchanged (both cells are already air → no-op).
+    const LIQUID_OR_AIR = /^(air|cave_air|void_air|water|lava|flowing_water|flowing_lava)$/;
+    const clearJumpColumn = async () => {
+        const fp = bot.entity.position.floored();
+        for (const dy of [1, 2]) {
+            if (bot.interrupt_code) return false;
+            const c = bot.blockAt(fp.offset(0, dy, 0));
+            if (c && c.boundingBox === 'block' && !LIQUID_OR_AIR.test(c.name)) {
+                try { await breakBlockAt(bot, c.position.x, c.position.y, c.position.z); }
+                catch (e) { return false; }
+            }
+        }
+        return true;
+    };
     // In water the bot floats a block or two above the block it just placed; stop
     // swimming and let it sink back down so the cell under its feet is a solid
     // support to place on (placeBlockUnderFeet needs that reference).
@@ -5230,6 +5366,9 @@ export async function pillarUp(bot, targetY = null, opts = {}) {
             if (yOf() >= MAX_Y) { log(bot, `Reached the world build height (y=${yOf()}).`); break; }
             const name = heldUsable();
             if (!name) { log(bot, `Out of blocks — pillared ${placed}, now at y=${yOf()}.`); break; }
+            // Mine a low 2-high-tunnel ceiling out of the jump column first (no-op in
+            // open air); if the head cell is still capped it's an undiggable ceiling.
+            await clearJumpColumn();
             if (!headOpen()) { log(bot, `Ceiling overhead at y=${yOf()} — can't pillar higher (placed ${placed}).`); break; }
             const y0 = yOf();
             await settleOntoFooting();
@@ -5406,11 +5545,11 @@ export async function customSkill(bot, skillName, ...args) {
     /**
      * Load and run a hot-reloadable custom skill written to bots/_supervisor/skills/<skillName>.js. The supervisor adds these files at runtime to teach the bot a procedure; the file is re-imported fresh on every call so edits take effect with NO agent restart. The skill module must export a default async function with signature (bot, ctx, ...args) where ctx = { skills, world, mc, Vec3, log }.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {string} skillName, the file name without extension of the custom skill to run, e.g. "buildNetherPortal".
+     * @param {string} skillName, the file name without extension of the custom skill to run, e.g. "realNetherPortal".
      * @param {...any} args, additional arguments forwarded to the custom skill.
      * @returns {Promise<any>} whatever the custom skill returns, or false if it could not be loaded.
      * @example
-     * await skills.customSkill(bot, "buildNetherPortal");
+     * await skills.customSkill(bot, "realNetherPortal");
      **/
     if (typeof skillName !== 'string' || !/^[A-Za-z0-9_-]+$/.test(skillName)) {
         log(bot, `Invalid custom skill name: ${skillName}`);

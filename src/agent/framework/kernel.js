@@ -17,7 +17,7 @@
  */
 
 import fs from 'fs';
-import { AGENT_MODE, FRAMEWORK_ENABLED_DEFAULT, foodInstinctsEnabled, hpInstinctsEnabled } from './contracts.js';
+import { AGENT_MODE, FRAMEWORK_ENABLED_DEFAULT, foodInstinctsEnabled, hpInstinctsEnabled, selfProposeEnabled, surviveNowEnabled } from './contracts.js';
 import { getWorld, mentalState, proposeTasks, commitGoal } from './world_model.js';
 import { pending as pendingInstincts } from './instinct.js';
 import { resolve as arbitrate, setBodyOwner, releaseBodyOwner, vitalNow as arbiterVitalNow } from './arbiter.js';
@@ -274,7 +274,13 @@ export class Kernel {
         //   _adminMission.active (由 _syncMirror 写), 任务 RUNNING 期间恒为真, 与心跳戳无关。用它兜底,
         //   即便心跳空窗也不解冻。任务 end() 会同步清 active → 自动恢复自主; flag-OFF/无任务时字节等价。
         const _missionActive = !!(this.bot._adminMission && this.bot._adminMission.active);
-        if (_missionActive || (this.bot._extIntentUntil && Date.now() < this.bot._extIntentUntil)) {
+        // ★2026-07-09 用户令 (newAction 期间冻结内核决策): 一条 !newAction 正在【编写+执行】代码时
+        //   (coder.generateCode 打 bot._newActionActive), bot 常静止等 LLM 出码 / 码在跑 —— 内核绝不
+        //   趁机派自主提案(self-propose: proposeTasks/commitGoal), 也不 force 灰区求生(surviveNow)抢身体
+        //   打断它。与 admin 独占同一条冻结闸: 唯一能穿透的仍是致命事件(vitalNow: 溺水/着火/岩浆/hp≤4)。
+        //   码跑完 finally 清标 → 自动恢复。
+        const _newAction = !!this.bot._newActionActive;
+        if (_missionActive || _newAction || (this.bot._extIntentUntil && Date.now() < this.bot._extIntentUntil)) {
             // ★2026-07-08 用户令 (admin 意志 = 独占 / 绝对): admin 任务 (WS task / 游戏内 chat, 由 agent
             //   LLM=gpt-5.5 执行) 期间, 内核【完全冻结】—— 不派发任何蓝图提案 (prepNether / 夜挖 / FREE_PLAY /
             //   proposeTasks), 也不 force 灰区求生 (surviveNow)。唯一能打断独占的是【致命事件】: arbiter.vitalNow
@@ -334,7 +340,11 @@ export class Kernel {
                 }
             } catch (e) {}
         }
-        if (!skillBusy && !vitalBusy) {
+        if (!skillBusy && !vitalBusy && surviveNowEnabled()) {
+            // ★2026-07-09 用户令 (surviveNow 彻底禁): 灰区强派整条路径由 MC_SURVIVE_NOW 熔断 (默认 OFF)。
+            //   剩下唯一活着的触发是"同锚>5min 僵局→RELOCATE", 正是深挖被莫名拽走的元凶。OFF 时内核绝不
+            //   强派 surviveNow; 保命地板 (vitalNow: 溺水/着火/岩浆/hp≤4) 在 _survivalTick 更早处独立生效,
+            //   不受影响。恢复: MC_SURVIVE_NOW=1 重启。见 contracts.surviveNowEnabled。
             // 连败计数 30min 衰减: 陈年连败不该给全新灰区解锁求死分支(deathEligible exhausted 条款)
             if (this.bot._svnFails && Date.now() - (this.bot._svnLastFailAt || 0) > 1800000) this.bot._svnFails = 0;
             const gz = this._grayZoneSignal();
@@ -357,7 +367,17 @@ export class Kernel {
         this._busyStuck = null;
 
         // 3) Idle → throttle, then propose + decide.
+        // ★2026-07-09 用户令 (self-propose 彻底禁): 空闲自主派发整条路径由 MC_SELF_PROPOSE 熔断 (默认 OFF)。
+        //   OFF 时内核 idle 什么都不自主找活 (proposeTasks/commitGoal/decide/_commit 全不跑) —— 只听 admin
+        //   指令 (AdminMission / handleMessage 经 self_prompter 派发, 独立于本路径)。上方 reflexes/vitalNow
+        //   硬保命 + (若开) 灰区求生 全在此闸之前, 不受影响。恢复: MC_SELF_PROPOSE=1 重启。见 contracts.selfProposeEnabled。
+        if (!selfProposeEnabled()) return;
         const now = Date.now();
+        // ★2026-07-09 用户令: admin 任务收尾后静一会儿 —— 收尾起 20s 内不 propose 自主任务, 免得
+        //   刚做完就自己找活到处跑。戳由 admin_mission.end() 打 (bot._proposePauseUntil)。此闸只压
+        //   这条"空闲找新活"的自主派发路径; 上方的灰区强制求生(surviveNow)/reflexes/vitalNow 硬保命
+        //   全在其之前, 不受影响。
+        if (this.bot._proposePauseUntil && now < this.bot._proposePauseUntil) return;
         if (now - this._lastDecideAt < this._decideEveryMs) return;
         this._lastDecideAt = now;
 

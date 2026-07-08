@@ -941,24 +941,47 @@ async function prepNetherInner(bot, ctx) {
     // NAKED carrying raw_iron "full armor's worth" (prepNether.js:721 comment, the 6.7h Sisyphus). Deaths
     // are overwhelmingly under-armored, so REORDER to survival-first: pickaxe (mine iron) → FULL IRON ARMOR
     // (the survival kit) → sword → shield (planks-gated, last so it can't block armor) → diamond/nether.
+    // ★2026-07-09 用户令 "prepNether 退役": 整条自主备战 gear-up 链已停用。根因是 obsidian×10 这条
+    //   目标 — 死后掉了黑曜石就重新凑料, 而 collectBlock('obsidian') 采最近黑曜石 = 啃掉现成的地狱门
+    //   门框 (session 实录: -175,64,382 那座门被系统性挖光, mine_motion dig target obsidian@-173~-176/
+    //   y64~68/z383 一整座 4x5 框)。用户受不了反复"拆自己的门", 令整条 goals[] 退役, 不再自主凑铁甲/
+    //   钻甲/打火石/黑曜石, 也不再为凑装下潜挖矿。保留的只有: 回床 (tryHome@1666, 循环前独立跑) +
+    //   低血遇敌 HOLD 防御 (modes 反射层) + 死亡找回 (corpse run 前导段)。
+    //   ★空 goals[] 契约安全: entryGoalsDone/doneNow 皆真空为 true; GET_BED 派发时 bedNewlySet 让
+    //   最终 return 正常返回 true, 纯空转触发内核 3-strike 冷却 (见 :3012 return 契约)。for-of 循环
+    //   (:2828) 直接零迭代, 循环内穿插的 keepKit/gear-achieve/obsidian-collect 全不再跑。
+    //   ★恢复方法: 取消下面注释即可整条复活 (BOOTSTRAP_KIT 提案在 world_model.js:683/1158 另行注掉)。
     const goals = [
-        { item: 'iron_pickaxe', count: 1 },    // mine iron/the rest; cheap (3 iron+2 stick)
-        { item: 'iron_chestplate', count: 1 }, // ★ARMOR FIRST now (chest=most protection) — survival before weapons
-        { item: 'iron_helmet', count: 1 },
-        { item: 'iron_leggings', count: 1 },
-        { item: 'iron_boots', count: 1 },
-        { item: 'iron_sword', count: 1 },      // a real weapon (death 21 was sword:null)
-        { item: 'shield', count: 1 },          // shield (skeleton arrows) — LAST of the iron tier: needs 6 planks (wood-gated), must not block armor
-        { item: 'diamond_sword', count: 1 },   // diamonds only after the iron survival kit is done
-        { item: 'diamond_chestplate', count: 1 },
-        { item: 'diamond_leggings', count: 1 },
-        { item: 'diamond_helmet', count: 1 },
-        { item: 'diamond_boots', count: 1 },
-        { item: 'flint_and_steel', count: 1 },
-        { item: 'obsidian', count: 10 }, // 10 = minimal nether portal frame
+        // { item: 'iron_pickaxe', count: 1 },    // mine iron/the rest; cheap (3 iron+2 stick)
+        // { item: 'iron_chestplate', count: 1 }, // ★ARMOR FIRST now (chest=most protection) — survival before weapons
+        // { item: 'iron_helmet', count: 1 },
+        // { item: 'iron_leggings', count: 1 },
+        // { item: 'iron_boots', count: 1 },
+        // { item: 'iron_sword', count: 1 },      // a real weapon (death 21 was sword:null)
+        // { item: 'shield', count: 1 },          // shield (skeleton arrows) — LAST of the iron tier: needs 6 planks (wood-gated), must not block armor
+        // { item: 'diamond_sword', count: 1 },   // diamonds only after the iron survival kit is done
+        // { item: 'diamond_chestplate', count: 1 },
+        // { item: 'diamond_leggings', count: 1 },
+        // { item: 'diamond_helmet', count: 1 },
+        // { item: 'diamond_boots', count: 1 },
+        // { item: 'flint_and_steel', count: 1 },
+        // { item: 'obsidian', count: 10 }, // 10 = minimal nether portal frame ← 拆门元凶
     ];
 
     prog(`==== prepNether START | inv diamonds=${has('diamond')} ====`);
+    // ★收窄 (用户令 2026-07-09 "2.收窄"): admin 任务在跑 且 已握齐"搭地狱门"的即时材料
+    //   (≥10 obsidian + flint_and_steel) 时, 不再为"进地狱求生"去凑铁甲/钻甲而下潜挖矿 —— admin
+    //   明确只要"搭门"就别自作主张开矿远征 (session 实录: 任务 "走到X 搭地狱门" 被 prepNether /
+    //   kernel BOOTSTRAP_KIT 劫成下潜挖铁; goals[] 把生存装排在 obsidian 前, 有黑曜石也拦不住挖铁)。
+    //   双闸: (a) _adminMission.active = 有明确外部指令在管; (b) 材料已在手。缺料 (如死亡把黑曜石掉了)
+    //   → portalBuildReady=false → 保留原找回/备料/挖矿。无 admin 任务时字节等价 (自主备战照旧)。
+    //   内核在 mission active 期本就冻结, 故本闸也顺带自愈"死亡-重生空窗"里越权的挖矿 (active 一恢复即放行)。
+    const _adminActiveNow = !!(bot._adminMission && bot._adminMission.active);
+    const portalBuildReady = () => has('obsidian') >= 10 && has('flint_and_steel') >= 1;
+    if (_adminActiveNow && portalBuildReady()) {
+        prog(`prepNether: ★收窄放行 — admin 任务在跑 且 搭门材料已齐 (obsidian=${has('obsidian')} flint_and_steel=${has('flint_and_steel')}), 跳过凑装/下潜备料, 直接放行搭门`);
+        return true;
+    }
     // ★kernel-return-contract audit 2026-07-02: ENTRY SNAPSHOT for the final return (bottom of
     // this function). The old `return goals.every(...)` was a pure STALE STOCK COUNT — a fully
     // kitted bot dispatched for something ELSE (BOOTSTRAP_KIT@66's wood buffer, GET_BED@50,

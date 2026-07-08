@@ -655,7 +655,36 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
             return false;
         }
     }
+    // ★2026-07-09 用户令: "从当前位置 surface up 本来很简单, 却一直东张西望瞎挖" — 根因是 PRIMARY
+    // 直接跑 GoalY 寻路器: GoalY 的启发只量竖直距离, A* 把横向移动当零成本 → 挖出蜿蜒斜楼梯 (瞎挖)。
+    // 竖直优先门: 头顶竖直列若无水/岩浆且逐块可破 (有镐 / 无镐但徒手可破的石类/矿), 直接跳过 PRIMARY
+    // 走下面的兜底竖直上挖+垫柱 (mineDown 竖直反向), 不再横向乱蹦。只有竖直被流体或不可破物 (无镐硬石/
+    // 基岩/黑曜石) 封死时才退回 PRIMARY 寻路器绕行找侧路。所有封顶/危险/侧逃逻辑不变 (封死场景仍走
+    // PRIMARY, 且始终有兜底)。
+    const straightUpViable = () => {
+        const cc = bot.entity.position.floored();
+        const below = bot.blockAt(cc.offset(0, -1, 0));
+        const footed = !!(below && below.boundingBox === 'block' && !/water|lava|fire|cactus|magma/.test(below.name || ''));
+        if (!footed && scafCount() === 0) return false;   // 无稳定落脚 + 无垫料 → 让寻路器找路
+        const topDy = Math.max(6, Math.min(24, targetY - cc.y + 2));
+        for (let dy = 2; dy <= topDy; dy++) {
+            const b = bot.blockAt(cc.offset(0, dy, 0));
+            if (!b) continue;                              // 未加载/空 → 视为可通过, 继续扫
+            const nm = b.name || '';
+            if (/water|lava/.test(nm)) return false;       // 流体顶 → 需绕行, 交 PRIMARY
+            if (b.boundingBox !== 'block' || OPEN.has(nm)) continue;  // 空气 → 继续
+            if (/bedrock|obsidian|end_portal|nether_portal/.test(nm)) return false;  // 破不动
+            if (STONY.test(nm) && !hasPick() && !NO_PICK_BREACHABLE.has(nm) && !/_ore$/.test(nm)) return false;  // 无镐硬石破不动
+        }
+        return true;
+    };
+    const _vFirst = straightUpViable();
+    if (_vFirst) {
+        dbg(`vertical-first: overhead column clear/breachable (y=${yNow()} target=${targetY} pick=${hasPick()} scaf=${scafCount()}) → skip GoalY staircase, straight-up climb`);
+        motion('surfaceUp.vertical_first', { y: yNow(), target: targetY, hasPick: hasPick(), scaffold: scafCount() });
+    }
     // ---- PRIMARY: pathfinder carves a staircase up (digging allowed) --------------
+    if (!_vFirst) {
     try {
         const moves = new Movements(bot);
         // No-pick pathfinding must be route-finding, not a hidden bare-hand stone miner.
@@ -725,6 +754,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
         }
     } catch (e) { dbg(`pf block threw: ${e.message}`); log(bot, `surfaceUp pathfinder leg err: ${e.message}`); }
     finally { try { bot.pathfinder.setGoal(null); } catch (e) {} }
+    } // end vertical-first gate: PRIMARY GoalY pathfinder runs ONLY when straight-up is blocked (fluid/unbreakable ceiling)
     if (surfaceReady()) { dbg(`reached open surface y=${yNow()} via pathfinder`); log(bot, `surfaceUp: reached open surface y=${yNow()} via pathfinder.`); return true; }
     dbg(`pathfinder phase done, still y=${yNow()} — entering fallback`);
 

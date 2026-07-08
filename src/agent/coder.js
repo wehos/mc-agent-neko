@@ -29,7 +29,22 @@ export class Coder {
         mkdirSync('.' + this.fp, { recursive: true });
     }
 
+    // ★2026-07-09 用户令 (newAction 期间铁律): 代码【编写(LLM 调用)+执行】的整个窗口标记
+    //   bot._newActionActive。此期间 bot 常静止(等 LLM 出码 / 码在跑), 各卡顿看门狗把静止
+    //   误判成"卡住"→断线重连 / 内核自主派别的任务 / 灰区求生抢身体, 把正在进行的 newAction 打断。
+    //   这层布尔闸让 kernel 冻结自主提案+灰区求生、unstuck 停止累计卡顿, 直到码真跑完(finally 清)。
+    //   真·终止仍走各自的确凿证据: 任务完成/失败/被新指令覆盖/code_timeout(真卡死)。
     async generateCode(agent_history) {
+        const bot = this.agent.bot;
+        try { bot._newActionActive = true; } catch (e) {}
+        try {
+            return await this._generateCode(agent_history);
+        } finally {
+            try { bot._newActionActive = false; } catch (e) {}
+        }
+    }
+
+    async _generateCode(agent_history) {
         this.agent.bot.modes.pause('unstuck');
         lockdown();
         // this message history is transient and only maintained in this function
@@ -72,6 +87,19 @@ export class Coder {
             }
             code = res.substring(res.indexOf('```')+3, res.lastIndexOf('```'));
             const result = await this._stageCode(code);
+            if (!result) {
+                console.warn("Failed to stage code, something is wrong.");
+                return 'Failed to stage code, something is wrong.';
+            }
+            if (result.syntaxError) {
+                const message = 'Error: Code failed to compile (syntax error):\n' + result.syntaxError
+                    + '\nWrite ONLY the raw statements of the action body — do NOT wrap them in '
+                    + '`export`, `function main(){...}`, or `module.exports`. Please try again.';
+                console.warn('Syntax error staging code:\n' + result.syntaxError + '\n');
+                messages.push({ role: 'assistant', content: res });
+                messages.push({ role: 'system', content: message });
+                continue;
+            }
             const executionModule = result.func;
             const lintResult = await this._lintCode(result.src_lint_copy);
             if (lintResult) {
@@ -198,8 +226,17 @@ export class Coder {
             tick_confirm,
             Vec3,
         });
-        const mainFn = compartment.evaluate(src);
-        
+        // ★2026-07-09: evaluate 抛的语法错误(如残留 `export` / 括号不配)以前直接冒泡出
+        //   _generateCode 无 try/catch → 整条 newAction 一次性夭折, 不重试。改为捕获成可反馈的
+        //   syntaxError, 让上层当作 lint 错误喂回模型, 用掉剩余 attempt 自我纠正。
+        let mainFn = null;
+        try {
+            mainFn = compartment.evaluate(src);
+        } catch (e) {
+            console.warn('Compartment evaluate (syntax) error: ' + (e && e.message || e));
+            return { syntaxError: (e && e.message) ? e.message : String(e), src_lint_copy };
+        }
+
         if (write_result) {
             console.error('Error writing code execution file: ' + write_result);
             return null;
@@ -213,9 +250,27 @@ export class Coder {
         for (let r of remove_strs) {
             if (code.startsWith(r)) {
                 code = code.slice(r.length);
-                return code;
+                break;
             }
         }
+        code = code.trim();
+        // ★2026-07-09: coding 模型(尤其 gpt-5.x-mini)时不时把整段包成模块 `export async function
+        //   main(bot){ ... }` / `async function main(bot){ ... }`。execTemplate 把代码塞进
+        //   `(async (bot)=>{ /* CODE HERE */ })`, 于是 `export` 落在函数体里 → compartment.evaluate
+        //   直接抛 `SyntaxError: Unexpected token 'export'`, 把整条(本来正确的) newAction 一次性打死。
+        //   这里把这种 main 包裹拆成裸函数体, 顺带清掉裸 `export ` 前缀。
+        const mainWrap = code.match(/^export\s+default\s+|^export\s+|^module\.exports\s*=\s*/);
+        let stripped = mainWrap ? code.slice(mainWrap[0].length).trim() : code;
+        const fnHead = stripped.match(/^(?:async\s+)?function\s+\w*\s*\([^)]*\)\s*\{/);
+        if (fnHead) {
+            const bodyStart = stripped.indexOf('{');
+            const bodyEnd = stripped.lastIndexOf('}');
+            if (bodyStart !== -1 && bodyEnd > bodyStart) {
+                return stripped.slice(bodyStart + 1, bodyEnd).trim();
+            }
+        }
+        // 无 main 包裹但仍有裸 `export ` 前缀(如 `export const ...`)→ 去掉关键字保留声明。
+        if (mainWrap && !fnHead) return stripped;
         return code;
     }
 

@@ -12,6 +12,7 @@ import { SelfPrompter } from './self_prompter.js';
 import { AdminMission } from './admin_mission.js';
 import { createFramework } from './framework/index.js';
 import { installVineUnstick } from './library/vine_unstick.js';
+import { installArrowGuard } from './arrow_guard.js';
 import convoManager from './conversation.js';
 import { handleTranslation, handleEnglishTranslation } from '../utils/translator.js';
 // NOTE (local deploy): addBrowserViewer import removed — it is HARD-DISABLED below
@@ -1373,6 +1374,8 @@ export class Agent {
             } catch (e) { console.warn('framework init failed:', e && e.message); }
             // Mineflayer-layer vine-trap unstick (recurring terrain trap, user-flagged).
             try { installVineUnstick(this.bot, (m) => { try { console.log(m); } catch (e) {} }); } catch (e) { console.warn('vine_unstick init failed:', e && e.message); }
+            // ★2026-07-09 精准挡箭反射 (用户令): physicsTick 逐刻弹道预测 → 命中航线上的箭瞬时定向举盾。
+            try { installArrowGuard(this); } catch (e) { console.warn('arrow_guard init failed:', e && e.message); }
 
             // This update loop ensures that each update() is called one at a time, even if it takes longer than the interval
             const INTERVAL = 300;

@@ -678,14 +678,17 @@ export function proposeTasks(world, bot) {
     //    whose wood dipped under the buffer re-proposed BOOTSTRAP_KIT@66 (skill=prepNether),
     //    outranking GET_BLAZE_RODS/SLAY_DRAGON and flailing wood-gathering in a dimension with
     //    no logs. Off-overworld the primary in-dimension skills need no wood/pick to proceed.
-    if (overworld && !isBootstrapDone(w, bot)) {
-        const noPick = kit.picks < 1;
-        push({ kind: PROPOSAL_KIND.BOOTSTRAP_KIT, priority: noPick ? 90 : 64, skill: 'prepNether',
-               rationale: noPick
-                   ? 'no usable pickaxe — finish wood→planks→table→pickaxe→stone tools before anything else'
-                   : `kit started but understocked (wood ${woodUnits(bot)}/${WOOD_BUFFER}, tier ${kit.pickTier}) — stock wood + upgrade to stone tools, don't wander off`,
-               hints: { hasTablePath: kit.hasTablePath, pickTier: kit.pickTier, wood: woodUnits(bot) } });
-    }
+    // ★2026-07-09 用户令 "prepNether 退役": BOOTSTRAP_KIT 提案停用 — 不再自主派 prepNether 冷开局
+    //   凑木→板→台→镐→石器。bot 之后靠 admin 指令驱动起步。回床 (GET_BED) / 低血防御 (HOLD) 保留。
+    //   ★恢复方法: 取消下面 push 的注释即可 (prepNether.js:944 的 goals[] 也需一并复活)。
+    // if (overworld && !isBootstrapDone(w, bot)) {
+    //     const noPick = kit.picks < 1;
+    //     push({ kind: PROPOSAL_KIND.BOOTSTRAP_KIT, priority: noPick ? 90 : 64, skill: 'prepNether',
+    //            rationale: noPick
+    //                ? 'no usable pickaxe — finish wood→planks→table→pickaxe→stone tools before anything else'
+    //                : `kit started but understocked (wood ${woodUnits(bot)}/${WOOD_BUFFER}, tier ${kit.pickTier}) — stock wood + upgrade to stone tools, don't wander off`,
+    //            hints: { hasTablePath: kit.hasTablePath, pickTier: kit.pickTier, wood: woodUnits(bot) } });
+    // }
 
     // 1b) ★SARCOPHAGUS RESCUE (checkpoint #16, 14:20Z live): sealed deep with no pick AND no
     //     wood — BOOTSTRAP_KIT@90's prepNether needs local wood/table that y<50 stone never has
@@ -1155,10 +1158,11 @@ export function proposeTasks(world, bot) {
                        rationale: `bare opening — scout for ${opening.need || 'resources'} (no known reachable wood/village yet)` });
                 break;
             case 'WOOD_BUFFER':
-                push({ kind: PROPOSAL_KIND.BOOTSTRAP_KIT, priority: 64, skill: 'prepNether',
-                       args: [{ woodTarget: WOOD_BUFFER }],
-                       rationale: `wood known but understocked (${woodUnits(bot)}/${WOOD_BUFFER}) — buffer wood before going under`,
-                       hints: { woodTarget: WOOD_BUFFER, wood: woodUnits(bot) } });
+                // ★2026-07-09 用户令 "prepNether 退役": WOOD_BUFFER 态的 BOOTSTRAP_KIT 提案一并停用。
+                // push({ kind: PROPOSAL_KIND.BOOTSTRAP_KIT, priority: 64, skill: 'prepNether',
+                //        args: [{ woodTarget: WOOD_BUFFER }],
+                //        rationale: `wood known but understocked (${woodUnits(bot)}/${WOOD_BUFFER}) — buffer wood before going under`,
+                //        hints: { woodTarget: WOOD_BUFFER, wood: woodUnits(bot) } });
                 break;
             case 'VILLAGE_HARVEST':
                 // ★2026-07-08 用户令: 食物本能禁用时不派村庄采集 (foodInstincts gate)。

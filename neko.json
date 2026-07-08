@@ -8,6 +8,14 @@
             }
         }
     },
+    "code_model": {
+        "model": "gpt-5.5-2026-04-23",
+        "params": {
+            "reasoning": {
+                "effort": "low"
+            }
+        }
+    },
     "skin": {
         "model": "slim",
         "path": "C:/Users/Administrator/Downloads/mc-agent-neko/skins/neko-skin.png"

@@ -36,8 +36,12 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
         try { await bot.equip(shieldItem, 'off-hand'); } catch (e) {}
     }
     const haveShield = () => bot.inventory.slots[45] && bot.inventory.slots[45].name === 'shield';
+    // ★2026-07-09 让位精准挡箭反射 (arrow_guard.js): 反射层正在挡箭 (bot._arrowBlockUntil) 时,
+    //   盾归它管 —— 不放盾 (lower 空转)、不冲刺 (sprint 会取消盾格)。剑在主手, 盾在副手, 举着盾照样
+    //   能挥剑, 所以挡箭窗内我们只是"不抢盾", 攻击节奏照走。
+    const arrowGuarding = () => (bot._arrowBlockUntil || 0) > Date.now();
     const raise = () => { try { if (haveShield()) bot.activateItem(true); } catch (e) {} };
-    const lower = () => { try { bot.deactivateItem(); } catch (e) {} };
+    const lower = () => { try { if (!arrowGuarding()) bot.deactivateItem(); } catch (e) {} };
     // ★C360 (modes.js FUTILE-FIGHT 断路器同步豁免): 黑名单里的打不动怪(bot._futileMobIds,
     // id→expiry)不选为目标 — mode 层不 engage 它, 这里也不能替别的怪进来时把它捞回来。
     const notFutile = (e) => {
@@ -146,6 +150,8 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
         if (hasBow && d > 4.5 && (kind === 'creeper' || kind === 'ranged')) {
             lower();
             try { await skills.equip(bot, 'bow'); } catch (_) {}
+            // ★让 arrow_guard 拉弓期间完全让手 (它的 deactivateItem 会掐断拉弓) — 见 arrow_guard 协作契约。
+            bot._drawingBow = true;
             try {
                 const aim = () => bot.lookAt(e.position.offset(0, (e.height || 1.8) * 0.45, 0));
                 await aim();
@@ -154,6 +160,7 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
                 await aim();                   // re-aim at the (moved) target
                 bot.deactivateItem();          // release
             } catch (_) {}
+            finally { bot._drawingBow = false; }
             await ensureWeapon();   // 射完切回近战武器 (bow 不在 WEAPONS 里 → 必换)
             continue;
         }

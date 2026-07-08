@@ -303,6 +303,10 @@ export class AdminMission {
         try { this.agent.self_prompter.owner = null; } catch (e) {}
         try { this.agent.self_prompter.interrupt = true; } catch (e) {}
         try { const b = this._bot(); if (b) b._extIntentUntil = 0; } catch (e) {}
+        // ★2026-07-09 用户令: admin 任务收尾 → 让 kernel 静默 20s 不 propose 自主任务 (免得刚做完
+        //   立刻自己找活乱跑)。kernel._survivalTick step 3 读此戳。superseded 不打: 新任务马上接管,
+        //   等它自己收尾时会重打; 硬保命/灰区求生仍走各自的闸, 不受此戳影响。
+        try { if (reason !== 'superseded') { const b2 = this._bot(); if (b2) b2._proposePauseUntil = Date.now() + 20000; } } catch (e) {}
 
         // Fire the terminal frame SYNCHRONOUSLY (before any await) so cleanKill/process.exit paths
         // still deliver it. Chat-origin missions fire no wire frame — local teardown only.

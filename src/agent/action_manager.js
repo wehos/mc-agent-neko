@@ -23,7 +23,7 @@ export class ActionManager {
         }
     }
 
-    async stop() {
+    async stop(fromTimeout = false) {
         if (!this.executing) return;
 
         let waitTime = 0;
@@ -51,11 +51,21 @@ export class ActionManager {
             // ★2026-07-08 用户令: 动作 15s 拒绝停止【绝不 process.exit】。强制放行(置 executing=false,
             //   让重连后的新动作能跑) + reconnectNow 重进世界。挂死的旧动作攥着旧 bot, 重连后对旧 bot
             //   的操作自然空转/被拒, 其 catch 也会再次置 executing=false, 无害。
-            console.warn('Code did not stop after 15s — forcing release + reconnect (NO process exit).');
             this.executing = false;
             this.currentActionLabel = '';
             this.currentActionFn = null;
-            try { this.agent.reconnectNow('action-refused-stop'); } catch (e) {}
+            // ★2026-07-09 用户令 (newAction 不得阻塞导致掉线): 若此刻正有一条 !newAction 在【编写+执行】
+            //   (bot._newActionActive), "15s 没停" 多半是码在正常跑/慢 —— "等码不算卡", 不是恶意拒停。
+            //   只强制放行身体 (上面已置 executing=false, 抢占者可继续), 绝不 reconnect —— 断线会把整条
+            //   newAction 连同连接一起打断。真·卡死的兜底是 code_timeout: 那条路显式 stop(true) 传
+            //   fromTimeout, 绕过此保护照旧重连 (与 modes.js unstuck 的 _newActionActive 早退同源规则)。
+            const protectNewAction = !fromTimeout && !!(this.agent && this.agent.bot && this.agent.bot._newActionActive);
+            if (protectNewAction) {
+                console.warn('Code did not stop after 15s, but a newAction is active — force-release only, NO reconnect ("等码不算卡"; code_timeout is the terminal escape).');
+            } else {
+                console.warn('Code did not stop after 15s — forcing release + reconnect (NO process exit).');
+                try { this.agent.reconnectNow('action-refused-stop'); } catch (e) {}
+            }
         }
     }
 
@@ -99,9 +109,15 @@ export class ActionManager {
                 if (this.recent_action_counter > 5) {
                     // ★2026-07-08 用户令: 动作打转【不再 cleanKill→process.exit】。counter>3 已 cancelResume
                     //   试图断掉重复源; 到 >5 仍在死循环 → reconnectNow 重进世界打断它, 进程照常活着。
-                    console.error('Infinite action loop detected — cancelling resume + reconnect (NO process exit).');
                     this.cancelResume();
                     this.recent_action_counter = 0;
+                    // ★2026-07-09 用户令 (newAction 不得阻塞导致掉线): newAction 期间即使检出打转也不 reconnect
+                    //   —— cancelResume 已断掉重复源 (软处理足够), 断线会把正在跑的 newAction 一起打断。
+                    if (this.agent && this.agent.bot && this.agent.bot._newActionActive) {
+                        console.error('Infinite action loop detected during an active newAction — cancelResume only, NO reconnect (禁断线重连).');
+                        return { success: false, message: 'Infinite action loop during newAction; resume cancelled (no reconnect).', interrupted: true, timedout: false };
+                    }
+                    console.error('Infinite action loop detected — cancelling resume + reconnect (NO process exit).');
                     try { this.agent.reconnectNow('infinite-action-loop'); } catch (e) {}
                     return { success: false, message: 'Infinite action loop detected, reconnecting.', interrupted: true, timedout: false };
                 }
@@ -213,7 +229,7 @@ export class ActionManager {
             console.warn(`Code execution timed out after ${TIMEOUT_MINS} minutes. Attempting force stop.`);
             this.timedout = true;
             this.agent.history.add('system', `Code execution timed out after ${TIMEOUT_MINS} minutes. Attempting force stop.`);
-            await this.stop(); // last attempt to stop
+            await this.stop(true); // fromTimeout: this IS the "真卡死" terminal — bypass the newAction reconnect-guard so a genuinely wedged code can still reconnect
         }, TIMEOUT_MINS * 60 * 1000);
     }
 

@@ -125,6 +125,8 @@ FIGHT                         贴脸能打的怪 → 让位常驻防御反射 (�
 
 即：能睡近床就睡，能挖矿就挖，能挖坑就挖坑 (含 15 格内找地)，黄昏可去远床；实在啥都做不了就**原地坚守**而不是砌那个把自己关外面的破盒子。**seal 封箱仍全禁** (`NEKO_ENABLE_SEAL_SHELTER=1` 才复活, 见 §9)。
 
+> **⚠️ 2026-07-09 FLEE-FIRST 覆盖 (用户怒令 · 关联 memory `flee-over-bunker-2026-07-09`)**: 用户重申"不允许保留 shelter, 只允许 bunkerDown", 且**遇够得到又打不赢的怪 (`shouldFlee`) 必须优先逃跑, 不允许就地 bunkerDown**。已改 `modes.js` self_preservation 反射链: ① `shouldNightShelter` 主动夜宿枝加 `!shouldFlee` 门 (有该逃的怪→跳过, 只在"周围暂时没怪"时才主动蹲坑); ② `shouldFlee` 逃跑枝在**地表暴露** (y≥50 且非封闭) 时改走 `sprintFlee` 逃离, 不再"Outmatched — digging in"就地封坑; 仅深处/封闭 (无处可逃) 保留地下 dig-in (=bunkerDown+挡箭墙)。晚上"就地 bunkerDown"只在 (a) 无怪 / (b) admin 挖三填一 / (c) 黄昏没床 触发。core 需重启。
+
 ---
 
 ## 7. ⚠️ 已知并接受的代价 (stranding gap)

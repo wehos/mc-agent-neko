@@ -270,3 +270,25 @@ export function foodInstinctsEnabled() {
 export function hpInstinctsEnabled() {
     return process.env.MC_HP_INSTINCTS === '1';
 }
+
+/**
+ * ★2026-07-09 用户令: "self-propose 和 surviveNow 两个都彻底禁 — idle 时什么都不自主干, 只听 admin
+ *   指令; 僵局不再自动 RELOCATE 拽走。" 深挖被莫名拽走的元凶就是这俩在 newAction 冻结闸的缝隙里逮到
+ *   idle/僵局强派 (self-propose 派蓝图 / surviveNow 锚点>5min RELOCATE)。
+ *
+ * ★selfProposeEnabled: 门 kernel._survivalTick 的空闲自主派发路径 (proposeTasks→commitGoal→decide→
+ *   _commit)。OFF = 内核永不自主找活; admin 任务派发 (AdminMission / handleMessage 经 self_prompter)
+ *   独立于此路径, 不受影响。
+ * ★surviveNowEnabled: 门 kernel._survivalTick 的灰区强派 (SURVIVE_NOW / surviveNow)。OFF = 僵局/血粮
+ *   灰区一律不强派 surviveNow (hp/food 触发本已被 MC_HP/FOOD_INSTINCTS 熔断, 剩的锚点>5min 僵局路一并断)。
+ *
+ * 两者【均不碰保命地板】: vitalNow (溺水/着火/岩浆/hp≤4) + self_defense + reflexes 独立生效。
+ * DELIBERATE DEFAULT = DISABLED (与 hp/food 闸同理由: 熔断须跨每条重启路径恒为 LIVE, 代码默认最保险)。
+ * RE-ENABLE: MC_SELF_PROPOSE=1 / MC_SURVIVE_NOW=1 + 重启。Pure env read, 热重载/重启安全。
+ */
+export function selfProposeEnabled() {
+    return process.env.MC_SELF_PROPOSE === '1';
+}
+export function surviveNowEnabled() {
+    return process.env.MC_SURVIVE_NOW === '1';
+}

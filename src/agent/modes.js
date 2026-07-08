@@ -2770,7 +2770,12 @@ const modes_list = [
                 }
                 execute(this, agent, () => this.sprintFlee(agent));
             }
-            else if (this.shouldNightShelter(bot) && !surviveNowActive(bot)) {
+            else if (this.shouldNightShelter(bot) && !this.shouldFlee(bot) && !surviveNowActive(bot)) {
+                // ★用户令 2026-07-09 "遇怪要 flee 就优先逃跑, 不允许就地 bunkerDown": 预防夜宿 bunkerDown
+                //   现在附加 !shouldFlee 门 —— 只有【没有够得到的、该逃的怪】时才主动蹲坑 (=用户的"周围暂时
+                //   没怪"). 一旦出现够得到又打不赢的怪, shouldFlee=true → 本枝被跳过 → 落到下方 shouldFlee 逃跑枝
+                //   (地表暴露 → sprint 逃离, 不再就地封坑)。能打赢的怪 shouldFlee=false 且 shouldNightShelter 的
+                //   canWin 也 false → 让位 self_defense 站撸, 均不进本枝。
                 // ★svnActive 压制(评审): sp 保留 claimant 是为早窗溺水/MLG 营救 — bunkerDown
                 // 这类"环境整理"枝在灰区指挥官持体时必须让树拍板, 否则僵局制造者借道回归。
                 if (Date.now() - (this._lastNightfallSayAt || 0) > 30000) {
@@ -2789,6 +2794,20 @@ const modes_list = [
                 // caught (the old single moveAway let zombies catch up). Staying
                 // ALIVE preserves the inventory so the re-entrant achieve run can
                 // resume — far better than dying and rebuilding from nothing.
+                // ★用户令 2026-07-09 "遇怪如果要 flee 就【优先逃跑】, 不允许就地 bunkerDown": 地表暴露
+                //   (y≥50 且非封闭) → 直接持续 sprint 逃离, 不再走下方"Outmatched — digging in"就地封坑。
+                //   唯一例外 = 深处/封闭 (无处可逃: 地表逃跑会撞进更多怪/被逼角, 见下方注释) → 沿用地下 dig-in
+                //   (=bunkerDown + 挡箭墙, 这是"只允许 bunkerDown"的地下形态, 非地表封箱 shelter)。低血无回复
+                //   contained-hold 例外 (lowHpNoRegenContainedHold) 保留下方原处理 (跑不动/跑了也不回血)。
+                const _exposedFlee = bot.entity.position.y >= 50 && !(bot._mobility && bot._mobility.enclosed);
+                if (_exposedFlee && !lowHpNoRegenContainedHold(bot)) {
+                    if (Date.now() - (this._sprintFleeSayAt || 0) > 8000) {
+                        this._sprintFleeSayAt = Date.now();
+                        say(agent, `Outmatched (${this.nearbyHostiles(bot).length} mob, hp ${Math.round(bot.health)}) — fleeing, not bunkering!`);
+                    }
+                    execute(this, agent, () => this.sprintFlee(agent));
+                    return;
+                }
                 const hostiles = this.nearbyHostiles(bot);
                 const noRegenHold = lowHpNoRegenContainedHold(bot);
                 if (noRegenHold) {
@@ -2897,6 +2916,18 @@ const modes_list = [
             if (surviveNowActive(bot)) {
                 // ★灰区指挥官持体: 树内分支(持盾站桩/床边等待/求死站桩)是蓄意驻留, 非楔死 —
                 // moveAway/GoalInvert/65s cleanKill 会拆树。技能楔死时滚动戳 ≤30s 过期, 本安全网自动恢复。
+                this.prev_location = null;
+                this.stuck_time = 0;
+                this.prev_dig_block = null;
+                this.step_prev_location = null;
+                return;
+            }
+            // ★2026-07-09 用户令 (newAction 期间禁止断线重连): 一条 !newAction 正在【编写+执行】代码时
+            //   (coder.generateCode 打 bot._newActionActive), bot 常静止在等 LLM 出码 / 码在跑 —— 卡顿
+            //   累计器会把这段静止误判成"卡住", 触发 'I'm stuck!'→moveAway, 15s 没脱出就 reconnectNow
+            //   把整条 newAction 连同连接一起打断。这不是真卡住, 是"在等代码编写和执行"。此期间彻底不
+            //   累计卡顿(码若真把身体卡死, 由 action code_timeout 作为确凿证据兜底, 而非本反射)。
+            if (bot._newActionActive) {
                 this.prev_location = null;
                 this.stuck_time = 0;
                 this.prev_dig_block = null;
