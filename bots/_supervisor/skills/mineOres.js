@@ -154,7 +154,16 @@ export default async function mineOres(bot, ctx, opts = {}) {
     })();
     prog(`START ore=${ore} need=${count} have=${g0} oracle=${tgt ? `${tgt.x},${tgt.y},${tgt.z}(库存告示${list0.length})` : 'none(盲挖回退)'} pos=${bot.entity.position.floored()} hp=${Math.round(bot.health)} food=${bot.food}`);
 
-    if (tgt) {
+    // ★脸上的铁优先 (2026-07-08 用户令: "让他挖铁, 结果它抛弃了脸上的铁跑走了"): oracle[0] 是全局
+    //   最优候选, 但它常在 20+ 格外, 而 bot 脚边/上一 run 刚暴露的同类矿就在臂展内。若 live 世界近处
+    //   (≤FACE_R) 已有本类矿, 直接进采集环就地 vein-follow, 绝不为了 oracle 坐标掉头走开 —— 那正是
+    //   run2(START -95,51 贴着 iron_ore@-94,53,175 d3=2.7) 却 march 去 -120,48 撞 self_defense 浮出
+    //   y68 丢铁的病根。见 [[mineores-surface-hop-churn]] / [[diamond-never-reached-blocker-stack]]。
+    const FACE_R = 6;
+    const faceOreNear = () => liveOreNear(FACE_R);
+    if (faceOreNear()) prog(`脸上有${ore}(≤${FACE_R}b) — 跳过 oracle march/下潜, 就地 vein-follow (不为 oracle 坐标掉头)`);
+
+    if (tgt && !faceOreNear()) {
         const dxz = Math.hypot(tgt.x - bot.entity.position.x, tgt.z - bot.entity.position.z);
         if (dxz > 8 && !bot.interrupt_code) {
             await Promise.race([
@@ -168,9 +177,10 @@ export default async function mineOres(bot, ctx, opts = {}) {
             && deadline - Date.now() > 60000) {
             try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(tgt.y - 1, -58) }); } catch (e) {}
         }
-    } else {
+    } else if (!faceOreNear()) {
         // ★评审 P2: 无可用 oracle 目标(缺失/陈旧/真距超闸)时不能在地表平采 —
         //   回退到被替代者的行为: 密封楼梯下潜到矿带, 与旧 mineDown 路径等价。
+        //   (faceOreNear 时跳过: 脸上已有矿, 盲挖下潜只会离开它 — 见上方 FACE_R 注释。)
         const band = ore === 'coal' ? 40 : (ore === 'diamonds' ? -52 : 14);
         if (bot.entity.position.y - band > 6 && !bot.interrupt_code && deadline - Date.now() > 60000) {
             prog(`无 oracle 目标 — 盲挖回退: mineDown 下潜 y${band}`);
@@ -198,7 +208,9 @@ export default async function mineOres(bot, ctx, opts = {}) {
                 return n;
             } catch (e) { return 0; }
         })();
-        if (swarm >= 2 || (swarm >= 1 && bot.health <= 10)) {
+        // ★2026-07-09 用户令 (低血惰性): 单怪+低血的让位限定熔断 — 只有真围殴 (swarm>=2) 才携进度退,
+        //   单怪交给 self_defense 打, 低血不是理由。恢复: MC_HP_INSTINCTS=1。
+        if (swarm >= 2 || (swarm >= 1 && process.env.MC_HP_INSTINCTS === '1' && bot.health <= 10)) {
             prog(`r${rounds}: 围殴中止 (hostiles10b=${swarm} hp=${Math.round(bot.health)}) — 携进度退`);
             break;
         }
@@ -275,7 +287,12 @@ export default async function mineOres(bot, ctx, opts = {}) {
         }
         const nxt = list.length ? list[rounds % list.length] : null;
         const nxtDist = nxt ? Math.hypot(nxt.x - bot.entity.position.x, nxt.z - bot.entity.position.z) : Infinity;
-        if (nxt && nxtDist >= 4 && nxtDist < 250) {
+        // ★脸上的铁优先(同 START 闸): 本轮零增但臂展内(≤FACE_R)仍有活矿 = 采集环够不着的埋脉/被挡,
+        //   不能横向 hop 去 oracle 下一候选把它扔了(run2 病根) — 就地 branchMine 刷新暴露面, 下轮 collectBlock 再吃。
+        if (faceOreNear()) {
+            prog(`r${rounds}: 脸上仍有${ore}(≤${FACE_R}b)但本轮零增 — 就地 branchMine 刷面, 不横向换点`);
+            try { await skills.customSkill(bot, 'branchMine', 8); } catch (e) {}
+        } else if (nxt && nxtDist >= 4 && nxtDist < 250) {
             prog(`r${rounds}: 本区采空 → oracle 换点 ${nxt.x},${nxt.y},${nxt.z}`);
             await Promise.race([
                 skills.goToPosition(bot, nxt.x, nxt.y, nxt.z, 3),

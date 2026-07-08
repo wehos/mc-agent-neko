@@ -96,8 +96,10 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
     // slow digging); ore across an air/ravine gap → REJECT (C1). Distance-capped. Downstream C337
     // (distToBlock<=4.6 && canSeeBlock, L400/L431) + C305-B carve reach guard (L356) still gate the
     // real dig, so accepting a buried vein here can never x-ray — it only heads the tunnel toward it.
-    const _BURIED_MAX_D3 = 12;
-    const _BURIED_MAX_OPEN_RUN = 1;   // mirror C304: ≥2 contiguous open cells = real gap / uncrossable 2-block pit → REJECT (true buried vein reads maxRun=0)
+    // ★C305-W (2026-07-08, mirror of C304-W 用户定调"允许挖石头开路"): cap 12→24, 且 open-run
+    // 只对平缓视线判 gap — 视线陡 (|dy|≥dist*0.55) 时空气柱=可凿楼梯的矿井, 不是沟。
+    const _BURIED_MAX_D3 = 24;
+    const _BURIED_MAX_OPEN_RUN = 1;   // mirror C304: ≥2 contiguous open cells on a SHALLOW line = real horizontal gap → REJECT (true buried vein reads maxRun=0)
     const _lineBuried = (eye, center, d3) => {
         try {
             if (d3 > _BURIED_MAX_D3) return { ok: false, why: `too-deep d3=${d3.toFixed(1)}>${_BURIED_MAX_D3}` };
@@ -118,14 +120,36 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
                 last = key;
                 if (key === oreKey) continue;
                 n++;
-                if (open(bot.blockAt(cell))) { openN++; run++; if (run > maxRun) maxRun = run; } else run = 0;
+                const cb = bot.blockAt(cell);
+                // ★C305-W 补刀 (mirror C304): 线上有岩浆 → 拒, steep-carve 不豁免
+                if (cb && /lava/.test(cb.name)) return { ok: false, why: `lava-on-line@${cell.x},${cell.y},${cell.z}` };
+                if (open(cb)) { openN++; run++; if (run > maxRun) maxRun = run; } else run = 0;
             }
-            return { ok: (maxRun <= _BURIED_MAX_OPEN_RUN), why: `n=${n} open=${openN} maxRun=${maxRun}` };
+            // steep line = the open cells are shaft/pit air above or below — stair-carvable, not a gap
+            const steep = Math.abs(vy) >= dist * 0.55;
+            return { ok: steep || (maxRun <= _BURIED_MAX_OPEN_RUN), why: `n=${n} open=${openN} maxRun=${maxRun}${steep ? ' steep-carve' : ''}` };
         } catch (e) { return { ok: true, why: 'voxel-err(fail-open)' }; }
+    };
+    // ★C305-S (mirror C304-S 用户定调"周围有怪房间最好别挖"): 刷怪笼 10 格内的矿不碰。5s 缓存
+    // (探针每 pass 最多跑 4 次, findBlocks palette 扫本就便宜, 缓存只是防抖)。fail-open。
+    let _spCache = { t: 0, v: [] };
+    const _nearSpawnerBM = (p) => {
+        try {
+            if (Date.now() - _spCache.t > 5000) {
+                _spCache.t = Date.now();
+                const spDef = bot.registry && bot.registry.blocksByName && bot.registry.blocksByName.spawner;
+                _spCache.v = spDef ? (bot.findBlocks({ matching: spDef.id, maxDistance: 48, count: 4 }) || []) : [];
+            }
+            return _spCache.v.some(s => Math.hypot(s.x - p.x, s.y - p.y, s.z - p.z) < 10);
+        } catch (e) { return false; }
     };
     const _oreReachableBM = async (oreBlock) => {
         if (_bmReachErr) return true;   // pathfinder unavailable → fail open (never block mining outright)
         try {
+            if (_nearSpawnerBM(oreBlock.position)) {
+                _mineDBG(`★C305 ${oreBlock.name}@${oreBlock.position.x},${oreBlock.position.y},${oreBlock.position.z} REJECT spawner-nearby`);
+                return false;
+            }
             if (!_bmReach) {
                 _bmReach = new BM_MOVES(bot);
                 _bmReach.canDig = true;
@@ -263,9 +287,11 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
         try {
             if (edibleHeld()) return null;
             const hp = Math.round(bot.health || 0);
-            if (bot.food < 8) return `${phase}: low-food buffer spent food=${bot.food} hp=${hp}`;
-            if (hp < 14) return `${phase}: low-hp buffer spent food=${bot.food} hp=${hp}`;
-            if (bot.food > 8) return null;
+            const foodInert = process.env.MC_FOOD_INSTINCTS !== '1';   // 饥饿惰性: 默认不因 food 停矿
+            const hpInert = process.env.MC_HP_INSTINCTS !== '1';       // ★2026-07-09 用户令: 低血惰性 — 默认不因低血停矿, 死了拉倒
+            if (!foodInert && bot.food < 8) return `${phase}: low-food buffer spent food=${bot.food} hp=${hp}`;
+            if (!hpInert && hp < 14) return `${phase}: low-hp buffer spent hp=${hp}`;
+            if (foodInert || bot.food > 8) return null;
             const t = bot.time.timeOfDay;
             const duskOrNight = t >= 11500 && t <= 23000;
             let adv = null;
@@ -402,7 +428,8 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
     };
     const directMineOre = async (oreBlock) => {
         if (!oreBlock || !ORES.includes(oreBlock.name)) return false;
-        if (bot.food <= 8 && !edibleHeld() && !isIronOre(oreBlock.name)) {
+        // 饥饿惰性: 默认不因 food 只挑铁跳矿 (原 food<=8 → essential-iron-only)
+        if (process.env.MC_FOOD_INSTINCTS === '1' && bot.food <= 8 && !edibleHeld() && !isIronOre(oreBlock.name)) {
             log(bot, `branchMine ore-chase skip ${oreBlock.name}@${oreBlock.position.x},${oreBlock.position.y},${oreBlock.position.z} low-food essential iron only food=${bot.food} hp=${Math.round(bot.health || 0)}`);
             motion('branchMine.ore.skip', { reason: 'low-food-essential-iron-only', block: blockObj(oreBlock) });
             return false;
@@ -505,7 +532,7 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             // reach (count 24, plenty for a dense seam) so each step actually harvests the band.
             const ores = world.getNearestBlocks(bot, ORES, 16, 24)
                 .filter(b => b && ORES.includes(b.name) && !skipped.has(`${b.position.x},${b.position.y},${b.position.z}`))
-                .filter(b => !(bot.food <= 8 && !edibleHeld()) || isIronOre(b.name))
+                .filter(b => process.env.MC_FOOD_INSTINCTS !== '1' || !(bot.food <= 8 && !edibleHeld()) || isIronOre(b.name))   // 饥饿惰性: 默认不因 food 只挑铁
                 .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position));
             if (ores.length === 0) break;
             let mined = false;

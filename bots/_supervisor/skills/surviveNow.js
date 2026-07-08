@@ -1,6 +1,8 @@
 // surviveNow — 灰区指挥官 (session#4 大修 2026-07-05; 对抗评审 19 findings 修订版)
 //
 // 触发(kernel 钩子, kernel.js SVN_*): hp<12 || food<8 || 同锚>5min(夜间健康驻守豁免)。
+// ★2026-07-09 低血/饥饿全熔断 (MC_HP_INSTINCTS/MC_FOOD_INSTINCTS 默认 OFF): hp/food 两路
+//   触发已断, 实际只剩 同锚>5min 僵局路。见 docs/hp-instincts-disabled.md。
 // kernel 绕过提案市场强制派发本技能; 激活期间软 hold 全部让位 — 走 execute() 仲裁的由
 // arbitration.json kernel:surviveNow 精确行挡下(self_preservation/self_defense 保留
 // claimant: 早窗溺水/MLG/战斗营救物理上等不起, 规则3-5 口径; 其 bunkerDown/dig-in 僵局枝
@@ -32,17 +34,38 @@ function prog(line) {
     try { fs.appendFileSync(PROG, `[${new Date().toISOString()}] [surviveNow] ${line}\n`); } catch (e) {}
 }
 
-function keepInvVerified() {
+// ★perf 2026-07-09: memoized on bot (~30s TTL) — was re-read from disk every survive-loop ROUND via
+// deathEligible. keepinv is world-constant, so staleness is irrelevant; a failed read caches false
+// (conservative: never death-reset without a confirmed keepInventory).
+function keepInvVerified(bot) {
     try {
-        const j = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'keepinv.json'), 'utf8'));
-        return j && j.value === true && Date.now() - j.ts < 86400000;
+        const now = Date.now();
+        const m = bot && bot._svnKeepInvMemo;
+        if (m && now - m.t < 30000) return m.v;
+        let v = false;
+        try {
+            const j = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'keepinv.json'), 'utf8'));
+            v = !!(j && j.value === true && Date.now() - j.ts < 86400000);
+        } catch (e) {}
+        if (bot) bot._svnKeepInvMemo = { t: now, v };
+        return v;
     } catch (e) { return false; }
 }
 
-function spawnKnown() {
+// ★perf 2026-07-09: memoized on bot (~30s TTL) — was re-read every round via snap(). The spawn point
+// only becomes MORE known over time, so a stale "unknown" is conservative (only delays death-reset).
+function spawnKnown(bot) {
     try {
-        const j = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'spawn_pos.json'), 'utf8'));
-        return j && typeof j.x === 'number';
+        const now = Date.now();
+        const m = bot && bot._svnSpawnMemo;
+        if (m && now - m.t < 30000) return m.v;
+        let v = false;
+        try {
+            const j = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'spawn_pos.json'), 'utf8'));
+            v = !!(j && typeof j.x === 'number');
+        } catch (e) {}
+        if (bot) bot._svnSpawnMemo = { t: now, v };
+        return v;
     } catch (e) { return false; }
 }
 
@@ -51,10 +74,21 @@ function readBedAnchor(bot) {
         const lm = bot._world && bot._world.landmarks;
         if (lm && lm.bed && typeof lm.bed.x === 'number') return lm.bed;
     } catch (e) {}
+    // ★perf 2026-07-09: the bed.json disk fallback (reached ONLY when no bed LANDMARK is known — the
+    // landmarks path above stays live) is memoized on bot (~30s TTL); it was read every survive-loop
+    // round via snap(). A real placed bed doesn't move, so staleness is harmless.
     try {
-        // bed.json 带 src 字段 = 选址锚非真床 (world_model.bedKnown 同口径), 不算
-        const j = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'bed.json'), 'utf8'));
-        if (j && typeof j.x === 'number' && !j.src) return j;
+        const now = Date.now();
+        const m = bot && bot._svnBedFileMemo;
+        if (m && now - m.t < 30000) return m.v;
+        let v = null;
+        try {
+            // bed.json 带 src 字段 = 选址锚非真床 (world_model.bedKnown 同口径), 不算
+            const j = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'bed.json'), 'utf8'));
+            if (j && typeof j.x === 'number' && !j.src) v = j;
+        } catch (e) {}
+        if (bot) bot._svnBedFileMemo = { t: now, v };
+        return v;
     } catch (e) {}
     return null;
 }
@@ -73,6 +107,39 @@ function inWaterOxygenLow(bot) {
         const wf = bot.blockAt(p), wh = bot.blockAt(p.offset(0, 1, 0));
         const inWater = /water/.test((wf && wf.name) || '') || /water/.test((wh && wh.name) || '');
         return inWater && typeof bot.oxygenLevel === 'number' && bot.oxygenLevel <= 14;
+    } catch (e) { return false; }
+}
+
+// ★2026-07-08 用户令 "禁止这个没卵用的本能抢夺 admin llm 的控制权 (它影响深层挖矿)":
+//   surviveNow 是【灰区求生指挥官】(半血 / 饥饿 / 僵局 / 夜怪 → 觅食·挖墙转移·求死重置)。深挖钻石
+//   途中血粮进灰区本属正常, 但本技能一旦被 kernel 因一次【致命瞬时】(hp≤4 / 岩浆 / 深水将溺)强派,
+//   就会靠 8s 心跳自续、把身体楔死在它自己的 survive-tree 里 —— 致命态一解除, 它仍不还身 (退出只认
+//   interrupt / 死亡 / vitalsOk, 而 vitalsOk 需 food≥8, 饥饿退环境时永远不满足) → 与 admin 的
+//   mineDiamonds 抢体, 状态栏在「在挖钻石(保命中)」↔「情况紧张·保命自救」间反复横跳。
+//   闸门: admin 指令/任务驱动期间 (bot._adminMission.active 或 bot._extIntentUntil 新鲜), 只要当前
+//   【不是真·致命态】, surviveNow 立刻让位 admin —— 灰区求生绝不打断独占任务。真·致命态照旧放行
+//   (self_preservation 硬地板本就独立生效, 此闸只挡"灰区抢体", 不挡保命)。见 admin-task-exclusive-ownership。
+function adminOwnsBody(bot) {
+    try {
+        if (bot && bot._adminMission && bot._adminMission.active) return true;
+        return !!(bot && bot._extIntentUntil && Date.now() < bot._extIntentUntil);
+    } catch (e) { return false; }
+}
+// ★环境致命态 (岩浆 / 深水将溺 氧≤8) —— 让位豁免只认这类【与饥饿无关】的环境急症。
+//   ★刻意不含 hp≤4: 当前版本"饥饿值永不阻碍任何项目, 饿死拉倒"(用户令 2026-07-08)。困难难度下
+//   饥饿掉血会把 hp 拖到 ≤4, 若把 hp≤4 当致命 → surviveNow 会赖着身体觅食/求死 = 饥饿从后门阻碍 admin,
+//   违反该原则。故删去 hp≤4: 饿到低血就让它饿死; 真被 mob 打到低血由 self_defense/self_preservation
+//   (admin 期允许) 处理。kernel admin 期不会重新强派 surviveNow (非致命 return / 致命被 vitalBusy 闸挡),
+//   故此处让位不会引发 kernel↔surviveNow 抖动。见 admin-task-exclusive-ownership。
+function envLethalNow(bot) {
+    try {
+        if (!bot || !bot.entity) return false;
+        const p = bot.entity.position;
+        const feet = bot.blockAt(p), head = bot.blockAt(p.offset(0, 1, 0));
+        if (/lava/.test((feet && feet.name) || '') || /lava/.test((head && head.name) || '')) return true;
+        const inWater = /water/.test((feet && feet.name) || '') || /water/.test((head && head.name) || '');
+        if (inWater && typeof bot.oxygenLevel === 'number' && bot.oxygenLevel <= 8) return true;
+        return false;
     } catch (e) { return false; }
 }
 
@@ -148,7 +215,7 @@ function snap(bot, ctx) {
         hp, food, tod, night, day: !night, dim, overworld, hostiles, hasNormal, hasAnyEdible,
         hasShield, hasArmor, sword: sword ? sword.name : null, bed, bedDist, mobState: mobRaw, enclosed,
         contained, anchorMin, pinned: a ? Date.now() - a.since > 300000 : false,
-        respawnKnown: !!bed || spawnKnown(),
+        respawnKnown: !!bed || spawnKnown(bot),
     };
 }
 
@@ -176,7 +243,7 @@ function hostileIdsWithin(bot, ctx, range) {
 }
 
 function deathEligible(bot, ctx, s, failed) {
-    if (!keepInvVerified()) {
+    if (!keepInvVerified(bot)) {
         // keepinv.json 过期/缺失 = 终止枝静默失效, 必须可见 (评审 P3)
         if (Date.now() - (bot._svnKeepinvWarnAt || 0) > 300000) {
             bot._svnKeepinvWarnAt = Date.now();
@@ -189,8 +256,10 @@ function deathEligible(bot, ctx, s, failed) {
     // (无食物+粮线以下), 记账永远不能单独解锁求死。
     // 危血近战绝境(死55实录): hp<=5 被近身追猎且无盾 — 蓄意死优于火海轮盘/换血, 同价更稳
     const meleeDoom = s.hp <= 5 && !s.hasShield && s.hostiles.some(h => h.d <= 8);
-    const desperate = (s.food <= 4 && !s.hasAnyEdible && (s.night || failed.has('FORAGE'))) || meleeDoom;
-    const exhausted = (bot._svnFails || 0) >= 2 && s.food <= 6 && !s.hasAnyEdible
+    // 饥饿惰性 (用户定调): 默认不因挨饿蓄意求死 — 饿死拉倒无所谓。仅战斗绝境(meleeDoom)求死。
+    const starveDeath = process.env.MC_FOOD_INSTINCTS === '1';
+    const desperate = (starveDeath && s.food <= 4 && !s.hasAnyEdible && (s.night || failed.has('FORAGE'))) || meleeDoom;
+    const exhausted = starveDeath && (bot._svnFails || 0) >= 2 && s.food <= 6 && !s.hasAnyEdible
         && (failed.has('RELOCATE') || s.night);
     return desperate || exhausted;
 }
@@ -216,7 +285,8 @@ function eligibleBranches(bot, ctx, s, failed) {
     if (!failed.has('SHELTER') && s.night && s.overworld && s.hostiles.length
         && (!s.bed || s.bedDist > 64 || failed.has('BED') || bedStale)) out.push('SHELTER');
     // food<12(饿) 或 低血且 food<18(回血线下, 4:27 实录 hp5/food13 空树连败): 猎到 18 才能自然回血
-    if (!failed.has('FORAGE') && s.day && s.overworld && (s.food < 12 || (s.hp < HP_FLOOR && s.food < 18))) out.push('FORAGE');
+    // 饥饿惰性: 默认不派白天觅食差事 (FORAGE=feedUp 漫游猎食/收割), 饿了也不改道
+    if (process.env.MC_FOOD_INSTINCTS === '1' && !failed.has('FORAGE') && s.day && s.overworld && (s.food < 12 || (s.hp < HP_FLOOR && s.food < 18))) out.push('FORAGE');
     if (!failed.has('RELOCATE') && (s.contained || s.pinned || s.hostiles.length)) out.push('RELOCATE');
     if (!failed.has('DEATH') && deathEligible(bot, ctx, s, failed)) out.push('DEATH');
     return out;
@@ -539,6 +609,13 @@ export default async function surviveNow(bot, ctx, opts = {}) {
         return { noop: true };
     }
 
+    // ★admin 独占让位 (启动闸): admin 指令/任务驱动中且非【环境致命】→ 灰区求生不抢体, 还身给 admin LLM。
+    if (adminOwnsBody(bot) && !envLethalNow(bot)) {
+        bot._surviveNowUntil = 0;
+        prog('admin 独占期 + 非致命 — 灰区求生让位 admin, noop 退出(不抢深挖任务的身体)');
+        return { noop: true };
+    }
+
     const achievements = [];
     const failed = new Set();
     let liftedClean = false;
@@ -554,6 +631,12 @@ export default async function surviveNow(bot, ctx, opts = {}) {
                 break;
             }
             if (bot.interrupt_code) { prog(`r${round}: interrupt — 让位`); break; }
+            // ★admin 独占让位 (运行中闸): 环境致命一解除立刻还身给 admin (否则靠心跳自续楔死深挖)。
+            if (adminOwnsBody(bot) && !envLethalNow(bot)) {
+                liftedClean = true;   // 非诚实零产出 — 是主动让位, 不计 kernel 连败/冷却
+                prog(`r${round}: admin 独占期 + 非致命 — 灰区求生让位 admin, 收官还身`);
+                break;
+            }
             // 水情/窒息让位(评审+死57实录): 早窗溺水营救等不起 vitalNow 地板; 头/脚埋进实体块
             // (沙砾塌头)时任何"站桩"分支(REGEN)都是等死 — 主动收官, 戳清零后营救反射满权限接管。
             try {

@@ -73,6 +73,27 @@ for (const [fam, names] of Object.entries(ORE_FAMILIES)) {
         for (let s = b.minStateId; s <= b.maxStateId; s++) { TARGET_STATES.add(s); STATE_FAMILY.set(s, fam); }
     }
 }
+// ★2026-07-08 用户令 "木头+村庄指示物 oracle": scoutResources 找树/村庄此前只有 getNearestBlocks
+//   本地感知 (32-48b, 只见已加载区块) + 盲扫 hop-march → 海岸无树出生点常年"逛街"。给 oracle 加地表族:
+//   wood=自然原木 (树, 出表按列去重成"树根"= 最低 y, 直接喂 scoutResources 定向寻路), village=村庄强指示物
+//   (bell/composter/hay — bell 几乎只在村庄)。地表带浅扫, 每族每区块封顶, palette 快路径同矿共用。
+const SURFACE_FAMILIES = {
+    wood: ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'],
+    village: ['bell', 'composter', 'hay_block'],
+};
+const WOOD_Y_LO = 58, WOOD_Y_HI = 120, WOOD_CAP = 48;      // 树冠可达 y110+; 封 48/区块 (出表去重后骤降)
+const VILLAGE_Y_LO = 55, VILLAGE_Y_HI = 110, VILLAGE_CAP = 8;
+const SURFACE_STATES = new Set();
+const SURFACE_FAMILY = new Map();
+for (const [fam, names] of Object.entries(SURFACE_FAMILIES)) {
+    for (const n of names) {
+        const b = mcData.blocksByName[n];
+        if (!b) continue;
+        for (let s = b.minStateId; s <= b.maxStateId; s++) { SURFACE_STATES.add(s); SURFACE_FAMILY.set(s, fam); }
+    }
+}
+// palette 快路径判段用矿+地表并集 (含树的 section 不再被 secHasTarget 跳过)。
+const ALL_STATES = new Set([...TARGET_STATES, ...SURFACE_STATES]);
 const AnvilCls = anvilPkg.Anvil('1.21.1');
 // ★2026-07-06 幻影矿根因: server autosave 重排 .mca 内部 chunk 偏移表, 长驻实例的
 //   旧句柄按过期偏移读出错位数据 (RCON 实证: 铁 y47-50 全幻影=stale 读, 钻石准=紧挨
@@ -92,6 +113,7 @@ const POLL_MS = 60000;
 const chunkCache = new Map();
 const CACHE_TTL_MS = 5 * 60 * 1000;   // 兜底 TTL: mtime 万一不动也 5min 强制重读
 const FAM_KEYS = Object.keys(ORE_FAMILIES);
+const AGG_KEYS = [...FAM_KEYS, ...Object.keys(SURFACE_FAMILIES)];   // 聚合含地表族 wood/village
 function regionFileFor(cx, cz) { return `r.${cx >> 5}.${cz >> 5}.mca`; }
 // 区块 (cx,cz) 是否落在某幻影中心 r 内 (以区块中心近似, 放宽 16b 容差)。
 function chunkNearCleared(cx, cz, cleared) {
@@ -119,9 +141,9 @@ function dropCleared(list, fam, cleared) {
 
 // 单区块矿扫 (纯函数, 结果可缓存)。返回 { ores:{fam:[{x,y,z}..]}, skipped }。
 function scanChunkOres(chunk, cx, cz) {
-    const ores = { diamonds: [], iron: [], gold: [], coal: [], water: [] };
+    const ores = { diamonds: [], iron: [], gold: [], coal: [], water: [], wood: [], village: [] };
     let skipped = 0;
-    // palette 快路径: section 调色板不含任何目标态 → 整段 4096 格直接跳
+    // palette 快路径: section 调色板不含任何目标态(矿∪地表) → 整段 4096 格直接跳
     const secHasTarget = (secY) => {
         try {
             const secs = chunk.sections;
@@ -132,24 +154,36 @@ function scanChunkOres(chunk, cx, cz) {
             if (!pal) return true;
             const vals = Array.isArray(pal) ? pal : (typeof pal.values === 'function' ? pal.values() : null);
             if (!vals) return true;
-            for (const v of vals) { const sid = typeof v === 'number' ? v : (v && v.stateId); if (TARGET_STATES.has(sid)) return true; }
+            for (const v of vals) { const sid = typeof v === 'number' ? v : (v && v.stateId); if (ALL_STATES.has(sid)) return true; }
             return false;
         } catch (e) { return true; }
     };
-    for (let secY = -4; secY <= 5; secY++) {          // y -64..95 覆盖钻石带+铁/金/煤主带
+    for (let secY = -4; secY <= 7; secY++) {          // y -64..127: 矿带(≤95) + 地表树冠/村庄(≤127)
         if (!secHasTarget(secY)) { skipped++; continue; }
-        const yLo = Math.max(secY * 16, -60), yHi = Math.min(secY * 16 + 15, 95);
+        const yLo = Math.max(secY * 16, -60), yHi = Math.min(secY * 16 + 15, 127);
         for (let y = yLo; y <= yHi; y++) {
             for (let lx = 0; lx < 16; lx++) {
                 for (let lz = 0; lz < 16; lz++) {
                     let sid;
                     try { sid = chunk.getBlockStateId({ x: lx, y, z: lz }); } catch (e) { continue; }
+                    const wx = cx * 16 + lx, wz = cz * 16 + lz;
                     const fam = STATE_FAMILY.get(sid);
-                    if (!fam) continue;
-                    if (fam === 'water') {
-                        if (y < WATER_Y_LO || y > WATER_Y_HI || ores.water.length >= 32) continue;  // 每区块封顶 (全局在出表切片)
+                    if (fam) {                                  // ── 矿族: 保持原 y≤95 行为不变 ──
+                        if (y > 95) continue;
+                        if (fam === 'water') {
+                            if (y < WATER_Y_LO || y > WATER_Y_HI || ores.water.length >= 32) continue;  // 每区块封顶 (全局在出表切片)
+                        }
+                        ores[fam].push({ x: wx, y, z: wz });
+                        continue;
                     }
-                    ores[fam].push({ x: cx * 16 + lx, y, z: cz * 16 + lz });
+                    const sfam = SURFACE_FAMILY.get(sid);       // ── 地表族: wood(树) / village(指示物) ──
+                    if (sfam === 'wood') {
+                        if (y < WOOD_Y_LO || y > WOOD_Y_HI || ores.wood.length >= WOOD_CAP) continue;
+                        ores.wood.push({ x: wx, y, z: wz });
+                    } else if (sfam === 'village') {
+                        if (y < VILLAGE_Y_LO || y > VILLAGE_Y_HI || ores.village.length >= VILLAGE_CAP) continue;
+                        ores.village.push({ x: wx, y, z: wz });
+                    }
                 }
             }
         }
@@ -196,7 +230,7 @@ async function scan() {
     const REGION = resolveRegion();       // 每扫重定位 — bot 换世界(新的世界 N→N+1)也自动跟上
     const anvil = new AnvilCls(REGION);   // 每扫新建 — 防 autosave 偏移表过期(幻影矿根因)
     const bcx = Math.floor(vit.x / 16), bcz = Math.floor(vit.z / 16);
-    const found = { diamonds: [], iron: [], gold: [], coal: [], water: [] };
+    const found = { diamonds: [], iron: [], gold: [], coal: [], water: [], wood: [], village: [] };
     const cleared = loadCleared();
     const stats = { scanned: 0, missing: 0, skippedSecs: 0, cacheHits: 0 };
     const quotaMet = () => Object.keys(QUOTA).every(f => found[f].length >= QUOTA[f]);
@@ -206,7 +240,7 @@ async function scan() {
         for (const [cx, cz] of ringChunks(bcx, bcz, r)) {
             const ores = await getChunkOres(anvil, REGION, cx, cz, cleared, stats);
             if (!ores) continue;
-            for (const fam of FAM_KEYS) { const dst = found[fam], src = ores[fam]; for (let i = 0; i < src.length; i++) dst.push(src[i]); }
+            for (const fam of AGG_KEYS) { const dst = found[fam], src = ores[fam] || []; for (let i = 0; i < src.length; i++) dst.push(src[i]); }
         }
         reachedR = r;
         if (r >= CHUNK_RADIUS && quotaMet()) break;
@@ -221,15 +255,22 @@ async function scan() {
             if (dropped) log(`cleared-filter ${fam}: -${dropped} 幻影 (${cleared.filter(c => c.ore === fam).length} 中心)`);
         }
     }
+    // ★木头去重成"树根": 一棵树的整条 trunk(多个 y)同 (x,z) 列 → 只留最低 y = 地面树根。scoutResources
+    //   直接拿它 goToPosition, 站到树下 bottom-up 砍 (与 skills.js 的树列归一同一语义: 瞄根不瞄冠)。
+    if (found.wood.length) {
+        const roots = new Map();   // "x,z" → 最低 y 的那格
+        for (const w of found.wood) { const k = w.x + ',' + w.z; const cur = roots.get(k); if (!cur || w.y < cur.y) roots.set(k, w); }
+        found.wood = [...roots.values()];
+    }
     const byDist = (a, b) => Math.hypot(a.x - vit.x, a.y - vit.y, a.z - vit.z) - Math.hypot(b.x - vit.x, b.y - vit.y, b.z - vit.z);
-    for (const fam of FAM_KEYS) found[fam].sort(byDist);
+    for (const fam of AGG_KEYS) found[fam].sort(byDist);
     const out = {
         ts: Date.now(),
         botPos: { x: Math.round(vit.x), y: Math.round(vit.y), z: Math.round(vit.z) },
         scannedChunks: stats.scanned, missingChunks: stats.missing, skippedSections: stats.skippedSecs,
         cacheHits: stats.cacheHits, reachedRadius: reachedR,
         totalFound: found.diamonds.length,   // 兼容旧口径 (mineDiamonds 日志用)
-        totals: { diamonds: found.diamonds.length, iron: found.iron.length, gold: found.gold.length, coal: found.coal.length },
+        totals: { diamonds: found.diamonds.length, iron: found.iron.length, gold: found.gold.length, coal: found.coal.length, wood: found.wood.length, village: found.village.length },
         diamonds: found.diamonds.slice(0, 16),
         iron: found.iron.slice(0, 24),
         // 分层: 山顶 bot 的 iron top-24 可能全是山面铁(y60-95), 夜挖(y<=50 地下带)会空手 —
@@ -238,12 +279,14 @@ async function scan() {
         gold: found.gold.slice(0, 16),
         coal: found.coal.slice(0, 16),
         water: found.water.slice(0, 8),
+        wood: found.wood.slice(0, 24),        // ★树根 (去重), 按距排序 — scoutResources "超范围灯塔"
+        village: found.village.slice(0, 8),   // ★村庄指示物 (bell/composter/hay)
     };
     try { fs.writeFileSync(OUT, JSON.stringify(out)); } catch (e) {}
     // cache 防泄漏: bot 走远后旧区块不再被访问, 超上限时按插入序淘汰最旧一批。
     if (chunkCache.size > 4096) { for (const k of chunkCache.keys()) { if (chunkCache.size <= 2048) break; chunkCache.delete(k); } }
     const near = (fam) => { const f = found[fam][0]; return f ? Math.round(Math.hypot(f.x - vit.x, f.y - vit.y, f.z - vit.z)) + 'b@' + f.x + ',' + f.y + ',' + f.z : 'none'; };
-    log(`scan ${Date.now() - t0}ms R=${reachedR} chunks=${stats.scanned}(miss ${stats.missing},cache ${stats.cacheHits}) secSkip=${stats.skippedSecs} dia=${found.diamonds.length}(${near('diamonds')}) iron=${found.iron.length}(${near('iron')}) gold=${found.gold.length}(${near('gold')}) coal=${found.coal.length}(${near('coal')})`);
+    log(`scan ${Date.now() - t0}ms R=${reachedR} chunks=${stats.scanned}(miss ${stats.missing},cache ${stats.cacheHits}) secSkip=${stats.skippedSecs} dia=${found.diamonds.length}(${near('diamonds')}) iron=${found.iron.length}(${near('iron')}) gold=${found.gold.length}(${near('gold')}) coal=${found.coal.length}(${near('coal')}) wood=${found.wood.length}(${near('wood')}) village=${found.village.length}(${near('village')})`);
 }
 
 log(`ore-oracle started (pid ${process.pid}, region ${resolveRegion()})`);

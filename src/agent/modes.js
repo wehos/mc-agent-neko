@@ -13,7 +13,7 @@ import { canClutchWater } from './framework/tools/lava_guard.js';
 // 反射抢身体的唯一入口, 在这里挂接入点 A + 所有权令牌。
 import { resolve as arbitrate, setBodyOwner, releaseBodyOwner, currentOwner as arbiterCurrentOwner, vitalNow as arbiterVitalNow } from './framework/arbiter.js';
 // ★2026-07-08 用户令: auto_eat 的「补血 vs 补体力」开关 (临时禁用饥饿/食物本能)。见 contracts.foodInstinctsEnabled。
-import { foodInstinctsEnabled } from './framework/contracts.js';
+import { foodInstinctsEnabled, hpInstinctsEnabled } from './framework/contracts.js';
 
 const FAMINE_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_|rotten_flesh|spider_eye/;
 const NORMAL_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_/;
@@ -25,6 +25,26 @@ const NORMAL_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|
 // yet fillerOf()=undefined → couldn't seal → died 3×). This constant is the UNION of both
 // former copies; add new block families HERE only, never in a local copy.
 const FILL_RE = /cobblestone|cobbled|deepslate|^dirt$|andesite|diorite|granite|^stone$|tuff|gravel|^sand$|red_sand|sandstone|netherrack|_planks$|_log$|_wood$|^planks$|hyphae|^mud$|^clay$|terracotta|dirt_path|coarse_dirt|rooted_dirt|mossy|calcite|blackstone|basalt/;
+
+// ★perf 2026-07-09: TTL-cached JSON reader for the small supervisor state files that were re-read
+// from disk on the hot observe/decide ticks — advisory.json was read+parsed TWICE per single
+// world_model.update() (lines ~6193 and ~6326) AND again in the SYNC tableRecoveryHold predicate,
+// migrate_state.json once per update. These files are written by separate supervisor processes and
+// change slowly (advisory already carries its own 45s freshness gate), and every consumer only READS
+// fields off the result (never mutates it), so a shared ~1.5s cache is safe: it dedupes the in-tick
+// double-read and drops the predicate's independent read WITHOUT pushing await into any sync decision
+// chain. Returns null on any read/parse failure — every call site already null-guards, matching the
+// old bare `try { JSON.parse(readFileSync(...)) } catch {}`.
+const _jsonReadCache = new Map();   // path -> { t, v }
+function readJsonCached(path, ttlMs) {
+    const now = Date.now();
+    const c = _jsonReadCache.get(path);
+    if (c && (now - c.t) < ttlMs) return c.v;
+    let v = null;
+    try { v = JSON.parse(fs.readFileSync(path, 'utf8')); } catch (e) { v = null; }
+    _jsonReadCache.set(path, { t: now, v });
+    return v;
+}
 
 async function say(agent, message) {
     agent.bot.modes.behavior_log += message + '\n';
@@ -154,6 +174,42 @@ function combatHasPriority(bot) {
         if (!ptBlank) return false;                                         // 没怪在脸上 — 无战斗可护, 照常脱困
         if (near >= 3) return false;                                        // 被围(3+) — 脱困优先于站撸(与 self_defense swarmed 门一致)
         return true;
+    } catch (e) { return false; }
+}
+
+// ★C367 (2026-07-08 用户令 · 甲兵单怪死战): 「有甲被小白攻击, 既没丝滑逃跑也没英勇战斗 — 下次英勇
+// 战斗; 单只怪、有甲、有武器, 哪怕血不多也干就完事了。」穿甲 + 有武器(剑/斧) + 全场只有【一只】非苦力
+// 怕怪 → 英勇战斗, 不逃不躲, HP 不设下限 (keepInventory 下"打不过大不了一次重开" << 站桩挨射/笨拙
+// 逃跑反被同速怪背刺)。
+// 与既有 self_preservation.armoredZombieBrawl 的分工: 那门是"穿甲 + 僵尸类【贴脸】(可成群)站撸";
+// 本门是"穿甲 + 武器 + 全场【仅一只】怪(含骷髅远射, 不要求贴脸)死战" — 专补"甲兵 vs 单只小白"这一被
+// 漏掉的场景(骷髅在 4.5b 外远射 → 贴脸例外/僵尸门都不触发 → 落到盾牌 flee, 却又低血被 self_defense
+// minHp 门拒战 = 用户实录的"既不逃也不打")。模块级函数: self_preservation.shouldFlee 与 self_defense
+// 两处共用同一判据 (前者放行不逃, 后者放行开打, 缺一则又卡回原僵局)。
+// 硬边界 (绝不越, 与全项目安全铁律一致):
+//   · 8格内有苦力怕 → 不适用 (甲挡不住贴脸爆炸, 交常规逃跑分支拉开距离);
+//   · hp≤4掉血 / 溺水 / 着火 由 arbiter.vitalNow 独立夺体逃命 — 本门只裁"该不该怂", 不碰致命环境急症;
+//   · "单只" = 16格内非苦力怕敌对怪恰为 1 (成群仍逃 — 甲扛不住多怪 DPS 叠加, 用户也只说"单只怪");
+//   · 必须【穿戴】护甲(slot 5-8)且【持/有】剑或斧 — 背包里的甲不减伤、裸手站撸都是送死, 不适用。
+function armoredSoloBrawl(bot) {
+    try {
+        if (!bot || !bot.entity) return false;
+        const p = bot.entity.position;
+        const HR = /zombie|skeleton|spider|witch|drowned|husk|stray|pillager|vindicator|cave_spider|zombie_villager/i;
+        let creeperClose = false, count = 0;
+        for (const e of Object.values(bot.entities || {})) {
+            if (!(e && e.position && e.name)) continue;
+            const d = e.position.distanceTo(p);
+            if (/creeper/i.test(e.name) && d < 8) { creeperClose = true; break; }   // 爆炸威胁优先, 直接不适用
+            if (HR.test(e.name) && d < 16) count++;
+        }
+        if (creeperClose || count !== 1) return false;
+        const armorRe = /_helmet$|_chestplate$|_leggings$|_boots$/;
+        const sl = bot.inventory.slots || [];
+        let worn = false;
+        for (let i = 5; i <= 8; i++) { if (sl[i] && armorRe.test(sl[i].name || '')) { worn = true; break; } }   // 穿戴中才减伤
+        if (!worn) return false;
+        return bot.inventory.items().some(i => /_sword$|_axe$/.test(i.name) && !/pickaxe/.test(i.name));   // 有武器才谈死战
     } catch (e) { return false; }
 }
 
@@ -393,6 +449,9 @@ function lowHpNoRegenContainedHold(bot) {
 }
 function _lowHpNoRegenContainedHoldRaw(bot) {
     if (!bot || !bot.entity) return null;
+    // ★2026-07-09 用户令 (低血/饥饿全熔断): 低血无回血冻身 hold 整族熔断 — 低血不冻任何行动,
+    //   死了拉倒。恢复: MC_HP_INSTINCTS=1 重启。见 contracts.hpInstinctsEnabled。
+    if (!hpInstinctsEnabled()) return null;
     // ★RECOVERY-SKILL EXIT: a deliberately-dispatched escape/relocate/forage skill MUST be able
     // to move even at low hp — otherwise this hold vetoes ALL supervisor-skill movement (incl.
     // the very food-seeking that would save the bot), and a food-starved bot FAMINE-holds to a
@@ -517,7 +576,7 @@ function tableRecoveryHold(bot) {
     if (!progressFresh) return null;
     let raw = 0, actionable = null, layered = 0, nearest = Infinity;
     try {
-        const a = JSON.parse(fs.readFileSync('bots/_supervisor/advisory.json', 'utf8'));
+        const a = readJsonCached('bots/_supervisor/advisory.json', 1500);
         if (a && Date.now() - a.ts < 45000 && typeof a.actionableHostiles === 'number') {
             raw = typeof a.hostiles === 'number' ? a.hostiles : 0;
             actionable = a.actionableHostiles;
@@ -876,6 +935,9 @@ const modes_list = [
             // ★ARMORED ZOMBIE BRAWL (见 armoredZombieBrawl): 穿甲 + 僵尸类贴脸 → 死战不逃, 越过下方所有
             // 胆怯档(无盾被远程 / hp<7 / 无盾打不过 / 僵尸群围殴)。仅贴脸生效, creeper/vitalNow 硬地板不越。
             if (this.armoredZombieBrawl(bot)) return false;
+            // ★ARMORED SOLO BRAWL (见模块级 armoredSoloBrawl): 穿甲 + 有武器 + 全场仅一只非苦力怕怪 →
+            // 死战不逃, 越过下方所有胆怯档(无盾被远程 / hp<7 / 无盾打不过)。含骷髅远射。creeper/vitalNow 不越。
+            if (armoredSoloBrawl(bot)) return false;
             if (!_shield0 && _hurt && Object.values(bot.entities).some(e => e && e.position && /skeleton|stray/i.test(e.name || '') && e.position.distanceTo(bot.entity.position) < 16)) return true;
             if (hostiles.length === 0) return false;
             // CREEPER: never let one get close — meleeing it = it explodes = death.
@@ -997,6 +1059,92 @@ const modes_list = [
                 bot.setControlState('jump', needJump);
                 bot.setControlState('left', false); bot.setControlState('right', false); bot.setControlState('back', false); // clear stray strafe (skel weave), keep forward/sprint
             } catch (e) { try { bot.setControlState('jump', true); } catch (e2) {} }
+        },
+        // ★用户令 2026-07-09 "被攻击后不要停下来，加速逃跑": 一旦挨打且已决定逃跑 (shouldFlee=true — 已排除
+        //   armoredSoloBrawl/armoredZombieBrawl/挨打必还手/能打赢, 见 Q2 只在已决定逃跑时生效, 不碰反击/死战),
+        //   不再 bunkerDown 停下挖坑封箱 / no-regen hold 发呆, 而是【持续 sprint 逃离, 永不停顿】。方向 (Q1):
+        //   原本有新鲜移动目标 → 继续冲刺奔向它 (继续前进); 没有 → 朝远离威胁方向跑 (而非原地发呆)。复用久经
+        //   调优的 kite 机制 (fleeMove 绕障/跳台阶/不乱跳、骷髅蛇皮走位躲箭、边跑边吃、中断纪律), 白天黑夜都跑,
+        //   退出 = 威胁清除 / 中断 / 死亡 / 真淹水(让位游泳)。仅由挨打+shouldFlee 分支调用 (creeper 专属规避在其上)。
+        sprintFlee: async function (agent) {
+            const bot = agent.bot;
+            // "原本有移动目标?" — 读寻路层最近一次真正跟路的目标 (≤10s 新鲜); 挨打时优先"继续冲向该目标",
+            // 而非掉头往威胁反方向乱跑 (用户 Q1 "如果原本有移动目标，被攻击后继续冲刺前进")。
+            let goalPt = null;
+            try {
+                if (bot._lastPathGoalInfo && Date.now() - (bot._lastPathGoalAt || 0) < 10000) {
+                    const g = bot._lastPathGoalInfo;
+                    if (typeof g.x === 'number' && typeof g.z === 'number') {
+                        goalPt = { x: g.x, y: (typeof g.y === 'number' ? g.y : bot.entity.position.y), z: g.z };
+                    } else if (g.entity && g.entity.pos) {
+                        goalPt = { x: g.entity.pos.x, y: g.entity.pos.y, z: g.entity.pos.z };
+                    }
+                }
+            } catch (e) {}
+            // 消费本模式激活自身的 interrupt 一次 (与 kite 同纪律), 之后一旦有 NEW interrupt (死亡/停止) 立即退出;
+            // 绝不在循环内 reset interrupt_code (否则顶掉 executor 的 stop → "refused stop 10s" 被看门狗杀进程)。
+            try { bot.interrupt_code = false; } catch (e) {}
+            for (let step = 0; step < 4000; step++) {
+                if (bot.interrupt_code || bot.health <= 0) break;                 // 真停止/死亡 → 立即返回
+                if (bot.oxygenLevel !== undefined && bot.oxygenLevel <= 6) break; // 真淹水 → 让位游泳脱困反射
+                const hs = this.nearbyHostiles(bot);
+                const cr = this.nearestCreeper(bot, 12);
+                if (hs.length === 0 && !cr) break;                               // 威胁清除 → 收手 (常规循环恢复→重新寻路奔目标)
+                const me = bot.entity.position;
+                // 最近威胁 (含 creeper) — 供"朝目标冲会不会撞进怪脸"守卫。
+                let nx = null, nz = null, nd = Infinity;
+                for (const e of hs) { if (!e || !e.position) continue; const d = e.position.distanceTo(me); if (d < nd) { nd = d; nx = e.position.x; nz = e.position.z; } }
+                if (cr && cr.position) { const d = cr.position.distanceTo(me); if (d < nd) { nd = d; nx = cr.position.x; nz = cr.position.z; } }
+                // 有目标且已接近 → 达成, 清掉转为常规离威胁逃。
+                if (goalPt && Math.hypot(goalPt.x - me.x, goalPt.z - me.z) < 2.5) goalPt = null;
+                // 目标方向若正对近处威胁 (<7b 且同向>0.35) → 本拍别往目标冲 (会撞进怪脸), 改逃离; 威胁不挡路才继续冲目标。
+                let target = null;
+                if (goalPt) {
+                    let gx = goalPt.x - me.x, gz = goalPt.z - me.z; const gl = Math.hypot(gx, gz) || 1; gx /= gl; gz /= gl;
+                    let towardThreat = false;
+                    if (nx != null && nd < 7) {
+                        let tx = nx - me.x, tz = nz - me.z; const tl = Math.hypot(tx, tz) || 1; tx /= tl; tz /= tl;
+                        towardThreat = (gx * tx + gz * tz) > 0.35;
+                    }
+                    if (!towardThreat) target = goalPt;
+                }
+                // 无可用目标 → 智能离威胁点 (safeFleeTarget: 避水/避怪群/避坑); 再兜底朝威胁反方向。
+                if (!target) {
+                    const safe = this.safeFleeTarget(bot);
+                    if (safe) target = safe;
+                    else {
+                        let cx = 0, cz = 0;
+                        if (hs.length) { for (const e of hs) { cx += e.position.x; cz += e.position.z; } cx /= hs.length; cz /= hs.length; }
+                        else if (nx != null) { cx = nx; cz = nz; }
+                        let dx = me.x - cx, dz = me.z - cz; const len = Math.hypot(dx, dz) || 1; dx /= len; dz /= len;
+                        target = me.offset(dx * 4, 0, dz * 4);
+                    }
+                }
+                // 骷髅在场且非冲目标 → 蛇皮走位躲箭 (与 kite 同款), 否则 fleeMove 直冲 (绕障/跳台阶/不乱跳)。
+                const skel = Object.values(bot.entities).some(e => e && e.position && /skeleton|stray/i.test(e.name || '') && e.position.distanceTo(me) < 16);
+                if (skel && !goalPt && target && typeof target.offset === 'function') {
+                    for (let s = 0; s < 3; s++) {
+                        if (bot.interrupt_code || bot.health <= 0) break;
+                        if (this.nearbyHostiles(bot).length === 0 && !this.nearestCreeper(bot, 12)) break;
+                        try { await bot.lookAt(target.offset(0.5, 0, 0.5), true); } catch (e) {}
+                        try { bot.clearControlStates(); } catch (e) {}
+                        bot.setControlState('forward', true);
+                        bot.setControlState('sprint', true);
+                        bot.setControlState(s % 2 === 0 ? 'left' : 'right', true);
+                        bot.setControlState('jump', s % 2 === 0);
+                        await new Promise(r => setTimeout(r, 220));
+                    }
+                    try { bot.clearControlStates(); } catch (e) {}
+                } else {
+                    await this.fleeMove(bot, target);
+                    await new Promise(r => setTimeout(r, 200));   // 持续 sprint — 不 clear (连续冲刺, 见 kite 注释: 每拍清会掐掉均速被追上)
+                }
+                // 边跑边吃 (不停下, 开始回血)。
+                const food = bot.inventory.items().find(i => /cooked_|_bread|^bread$|^apple$|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|cod|salmon|_stew|baked_|rabbit/.test(i.name));
+                if (food && bot.food < 20) { try { await skills.consume(bot, food.name); } catch (e) {} }
+                if (step % 8 === 7) { try { say(agent, 'Under attack — sprinting away!'); } catch (e) {} }   // agent.err 心跳 (看门狗存活信号)
+            }
+            try { bot.clearControlStates(); } catch (e) {}
         },
         shouldNightShelter: function (bot) {
             // ★PROACTIVE NIGHT INSTINCT (用户诊断: bot 没夜晚意识——天黑还慢悠悠挖,直到被怪偷袭
@@ -1802,6 +1950,13 @@ const modes_list = [
                     else if (Math.hypot(_p.x - _s.ax, _p.z - _s.az) >= 2) { _s.ax = _p.x; _s.az = _p.z; _s.at = Date.now(); }
                     else if (Date.now() - _s.at >= 4000) _swimCrossing = false;
                 }
+                // ★2026-07-09 修 (挖黑曜石站水边被反复拽出): 与 goto 让位同策 —— 正在挖/采集 (admin 任务
+                //   或 mineflayer 正在 dig 一块) 且没在真淹血时, 不因站在水/岩浆边就 hijack 去"游上岸"。
+                //   黑曜石 ~9.4s/块, 每个无打断窗口远短于此, [C] surface get-out 反复抢身 → collectBlocks
+                //   全程返回 undefined、一块都挖不完 (实录 2026-07-09)。只按住 jump 骑水面 (不下沉、头出水面
+                //   回氧), 挖矿交给动作本身; 氧≤0 真扣血 (drowningDamage) 或深水将溺 (上面 [A] 分支) 照常抢身。
+                const miningActive = !!bot.targetDigBlock
+                    || !!(bot._adminMission && bot._adminMission.active);
                 if (drowning && y0 < 55) {
                     // DEEP & out of air (flooded tunnel / aquifer): no shore to swim to.
                     // The OLD code only towered straight UP toward the distant surface —
@@ -1883,6 +2038,12 @@ const modes_list = [
                     // "真扣血",同时用 gotoActive 的 grace 窗消除 isMoving() 闪断导致的误抢身。
                     // 注: 上面的 deep 溺水自救分支(drowning && y0<55,"heading for air")不受影响、照常在
                     // 氧≤14 抢身 —— 那是深水将溺的保命反射(y<55),关它会违背"只要不淹死就行"。
+                    bot.setControlState('jump', true);
+                }
+                else if (miningActive && !drowningDamage && !combatHasPriority(bot)) {
+                    // ★挖矿/采集让位 (见上 miningActive): 只按住 jump 骑水面, 绝不 hijack 去游岸 —— 与
+                    //   gotoActive 分支同策。战斗有优先 (combatHasPriority) 或真淹血 (drowningDamage) 时本
+                    //   分支失效, 落到 [C] surface get-out / 下方 self_defense。
                     bot.setControlState('jump', true);
                 }
                 else if (y0 >= 55 && !combatHasPriority(bot)) {
@@ -2597,6 +2758,17 @@ const modes_list = [
                     }
                     try { bot.clearControlStates(); } catch (e) {}
                 });
+            }
+            else if ((Date.now() - (bot.lastDamageTime || 0) < 4000) && this.shouldFlee(bot) && !surviveNowActive(bot)) {
+                // ★用户令 2026-07-09 "被攻击后不要停下来，加速逃跑": 正在挨打 (≤4s) 且已决定逃跑 (shouldFlee — 见 Q2
+                //   只在已决定逃跑时生效, 已排除反击/死战/能打赢) → 压过下方【预防夜宿 bunkerDown】与【outmatched dig-in】,
+                //   改为持续 sprint 逃离 (有移动目标继续冲向它, 否则离威胁跑; 永不停顿)。creeper 专属规避 (creeperBackoffTarget)
+                //   在本枝之上, 不受影响。未挨打的预判 outmatched 仍走下方 dig-in (用户仅令"被攻击后"要跑)。
+                if (Date.now() - (this._sprintFleeSayAt || 0) > 8000) {
+                    this._sprintFleeSayAt = Date.now();
+                    say(agent, `Hit (${this.nearbyHostiles(bot).length} mob, hp ${Math.round(bot.health)}) — sprinting away, not stopping!`);
+                }
+                execute(this, agent, () => this.sprintFlee(agent));
             }
             else if (this.shouldNightShelter(bot) && !surviveNowActive(bot)) {
                 // ★svnActive 压制(评审): sp 保留 claimant 是为早窗溺水/MLG 营救 — bunkerDown
@@ -3504,7 +3676,10 @@ const modes_list = [
                 } catch (e) {}
                 return;
             }
-            if (enemy && hasWeapon && !swarmed && (bot.health > minHp || pointBlank)) {
+            // ★ARMORED SOLO BRAWL (见模块级 armoredSoloBrawl, 与 self_preservation.shouldFlee 共用):
+            //   穿甲 + 有武器 + 全场仅一只非苦力怕怪 → 血量门(minHp)作废, 哪怕血不多也开打 (用户令 2026-07-08)。
+            //   shouldFlee 已同步放行不逃, 缺这一半会又卡回"低血被 minHp 拒战 = 既不逃也不打"的原僵局。
+            if (enemy && hasWeapon && !swarmed && (bot.health > minHp || pointBlank || armoredSoloBrawl(bot))) {
                 say(agent, `Fighting ${enemy.name}!`);
                 // ★C360: fight-cycle 快照 — cycle 结束时 recordFightOutcome 对照它判"这轮有无进展"。
                 const cycle = { id: enemy.id, name: enemy.name, t0: Date.now(), dist0: enemy.position.distanceTo(bot.entity.position) };
@@ -3726,12 +3901,33 @@ const modes_list = [
                 // the BREAKOUT last-resort lives. (The mission-layer stagnation timer
                 // could never fire while a child loop held the stack — same trap as the
                 // chopWood deep-dig; an always-mode is the only layer that sees it all.)
-                if (!this.pinAnchor || bot.entity.position.distanceTo(this.pinAnchor) > 10) {
-                    // Moved out of the pin zone — the wedge/livelock broke. Clear the kick
-                    // counter and persistent-pin escalation flags so the next pin gets a fresh
-                    // window (and a fresh, un-backed-off cadence).
+                // ★2026-07-09 用户令 (admin 意志 = 独占 / 绝对 · 全程让位): admin LLM 任务【全程】pin-breaker
+                //   整体让位 —— 任务可能正当地在 ~10 格内久留 (原地建造 / 小范围采集 / LLM 思考间隙), 15min
+                //   "钉住" 是任务在干活不是死锁。此反射 always-on、直接在 update 里干活不走 execute(), 所以
+                //   execute() 的 admin 独占门 (7208) 覆盖不到它 —— 这里单独补门。强制 interrupt 会夺走 admin 的
+                //   身体 / 打断 LLM 在途动作 (正是用户报的 bug: "全程 admin llm 任务情况下根本不该触发这个")。
+                //   走 reset 分支: 每拍把 pin 窗口钉到 now (admin 时间绝不累计成 kick) 且跳过下方 kick body;
+                //   任务真卡死由 AdminMission 的 deadline + onNoProgress 自评兜底, 不靠 watchdog 强拆。致命态
+                //   adminExclusiveActive 自返回 false → 放行 (下方"受伤/溺水 wedged-reflex"保命网照常运行)。
+                const _adminHold = adminExclusiveActive(bot);
+                if (_adminHold || !this.pinAnchor || bot.entity.position.distanceTo(this.pinAnchor) > 10) {
+                    // Moved out of the pin zone (or admin owns the body) — the wedge/livelock broke.
+                    // Clear the kick counter and persistent-pin escalation flags so the next pin gets a
+                    // fresh window (and a fresh, un-backed-off cadence).
                     this.pinAnchor = bot.entity.position.clone(); this.pinAt = now; this.pinKick = 0; this.pinKickCount = 0;
                     try { bot._persistentPinKicks = 0; bot._persistentPinSince = 0; } catch (e) {}
+                    if (_adminHold) {
+                        // Also clear the pocket-fuse anchor so its 12-min budget doesn't count admin time,
+                        // and drop a throttled breadcrumb that the pin-breaker stood down for admin.
+                        try { bot._exemptAnchor = null; } catch (e) {}
+                        if (now - (bot._lastPinAdminExemptAt || 0) > 60000) {
+                            bot._lastPinAdminExemptAt = now;
+                            try {
+                                fs.appendFileSync('bots/_supervisor/progress.txt',
+                                    `[${new Date().toISOString()}] [reflex_watchdog] admin 独占期 pin-breaker 让位: extIntent 新鲜 — 不强制 interrupt (任务卡死由 AdminMission deadline/onNoProgress 兜底)\n`);
+                            } catch (e) {}
+                        }
+                    }
                 } else if (now - this.pinAt > 5 * 60 * 1000
                            // ★BACKOFF (livelock fix, C2xx): the kick used to fire every 60s
                            // forever. When the underlying pin can't be broken by a forced
@@ -4372,6 +4568,10 @@ const modes_list = [
             };
             const noRegenSafeAirHold = () => {
                 const nowHold = Date.now();
+                // ★2026-07-09 用户令 (低血/饥饿全熔断): "hold air pocket, no blind dig" 熔断 —
+                //   低血低食不再冻住 mobility 的 ENTOMBED/POCKET 挖出, 正常脱困干活 (实录 2026-07-08
+                //   15:49: hp10/food14 被此 gate 钉在 y=59 气穴里发呆, 铁就在墙上不挖)。
+                if (!hpInstinctsEnabled()) return null;
                 if (!(bot.health < 14 && bot.food < 18) || normalEdibleHeld()) return null;
                 // ★C225: yield to an explicitly-dispatched recovery VENTURE (forageExplore/escapePlan
                 // travelling to food). The skill-name allowlist (survivalSkill below) can't see it —
@@ -5405,6 +5605,24 @@ const modes_list = [
                 if (!support.stable) {
                     write('dig.unsupported_before', { seq, target: blockObj(block), args, support, env: envSnap() });
                 }
+                // ★C360-XR (2026-07-09 用户: "还是会经常穿墙挖矿"): 物理层反 x-ray 总闸。上层闸
+                // (C304/C305/C337) 只覆盖各自技能路径, 而 LLM newAction 代码/寻路器/杂散调用点
+                // 拿着臂展内的矿照样隔墙抠 — 服务器不查视线, 只有这里能一网打尽。只管【矿】:
+                // >2.2 格且 canSeeBlock=false = 隔墙抠矿 → throw (调用方按挖矿失败换目标)。
+                // ≤2.2 豁免 (贴脸/刚凿开的面, canSeeBlock 抽风保护, 与 chopWood C339 同约定);
+                // 非矿一律放行 (脱困/幽灵格/凿柱/开路全不受影响)。
+                if (block && block.position && /_ore$|ancient_debris/.test(block.name || '')) {
+                    const _xd = bot.entity.position.offset(0, 1.62, 0).distanceTo(block.position.offset(0.5, 0.5, 0.5));
+                    if (_xd > 2.2) {
+                        const _xsee = (() => { try { return bot.canSeeBlock(block); } catch (e) { return true; } })();
+                        if (!_xsee) {
+                            try { fs.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★XRAY-BLOCK dig ${block.name}@${block.position.x},${block.position.y},${block.position.z} d=${_xd.toFixed(1)} occluded — refused\n`); } catch (e) {}
+                            const err = new Error(`xray dig blocked: ${block.name} occluded at ${_xd.toFixed(1)}b`);
+                            write('dig.end', { seq, ok: false, ms: Date.now() - startedAt, target: blockObj(block), error: err.message, env: envSnap() });
+                            throw err;
+                        }
+                    }
+                }
                 if (!(await ensurePickForDig(block, seq))) {
                     const err = new Error(`stone dig blocked without held pick: ${block ? block.name : 'unknown'}`);
                     write('dig.end', { seq, ok: false, ms: Date.now() - startedAt, target: blockObj(block), error: err.message, env: envSnap() });
@@ -6005,7 +6223,7 @@ const modes_list = [
                 // --- migration (coarse) ---
                 let inDeathZone = false, biome = 'unknown';
                 try {
-                    const adv = JSON.parse(fs.readFileSync('bots/_supervisor/advisory.json', 'utf8'));
+                    const adv = readJsonCached('bots/_supervisor/advisory.json', 1500);
                     if (adv && adv.dzone) inDeathZone = Math.hypot(p.x - adv.dzone.cx, p.z - adv.dzone.cz) <= (adv.dzone.r || 0);
                 } catch (e) {}
                 try { biome = world.getBiomeName(bot); } catch (e) {}
@@ -6116,9 +6334,9 @@ const modes_list = [
                 //   go:true on force BEFORE the cooldown check), so they are deliberately left UNGATED.
                 let migrateOnCooldown = false;
                 try {
-                    const _ms = JSON.parse(fs.readFileSync('bots/_supervisor/migrate_state.json', 'utf8'));
+                    const _ms = readJsonCached('bots/_supervisor/migrate_state.json', 1500);
                     // non-force dispatch (args=[]) uses migrate.js's default cooldownMin=20 → mirror it.
-                    migrateOnCooldown = (now - (_ms.lastMigrateAt || 0)) < 1200000;
+                    migrateOnCooldown = (now - ((_ms && _ms.lastMigrateAt) || 0)) < 1200000;
                 } catch (e) {}
                 // force dispatch (bypasses migrate.js's conservative start-gate, incl. its 20min cooldown
                 // AND night gate) ONLY for decision-layer-only triggers (stuck/woodBarren) in a biome
@@ -6138,7 +6356,7 @@ const modes_list = [
                 // --- surfaceGate (AUTO; supervisor override read from advisory.surfaceGate) ---
                 let gateMode = 'free', gateReason = 'safe day', decidedBy = 'auto', gateUntil = 0;
                 try {
-                    const adv = JSON.parse(fs.readFileSync('bots/_supervisor/advisory.json', 'utf8'));
+                    const adv = readJsonCached('bots/_supervisor/advisory.json', 1500);
                     const sg = adv && adv.surfaceGate;
                     if (sg && sg.mode === 'committed_underground' && (!sg.until || now < sg.until)) {
                         gateMode = 'committed_underground'; gateReason = sg.reason || 'supervisor commit'; decidedBy = 'supervisor'; gateUntil = sg.until || 0;
@@ -6379,8 +6597,9 @@ const modes_list = [
                 const _creeperPB = Number.isFinite(creeperDist) && creeperDist < 3.2;
                 const _meleePB = Number.isFinite(closest) && closest < 3.2;
                 const commitToFight = _meleePB && !_creeperPB && hasSwordDec && hp > 12 && !(mob && mob.enclosed);  // ★hp>6→>12: 死亡数据(45死)实锤 hp6 提交melee=自杀(zombie 2下打死);低血该封顶/逃不该挥剑
-                // ── computeNightPlan(): short-circuit priority chain (user spec, verbatim order):
-                //    FIGHT > MINE_THROUGH_NIGHT > GO_BED > DIG_ONE_CAP > SEAL_FORT ; non-night → NONE.
+                // ── computeNightPlan(): short-circuit priority chain (user spec 2026-07-08, verbatim order):
+                //    FIGHT > GO_BED(near≤15) > [SMELT_IRON·kept] > MINE_THROUGH_NIGHT > DIG_ONE_CAP(in-place|≤15b search)
+                //    > GO_BED(far, DUSK-only) > SEAL_FORT(bare hold) ; non-night → NONE.
                 // ★ALREADY-SAFE-UNDERGROUND: the strict picksBudget≥200 gate above is for the DUSK choice
                 // "should I descend to mine all night". A bot ALREADY deep+enclosed with a pickaxe is already
                 // mining safely — it must KEEP MINING, not surface-bootstrap (can't, at night) nor shelter
@@ -6415,33 +6634,72 @@ const modes_list = [
                 const _stickPathDec = (counts.stick || 0) >= 2 || planksMax >= 2 || logs >= 1;
                 const smeltIronWarranted = !_hasIronPickDec && durablePick && _ironConvAchievable && _stickPathDec
                     && actionable === 0 && food > 6 && hasTablePath && !_stuckMob;
+                // ── ★用户令 2026-07-08 夜间行为白名单参数 ──
+                // NEAR_BED: 近床阈值 6→15 (第①项, 最高优先级); DIG_SEARCH: 挖三填一"找地"半径 (第④项).
+                const NEAR_BED = 15;
+                const DIG_SEARCH = 15;
+                // 近床可睡(第①项, 最高优先级): bedAffordable(可达+无威胁+非深处爬升) 且 (已知床≤15格 或 背包床在近地表).
+                //   背包床=零步近床(goBedSleep 就地放床睡), 归"近"; 但只在【近地表 y>=50】归最高优 —— 深处(y<50)带镐的
+                //   矿工不该被一张背包床拽出整夜下矿(alreadyDeepEnclosed 铁律), 深处背包床改由下方"兜底放床睡"(在挖矿/挖三填一之下)接管.
+                const nearBed = bedAffordable && ((_bedLm && Number.isFinite(_bedLm.dist) && _bedLm.dist <= NEAR_BED) || (_bedInPack && y >= 50));
+                // ★挖三填一"15格找地"(第④项): 就地不可挖(重力柱/含水落点)但半径内有"可挖三填一的地面"时, relocate 去挖.
+                //   由近及远环扫, 命中即停 (返回 true 后由执行层 nightShelter relocate 同参数走位再挖). 材料按镐分档:
+                //   徒手→只认软土; 有镐→石系也算. 排除 sand/gravel 重力柱 (digOneCapOne 会拒) + y≤16 (dig_one 是浅层夜庇护).
+                //   仅在链子走到挖三填一档才调用 (lazy, 见 computeNightPlan), 省每 tick 全扫开销.
+                const _hasDiggableGroundWithin = (R) => {
+                    try {
+                        const hasPickNow = picks >= 1;
+                        for (let r = 1; r <= R; r++) {
+                            for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
+                                if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;   // 只扫第 r 环
+                                for (const dy of [0, -1, 1]) {
+                                    const feet = bot.blockAt(m.offset(dx, dy, dz));
+                                    if (!(feet && feet.boundingBox === 'empty')) continue;
+                                    const head = bot.blockAt(m.offset(dx, dy + 1, dz));
+                                    if (!(head && head.boundingBox === 'empty')) continue;
+                                    const floor = bot.blockAt(m.offset(dx, dy - 1, dz));
+                                    if (!(floor && floor.boundingBox === 'block')) continue;
+                                    if ((m.y + dy - 1) <= 16) continue;   // dig_one 是浅层夜庇护, 不在深处
+                                    const fn = floor.name || '';
+                                    if (/^(sand|red_sand|gravel|suspicious_sand|suspicious_gravel)$/.test(fn)) continue;   // 重力柱, digOneCapOne 会拒
+                                    const soft = /^(dirt|coarse_dirt|rooted_dirt|grass_block|podzol|mycelium|clay|mud|moss_block|dirt_path|farmland)$/.test(fn);
+                                    const stone = /(stone|deepslate|tuff|andesite|diorite|granite|cobbled|blackstone|basalt|calcite|dripstone|_ore$)/.test(fn);
+                                    if (soft || (stone && hasPickNow)) return true;
+                                }
+                            }
+                        }
+                    } catch (e) {}
+                    return false;
+                };
                 const computeNightPlan = () => {
                     if (phase !== 'dusk' && phase !== 'night') return { decision: 'NONE' };
+                    // (0) 贴脸能打的怪 → 让位常驻防御反射 (只是"本 tick 不派夜间任务"的协调, 不新增行为; self_defense 反射另在别处常驻).
                     if (commitToFight) return { decision: 'FIGHT', reason: `point-blank melee d=${Number.isFinite(closest) ? closest.toFixed(1) : '?'}` };
+                    // ── 用户令 2026-07-08 夜间行为白名单 (有优先级): 近床(≤15) > [炼铁·保留] > 下矿 > 挖三填一(就地|≤15格找地) > 黄昏远床 > 裸hold ──
+                    // ① 近床(≤15格, 寻路可达, 可睡)或近地表背包床 → 睡到天亮. 最高优先级 (原 ≤6 → 15). 睡觉直接跳过夜险+断粮死环.
+                    if (nearBed)
+                        return { decision: 'GO_BED', reason: (_bedLm && Number.isFinite(_bedLm.dist) && _bedLm.dist <= NEAR_BED) ? `bed ${_bedLm.dist}b ≤${NEAR_BED} — sleep to dawn (highest priority)` : 'bed in pack — place & sleep (near, zero-walk)', target: _bedLm };
+                    // ★炼铁保留 (用户令 2026-07-08: 夜间炼铁/升级铁装保留). 仍排在下矿之上 (T-0097: 先把囤铁锁成铁镐/剑/盾, 再多挖).
                     if (smeltIronWarranted) return { decision: 'SMELT_IRON', reason: `${_ironIngotsDec >= 3 ? _ironIngotsDec + ' ingots' : _rawIronDec + ' raw_iron'} + no iron pick — lock in iron tier (persistent + iron sword/shield)`, targetY: y };
-                    // ★用户令 2026-07-07 (求死重生落点就在床边却跑去挖夜矿): a bed within arm's reach
-                    //   (respawn point / a just-built bed) BEATS mining the night — sleeping skips straight to
-                    //   dawn, dodging the night-danger + no-food death loop. Only when the bed is ADJACENT
-                    //   (≤6b) and affordable (bedAffordable already = reachable + no actionable threat + not a
-                    //   deep-no-climb); a FAR bed still yields to MINE_THROUGH_NIGHT (progress bias unchanged).
-                    if (bedAffordable && _bedLm && Number.isFinite(_bedLm.dist) && _bedLm.dist <= 6)
-                        return { decision: 'GO_BED', reason: `bed adjacent ${_bedLm.dist}b — sleep to dawn over night-mining`, target: _bedLm };
+                    // ② 镐(资源)充足 → 整夜下矿.
                     if (canMineWholeNight) return { decision: 'MINE_THROUGH_NIGHT', reason: `pickBudget=${picksBudget}>=${cfg.mineNightPickBudget}`, targetY: 12 };
                     if (alreadyDeepEnclosed) return { decision: 'MINE_THROUGH_NIGHT', reason: `already deep/enclosed y=${y} pick=${picks} — keep mining, don't surface-bootstrap`, targetY: 12 };
-                    if (bedAffordable) return { decision: 'GO_BED', reason: `bed@${_bedReachCost}b`, target: _bedLm };
-                    if (digOneViable) return { decision: 'DIG_ONE_CAP', reason: `dig-one shelter y=${y}` };
-                    // ★SURFACE WALL-BOX ("seal"/封箱) DISABLED — user 2026-07-07 (docs/shelter-mechanism-disabled.md).
-                    //   This terminal fallback STILL returns SEAL_FORT on purpose — do NOT switch it to NONE:
-                    //     • SEAL_FORT@91 must keep out-ranking daytime BOOTSTRAP_KIT@90 (world_model §night switch),
-                    //       else a pickless/no-bed bot would get NO night proposal and wander off to chop wood in
-                    //       the dark instead of hunkering down;
-                    //     • the unstuck-suppression gate (~modes.js:2650) keys on the NIGHT_SEAL commitment to stop
-                    //       the watchdog dragging the bot out of its hold.
-                    //   What changed is the EXECUTOR, not the decision: nightShelter('seal') no longer BUILDS the
-                    //   wall ring (it kept leaving the bot standing OUTSIDE its own walls — placeBlock drift). It now
-                    //   just holds in place and bails on any hit, handing off to self-defense reflex / surviveNow
-                    //   (RELOCATE/DEATH, keepInventory ON). dig_one (挖三填一) above is untouched — user kept it.
-                    //   Net: this branch = "commit to HOLDING the night in place", not "wall yourself in".
+                    // ③④ 挖三填一: 就地可挖(digOneViable), 或 ≤15格内有"可挖三填一的地面"(执行层 nightShelter relocate 去挖). 排在【黄昏远床之上】(用户令顺序).
+                    //     lazy 扫描: 只在链子走到这里(近床/炼铁/下矿都没命中)时才扫, 命中即停. 硬门 picks>=1 卡在 if 里(不在扫描函数内) —
+                    //     §7.3 红线: 无镐 bot 走 dig_one 会徒手挖软土把自己埋到树底 → 天亮树抬高不可达 → wood=0 bootstrap 死锁. 与 digOneViable 同守卫.
+                    if (digOneViable || (picks >= 1 && y > 16 && _hasDiggableGroundWithin(DIG_SEARCH)))
+                        return { decision: 'DIG_ONE_CAP', reason: digOneViable ? `dig-one shelter y=${y}` : `dig-one via ≤${DIG_SEARCH}b ground search` };
+                    // 背包床兜底: 深处/够不到别的但背包里【有床】→ 就地放床睡 (零步无跋涉, 不受第⑤项"仅黄昏"限 —— 那是给"走去远床"的跋涉风险设的).
+                    //   排在下矿/挖三填一【之下】(深处矿工先挖), 黄昏远床【之上】(就地放床比走去远床更安全). 近地表背包床已在上面 nearBed 走最高优.
+                    if (_bedInPack && bedAffordable) return { decision: 'GO_BED', reason: 'pack bed — place & sleep in place (zero-walk, last resort before dusk-travel/hold)', target: _bedLm };
+                    // ⑤ 黄昏才前往"远床"(>15格, ≤${cfg.bedReachDist}): 趁天光去更远的已知床 (用户令: 黄昏可去更远找床). 深夜【绝不】奔远床 (跨图风筝死环). 最低优先.
+                    if (phase === 'dusk' && bedAffordable) return { decision: 'GO_BED', reason: `dusk far bed@${_bedReachCost}b (>${NEAR_BED}, dusk-only)`, target: _bedLm };
+                    // ★SURFACE WALL-BOX ("seal"/封箱) 仍禁用 — 用户令 2026-07-07 维持 + 07-08 复述"shelter机制临时禁用" (docs/shelter-mechanism-disabled.md).
+                    //   终兜底照旧返回 SEAL_FORT (勿改 NONE / 勿盲转 DIG_ONE_CAP — 见红线):
+                    //     • SEAL_FORT@91 必须压过白天 BOOTSTRAP_KIT@90 (world_model §night switch), 否则无镐/无床 bot 夜里没提案 → 黑灯砍树;
+                    //     • unstuck 抑制门 (~modes.js:2802) 认 NIGHT_SEAL 提交, 阻止看门狗把 bot 从 hold 里拖出去。
+                    //   执行层 nightShelter('seal') 不砌墙 = 原地【裸 hold】(站住/饿了吃/挨打即让位 self-defense 反射 + surviveNow RELOCATE/DEATH, keepInv ON).
+                    //   挖三填一(③④) 已优先且带 15 格找地, 这里只剩"无镐/无软土可迁/无床"的物理下限 (§7 已知并接受的 stranding gap).
                     return { decision: 'SEAL_FORT', reason: 'hold in place — surface wall-box disabled (dig_one preferred when viable)' };
                 };
                 const nightPlan = computeNightPlan();
@@ -6668,7 +6926,12 @@ const modes_list = [
                                 // means walking back will fail again — don't ping-pong to it all night.
                                 if (b && b._bedSleepFailAt && Date.now() - b._bedSleepFailAt < 180000) return false;
                                 const lm = w.landmarks || {};
-                                return !!(lm.bed || lm.village);
+                                const tgt = lm.bed || lm.village;
+                                if (!tgt) return false;
+                                // ★用户令 2026-07-08: 近床(≤15格)整夜都可睡本能触发; 远床(>15)仅【黄昏】才去 (与 computeNightPlan 近/远语义一致 — 深夜不奔远床).
+                                const _d = Number.isFinite(tgt.dist) ? tgt.dist : Infinity;
+                                if (_d > 15 && t.phase !== 'dusk') return false;
+                                return true;
                             } catch (e) { return false; } },
                             act: async (w, b, c) => {
                                 const lm = (w && w.landmarks) || {}; const tgt = lm.bed || lm.village; if (!tgt) return;
@@ -6903,6 +7166,10 @@ const modes_list = [
             //   血」时才吃背包食物, 把 food 顶过 18 让 HP 回复, 到线即停 —— 绝不为填满饥饿条而吃; health 满
             //   或 food>=18(已能回血) 都不吃。食物本能启用(MC_FOOD_INSTINCTS=1)时回退原逻辑(food<=17 就吃,
             //   主动维持饥饿条)。见 contracts.foodInstinctsEnabled / docs/food-instincts-disabled.md。
+            // ★2026-07-09 用户令: "所有食物相关的机制全部熔断" — 双闸全 OFF 时 auto_eat 整体熔断
+            //   (它的 execute() 会掐掉在跑技能吃 1.6s = "因低血/饥饿打断行动"), 饿死拉倒。
+            //   任一闸开 (MC_FOOD_INSTINCTS=1 或 MC_HP_INSTINCTS=1) 恢复下面的原逻辑。
+            if (!foodInstinctsEnabled() && !hpInstinctsEnabled()) return;
             const regenOnly = !foodInstinctsEnabled();
             const shouldEat = regenOnly ? (bot.health < 20 && bot.food < 18) : (bot.food <= 17);
             if (shouldEat && Date.now() - this.last_eat > 8000) {

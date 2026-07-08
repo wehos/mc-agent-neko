@@ -567,6 +567,49 @@ async function placeCraftingTableWithinReach(bot) {
             }
         } catch (e) {}
     }
+    // ★2026-07-08 受限口袋壁龛兜底 (钻石"够不到"根因 1b, 见 [[craft-table-wedge-disconnect]] / [[diamond-never-reached-blocker-stack]]):
+    //   刚钻进 1x2 石缝时身边全是实心 → 上面 12 格扫描找不到空气格 → 放不下台 → 石镐造不出 →
+    //   mineDiamonds 永久 DEFER (实录 22×, 0 次真下潜)。像真玩家那样【挖出一格壁龛】再放台: 只挖脚侧一格
+    //   可挖实心 (脚下支撑不动/不破流体/不吃矿石与设施/不碰基岩), 挖空后台放在其下方实心面上。fluid 六邻
+    //   检沿用含水层护栏 —— 绝不朝水/岩浆挖出壁龛 (那正是 mineDiamonds 全部下潜守卫要防的)。
+    try {
+        const diggable = (b) => b && b.boundingBox === 'block' && !noBuild.has(b.name)
+            && !/bedrock|barrier|obsidian|reinforced_deepslate|_ore$|chest|furnace|crafting_table|dispenser|dropper|hopper|spawner/.test(b.name);
+        const fluidAround = (c) => {
+            for (const [ex, ey, ez] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]) {
+                const nb = bot.blockAt(c.offset(ex, ey, ez));
+                if (nb && /lava|water/.test(nb.name)) return true;
+            }
+            return false;
+        };
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const niche = base.offset(dx, 0, dz);              // 脚侧一格 (非脚下支撑)
+            if (botAabbIntersectsBlock(bot, niche)) continue;
+            const nb = bot.blockAt(niche);
+            if (!diggable(nb) || fluidAround(niche)) continue;
+            const floor = bot.blockAt(niche.offset(0, -1, 0)); // 台需下方有实心可附着
+            if (!floor || floor.boundingBox !== 'block' || noBuild.has(floor.name)) continue;
+            try { await breakBlockAt(bot, niche.x, niche.y, niche.z); await tickConfirm.sleepMs(120); } catch (e) { continue; }
+            const cleared = bot.blockAt(niche);
+            if (!cleared || !empty.has(cleared.name)) continue;
+            try {
+                const equipRes = await tickConfirm.equipConfirmed(bot, item.name, 'hand');
+                if (!equipRes.ok) continue;
+                await bot.lookAt(floor.position.offset(0.5, 0.5, 0.5), true);
+                const res = await tickConfirm.placeBlockConfirmed(
+                    bot, floor, new Vec3(0, 1, 0), niche, 'crafting_table',
+                    { retries: 2, confirmTimeoutMs: 700, backoffMs: 150 }
+                );
+                if (!res.ok) continue;
+                await tickConfirm.sleepMs(160);
+                const placed = bot.blockAt(niche);
+                if (placed && placed.name === 'crafting_table') {
+                    log(bot, `Placed crafting_table in a dug niche at ${niche} (constrained pocket — no ambient air spot).`);
+                    return placed;
+                }
+            } catch (e) {}
+        }
+    } catch (e) {}
     log(bot, 'Could not place a reachable crafting_table for local craft.');
     return null;
 }
@@ -996,6 +1039,44 @@ export async function raceInterrupt(bot, work, { pollMs = 200, timeoutMs = 0, on
     }
 }
 
+// ★后退一步 (2026-07-09 用户令 "挖矿贴墙太近了需要后退一步"; 追加"只允许在当前方块内略微退后, 不离开本格"):
+//  死贴墙面(眼睛几乎顶到墙)时, 看向目标的射线先撞脸前那堵墙 → canSeeBlock 假阴 → 卡墙空挥。人类做法:
+//  往后靠一点点换个视角。【只在当前 floored 方块内】沿远离墙的水平主轴挪到靠里子格(离墙远一点点),
+//  一旦要越出本格立即停 — 绝不迈进相邻格。同格内退后=地板不变、无坠落/流体/邻格风险, 纯非破坏微调。
+//  看向目标按 back 键即远离墙; 到位/将越格/1.2s 任一即停清控制。确有位移→true(交回 C337-C 顶复查 LOS)。
+async function _stepBackForDig(bot, target) {
+    try {
+        if (!bot || !bot.entity || !target || !target.position) return false;
+        if (!bot.entity.onGround) return false;
+        const m0 = bot.entity.position;
+        const ctr = target.position.offset(0.5, 0.5, 0.5);
+        const dx = ctr.x - m0.x, dz = ctr.z - m0.z;             // 指向目标(墙)的水平方向
+        if (Math.hypot(dx, dz) < 0.05) return false;            // 目标基本在正上/下方 — 退后无意义
+        const feet = m0.floored();
+        const axis = Math.abs(dx) >= Math.abs(dz) ? 'x' : 'z';
+        const sign = axis === 'x' ? Math.sign(dx) : Math.sign(dz);   // >0: 墙在 +轴, 退向 -轴
+        if (!sign) return false;
+        // 本格内"靠里"落点: 远离墙那侧, 留身宽余量不贴对面 → floor + (墙在+轴 ? 0.3 : 0.7)。中心仍在本格。
+        const aim = (axis === 'x' ? feet.x : feet.z) + (sign > 0 ? 0.3 : 0.7);
+        const start = axis === 'x' ? m0.x : m0.z;
+        if (sign > 0 ? start <= aim + 0.03 : start >= aim - 0.03) return false;   // 已经够靠里, 无需动
+        const _t0 = Date.now();
+        try {
+            while (Date.now() - _t0 < 1200 && !bot.interrupt_code) {
+                const m = bot.entity.position, cell = m.floored();
+                if (cell.x !== feet.x || cell.z !== feet.z) break;              // 将越出本格 → 停(不离开当前方块)
+                const sub = axis === 'x' ? m.x : m.z;
+                if (sign > 0 ? sub <= aim : sub >= aim) break;                  // 已退到靠里子格
+                try { await bot.lookAt(new Vec3(ctr.x, m.y + 1.62, ctr.z), true); } catch (e) {}   // 看向墙, back 键即远离
+                try { bot.setControlState('back', true); } catch (e) {}
+                await new Promise(r => setTimeout(r, 60));
+            }
+        } finally { try { bot.clearControlStates(); } catch (e) {} }
+        const end = axis === 'x' ? bot.entity.position.x : bot.entity.position.z;
+        return Math.abs(end - start) > 0.08;                                   // 确有后退位移
+    } catch (e) { try { bot.clearControlStates(); } catch (_) {} return false; }
+}
+
 async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = true, pickup = false, requireLOS = false } = {}) {
     const dead = (b) => !b || b.boundingBox === 'empty' || b.name === 'air';
     if (dead(block)) return 'gone';
@@ -1041,8 +1122,58 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
         // pickup pathfind against the wall swinging forever (bug 2). No distance exemption now: occluded
         // ⇒ refuse; the caller skips+excludes and branchMine's carve-a-stand-cell path exposes it legit.
         if (requireLOS) {
-            const _los = (() => { try { return bot.canSeeBlock(cur); } catch (e) { return true; } })();
-            if (!_los) return 'occluded';
+            // ★后退一步 (用户令): 贴墙太近(臂展内 <2.2b)却 canSeeBlock 假阴 = 脸顶着墙看不清目标 → 先非
+            //  破坏地【在当前方块内】往后靠一点点取视角(好过直接凿墙)。退后下面 C337-C 循环顶复查 LOS, 通了就直接采。
+            {
+                const _losNow = (() => { try { return bot.canSeeBlock(cur); } catch (e) { return true; } })();
+                if (!_losNow && reachOf() < 2.2 && bot.entity.onGround) {
+                    if (await _stepBackForDig(bot, cur)) {
+                        try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★STEP-BACK dig ${cur.name}@${cur.position.x},${cur.position.y},${cur.position.z} — 贴墙太近, 本格内后退取视角\n`); } catch (e) {}
+                    }
+                }
+            }
+            // ★C337-C (2026-07-09 "挖石头开路"落到执行层 — 实拍: C304 放行脸前 2.2 格埋铁, 这里
+            // canSeeBlock=false 秒拒 'occluded' → 主循环 skip+exclude 150ms 一块 9 连败 gained=0
+            // 扬长而去 = "路过铁不挖"。选目标层允许了埋矿, 抡镐层却"看不见就不挖", 中间挡视线的
+            // 1-2 块石头无人负责挖开)。人类行为: 矿被一层石头挡着就先敲掉挡的那块。
+            // 修: LOS 失败 → 沿眼→矿心射线取第一块遮挡物, 满足【臂展内 ≤4.6 / 不是矿 / 不是自己
+            // 脚下支撑柱 / 过流体裁判】→ 挖掉它, 复查 LOS, 最多 3 块。遮挡物够不到/挖不动/是矿
+            // → 维持 'occluded' 原样拒 (真·隔厚墙 x-ray 仍不可能; 矿遮矿交回主循环按矿正常采)。
+            for (let _c = 0; _c < 3; _c++) {
+                if (bot.interrupt_code) return 'occluded';
+                const _los = (() => { try { return bot.canSeeBlock(cur); } catch (e) { return true; } })();
+                if (_los) break;
+                const _eye = bot.entity.position.offset(0, 1.62, 0);
+                const _ctr = cur.position.offset(0.5, 0.5, 0.5);
+                const _d = _ctr.minus(_eye); const _len = _d.norm();
+                if (!(_len > 0.01)) break;
+                let _hit = null;
+                try { _hit = bot.world.raycast(_eye, _d.scaled(1 / _len), _len + 0.5); } catch (e) { _hit = null; }
+                if (!_hit || !_hit.position) return 'occluded';
+                if (_hit.position.equals(cur.position)) break;            // 射线已直达矿 — LOS 实际通
+                const _ob = bot.blockAt(_hit.position);
+                if (!_ob || _ob.boundingBox !== 'block') return 'occluded';
+                if (/_ore$/.test(_ob.name || '')) return 'occluded';      // 矿遮矿: 不当渣土挖, 主循环自会采它
+                if (bot.entity.position.offset(0, 1.62, 0).distanceTo(_ob.position.offset(0.5, 0.5, 0.5)) > 4.6) return 'occluded';
+                const _feet = bot.entity.position.floored();
+                if (_ob.position.x === _feet.x && _ob.position.z === _feet.z && _ob.position.y < _feet.y) return 'occluded';  // 自己脚下支撑柱不挖
+                if (process.env.MC_DIG_FLUID_GUARD !== '0') {
+                    const _og = safeToDigBlock(bot, _ob);
+                    if (_og && _og.ok === false) {
+                        try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★FLUIDGUARD skip occluder ${_ob.name}@${_ob.position.x},${_ob.position.y},${_ob.position.z} — ${_og.reason}\n`); } catch (e) {}
+                        return 'fluidguard';
+                    }
+                }
+                try {
+                    await Promise.race([
+                        gazeHold(bot, _ob, bot.dig(_ob)),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error('occluder-dig-timeout')), 6000)),
+                    ]);
+                    try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★C337-C carved occluder ${_ob.name}@${_ob.position.x},${_ob.position.y},${_ob.position.z} → expose ${cur.name}@${cur.position.x},${cur.position.y},${cur.position.z}\n`); } catch (e) {}
+                } catch (e) { return 'occluded'; }
+            }
+            const _losF = (() => { try { return bot.canSeeBlock(cur); } catch (e) { return true; } })();
+            if (!_losF) return 'occluded';
         }
         // ★岩浆/水裁判 试装 (2026-07-07 用户令): DIG-lane fluid precondition. Before opening this
         // cell, ask the fluid guard whether breaking it would flood the bot's pocket — lava at any
@@ -1085,6 +1216,120 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
         if (e && e.message === 'interrupted') return 'error';
         return (e && e.message === 'dig-timeout') ? 'timeout' : 'error';
     }
+}
+
+// ★C304-T (2026-07-09 用户令"凿隧道直达"): 选矿层 C304 放行了 5–24 格外被实心石头埋住的铁, 但执行层
+//  safeDig 只会 ①generic approach 够不到就秒返 'unreachable'(在任何凿开之前) ②在臂展内时沿眼→矿心
+//  射线凿 ≤3 块"窥视孔"(C337-C)——两者都不产出一条能走进去的路; 于是 collectBlock 把整条矿脉一格一格
+//  exclude 拆散放弃 (实录: 下潜到 y49 矿层, gained=0, 用时171s 空转白挖石头 = 用户"穿墙挖石头够不到铁
+//  最终放弃矿脉")。branchMine.directMineOre 有"矿旁凿站位再步入"的近距原语, 但 collectBlock(mineOres
+//  每轮首选路径)没有。本原语补上缺失的一环: 朝埋铁凿一条 1×2 密封隧道, 逐格步进, 直到矿进臂展+可见,
+//  交回 safeDig 正常采(vein-follow 收尾)。安全闸(与 mineDown/reach-gate/C360-XR 同源, 缺一即安全停手
+//  返 false 让调用方按旧逻辑 exclude, 绝不制造新险):
+//   · 防坠: 下一站位格【脚下必须实心地板】, 否则=隔空/溶洞 → 停(不搭桥, 守住 reach-gate "不跨空隙"语义)。
+//   · 防淹: 每块 corridor 走 safeToDigBlock 岩浆/水裁判(safeDig 内建), 破面会淹 → 停(留密封)。
+//   · 防 x-ray: corridor 块只在臂展 ≤4.6 内破(safeDig approach:false 自带 reach 守卫); 矿块从不当渣土挖,
+//     前方一旦是矿即返 true 交 safeDig(其 requireLOS + C360-XR 仍锁真实采矿, 隔厚墙 x-ray 仍不可能)。
+//   · 有界: maxSteps + budgetMs + interrupt/death 感知; 凿不开或步进不动累计 3 次即停。
+//  off-switch: 环境变量 MC_ORE_TUNNEL=0 关闭(默认开)。
+async function tunnelToOre(bot, oreBlock, { maxSteps = 30, budgetMs = 25000, maxD3 = 24 } = {}) {
+    try {
+        if (process.env.MC_ORE_TUNNEL === '0') return false;
+        if (!oreBlock || !oreBlock.position) return false;
+        if (bot._mobility && bot._mobility.state === 'MAROONED') return false;   // 行军独占移动, 让位
+        const orePos = new Vec3(oreBlock.position.x, oreBlock.position.y, oreBlock.position.z);
+        const oreCtr = orePos.offset(0.5, 0.5, 0.5);
+        const isDead = (b) => !b || b.boundingBox === 'empty' || b.name === 'air';
+        const isOreName = (n) => /_ore$/.test(n || '');
+        const solidAt = (p) => { const b = bot.blockAt(p); return !!(b && b.boundingBox === 'block'); };
+        const eyeReach = () => bot.entity.position.offset(0, 1.62, 0).distanceTo(oreCtr);
+        const _dbg = (m) => { try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ${m}\n`); } catch (e) {} };
+        if (eyeReach() > maxD3 + 1.5) return false;             // 太远, 不承诺(与 C304 同上限)
+        const t0 = Date.now();
+        let stuck = 0, carved = 0;
+        for (let step = 0; step < maxSteps; step++) {
+            if (bot.interrupt_code || bot.death_abort || bot.health <= 0) return false;
+            if (Date.now() - t0 > budgetMs) { _dbg(`★C304-T timeout ore@${orePos.x},${orePos.y},${orePos.z} carved=${carved} step=${step}`); return false; }
+            const cur = bot.blockAt(orePos);
+            if (isDead(cur) || !isOreName(cur.name)) return false;   // 矿已被采走/消失 → 交回主循环重扫
+            let los = false; try { los = bot.canSeeBlock(cur); } catch (e) { los = false; }
+            if (eyeReach() <= 4.4 && los) { _dbg(`★C304-T reached ore@${orePos.x},${orePos.y},${orePos.z} carved=${carved} step=${step}`); return true; }
+
+            const feet = bot.entity.position.floored();
+            const dx = orePos.x - feet.x, dy = orePos.y - feet.y, dz = orePos.z - feet.z;
+            // 水平主轴 = 剩余较大的那一维; 都为 0 时靠竖直逼近
+            let sx = 0, sz = 0;
+            if (Math.abs(dx) >= Math.abs(dz)) { if (dx !== 0) sx = Math.sign(dx); else if (dz !== 0) sz = Math.sign(dz); }
+            else { if (dz !== 0) sz = Math.sign(dz); else if (dx !== 0) sx = Math.sign(dx); }
+            // 竖直每步至多 ±1, 仅当 |dy|>1 才升降(最后 1 格高差交给 safeDig 的臂展)
+            const sy = dy > 1 ? 1 : (dy < -1 ? -1 : 0);
+            if (sx === 0 && sz === 0 && sy === 0) return false;      // 已同格却未 reach/LOS → 交 safeDig
+            if (sx === 0 && sz === 0 && sy > 0) return false;        // 纯竖直上矿需 pillar(越 reach-gate)→ 交 exclude
+
+            const nf = feet.offset(sx, sy, sz);      // 下一站位(脚)
+            const nh = nf.offset(0, 1, 0);           // 下一站位(头)
+            const floor = nf.offset(0, -1, 0);       // 下一站位脚下地板(升/平/降通式: nf 正下方)
+
+            // 本步要清开的 cells = 前向身位(nf 脚 + nh 头); 台阶【下】另加过渡头顶净空 feet+(sx,1,sz),
+            // 否则平移到落点前会头撞前上方石头卡死。台阶【上】只破身位, 绝不碰 floor(=承重台阶)。
+            const carveList = [nf, nh];
+            if (sy < 0 && (sx !== 0 || sz !== 0)) carveList.push(feet.offset(sx, 1, sz));
+
+            // 前方任一清开格正是矿 → 矿在正前臂展, 交 safeDig(绝不把矿当渣挖穿)
+            for (const p of carveList) { const b = bot.blockAt(p); if (b && isOreName(b.name)) { _dbg(`★C304-T ore-ahead @${p.x},${p.y},${p.z} carved=${carved} step=${step}`); return true; } }
+
+            // 防坠: 站位脚下必须实心(否则=隔空/溶洞 → 停, 不搭桥/不 pillar, 守 reach-gate 语义)
+            if (!solidAt(floor)) { _dbg(`★C304-T stop no-floor ahead @${nf.x},${nf.y},${nf.z} (gap/cave) — 不搭桥`); return false; }
+
+            // 逐块凿开 corridor — safeDig(approach:false)自带 ≤4.6 臂展守卫 + 岩浆/水裁判 + equip
+            let opened = true;
+            for (const p of carveList) {
+                const b = bot.blockAt(p);
+                if (isDead(b)) continue;
+                if (isOreName(b.name)) { _dbg(`★C304-T ore-ahead @${p.x},${p.y},${p.z} carved=${carved} step=${step}`); return true; }
+                const r = await safeDig(bot, b, { approach: false, equip: true, requireLOS: false, maxMs: 9000 });
+                if (r === 'fluidguard') { _dbg(`★C304-T stop fluid @${p.x},${p.y},${p.z} carved=${carved}`); return false; }
+                if (r !== 'ok' && r !== 'gone') { opened = false; break; }
+                if (r === 'ok') carved++;
+            }
+            if (!opened) { if (++stuck >= 3) { _dbg(`★C304-T stuck carve @${nf.x},${nf.y},${nf.z} carved=${carved}`); return false; } continue; }
+
+            // 步进单格(手控, 不重启寻路以免漫游); 升格则 jump
+            const ctr = nf.offset(0.5, 0, 0.5);
+            const _st = Date.now(); let moved = false;
+            try {
+                while (Date.now() - _st < 2500 && !bot.interrupt_code) {
+                    const m = bot.entity.position, here = m.floored();
+                    if (here.x === nf.x && here.z === nf.z && Math.abs(m.y - nf.y) < 0.6) { moved = true; break; }
+                    try { await bot.lookAt(new Vec3(ctr.x, m.y + 1.0, ctr.z), true); } catch (e) {}
+                    try { bot.setControlState('forward', true); } catch (e) {}
+                    try { bot.setControlState('jump', sy > 0); } catch (e) {}
+                    await new Promise(r => setTimeout(r, 90));
+                }
+            } finally { try { bot.clearControlStates(); } catch (e) {} }
+            if (!moved) { if (++stuck >= 3) { _dbg(`★C304-T stuck move → ${nf.x},${nf.y},${nf.z} carved=${carved}`); return false; } }
+            else stuck = 0;
+        }
+        _dbg(`★C304-T maxSteps ore@${orePos.x},${orePos.y},${orePos.z} carved=${carved}`);
+        return false;
+    } catch (e) { try { bot.clearControlStates(); } catch (_) {} return false; }
+}
+
+// ★perf 2026-07-09: death_log.jsonl grows all session and was re-read+split from disk on EVERY
+// collectBlock attempt (dozens per call) via an `await import('fs')` anti-pattern. Cache the last-64
+// raw lines on the persistent bot object (~15s TTL, shared across all skills), so the death-zone scan
+// costs one read per 15s instead of one per mining attempt. Death zones don't shift within a collect
+// call (a death aborts the skill), so staleness is harmless.
+function _deathLinesCached(bot) {
+    try {
+        const now = Date.now();
+        const m = bot && bot._deathLinesMemo;
+        if (m && now - m.t < 15000) return m.lines;
+        let lines = [];
+        try { lines = fs_dz.readFileSync('bots/_supervisor/death_log.jsonl', 'utf8').trim().split('\n').slice(-64); } catch (e) {}
+        if (bot) bot._deathLinesMemo = { t: now, lines };
+        return lines;
+    } catch (e) { return []; }
 }
 
 export async function collectBlock(bot, blockType, num=1, exclude=null, veinFollow='auto') {
@@ -1153,10 +1398,26 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
     const baseGain = gainOf();
 
     let collected = 0;
+    // ★C304-T: cap sealed-tunnel-to-ore attempts per collectBlock call so a pathological
+    //  string of buried candidates can't run the 25s tunnel back-to-back for minutes.
+    let _tunnelTries = 0;
+    const _TUNNEL_MAX_TRIES = 4;
 
     const movements = new pf.Movements(bot);
     movements.dontMineUnderFallingBlock = false;
     movements.dontCreateFlow = true;
+    // ★COLLECT-TARGET UN-HARDEN (根因: "收起工作台永远收不了"): pf.Movements 被全局换成 _NoScaffold
+    //   Movements + hardenMovements, 把 crafting_table/furnace/chest/barrel/床 塞进 blocksCantBreak —
+    //   那是为了【赶路时】别顺手拆自己的站台。但本函数是【显式采集】: 下面 1447 行用 movements.safeToBreak
+    //   当扫描候选过滤器, safeToBreak 对 blocksCantBreak 里的方块返回 false → 目标被剔出候选 → 报
+    //   "No crafting_table nearby to collect" 一镐没抡就 false (searchForBlock/nearbyBlocks 却都看得见,
+    //   因为它们不走 safeToBreak)。这里把本次要采的类型从黑名单摘掉解闸; 可达/流体/LOS 安全仍由 safeDig 兜底。
+    try {
+        for (const n of blocktypes) {
+            const bid = mc.getBlockId(n);
+            if (bid != null && movements.blocksCantBreak instanceof Set) movements.blocksCantBreak.delete(bid);
+        }
+    } catch (e) {}
     // ★RAVINE DISCIPLINE (deaths 196/197 — both "fall" mid-iron-grind; filmstrip shows a
     // huge ravine/mineshaft complex with the ore embedded in cliff walls): the default
     // maxDropDown=4 lets the pathfinder descend cliffs via chained 4-block hops — at
@@ -1211,8 +1472,15 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
     // → REJECT. Distance-capped so we never commit to an absurdly deep single ore. Cheap (~a dozen
     // blockAt, no 2nd pathfind → keeps C9). Downstream C337 LOS + ≤4.6 reach still gate the real dig,
     // so accepting a buried vein here can NEVER x-ray — it only lets the bot TUNNEL toward it.
-    const _BURIED_MAX_D3 = 12;          // max straight-line commit for one buried vein (~11 stone breaks)
-    const _BURIED_MAX_OPEN_RUN = 1;     // ≥2 contiguous open cells on the line = a real gap the no-scaffold/parkour-off probe can't cross (or a 2-block pit the drop falls into unreachably) → REJECT; a true buried vein reads maxRun=0, so this costs it nothing
+    // ★C304-W (2026-07-08 用户定调"主要是要允许挖石头开路"): 12 格上限 + 无差别 open-run 把
+    // "远处包石矿"和"头顶矿井壁上的矿"全打成不可达 (15:36 实录 8 候选全拒→原地空转, 其中
+    // iron@-100,59,292 头顶 16 格, 凿几步楼梯就够到)。石头挡路就该挖开 — 横向凿隧道、向上
+    // 凿楼梯都是合法开路; 真正要拒的只剩"横跨峡谷空隙"的 x-ray 几何 (C1)。两刀:
+    //   ① 上限 12→24: "远"≠"不可达", 挖得动就挖 (下游 C337 LOS+≤4.6 仍锁真实挥镐, 不会x-ray)。
+    //   ② open-run 只对【平缓视线】判 gap: 视线陡 (|dy|≥dist*0.55, 头顶/脚下矿井的空气柱) 时,
+    //      空气是可以凿楼梯绕上/下去的, 不是沟 — 不再当 gap 拒。
+    const _BURIED_MAX_D3 = 24;          // straight-line commit cap (dig-open-a-path is allowed; farther veins belong to branchMine/mineDown)
+    const _BURIED_MAX_OPEN_RUN = 1;     // ≥2 contiguous open cells on a SHALLOW line = a real horizontal gap → REJECT (true buried vein reads maxRun=0)
     const _lineBuried = (eye, center, d3) => {
         try {
             if (d3 > _BURIED_MAX_D3) return { ok: false, why: `too-deep d3=${d3.toFixed(1)}>${_BURIED_MAX_D3}` };
@@ -1234,10 +1502,15 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
                 if (key === oreKey) continue;                         // the ore's own voxel is solid by definition
                 n++;
                 const b = bot.blockAt(cell);
-                const isOpen = !b || b.boundingBox === 'empty';       // air/cave_air/water/lava all 'empty'
+                // ★C304-W 补刀: 线上有岩浆 = 朝岩浆凿 → 直接拒, steep-carve 也不豁免 (放宽 open-run
+                // 之前岩浆柱会碰巧被当 gap 拒掉, 放宽后必须显式挡)。
+                if (b && /lava/.test(b.name)) return { ok: false, why: `lava-on-line@${cell.x},${cell.y},${cell.z}` };
+                const isOpen = !b || b.boundingBox === 'empty';       // air/cave_air/water all 'empty'
                 if (isOpen) { openN++; run++; if (run > maxRun) maxRun = run; } else run = 0;
             }
-            return { ok: (maxRun <= _BURIED_MAX_OPEN_RUN), why: `n=${n} open=${openN} maxRun=${maxRun}` };
+            // steep line = the open cells are shaft/pit air above or below — stair-carvable, not a gap
+            const steep = Math.abs(vy) >= dist * 0.55;
+            return { ok: steep || (maxRun <= _BURIED_MAX_OPEN_RUN), why: `n=${n} open=${openN} maxRun=${maxRun}${steep ? ' steep-carve' : ''}` };
         } catch (e) { return { ok: true, why: 'voxel-err(fail-open)' }; }   // C7: never hard-block on internal error
     };
     const _oreReachable = async (cand) => {
@@ -1292,7 +1565,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
         // 出"16格内有2+邻死"的雷点,谓词里拒绝雷点14格内的目标。
         let _dzones = [];
         try {
-            const _dlraw = (await import('fs')).readFileSync('bots/_supervisor/death_log.jsonl', 'utf8').trim().split('\n').slice(-50);
+            const _dlraw = _deathLinesCached(bot).slice(-50);
             const _dpts = _dlraw.map(l => { try { const r = JSON.parse(l); return (typeof r.x === 'number') ? r : null; } catch (e) { return null; } }).filter(Boolean);
             _dzones = _dpts.filter(p => _dpts.filter(q => q !== p && Math.hypot(q.x - p.x, q.z - p.z) < 16).length >= 2);
         } catch (e) {}
@@ -1300,6 +1573,15 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
         //   → 出生区地下铁全部"不可见", 05:08 三振实录)。地表的死与深处的矿无关: |dy|<=12 才算。
         const _inDeathZone = (p) => _dzones.some(z => Math.hypot(z.x - p.x, z.z - p.z) < 14
             && Math.abs((typeof z.y === 'number' ? z.y : p.y) - p.y) <= 12);
+        // ★C304-S (2026-07-08 用户定调"周围有怪房间最好别挖"): 刷怪笼 10 格内的矿候选直接不可见 —
+        // 主动绕开地牢/废弃矿井刷怪房, 不再只靠死后 _inDeathZone 事后学。findBlocks 按稀有方块
+        // palette 快扫, 每 pass 一次, 便宜; 扫描失败 fail-open (照旧, 交给实时威胁本能兜底)。
+        let _spawners = [];
+        try {
+            const _spId = mc.getBlockId('spawner');
+            if (_spId != null) _spawners = bot.findBlocks({ matching: _spId, maxDistance: 48, count: 4 }) || [];
+        } catch (e) { _spawners = []; }
+        const _nearSpawner = (p) => _spawners.some(s => Math.hypot(s.x - p.x, s.y - p.y, s.z - p.z) < 10);
 
         // The scan + per-block predicate (incl. pathfinder's safeToBreak, which walks
         // neighbour blocks) can null-deref inside dependency code — that throw used to
@@ -1331,6 +1613,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
                 try {
                     if (!block || !block.position || !blocktypes.includes(block.name)) continue;
                     if (_inDeathZone(block.position)) continue;   // 雷区矿物不可见
+                    if (_nearSpawner(block.position)) continue;   // ★C304-S 刷怪笼房间的矿不碰
                     if (exclude) {
                         let _ex = false;
                         for (let position of exclude) {
@@ -1355,6 +1638,43 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
             else
                 log(bot, `No more ${blockType} nearby to collect.`);
             break;
+        }
+        // ★树列归一 (2026-07-08, 用户定调"树根/树冠就近一个为目标"): findBlocks 常只吐出树冠 (y≈75+)
+        //   的上层 log, _oreReachable 的 GoalNear 便瞄向半空的树冠 → 裸手 bot 站地面够不到 (remain≈6)
+        //   → 假判 "across gap/wall" → 整树被拒 → relocate 盲冲 landbias sprint → ★IN-WATER 冲海.
+        //   修: 每个 log 候选沿其竖直列展开 (root..canopy), 取离 bot 最近的一块当目标. 地面自然落到树根
+        //   (y=68 可走), 站高处则落树冠. 只动 log 家族; 矿/土/石候选原样 (some(_isLog)=false 时整段跳过).
+        const _isLog = (n) => /(?:_log|_stem|_wood|_hyphae)$/.test(n || '');
+        if (blocks.some(b => b && _isLog(b.name))) {
+            const _nearestInColumn = (blk) => {
+                let base = blk.position;
+                for (let i = 0; i < 24; i++) {                       // 下沉到列底 (树高上限 ~24)
+                    const b = bot.blockAt(base.offset(0, -1, 0));
+                    if (b && _isLog(b.name)) base = b.position; else break;
+                }
+                let best = bot.blockAt(base);
+                if (!best) return blk;
+                let bestD = bot.entity.position.distanceTo(base.offset(0.5, 0.5, 0.5));
+                let p = base;
+                for (let i = 0; i < 24; i++) {                       // 自底向上, 记离 bot 最近的一块
+                    const b = bot.blockAt(p.offset(0, 1, 0));
+                    if (!b || !_isLog(b.name)) break;
+                    const d = bot.entity.position.distanceTo(b.position.offset(0.5, 0.5, 0.5));
+                    if (d < bestD) { bestD = d; best = b; }
+                    p = b.position;
+                }
+                return best;
+            };
+            const seen = new Set(), remapped = [];
+            for (const blk of blocks) {
+                const t = (blk && _isLog(blk.name)) ? _nearestInColumn(blk) : blk;
+                if (!t || !t.position) continue;
+                const k = `${t.position.x},${t.position.y},${t.position.z}`;
+                if (seen.has(k)) continue;
+                seen.add(k); remapped.push(t);
+            }
+            remapped.sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position));
+            if (remapped.length) blocks = remapped;
         }
         // ★C304 ORE: pick the nearest candidate that is genuinely reachable via a short walk/dig
         // path (no bridging across gaps). Skip+exclude unreachable ones so we don't lock onto — and
@@ -1429,7 +1749,15 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
                 // through a wall (the C304 path-exists gate selected it, but distToBlock<=4.6 alone
                 // let it reach through solid rock). Non-ore (logs/stone/dirt) dig as before.
                 const _isOre = /_ore$/.test(block.name || '');
-                const r = await safeDig(bot, block, { maxMs: 15000, equip: false, requireLOS: _isOre });
+                let r = await safeDig(bot, block, { maxMs: 15000, equip: false, requireLOS: _isOre });
+                // ★C304-T (2026-07-09 "凿隧道直达"): 埋铁被 safeDig 判 unreachable/occluded 时不再直接
+                //  exclude 放弃整条矿脉 — 先朝它凿一条密封隧道(防坠/防淹/防x-ray, 任一不安全即停),
+                //  逼近到臂展再重试一次 safeDig(requireLOS 仍锁, 绝不 x-ray)。隧道失败=旧行为 exclude。
+                if (_isOre && (r === 'unreachable' || r === 'occluded') && _tunnelTries < _TUNNEL_MAX_TRIES) {
+                    _tunnelTries++;
+                    if (await tunnelToOre(bot, block))
+                        r = await safeDig(bot, block, { maxMs: 15000, equip: false, requireLOS: true });
+                }
                 if (r === 'ok') {
                     // ★Actually COLLECT the drop (fixes "挖了树不捡木头"): step ONTO the broken
                     // block's spot via a dig-capable path so mineflayer auto-vacuums the item,
@@ -1551,7 +1879,8 @@ export async function pickupNearbyItems(bot, distance = 8) {
             return it && it.name ? it.name : '';
         } catch (e) { return ''; }
     };
-    const faminePickup = () => bot.food <= 2 || (bot.food <= 3 && bot.health <= 8);
+    // ★2026-07-09 用户令: 双闸全 OFF 时不因低血/饥饿改变拾取行为 (不再只捡食物/贴身近物); 任一闸开恢复。
+    const faminePickup = () => (process.env.MC_FOOD_INSTINCTS === '1' || process.env.MC_HP_INSTINCTS === '1') && (bot.food <= 2 || (bot.food <= 3 && bot.health <= 8));
     const miningPickup = () => {
         const skill = bot._currentSkill || '';
         const mob = bot._mobility || {};
@@ -3212,7 +3541,8 @@ function randomUnstickSkipMode(bot, goalInfo = null) {
             i && i.name &&
             /beef|porkchop|chicken|mutton|rabbit|cod|salmon|bread|apple|berries|potato|carrot|melon|cookie|pumpkin_pie|beetroot|mushroom_stew|rabbit_stew|suspicious_stew/i.test(i.name) &&
             i.name !== 'rotten_flesh');
-        if (isItemGoal && bot && bot.health <= 8 && bot.food < 18 && !normalFood) return 'lowhp-item-pickup';
+        // ★2026-07-09 用户令: 双闸全 OFF 时不因低血限制取物目标; 任一闸开恢复。
+        if ((process.env.MC_HP_INSTINCTS === '1' || process.env.MC_FOOD_INSTINCTS === '1') && isItemGoal && bot && bot.health <= 8 && bot.food < 18 && !normalFood) return 'lowhp-item-pickup';
     } catch (e) {}
     return null;
 }
@@ -4645,17 +4975,48 @@ export async function digOneCapOne(bot) {
 
     const feet = bot.entity.position.floored();
 
+    // ★封顶料 capName 先算(与 ④ 同优先级: 泥土>石系>...>木料末位保命)——① 的 gravity
+    //   闸门要靠它判定"能不能挖三填一穿沙"。inv/capName 下游 ④⑤ 直接复用。
+    const inv = world.getInventoryCounts(bot);
+    // ★#4 (review-2026-07-06 乱放木板): cap/侧墙材料 cheap-first, 木料末位。旧版 _CAP_PREFS 只列
+    // oak_planks(漏 spruce 等), fallback 抓"任意固体"会选中 spruce_planks → 工作台旁乱堆木板(真凶,
+    // 初诊误判在 modes.js)。扩充贱料清单 + fallback 拆两段: 先任意非木贱料, 只有木料时才用(裸生
+    // 封顶保命 — modes.js:1175 保护的 wood-only seal 不能断)。cap(④)与侧墙(⑤ 4376)共用 capName。
+    // ★材料优先级 (用户令 2026-07-07: 泥土 > 石头 > 其他): dirt/coarse_dirt 优先, 石系其次;
+    //   木料仍是最末位 fallback(下方 _nonWood/_wood 两段), 仅裸生保命才用。
+    const _CAP_PREFS = [
+        'dirt', 'coarse_dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'deepslate',
+        'andesite', 'diorite', 'granite', 'netherrack', 'tuff', 'sandstone', 'red_sandstone', 'terracotta',
+    ];
+    let capName = _CAP_PREFS.find(n => (inv[n] || 0) > 0);
+    if (!capName) {
+        const _solidOK = (it) =>
+            !_isGravity({ name: it.name }) &&
+            !/sword|pickaxe|axe|shovel|hoe|_ingot|_pickaxe|bucket|torch|seeds|^bed$|_bed$|food|apple|bread|meat|fish/.test(it.name) &&
+            (mc.getItemId(it.name) != null);
+        const items = bot.inventory.items();
+        const _nonWood = items.find(it => _solidOK(it) && !/_planks$|_log$|_wood$/.test(it.name));   // 先非木贱料
+        const _wood = items.find(it => _solidOK(it) && /_planks$|_log$|_wood$/.test(it.name));       // 木料末位(仅裸生保命)
+        capName = (_nonWood && _nonWood.name) || (_wood && _wood.name) || null;
+    }
+
     // ① _gravityPitTrap (C334 sand/gravel column): if a gravity block sits just
     // below the dig target (dy-1 / dy-2) or is poised to fall onto the cap (dy+2),
-    // digging one down would bury the bot. Bail to seal instead.
+    // digging one down would bury the bot.
+    // ★挖三填一 (用户令 2026-07-08): 沙子/砾石本身是可以挖穿的 —— 前提是手里有泥土等
+    //   可封顶方块。所以 gravity 列只在【无封顶料】时才拒挖 downgrade-to-seal; 手里有
+    //   capName 时照常挖一格再封顶(④ 会把落下的沙压在 cap 上, 形成密封坑)。
     const _trapProbe = [
         bot.blockAt(feet.offset(0, -1, 0)),
         bot.blockAt(feet.offset(0, -2, 0)),
         bot.blockAt(feet.offset(0, 2, 0)),
     ];
     if (_trapProbe.some(_isGravity)) {
-        log(bot, 'digOneCapOne: gravity column above/below (C334 _gravityPitTrap) — refusing dig-one, downgrade to seal.');
-        return false;
+        if (!capName) {
+            log(bot, 'digOneCapOne: gravity column above/below (C334 _gravityPitTrap) 且手里无封顶料 — refusing dig-one, downgrade to seal.');
+            return false;
+        }
+        log(bot, `digOneCapOne: gravity column (sand/gravel) present but cap block '${capName}' in hand — 挖三填一 proceeding (dig-through + cap).`);
     }
 
     // ② Bedrock-floor / deep-shaft guard: never dig the one-down at or below y=16.
@@ -4693,29 +5054,7 @@ export async function digOneCapOne(bot) {
     }
 
     // ④ Cap the head: place a NON-gravity block two above the (new) feet so it
-    // can't fall through the pocket. Pick a solid filler we actually carry.
-    const inv = world.getInventoryCounts(bot);
-    // ★#4 (review-2026-07-06 乱放木板): cap/侧墙材料 cheap-first, 木料末位。旧版 _CAP_PREFS 只列
-    // oak_planks(漏 spruce 等), fallback 抓"任意固体"会选中 spruce_planks → 工作台旁乱堆木板(真凶,
-    // 初诊误判在 modes.js)。扩充贱料清单 + fallback 拆两段: 先任意非木贱料, 只有木料时才用(裸生
-    // 封顶保命 — modes.js:1175 保护的 wood-only seal 不能断)。cap(④)与侧墙(⑤ 4376)共用 capName。
-    // ★材料优先级 (用户令 2026-07-07: 泥土 > 石头 > 其他): dirt/coarse_dirt 优先, 石系其次;
-    //   木料仍是最末位 fallback(下方 _nonWood/_wood 两段), 仅裸生保命才用。
-    const _CAP_PREFS = [
-        'dirt', 'coarse_dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'deepslate',
-        'andesite', 'diorite', 'granite', 'netherrack', 'tuff', 'sandstone', 'red_sandstone', 'terracotta',
-    ];
-    let capName = _CAP_PREFS.find(n => (inv[n] || 0) > 0);
-    if (!capName) {
-        const _solidOK = (it) =>
-            !_isGravity({ name: it.name }) &&
-            !/sword|pickaxe|axe|shovel|hoe|_ingot|_pickaxe|bucket|torch|seeds|^bed$|_bed$|food|apple|bread|meat|fish/.test(it.name) &&
-            (mc.getItemId(it.name) != null);
-        const items = bot.inventory.items();
-        const _nonWood = items.find(it => _solidOK(it) && !/_planks$|_log$|_wood$/.test(it.name));   // 先非木贱料
-        const _wood = items.find(it => _solidOK(it) && /_planks$|_log$|_wood$/.test(it.name));       // 木料末位(仅裸生保命)
-        capName = (_nonWood && _nonWood.name) || (_wood && _wood.name) || null;
-    }
+    // can't fall through the pocket. capName 已在 ① 之前算好(泥土>石系>...>木料末位)。
 
     // ★C346 depth-adaptive cap (deaths #4/#5 2026-07-02 13:11, zombie siege at the FLAT
     // village: a 1-deep pocket's cap cell (feet+2) sits one ABOVE the original surface —

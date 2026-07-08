@@ -24,6 +24,10 @@ $env:MC_FRAMEWORK_SHADOW = '0'
 # ⚠ 注意: 修改本行后必须重启 watchdog 进程本身 (已在跑的 watchdog env 不会因改文件而变); 或直接靠代码默认。
 # 回头恢复: 改成 '1' (或删除本行) 并重启 watchdog。详见 docs/food-instincts-disabled.md。
 $env:MC_FOOD_INSTINCTS = '0'
+# ★2026-07-09 用户令: 低血本能同步熔断 — 禁止因低血/饥饿打断任何行动 (hp<12 灰区/hp<=4 地板/
+# no-regen 冻身 hold/auto_eat/技能低血 BAIL 全断), 饿死/死了拉倒。恢复: 改 '1' 并重启 watchdog + bot。
+# 详见 docs/hp-instincts-disabled.md。
+$env:MC_HP_INSTINCTS = '0'
 # ★2026-07-05 新机: node 装在 zip 目录而非系统 PATH (与 start-neko.ps1 同一路径约定)。
 # Restart-Agent 及各 keep-alive 都用裸名 'node' 启动 — 若 PATH 里没有 node, 整条链一个也起不来。
 $node22 = 'C:\Users\Administrator\nodejs22'
@@ -91,7 +95,7 @@ $progFile = Join-Path $proj 'bots\_supervisor\progress.txt'
 $freezeLimitSec = 360    # progress.txt stale this long while agent is up = skill hung -> restart
 $wedgeLimitSec  = 1200   # agent.err SILENT this long (no broadcasts) = half-dead MC conn -> restart
 
-function Restart-Agent($reason) {
+function Restart-Agent($reason, [switch]$ClearWorld) {
     Add-Content $log "[$(Get-Date -Format o)] RESTART ($reason)"
     # ── IMMORTAL OS-LEVEL ALERT ────────────────────────────────────────────────────────
     # Chat Monitors/crons are session-bound and die ~1.5h after the user's last message
@@ -121,7 +125,32 @@ function Restart-Agent($reason) {
         $c = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
         if ($c) { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue }
     }
+    # ★2026-07-09 EADDRINUSE crash-loop 根因修: 旧代码只按「监听 48909 的进程」杀。一个还在 BOOT
+    #   (fork 了 init_agent, 但 mindserver 还没 listen 48909) 的 main.js 逃过端口杀 → 下面又 launch
+    #   一个 → 两个 main.js 抢 48909 → EADDRINUSE 未捕获异常 → 进程退出 (proc DEAD) → watchdog 再
+    #   重启 → 自持崩溃循环 (实录 agent.err 18:17 连环 EADDRINUSE)。修: 按命令行扫掉所有残留
+    #   main.js / init_agent.js 节点进程 (含 mid-boot 的), 再轮询确认 48909 真空出来才 relaunch。
+    Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'main\.js|init_agent\.js' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Seconds 2
+    # 轮询确认端口真空 (监听 socket 随进程死立即释放, 无 TIME_WAIT; 给 mid-boot 的 late-bind 兜底)
+    $portFreeTries = 0
+    while ((Get-NetTCPConnection -LocalPort 48909 -State Listen -ErrorAction SilentlyContinue) -and $portFreeTries -lt 10) {
+        Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -match 'main\.js|init_agent\.js' } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Seconds 1
+        $portFreeTries++
+    }
+    # ★2026-07-08 NEW-WORLD auto-reset: clear stale world-tied files AFTER the agent is dead (so
+    # nothing rewrites landmarks.json from memory) and BEFORE the fresh boot below re-reads them.
+    if ($ClearWorld) {
+        try {
+            $cw = & node (Join-Path $proj 'bots\_supervisor\new-world-reset.mjs') clear
+            Add-Content $log "[$(Get-Date -Format o)] world-reset: $cw"
+        } catch { Add-Content $log "[$(Get-Date -Format o)] world-reset clear err: $($_.Exception.Message)" }
+    }
     # ★2026-07-04 review: 与 start-neko.ps1 对齐 — 带内存/GC flags (当前活进程即以此拉起),
     # MC_FRAMEWORK_* 已在脚本顶部钉进本进程 env, 子进程自动继承。
     Start-Process -FilePath 'node' -ArgumentList '--max-old-space-size=8192', '--expose-gc', 'main.js' -WorkingDirectory $proj `
@@ -158,6 +187,21 @@ while ($true) {
         Add-Content $log "[$(Get-Date -Format o)] watchdog.stop found - exiting"
         Remove-Item (Join-Path $proj 'watchdog.stop') -Force
         break
+    }
+    # ── ★NEW-WORLD AUTO-RESET (2026-07-08): 用户开新世界时旧世界的 landmarks/bed/chest/oracle/记忆
+    #    坐标全失效 → bot 朝不存在的旧坐标白跑。new-world-reset.mjs 用 ore-oracle 同款判据 (saves 下
+    #    .mca 最新 mtime = 当前世界) 检测切换; 变了就 kill→clear→relaunch (fresh boot 才甩得掉
+    #    landmarks.json 这种跨重启内存)。首次运行只记基线不清。detect 无副作用(不删文件)。 ──
+    $nwr = Join-Path $proj 'bots\_supervisor\new-world-reset.mjs'
+    if (Test-Path $nwr) {
+        try {
+            $nwrOut = & node $nwr detect
+            if ($LASTEXITCODE -eq 10) {
+                Add-Content $log "[$(Get-Date -Format o)] ★NEW WORLD: $nwrOut — clearing stale state + restarting agent"
+                Restart-Agent "NEW WORLD detected — cleared stale world state ($nwrOut)" -ClearWorld
+                continue
+            }
+        } catch {}
     }
     # BRIDGE KEEP-ALIVE: bridge.mjs (a detached WS client) is what writes frame.jpg from the
     # agent's screenshot frames + relays tasks. It's the screenshot pipeline's weak link — it
@@ -240,7 +284,35 @@ while ($true) {
     }
     $listening = Get-NetTCPConnection -LocalPort 48909 -State Listen -ErrorAction SilentlyContinue
     if (-not $listening) {
-        Restart-Agent 'agent DOWN (48909 not listening)'
+        # ★2026-07-09 MC-DOWN GRACE (实录 01:23-01:33 连环误杀 7 次): 48909 是 bot spawn 成功后才开的
+        # 端口。MC LAN 世界 (settings.js "port") 拒连期间, agent 永远 spawn 不到 → 48909 永远不开 →
+        # 旧逻辑把「正在 10s 退避重连的健康 agent」当死进程每 60s 杀一次 (kill→crash快照→relaunch 风暴,
+        # 顺带清掉 bot 记忆)。修: 判死前先探 MC 端口 —— MC 不可达 + agent 进程还活着 = 上游的问题,
+        # HOLD 不杀 (agent 自己会无限重连, 服务器一回来就接上)。MC 可达时行为与旧版逐字节一致。
+        $mcPort = 55916
+        try {
+            $pm = Select-String -Path (Join-Path $proj 'settings.js') -Pattern '"port":\s*(\d+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($pm) { $mcPort = [int]$pm.Matches[0].Groups[1].Value }
+        } catch {}
+        # MC LAN 世界监听在 '::' (IPv6) — 127.0.0.1 的 TcpClient 探针会假阴性 (实录 01:44:39 报
+        # "MC DOWN too" 而 10s 后 agent 正常连入)。服务器就在本机 → 直接查有没有进程在监听该端口,
+        # 不分 v4/v6, 也不给 MC 造垃圾连接。
+        $mcUp = [bool](Get-NetTCPConnection -LocalPort $mcPort -State Listen -ErrorAction SilentlyContinue)
+        # 诊断: 进程死 vs 活着但端口没开 (上次事故第一刀分不清) — 写进 RESTART/HOLD 原因里。
+        $mainAlive = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -like '*main.js*' }
+        $procState = if ($mainAlive) { 'proc ALIVE, port closed' } else { 'proc DEAD' }
+        if (-not $mcUp -and $mainAlive) {
+            Add-Content $log "[$(Get-Date -Format o)] HOLD (agent 48909 down but MC server :$mcPort unreachable — upstream outage, agent retrying; NOT killing)"
+            if (-not $script:mcDownSince) {
+                $script:mcDownSince = Get-Date
+                try { Add-Content (Join-Path $proj 'ALERTS.txt') ("[{0}] MC SERVER UNREACHABLE :{1} — watchdog holding (agent alive, retrying)" -f (Get-Date -Format 'MM-dd HH:mm:ss'), $mcPort) } catch {}
+            }
+        }
+        else {
+            $script:mcDownSince = $null
+            Restart-Agent ("agent DOWN (48909 not listening; $procState; MC :$mcPort " + $(if ($mcUp) { 'up' } else { 'DOWN too' }) + ")")
+        }
     }
     else {
         # FREEZE DETECTION: agent process up but the supervised skill may be hung. Use the

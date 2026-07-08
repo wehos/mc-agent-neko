@@ -125,7 +125,7 @@ export class VisionInterpreter {
 
     async analyzeImage(filename) {
         try {
-            const imageBuffer = fs.readFileSync(`${this.fp}/${filename}.jpg`);
+            const imageBuffer = await fs.promises.readFile(`${this.fp}/${filename}.jpg`);
             const messages = this.agent.history.getHistory();
 
             const blockInfo = this.getCenterBlockInfo();

@@ -70,6 +70,10 @@ export default async function prepNether(bot, ctx) {
 
 async function prepNetherInner(bot, ctx) {
     const { skills, world, mc, log, Vec3 } = ctx;
+    // ★2026-07-09 用户令 HP/食物本能熔断: 两个外部熔断器(监督器直读 process.env, 默认关闭=值≠'1'):
+    // 因低血/因饿的本能失效; 置 '1' 恢复原行为。food breaker: MC_FOOD_INSTINCTS==='1'; hp breaker: MC_HP_INSTINCTS==='1'。
+    const _foodOn = () => process.env.MC_FOOD_INSTINCTS === '1';
+    const _hpOn   = () => process.env.MC_HP_INSTINCTS   === '1';
     const has = (n) => world.getInventoryCounts(bot)[n] || 0;
     const equipArmor = async () => { if (bot.armorManager) { try { await bot.armorManager.equipAll(); } catch (e) {} } };
     const cancelRequested = () => !!(bot._supervisorCancelAt && Date.now() - bot._supervisorCancelAt < 30000);
@@ -155,7 +159,8 @@ async function prepNetherInner(bot, ctx) {
         // active or the bot loses its ③ shelter at night. After cutover kernelDriver heartbeats → yield.
         try { return !!(bot._kernelDriverActive && Date.now() - bot._kernelDriverActive < 10000); } catch (e) { return false; }
     };
-    const shouldDuskShelter = () => !nightOwnedByDecisionLayer() && isDuskNow() && snacklessCritical() && !undergroundSafe() && !canFightNight();
+    // ★2026-07-09 用户令 HP/食物本能熔断: 黄昏因饿/低血预庇护(snacklessCritical 驱动, 非因怪; 夜庇护走 isNightNow 不受影响); 任一/双闸开恢复。
+    const shouldDuskShelter = () => (_hpOn() || _foodOn()) && !nightOwnedByDecisionLayer() && isDuskNow() && snacklessCritical() && !undergroundSafe() && !canFightNight();
     const shouldDayFamineHostileShelter = () => {
         try {
             const securedLowResourceHold = bodyBudgetBunkerHold() && (coveredAboveNow() || containedMobilityNow());
@@ -499,7 +504,7 @@ async function prepNetherInner(bot, ctx) {
                             const me = bot.entity.position;
                             let ax = me.x - wb.position.x, az = me.z - wb.position.z;
                             const L = Math.hypot(ax, az) || 1; ax /= L; az /= L;
-                            if (snacklessCritical()) {
+                            if ((_hpOn() || _foodOn()) && snacklessCritical()) {   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿/低血软化水禁(不搬迁,就地挖/守); 任一/双闸开恢复。
                                 prog(`prepNether: bunker water veto softened at food=${bot.food} hp=${Math.round(bot.health)} — no night relocation, dig/hold in place`);
                             } else {
                                 prog(`prepNether: bunker site too close to water (${Math.round(L)}b) — moving 12b inland before digging`);
@@ -510,9 +515,9 @@ async function prepNetherInner(bot, ctx) {
                     const wetDist = nearestWaterDist(4);
                     if (standingInFluid() || wetDist !== null) {
                         const wetFails = bot._nightWetBunkerFails || 0;
-                        const injuredHold = bot.health <= 16 && !standingInFluid();
+                        const injuredHold = _hpOn() && bot.health <= 16 && !standingInFluid();   // ★2026-07-09 用户令 HP/食物本能熔断: 低血接受贴水坑(纯HP,无威胁); HP闸开恢复。
                         const repeatedWetFail = wetFails >= 5 && !standingInFluid();
-                        if ((snacklessCritical() && !standingInFluid()) || injuredHold || repeatedWetFail) {
+                        if ((((_hpOn() || _foodOn()) && snacklessCritical()) && !standingInFluid()) || injuredHold || repeatedWetFail) {   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿/低血接受贴水坑; 任一/双闸开恢复。
                             bot._nightWetBunkerFails = 0;
                             prog(`prepNether: wet-adjacent bunker accepted (waterDist=${wetDist === null ? 'none' : wetDist.toFixed(1)} hp=${Math.round(bot.health)} fails=${wetFails}) — seal/hold beats night relocation loop`);
                         } else {
@@ -748,7 +753,7 @@ async function prepNetherInner(bot, ctx) {
                     // MAROONED 反射让位(不抢身体中断 digDown). 覆盖 covered-hold/body-budget/dug-in 三分支,每轮
                     // (~1.5s)刷新,12s 过期. 解 prepNether 封顶 ⟷ mobility MAROONED dig 反射互绞(25次封顶失败真根因).
                     try { bot._nightSealingUntil = Date.now() + 12000; } catch (e) {}
-                    const lowResourceNoDigHold = bodyBudgetBunkerHold();
+                    const lowResourceNoDigHold = (_hpOn() || _foodOn()) && bodyBudgetBunkerHold();   // ★2026-07-09 用户令 HP/食物本能熔断: 低食+低血跳过挖坑改就地封顶(mixed); 任一/双闸开恢复(双关→照常挖坑掩体)。
                     if (coveredAbove()) {
                         prog(`prepNether: bunker already covered — hold position y=${Math.floor(bot.entity.position.y)}, no extra digDown`);
                         await nightBunkerStaticWeapon();
@@ -1004,7 +1009,7 @@ async function prepNetherInner(bot, ctx) {
             const suppressed = bot._killBoxSuppressUntil && Date.now() < bot._killBoxSuppressUntil;
             if (d0 < z.r && !inMelee && !suppressed) {
                 const staticOnly = stationaryKitOnly();
-                const staticKit = staticOnly && !hasEdible() && bot.food <= 6 && (coveredAboveNow() || containedMobilityNow()) && stationaryKitOpportunity();
+                const staticKit = staticOnly && _foodOn() && !hasEdible() && bot.food <= 6 && (coveredAboveNow() || containedMobilityNow()) && stationaryKitOpportunity();   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿滞留死亡簇改就地补给(纯食物); 食物闸开恢复(关→照常上浮/驱离)。
                 if (staticKit) {
                     prog(`★KILL-BOX(prep): stationary kit override ${staticKit} food=${bot.food} hp=${Math.round(bot.health)} y=${Math.round(p0.y)} — no surfaceUp/expel`);
                     try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
@@ -1155,7 +1160,7 @@ async function prepNetherInner(bot, ctx) {
         // 落在 >2 && <14 死区时(normalSafeDay 卡 food≥14、famineVerticalEmergency 卡 food≤2),有铁无木
         // 无台的健康 bot 会在 TABLE gate 空转 3min+(live 实测 food13)。保留 hp≥14(地表战斗安全)/白天/
         // threat=0;手里有吃的就放行(keepFed 同轮先吃,food 会回升),没吃的也要 food≥8 才上,避免饿着爬。
-        const normalSafeDay = undergroundWorksite && daytime && threat.actionable === 0 && bot.health >= 14 && (bot.food >= 8 || hasEdible());
+        const normalSafeDay = undergroundWorksite && daytime && threat.actionable === 0 && (!_hpOn() || bot.health >= 14) && (!_foodOn() || bot.food >= 8 || hasEdible());   // ★2026-07-09 用户令 HP/食物本能熔断: 补木上浮的血/食要求门(威胁前置 threat===0 保留); 对应闸开各自恢复(双关→无威胁即放行上浮补木)。
         const famineVerticalEmergency = daytime
             && !hasEdible()
             && bot.food <= 2
@@ -1472,10 +1477,10 @@ async function prepNetherInner(bot, ctx) {
         // withdraw for RATIONS — hungry, nothing edible held, bank provably has food, and
         // it's CLOSE (16b even by day: no long famine marches for a snack; the WANT list
         // below already pulls food x8). Shares the 10-min throttle with the iron trigger.
-        const _foodPoor = bot.food != null && bot.food <= 10 && !hasEdible();
+        const _foodPoor = _foodOn() && bot.food != null && bot.food <= 10 && !hasEdible();   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿去银行取粮(纯食物); 食物闸开恢复。
         const _manifestFood = _mCount(/^(cooked_\w+|bread|apple|baked_potato|beef|porkchop|mutton)$/);
         const _foodTopup = _foodPoor && _manifestFood !== 0 && _bankDistNow <= 16 && _topupFresh;
-        if (haveSword() && haveAnyArmor() && bot.health >= 14 && !_ironTopup && !_foodTopup) { prog('bankRecover: already armed (sword+armor, hp ok) — skip'); return; }
+        if (haveSword() && haveAnyArmor() && (!_hpOn() || bot.health >= 14) && !_ironTopup && !_foodTopup) { prog('bankRecover: already armed (sword+armor, hp ok) — skip'); return; }   // ★2026-07-09 用户令 HP/食物本能熔断: 低血不再强拉已武装 bot 去银行(纯HP要求门); HP闸开恢复。
         if (_ironTopup || _foodTopup) {
             bot._bankIronTopupAt = Date.now();
             prog(`bankRecover: ${_ironTopup ? 'iron' : 'food'} top-up — ${_ironTopup ? `inv iron ${has('iron_ingot')}+${has('raw_iron')}<3, no iron pick` : `food=${bot.food} nothing edible held`}, bank ${Math.round(_bankDistNow)}b away → withdraw`);
@@ -1492,7 +1497,7 @@ async function prepNetherInner(bot, ctx) {
         // steal the body for a long/destructive cave path and only later discover that hunger
         // logic would have held in place. With low HP, no normal food, and no regen, recovery
         // trips are allowed only when the bank is already right beside us.
-        if (!hasEdible() && bot.health < 14 && bot.food < 18) {
+        if ((_hpOn() || _foodOn()) && !hasEdible() && bot.health < 14 && bot.food < 18) {   // ★2026-07-09 用户令 HP/食物本能熔断: 无回血限制远行取银行(mixed); 任一/双闸开恢复。
             const me = bot.entity.position;
             const bankDist = Math.hypot(me.x - bank.x, me.y - bank.y, me.z - bank.z);
             if (bankDist > 4.5) {
@@ -1500,7 +1505,7 @@ async function prepNetherInner(bot, ctx) {
                 return;
             }
         }
-        if (famineBudget()) {
+        if (_foodOn() && famineBudget()) {   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿限制去银行(famine 纯食物口径; 内含威胁支路仅在食物闸开时生效); 食物闸开恢复。
             const me = bot.entity.position;
             const bankDist = Math.hypot(me.x - bank.x, me.y - bank.y, me.z - bank.z);
             if (hostilesNear(16) > 0 || bankDist > 8) {
@@ -1634,7 +1639,7 @@ async function prepNetherInner(bot, ctx) {
             } catch (e) { return false; }
         };
         if ((homeSet() && !homeSaturated()) || bot.interrupt_code) return;
-        if (bot.health < 10) return;                            // too hurt to do anything but survive
+        if (_hpOn() && bot.health < 10) return;                 // ★2026-07-09 用户令 HP/食物本能熔断: 低血不再阻止建床安家(纯HP); HP闸开恢复(原: too hurt to do anything but survive)。
         // By DAY we run setBed even with spiders around — this jungle has no sheep, so setBed
         // bootstraps a bed from SPIDER STRING (4 string=1 wool, 2x2), and spiders ARE the
         // string source. setBed's own guards keep it safe (spider-hunt is day+calm gated).
@@ -1681,11 +1686,11 @@ async function prepNetherInner(bot, ctx) {
     // cave-mob swarm → survive the diamond mine.)
     const stockTorches = async () => {
         if (bot.interrupt_code || has('torch') >= 12) return;
-        if (famineBudget()) {
+        if (_foodOn() && famineBudget()) {   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿跳过火把 kit(famine 纯食物); 食物闸开恢复。
             prog(`prepNether: SKIP torch kit — famine body budget food=${bot.food} hp=${Math.round(bot.health)} no edible`);
             return;
         }
-        if (bot.health < 14 && bot.food < 18 && !hasEdible()) {
+        if ((_hpOn() || _foodOn()) && bot.health < 14 && bot.food < 18 && !hasEdible()) {   // ★2026-07-09 用户令 HP/食物本能熔断: 无回血跳过火把 kit(mixed); 任一/双闸开恢复。
             prog(`prepNether: SKIP torch kit — no-regen body budget food=${bot.food} hp=${Math.round(bot.health)} no normal food; don't chop/craft optional torches`);
             return;
         }
@@ -1748,8 +1753,8 @@ async function prepNetherInner(bot, ctx) {
         if (isNightNow()) return { ok: false, reason: 'night' };
         const hostileBlock = critical ? noRegenActionableThreats(12).actionable : hostilesNear(24);
         if (hostileBlock > 0) return { ok: false, reason: critical ? `actionable12=${hostileBlock}` : `hostiles24=${hostileBlock}` };
-        if (bot.health <= (critical ? 8 : 14)) return { ok: false, reason: `hp=${Math.round(bot.health)}` };
-        if (!critical && bot.food <= 14 && !edibleNow()) return { ok: false, reason: `food=${bot.food} no edible held` };
+        if (_hpOn() && bot.health <= (critical ? 8 : 14)) return { ok: false, reason: `hp=${Math.round(bot.health)}` };   // ★2026-07-09 用户令 HP/食物本能熔断: 低血不再阻止可选砍木(纯HP); HP闸开恢复。
+        if (_foodOn() && !critical && bot.food <= 14 && !edibleNow()) return { ok: false, reason: `food=${bot.food} no edible held` };   // ★2026-07-09 用户令 HP/食物本能熔断: 低食不再阻止可选砍木(纯食物); 食物闸开恢复。
         return critical ? reachableWoodTarget(16, 8) : reachableWoodTarget();
     };
     const foodSignalBeforeSurface = () => {
@@ -1927,7 +1932,10 @@ async function prepNetherInner(bot, ctx) {
         }
         const lowHpNoRegen = bot.health < 14 && bot.food < 18;
         if (lowHpNoRegen && !hasEdible()) await noRegenStaticKit('keepFed');
-        if (bot.food >= 12 && !lowHpNoRegen) return true;        // no food held but enough buffer to continue short prep work
+        // ★2026-07-09 用户令 HP/食物本能熔断: 食物闸关 → keepFed 仅保留上方"吃包内食物"(第1类豁免), 直接 return true
+        // 跳过后面全部 觅食派发(feedUp/forage/famine chopWood)、因饿/无回血保持、饥荒兜底与夜间饥饿 hold;
+        // 食物闸开(='1')→ 恢复整块觅食机(与原 `food>=12 && !lowHpNoRegen` 早退字节等价)。
+        if (!_foodOn() || (bot.food >= 12 && !lowHpNoRegen)) return true;        // no food held but enough buffer to continue short prep work
         // ★C291: the food gate must not block the PICKAXE CRAFT when the bot is pickless but already
         // HOLDS the materials — the craft is zero-food-cost and IS the bootstrap escape. Live
         // 2026-06-20 (sibling to C285/C286): food=11 keepFed looped on a futile forest feedUp while
@@ -2633,7 +2641,7 @@ async function prepNetherInner(bot, ctx) {
             }
             if (cleared > 0) prog(`prepNether: ★C324-A capSurplus /clear'd ${cleared} bulk surplus (emptySlots was ${emptySlots}) — keep slots free for wood/loot/crafts`);
         } catch (e) {}
-        if (famineBudget()) {
+        if (_foodOn() && famineBudget()) {   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿跳过巡回 kit(famine 纯食物); 食物闸开恢复(关→照常巡回补 kit)。
             await famineStaticKit();
             prog(`prepNether: SKIP roaming kit — famine body budget food=${bot.food} hp=${Math.round(bot.health)} no edible`);
             return;
@@ -2863,7 +2871,7 @@ async function prepNetherInner(bot, ctx) {
         // 成功获木 → tableRecoveryBlocked 见 logs>0 自动放行, 原流程继续; 失败 → 如实落回原路径。
         if (!woodFirstTried && has(g.item) < g.count && needsCraftingTable(g.item)
             && planksEqHeld() < 4 && !isNightNow() && !isDuskNow()
-            && !famineBudget() && bot.health >= 8 && !bot.interrupt_code) {
+            && (!_foodOn() || !famineBudget()) && (!_hpOn() || bot.health >= 8) && !bot.interrupt_code) {   // ★2026-07-09 用户令 HP/食物本能熔断: 铁段前补木不再被因饿/低血挡(要求门); 对应闸开各自恢复。
             woodFirstTried = true;
             const underground = bot.entity.position.y < 55;
             prog(`prepNether: ★WOOD-FIRST before ${g.item} — planksEq=${planksEqHeld()}<4 (table floor), daytime → ${underground ? 'surfaceUp then ' : ''}chopWood before the iron segment`);
@@ -2893,7 +2901,7 @@ async function prepNetherInner(bot, ctx) {
         await famineStaticKit();
         await lowFoodHostileStaticWeapon(`before ${g.item}`);
         await stockTorches();   // light the mines before deep diamond runs — kills the cave-mob swarm deaths
-        if (famineCritical()) {
+        if (_foodOn() && famineCritical()) {   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿在 kit 目标前让位/觅食(famine 纯食物); 食物闸开恢复(关→照常尝试目标)。
             if (daylightFamineForageWindow() && (!bot._lastPrepFamineForageAt || Date.now() - bot._lastPrepFamineForageAt > 60000)) {
                 bot._lastPrepFamineForageAt = Date.now();
                 prog(`prepNether: FAMINE daylight forage window before ${g.item} — hp=${Math.round(bot.health)} food=${bot.food}; hand body to keepFed/feedUp once`);
@@ -2922,7 +2930,7 @@ async function prepNetherInner(bot, ctx) {
                                // only fired once per goal at the top. Self-gated → cheap no-op.
             await famineStaticKit();
             await lowFoodHostileStaticWeapon(`mid ${g.item}`);
-            if (famineCritical()) {
+            if (_foodOn() && famineCritical()) {   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿在 kit 目标中让位/觅食(famine 纯食物); 食物闸开恢复(关→照常尝试目标)。
                 if (daylightFamineForageWindow() && (!bot._lastPrepFamineForageAt || Date.now() - bot._lastPrepFamineForageAt > 60000)) {
                     bot._lastPrepFamineForageAt = Date.now();
                     prog(`prepNether: FAMINE daylight forage window mid-${g.item} — hp=${Math.round(bot.health)} food=${bot.food}; hand body to keepFed/feedUp once`);

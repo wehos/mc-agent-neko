@@ -111,12 +111,15 @@ export class Prompter {
 
         this.skill_libary = new SkillLibrary(agent, this.embedding_model);
         mkdirSync(`./bots/${name}`, { recursive: true });
-        writeFileSync(`./bots/${name}/last_profile.json`, JSON.stringify(this.profile, null, 4), (err) => {
-            if (err) {
-                throw new Error('Failed to save profile:', err);
-            }
+        // ★fix 2026-07-09: writeFileSync is SYNCHRONOUS — its 3rd arg is `options`, not a callback,
+        // so the error-handling/success-log callback here never ran (and `new Error(msg, err)` ignores
+        // its 2nd arg). This is a one-time boot save (kept sync); wrap it properly instead.
+        try {
+            writeFileSync(`./bots/${name}/last_profile.json`, JSON.stringify(this.profile, null, 4));
             console.log("Copy profile saved.");
-        });
+        } catch (err) {
+            throw new Error(`Failed to save profile: ${err && err.message}`);
+        }
     }
 
     getName() {

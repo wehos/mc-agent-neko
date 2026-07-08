@@ -17,7 +17,7 @@
  */
 
 import fs from 'fs';
-import { AGENT_MODE, FRAMEWORK_ENABLED_DEFAULT, foodInstinctsEnabled } from './contracts.js';
+import { AGENT_MODE, FRAMEWORK_ENABLED_DEFAULT, foodInstinctsEnabled, hpInstinctsEnabled } from './contracts.js';
 import { getWorld, mentalState, proposeTasks, commitGoal } from './world_model.js';
 import { pending as pendingInstincts } from './instinct.js';
 import { resolve as arbitrate, setBodyOwner, releaseBodyOwner, vitalNow as arbiterVitalNow } from './arbiter.js';
@@ -82,6 +82,7 @@ const SVN_HP_FLOOR = 12;               // hp < 12 → 灰区
 const SVN_FOOD_FLOOR = 8;              // food < 8 → 灰区
 const SVN_ANCHOR_MS = 300000;          // 同 10b 锚 >5min → 灰区(僵局信号)
 const SVN_ANCHOR_RADIUS = 10;          // 与 reflex_watchdog pin/pocketFuse 同口径
+const SVN_ANCHOR_VERTICAL = 6;         // ★竖直进度阈: 采矿时 |Δy|>6 视为移动, 重锚 (见 _trackAnchor)
 const SVN_COOLDOWN_BASE_MS = 60000;    // 零进度升级冷却基数
 const SVN_COOLDOWN_CAP_MS = 480000;    // 冷却封顶 8min
 
@@ -129,6 +130,16 @@ export class Kernel {
 
     /** Called from agent.update(delta). Cheap + guarded; no-op when disabled. */
     async tick(delta) {
+        // ★2026-07-09 GHOST-KERNEL REBIND (挖黑曜石站桩实录 20:25): 重连换代只换 agent.bot,
+        //   本内核构造时抓死的 this.bot 仍指旧尸体。_poisonDeadBot 只炸【动作】方法, 而内核
+        //   全是【读】(坐标/血粮/时间/_extIntentUntil) — 读不炸 → 锚点坐标永远冻结 (-86,62,78)
+        //   → anchor>5min 灰区每 5min 强推 surviveNow 抢走真身的 admin 动作 (goToRememberedPlace
+        //   被 interrupt), 且 admin 独占闸读的是旧 bot 上过期的 _extIntentUntil, 拦不住。
+        //   修: 换代即重指 — 新 bot 的 _svnAnchor/_extIntentUntil 等状态天然全新。
+        if (this.agent && this.agent.bot && this.agent.bot !== this.bot) {
+            this.bot = this.agent.bot;
+            try { this.bot._agent = this.agent; } catch (e) {}
+        }
         if (!this.bot || !this.bot.entity) return;
         // S3-shadow observation runs INDEPENDENTLY of the decision-loop flag: it only
         // reads the world + proposeTasks and appends a line — it never dispatches.
@@ -203,8 +214,15 @@ export class Kernel {
             const bot = this.bot;
             const p = bot.entity.position;
             const a = bot._svnAnchor;
-            if (bot.isSleeping || !a || Math.hypot(p.x - a.x, p.z - a.z) > SVN_ANCHOR_RADIUS) {
-                bot._svnAnchor = { x: p.x, z: p.z, since: Date.now() };
+            // ★2026-07-08 竖直下潜也算移动 (钻石"够不到"根因头号疑犯之一, 见 [[diamond-never-reached-blocker-stack]]):
+            //   原锚只算水平 hypot(dx,dz), 竖直下潜 60 格在它眼里=原地没动 → 5min 判僵局 → surviveNow force
+            //   把满血矿工 surfaceUp(63) 拽回地表 (progress.txt 实录 'surfaceUp gained +24y y-2→22')。修: 仅在
+            //   【采矿技能在位】时把竖直位移计入进度 (采矿时 |Δy|>6 即重锚)。为何 gate 在采矿: 否则水里上下
+            //   扑腾 ±6 会无限重锚、规避僵局检测 (reviewer 顾虑)。水平门(>10b)/睡眠重置/hp<12/vitalNow 地板全不变。
+            const miningNow = /mineDiamonds|mineDown|branchMine|mineOres|gatherObsidian/.test(String(bot._currentSkill || ''));
+            const vertProgressed = a && miningNow && Math.abs(p.y - (a.y != null ? a.y : p.y)) > SVN_ANCHOR_VERTICAL;
+            if (bot.isSleeping || !a || Math.hypot(p.x - a.x, p.z - a.z) > SVN_ANCHOR_RADIUS || vertProgressed) {
+                bot._svnAnchor = { x: p.x, y: p.y, z: p.z, since: Date.now() };
             }
         } catch (e) {}
     }
@@ -219,7 +237,10 @@ export class Kernel {
             if (hp <= 0) return null;
             if (bot._diedAt && Date.now() - bot._diedAt < 20000) return null;
             if (bot.isSleeping) return null;
-            if (hp < SVN_HP_FLOOR) return `hp${Math.round(hp)}<${SVN_HP_FLOOR}`;
+            // ★2026-07-09 用户令 (低血/饥饿全熔断): hp 灰区触发默认熔断 — 低血不再强派 surviveNow
+            //   打断在跑技能 (实录 2026-07-08 15:48: hp10<12 触发 → RELOCATE/垫柱 → ENTOMBED 冻身,
+            //   mineOres 每轮只活 ~22s)。恢复: MC_HP_INSTINCTS=1 重启。见 contracts.hpInstinctsEnabled。
+            if (hpInstinctsEnabled() && hp < SVN_HP_FLOOR) return `hp${Math.round(hp)}<${SVN_HP_FLOOR}`;
             // ★2026-07-08 用户令: 临时"全面放弃对体力(饥饿)的关注" — 食物本能禁用时不再因低饥饿触发
             //   灰区求生(那会强派 surviveNow 去觅食=乱逛)。HP 灰区(hp<12)、锚点僵局、硬保命(vitalNow)
             //   与 hp<=6/food<=2 危急强派 全部不变 → 只补血不补体力。回头恢复: MC_FOOD_INSTINCTS=1。
@@ -231,7 +252,8 @@ export class Kernel {
                 // 要么伴随血粮不适(评审: 否则每个无床之夜必然整夜 SVN↔冷却抖动)。
                 let night = false;
                 try { const t = bot.time.timeOfDay; night = t >= 12542 && t <= 23459; } catch (e) {}
-                if (!night || hp < 16 || food < 12) return `anchor${Math.round((Date.now() - a.since) / 60000)}min`;
+                // 低血/饥饿全熔断下, 夜锚的"血粮不适"限定同步失效 — 夜间同锚一律视为蓄意驻守。
+                if (!night || (hpInstinctsEnabled() && hp < 16) || (foodInstinctsEnabled() && food < 12)) return `anchor${Math.round((Date.now() - a.since) / 60000)}min`;
             }
         } catch (e) {}
         return null;
@@ -244,7 +266,15 @@ export class Kernel {
         //   chat-loop 结束(agent.handleMessage 的 finally 清 bot._extIntentUntil)。这就是"外部意图=最高
         //   优先级、独占, 直到 gpt-5.4-mini 判定完成"。硬保命反射(modes vitalNow: 溺水/着火/岩浆/hp≤4)
         //   独立于内核、仍生效; 5min 戳是崩溃兜底。
-        if (this.bot._extIntentUntil && Date.now() < this.bot._extIntentUntil) {
+        // ★2026-07-09 修 (挖黑曜石越权 commit 实录): 冻结原本只认 _extIntentUntil —— 但那是 5min
+        //   心跳戳, AdminMission.tick 仅在 self_prompt 活跃 / 有 supervised skill / _currentSkill 在跑时
+        //   续戳; 任务在两回合之间的空窗 (collectBlocks 返回 undefined 释放身体、self-prompt 还没起下一轮)
+        //   会让戳过期 → 内核解冻 → commitGoal 派 BOOTSTRAP_KIT(prepNether) 抢身体去引导挖矿 (还叠一个
+        //   "no usable pickaxe" 误判), 与 admin 挖黑曜石打架 → 垫块方块后原地僵住。真相是 FSM 的
+        //   _adminMission.active (由 _syncMirror 写), 任务 RUNNING 期间恒为真, 与心跳戳无关。用它兜底,
+        //   即便心跳空窗也不解冻。任务 end() 会同步清 active → 自动恢复自主; flag-OFF/无任务时字节等价。
+        const _missionActive = !!(this.bot._adminMission && this.bot._adminMission.active);
+        if (_missionActive || (this.bot._extIntentUntil && Date.now() < this.bot._extIntentUntil)) {
             // ★2026-07-08 用户令 (admin 意志 = 独占 / 绝对): admin 任务 (WS task / 游戏内 chat, 由 agent
             //   LLM=gpt-5.5 执行) 期间, 内核【完全冻结】—— 不派发任何蓝图提案 (prepNether / 夜挖 / FREE_PLAY /
             //   proposeTasks), 也不 force 灰区求生 (surviveNow)。唯一能打断独占的是【致命事件】: arbiter.vitalNow
@@ -283,7 +313,8 @@ export class Kernel {
             try {
                 const hpN = (typeof this.bot.health === 'number') ? this.bot.health : 20;
                 const foodN = (typeof this.bot.food === 'number') ? this.bot.food : 20;
-                const critical = (hpN > 0) && (hpN <= 6 || foodN <= 2)
+                // ★2026-07-09 用户令: hp<=6 / food<=2 危急解卷各走各闸 — 双闸全 OFF 时永不因血粮抬 interrupt。
+                const critical = (hpN > 0) && ((hpInstinctsEnabled() && hpN <= 6) || (foodInstinctsEnabled() && foodN <= 2))
                     && !(this.bot._diedAt && Date.now() - this.bot._diedAt < 20000);
                 const cur = String(this.bot._currentSkill || '');
                 const recovery = /feedUp|forage|villageHarvest|wheatFarm|smeltSafe|goBedSleep|escapePlan|surfaceUp|surviveNow/i.test(cur);

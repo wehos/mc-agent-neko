@@ -10,6 +10,20 @@ import path from 'path';
 const _CHOP_PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
 const _MINE_MOTION = path.resolve(process.cwd(), 'bots', '_supervisor', 'mine_motion.jsonl');
 const _dbg = (s) => { try { fs.appendFileSync(_CHOP_PROG, `[${new Date().toISOString()}] [chopDBG] ${s}\n`); } catch (e) {} };
+// ★perf 2026-07-09: death_log.jsonl grows all session and was re-read+split every main-loop iteration
+// here. Cache the last-64 raw lines on the persistent bot object (~15s TTL, shared across skills);
+// the death set is stable within a chop pass, so staleness is harmless.
+function _deathLinesCached(bot) {
+    try {
+        const now = Date.now();
+        const m = bot && bot._deathLinesMemo;
+        if (m && now - m.t < 15000) return m.lines;
+        let lines = [];
+        try { lines = fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'death_log.jsonl'), 'utf8').trim().split('\n').slice(-64); } catch (e) {}
+        if (bot) bot._deathLinesMemo = { t: now, lines };
+        return lines;
+    } catch (e) { return []; }
+}
 // ★UNREACHABLE-TREE BLACKLIST (module-level → survives the achieve-loop's repeated re-ENTER of
 // chopWood within one process). Root cause of a ~40min bootstrap deadlock: 40-block scan finds ONE
 // lone log (e.g. oak_log@8.3b across water / on a ledge) that the pathfinder can NEVER reach;
@@ -70,6 +84,16 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                   'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
     const total = () => LOGS.reduce((s, t) => s + (world.getInventoryCounts(bot)[t] || 0), 0);
     const _opts = opts && typeof opts === 'object' ? opts : {};
+    // ★往海边走诊断 (session#14): 无树 relocate/raw-traverse 的朝向此前只记 stale 计数,不记方位
+    // → "为什么一开局往南/往海走" 从日志无法判定。这三个纯日志助手补上罗盘方位。
+    // compass: N=0(-z) E=90(+x) S=180(+z) W=270(-x); MC 里 +z=南。
+    const _compass = (dx, dz) => {
+        if (Math.hypot(dx, dz) < 0.01) return '·';
+        const deg = (Math.round(Math.atan2(dx, -dz) * 180 / Math.PI) + 360) % 360;
+        return `${deg}°${['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(deg / 45) % 8]}`;
+    };
+    const _bearingTo = (tx, tz, fx = bot.entity.position.x, fz = bot.entity.position.z) => _compass(tx - fx, tz - fz);
+    const _yawCompass = (y) => _compass(-Math.sin(y), Math.cos(y));   // mineflayer yaw→方向向量 (dx=-sin, dz=cos)
     const _planksEq = () => {
         const c = world.getInventoryCounts(bot);
         return Object.keys(c).filter(k => /_planks$/.test(k)).reduce((s, k) => s + (c[k] || 0), 0)
@@ -81,7 +105,16 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             return Object.values(bot.entities).some(e => e && e.position && mc && mc.isHostile && mc.isHostile(e) && e.position.distanceTo(bot.entity.position) < r);
         } catch (e) { return true; }
     };
+    // ★饥饿惰性化 (用户定调 2026-07-08): 默认 (MC_FOOD_INSTINCTS!=='1') 饥饿不 gate/改道/BAIL
+    //   任何行为, 也不写日志。所有原本因 food 让位/觅食的分支统一经此开关短路成"食物无关",
+    //   chopWood 照常砍到木或真无树为止, 饿死无所谓。恢复旧行为: MC_FOOD_INSTINCTS=1 重启。
+    //   与 contracts.foodInstinctsEnabled 同义 (外挂模块不 import, 直读 env)。
+    const _foodInstincts = () => process.env.MC_FOOD_INSTINCTS === '1';
+    // ★2026-07-09 用户令 (低血惰性, 与饥饿惰性同构): 默认低血不 gate/让位/BAIL 任何行为, 死了拉倒。
+    //   纯低血分支统一经此开关短路; 威胁触发的让位 (_hostileNear 等) 不受影响。恢复: MC_HP_INSTINCTS=1。
+    const _hpInstincts = () => process.env.MC_HP_INSTINCTS === '1';
     const _criticalForageAllowed = () => {
+        if (!_foodInstincts()) return false;
         const t = bot.time.timeOfDay;
         return !!_opts.allowCriticalForage
             && (bot.health > 4 || (_opts.criticalForageLocalOnly && bot.health >= 4))
@@ -95,12 +128,13 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
     // 无食可觅时 木→锄→农场 恰是唯一的食物之路, 低险作业收益>风险)。收紧到 food<=4
     // (真饥饿边缘才让), 且白天无敌对时进一步豁免到 food<=2。
     const _needsFoodYield = () => {
+        if (!_foodInstincts()) return false;   // 饥饿惰性: 默认永不因饿让位
         if (_foodHeld() || _criticalForageAllowed()) return false;
         const day = (() => { try { const t = bot.time.timeOfDay; return t < 12000; } catch (e) { return false; } })();
         const safeDay = day && !_hostileNear(16);
         return bot.food <= (safeDay ? 2 : 4);
     };
-    const _lowHpHostileYield = () => bot.health <= 14 && _hostileNear(12) && !_criticalForageAllowed();
+    const _lowHpHostileYield = () => _hpInstincts() && bot.health <= 14 && _hostileNear(12) && !_criticalForageAllowed();
     const _motion = (event, data = {}) => {
         try {
             const p = bot.entity.position;
@@ -174,6 +208,41 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         for (const n of CHEAP_FILL) { const it = items.find(i => i.name === n); if (it) return it; }
         const terra = items.find(i => /_terracotta$|^terracotta$/.test(i.name)); if (terra) return terra;   // badlands 贱料
         return items.find(i => /_planks$|_log$|_wood$/.test(i.name)) || null;   // 木料末位回退 (不可删)
+    };
+    // ★就近取料 (用户: 垫高砍树时身上没泥土/石头 → 就近挖一点): pickFiller 只在库里翻,
+    // 翻空就烧木料/返回 null → 无贱料时垫柱直接失败或白烧木。这里在"没有真贱料(只剩木料/空)"
+    // 时, 就近挖 1-2 块地面料补上再垫柱。泥土类(dirt/grass/gravel/sand…)徒手即掉可放置物;
+    // 石头类必须有镐才挖(徒手撸石掉空=白费), 且软料优先(不磨镐)。挖完 _sweepDrops 捡回。
+    const _CHEAP_HAVE = new Set(CHEAP_FILL);
+    const _haveCheapFiller = () => bot.inventory.items().some(i => _CHEAP_HAVE.has(i.name) || /_terracotta$|^terracotta$/.test(i.name));
+    const _SOFT_SRC = /^(dirt|grass_block|coarse_dirt|rooted_dirt|dirt_path|podzol|mycelium|moss_block|gravel|sand|red_sand|mud|packed_mud|clay|sandstone|red_sandstone)$/;
+    const _ensureFiller = async (why = '') => {
+        const f = pickFiller();
+        if (f && !/_planks$|_log$|_wood$/.test(f.name || '')) return f;   // 已有真贱料, 直接用
+        if (_needsFoodYield && _needsFoodYield()) return f;               // 让位窗口内不额外挖料
+        const m = bot.entity.position.floored();
+        const eye = () => bot.entity.position.offset(0, 1.6, 0);
+        const cands = [];
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+            for (const dy of [0, -1]) {
+                const b = bot.blockAt(m.offset(dx, dy, dz));
+                if (!b || b.boundingBox !== 'block') continue;
+                if (/water|lava/.test(b.name || '')) continue;
+                const soft = _SOFT_SRC.test(b.name || '');
+                const stony = STONY_BLOCK.test(b.name || '');
+                if (!soft && !(stony && hasPick())) continue;   // 徒手撸石掉空 → 只在有镐时才收石料
+                const d = eye().distanceTo(b.position.offset(0.5, 0.5, 0.5));
+                if (d > 4.6) continue;
+                cands.push({ b, soft, d });
+            }
+        }
+        cands.sort((a, z) => (a.soft === z.soft ? a.d - z.d : (a.soft ? -1 : 1)));   // 软料优先, 再按近
+        for (const c of cands.slice(0, 2)) {
+            _dbg(`ensureFiller: 就近挖 ${c.b.name}@${c.b.position.x},${c.b.position.y},${c.b.position.z} (${why || 'pillar'})`);
+            if (await guardedDig(c.b, 'ensure-filler')) { try { await _sweepDrops(4, 3); } catch (e) {} }
+            if (_haveCheapFiller()) break;
+        }
+        return pickFiller();
     };
     const guardedDig = async (block, why = '') => {
         if (!block) return false;
@@ -596,7 +665,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         }
         {
             const _noPick = !bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
-            const _lowResources = bot.health <= 8 || bot.food <= 8;
+            const _lowResources = _hpInstincts() && bot.health <= 8;   // 饥饿惰性: 去 food 项; 低血惰性: hp 项过闸
             if (_noPick && _lowResources && !_trueSurfaceNow()) {
                 const _targetY = Math.max(82, Math.floor(bot.entity.position.y) + 12);
                 _dbg(`digToSurface NOPICK-low-resource → surfaceUp natural-route target=${_targetY}`);
@@ -641,10 +710,10 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // Honor the death/stop signals; clear only the flee-interrupts we're meant to
             // survive (and only when not dying).
             if (bot.death_abort || bot.health <= 0) { _dbg(`digToSurface ABORT (death) at i=${i} y=${Math.floor(bot.entity.position.y)}`); return false; }
-            if (bot._chopGen !== _gen) { _dbg(`digToSurface YIELD (superseded gen${_gen}→${bot._chopGen}) at i=${i}`); return false; }
+            if (_superseded()) { _dbg(`digToSurface YIELD (superseded gen${_gen}→${bot._chopGen} poisoned=${!!bot._poisoned}) at i=${i}`); return false; }
             // ★危殆让位 (hp0.6事件: 爬升穿过雷区芯被怪缠上,hp掉到0.6还在一步步往上凿 —
             // 残血时唯一正业是活下来): hp≤6 → 停止爬升,把控制还给编排层的生存路径。
-            if (bot.health <= 4 && !_criticalForageAllowed()) { _dbg(`digToSurface BAIL (critical hp ${bot.health.toFixed(1)}) at i=${i} — yield to survival`); return false; }   // 6→4 同 chopWood bail线(死水局解锁)
+            if (_hpInstincts() && bot.health <= 4 && !_criticalForageAllowed()) { _dbg(`digToSurface BAIL (critical hp ${bot.health.toFixed(1)}) at i=${i} — yield to survival`); return false; }   // 6→4 同 chopWood bail线(死水局解锁); 低血惰性: 过闸
             if (_lowHpHostileYield()) {
                 _motion('chopWood.low_hp_hostile_yield', { where: 'digToSurface', iter: i, y: Math.floor(bot.entity.position.y), hp: Math.round(bot.health || 0), food: bot.food });
                 _dbg(`digToSurface BAIL (hp=${bot.health.toFixed(1)} + hostile near) at i=${i} — yield to survival`);
@@ -687,16 +756,12 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                 let _blockedByNoPickStone = false;
                 const _pickForStuck = () => bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
                 const _STONY_STUCK = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
-                let _plannedStoneStair = 0;
                 for (const c of [mm.offset(ddx, 1, ddz), mm.offset(ddx, 2, ddz), mm.offset(0, 2, 0)]) {
                     const b = bot.blockAt(c);
                     if (b && !UP_OPEN.has(b.name) && !NO_DIG_UP.has(b.name)) {
                         if (!_pickForStuck() && _STONY_STUCK.test(b.name)) {
-                            if (py >= 80 && bot.food <= 2 && _plannedStoneStair < 3) {
-                                _plannedStoneStair++;
-                                _dbg(`surf STUCK planned no-pick stone stair ${_plannedStoneStair}/3 y=${py} name=${b.name}`);
-                                try { bot._plannedNoPickStoneUntil = Date.now() + 15000; } catch (e) {}
-                            } else { _blockedByNoPickStone = true; break; }
+                            // 饥饿惰性: 原 famine(food<=2) 专属的 no-pick 石阶挣扎已移除, 统一走常规 abort
+                            _blockedByNoPickStone = true; break;
                         }
                         await guardedDig(b, 'surf-stuck');
                     }
@@ -741,7 +806,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // dirt=21 yet it fell through to the unstable staircase). Do it by hand reliably:
             // clear the head, equip filler, jump, and place a block under our feet at the apex.
             // Vertical rise that CANNOT fall back (unlike raw stair-climbing in cave terrain).
-            const _fill = pickFiller();   // ★#5 贱料优先, 木料末位回退 (原扁平正则 .find 按槽位序先选木板烧木垫脚)
+            const _fill = await _ensureFiller('surf-pillar');   // ★#5 贱料优先, 木料末位回退; 无贱料就近挖一块
             // ★STAIR-PLACE first (deterministic +1, proven in LEASH; the self-pillar
             // below is a hitbox race that mostly loses — saw y oscillate 60↔62 for 5min
             // with 22 dirt in the bag). Place into an ADJACENT cell at foot height
@@ -845,7 +910,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                     if (rose) break;
                 }
                 if (!rose) {
-                    _dbg(`raw-stair no viable climb from y=${before} pick=${_pickIn()} food=${bot.food} hp=${bot.health.toFixed(1)} — yield`);
+                    _dbg(`raw-stair no viable climb from y=${before} pick=${_pickIn()} hp=${bot.health.toFixed(1)} — yield`);
                     if (!_pickIn()) {
                         bot._chopNoPickSurfaceBlockedUntil = Date.now() + 30000;
                         _motion('chopWood.no_pick_surface_blocked', {
@@ -872,6 +937,13 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
     // every loop in THIS file yields the moment it's superseded.
     bot._chopGen = (bot._chopGen || 0) + 1;
     const _gen = bot._chopGen;
+    // ★2026-07-09 GHOST-STACK 快速退出 ([[ghost-stack-epoch-poison]]): 重连毒化尸体 (agent._poisonDeadBot)
+    //   后, 旧实例的 _chopGen 永不被新实例 bump —— 新 chopWood 跑在【新 bot 对象】上, 死 bot 的 _chopGen
+    //   原封不动 == _gen → gen 门对【跨重连】幽灵永不触发。实录: 死 bot 上的 chopWood 空转 relocate
+    //   adv=0.0b ★IN-WATER + WET-WORKSITE escape STALE-BOT 刷了 75s+。修: 认 bot._poisoned —— 毒化时
+    //   一次性置真的普通属性 (幽灵只能清 interrupt_code=false, 清不掉 _poisoned), 是唯一【跨实例】可靠
+    //   信号。折进所有既有让位点 (_superseded), 任一 iter 顶即刻 return, 幽灵 ≤1 iter 自杀。
+    const _superseded = () => { try { return !!bot._poisoned || bot._chopGen !== _gen; } catch (e) { return false; } };
     // ★走格子扫荡 (用户实拍×2: 挖了树不捡 — item_collecting 模式在 achieve 期间是被禁用的,
     // 所以掉落必须由我们显式走过去踩格子捡): walk onto each dropped item entity within r.
     // (e.objectType dropped 2026-07-02: prismarine-entity deprecated it and every access
@@ -943,7 +1015,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         let seen = 0, reached = 0, _nearDrop = '';
         try {
             for (let pass = 0; pass < maxN; pass++) {
-                if (bot.interrupt_code || bot.death_abort || bot._chopGen !== _gen) break;
+                if (bot.interrupt_code || bot.death_abort || _superseded()) break;
                 // ★C299c don't chase the junk we just tossed for room — sweep walks the bot over its own
                 // discarded red_sand and vanilla auto-collects it right back (live: red_sand 346→381, a
                 // toss↔re-pickup loop that re-fills the very slots C299 freed). Skip drops whose name is
@@ -1024,7 +1096,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // though the bot is already on open overworld terrain. In that case a hard
             // leash raw-walks it back through cliffs/shafts and recreates the stair-edge
             // stall. FREE + healthy + high means "local tree search", not mine escape.
-            if (bot._mobility && bot._mobility.state === 'FREE' && bot.food >= 8 && bot.health >= 10) return true;
+            if (bot._mobility && bot._mobility.state === 'FREE' && bot.health >= 10) return true;   // 饥饿惰性: 去 food>=8 项
         } catch (e) {}
         return false;
     };
@@ -1032,8 +1104,8 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         const freshHandoff = Date.now() < (bot._maroonedWoodHandoffUntil || 0);
         const marooned = !!(bot._mobility && bot._mobility.state === 'MAROONED');
         if (!freshHandoff && !marooned) return false;
-        if (bot.health <= 6 || bot.food <= 4 || _hostileNear(12)) {
-            _dbg(`MAROONED local harvest skip hp=${bot.health.toFixed(1)} food=${bot.food} hostile=${_hostileNear(12)}`);
+        if ((_hpInstincts() && bot.health <= 6) || _hostileNear(12)) {   // 饥饿惰性: 去 food<=4 项; 低血惰性: hp 项过闸, 敌情项保留
+            _dbg(`MAROONED local harvest skip hp=${bot.health.toFixed(1)} hostile=${_hostileNear(12)}`);
             return false;
         }
         try {
@@ -1133,7 +1205,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                 else break;
             }
             for (let dy = lowDy; dy <= 8; dy++) {
-                if (bot.interrupt_code || bot.death_abort || bot._chopGen !== _gen) break;
+                if (bot.interrupt_code || bot.death_abort || _superseded()) break;
                 const lb = bot.blockAt(bp.offset(0, dy, 0));
                 if (!lb || !/_log$|_wood$/.test(lb.name || '')) { if (dy > 0) break; else continue; }
                 const reach = eye().distanceTo(lb.position.offset(0.5, 0.5, 0.5));
@@ -1302,16 +1374,33 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
     let _stoneAborts = 0;   // NOPICK-FAMINE: stone-face aborts this call; ≥4 = all headings stone → bare-hand climb
     // ★缰绳锚点 (220复盘: v1锚在bed.json,但那是幽灵床坐标 — 床丢了文件还在,圈心错位80格
     // → -157,112 算出来"在圈内",缰绳没绷). 锚 = bed.json(家应该在的位置) ,半径收紧80。
-    let _ax = 0, _az = 0, _pulledHome = false;
-    try { const bj = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'bed.json'), 'utf8')); if (typeof bj.x === 'number') { _ax = bj.x; _az = bj.z; } } catch (e) {}
+    let _ax = 0, _az = 0, _pulledHome = false, _anchorSrc = 'none';
+    // ★(0,0) 幽灵锚修复 (实锤: 新世界 bot 未死过 → spawn_pos.json 没写; 无家床 → bed.json 无;
+    // 本 LAN 服务器把 bot.spawnPoint 钉死在 (0,0) 哨兵值 — 三级锚源全落空, 静默退化成 (0,0)。
+    // 树在 z≈260, 锚在 (0,0), 每次 bot 靠近树就被 leash 硬拽 264 格回原点 → "砍了树根就跑"。
+    // (0,0) 锚比"没有锚"更糟: 它把 bot 从唯一有树的方向往世界原点空地拖。修=validAnchor 拒绝
+    // (0,0) 哨兵, 三级兜底全空时锚定到"本会话起点"(缓存 bot._chopRoamOrigin), 让 leash 约束的是
+    // 离出发点漂移, 而非离原点漂移。bankGear/prepNether 同款 validSpawn 套路。)
+    const _validAnchor = (x, z) => Number.isFinite(x) && Number.isFinite(z) && !(Math.abs(x) < 1 && Math.abs(z) < 1);
+    // ★缰绳锚点 (220复盘: v1锚在bed.json,但那是幽灵床坐标 — 床丢了文件还在,圈心错位80格
+    // → -157,112 算出来"在圈内",缰绳没绷). 锚 = bed.json(家应该在的位置) ,半径收紧80。
+    try { const bj = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'bed.json'), 'utf8')); if (_validAnchor(bj.x, bj.z)) { _ax = bj.x; _az = bj.z; _anchorSrc = 'bed'; } } catch (e) {}
     // ghost-bed guard (C39 同款,第三处): 死276后 bed.json 还是崖壁区老床(96,-34),缰绳
     // 回拉会把 bot 拉回被诅咒地形 → 距床>60 用 spawn_pos(真锚,且 spawn 高地有树)
-    try { if (Math.hypot(_ax - bot.entity.position.x, _az - bot.entity.position.z) > 60) { const sj = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'spawn_pos.json'), 'utf8')); if (typeof sj.x === 'number') { _ax = sj.x; _az = sj.z; } } } catch (e) {}
+    try { if (_anchorSrc === 'none' || Math.hypot(_ax - bot.entity.position.x, _az - bot.entity.position.z) > 60) { const sj = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'spawn_pos.json'), 'utf8')); if (_validAnchor(sj.x, sj.z)) { _ax = sj.x; _az = sj.z; _anchorSrc = 'spawn_pos'; } } } catch (e) {}
+    // bot.spawnPoint 真锚 (本服务器多为 (0,0) 哨兵, validAnchor 会挡掉; 别的服务器有真值就用)
+    if (_anchorSrc === 'none' && bot.spawnPoint && _validAnchor(bot.spawnPoint.x, bot.spawnPoint.z)) { _ax = bot.spawnPoint.x; _az = bot.spawnPoint.z; _anchorSrc = 'spawnPoint'; }
+    // 三级锚源全空 → 锚到本会话起点 (一次性缓存, 跨热加载/重入存活于 bot 对象), leash 从"这里"起算
+    if (_anchorSrc === 'none') {
+        if (!bot._chopRoamOrigin) { const _p = bot.entity.position; bot._chopRoamOrigin = { x: _p.x, z: _p.z }; }
+        _ax = bot._chopRoamOrigin.x; _az = bot._chopRoamOrigin.z; _anchorSrc = 'self';
+    }
+    _dbg(`chopWood anchor=(${Math.round(_ax)},${Math.round(_az)}) src=${_anchorSrc}`);
     for (let i = 0; i < count * 5 && total() < target; i++) {
         // honor death/stop — an immortal chop loop orphans across respawn and fights the
         // replacement instance (same class as the digToSurface dual-loop wedge)
         if (bot.death_abort || bot.health <= 0) { _dbg(`chopWood ABORT (death) at iter${i}`); return total(); }
-        if (bot._chopGen !== _gen) { _dbg(`chopWood YIELD (superseded gen${_gen}→${bot._chopGen}) at iter${i}`); return total(); }
+        if (_superseded()) { _dbg(`chopWood YIELD (superseded gen${_gen}→${bot._chopGen} poisoned=${!!bot._poisoned}) at iter${i} — ghost-stack fast-exit`); try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {} return total(); }
         await _ensureInvRoom();   // ★C299 free a slot BEFORE chopping — a full inventory silently voids every pickup (logs land, can't be stored, total stays 0)
         if (!_opts.needLogs && !_opts.allowCriticalForage && _planksEq() >= 8) {
             _motion('chopWood.wood_eq_satisfied', { where: 'mainLoop', iter: i, logs: total(), planksEq: _planksEq(), target });
@@ -1335,8 +1424,8 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         // (prepNether/missionNether) 持有生存路径(蹲坑/进食/evac/advisory消费)。
         // bail线 6→4 (hp6/food0 死水局: 保命线锁死回血路径——hp6 不作业就永远 hp6,
         // 每夜赌命。木头→工具→武器→猎食 才是回血链,hp5-6 的低险作业收益>风险)
-        if (bot.health <= 4 && !_criticalForageAllowed()) { _dbg(`chopWood BAIL (critical hp ${bot.health.toFixed(1)}) at iter${i} — yield to survival`); return total(); }
-        if (bot.health <= 4) { _dbg(`chopWood CRITICAL-FORAGE allowed hp=${bot.health.toFixed(1)} food=${bot.food} hostiles=0 daylight — controlled forage instead of starvation deadlock`); }
+        if (_hpInstincts() && bot.health <= 4 && !_criticalForageAllowed()) { _dbg(`chopWood BAIL (critical hp ${bot.health.toFixed(1)}) at iter${i} — yield to survival`); return total(); }
+        if (_hpInstincts() && bot.health <= 4) { _dbg(`chopWood CRITICAL-FORAGE allowed hp=${bot.health.toFixed(1)} food=${bot.food} hostiles=0 daylight — controlled forage instead of starvation deadlock`); }
         if (_lowHpHostileYield()) {
             _motion('chopWood.low_hp_hostile_yield', { where: 'mainLoop', iter: i, logs: total(), target, hp: Math.round(bot.health || 0), food: bot.food });
             _dbg(`chopWood BAIL (hp=${bot.health.toFixed(1)} + hostile near) at iter${i} — yield to survival`);
@@ -1370,7 +1459,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         // ★死亡热图避区 (240: 12,-40 杀人井第三次得手,这次是砍树过境跌入 — 避区检查原本
         // 只在采矿循环): 身处"16格内3+死"雷区 → 背质心撤24格再找树。与 achieve 同款。
         try {
-            const dl2 = fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'death_log.jsonl'), 'utf8').trim().split('\n').slice(-50);
+            const dl2 = _deathLinesCached(bot).slice(-50);
             const meD = bot.entity.position;
             let ndD = 0, cxD = 0, czD = 0;
             for (const ln of dl2) { try { const r = JSON.parse(ln); if (typeof r.x === 'number' && Math.hypot(r.x - meD.x, r.z - meD.z) < 16) { ndD++; cxD += r.x; czD += r.z; } } catch (e) {} }
@@ -1494,7 +1583,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                                 // then step up onto it: +1 per round, zero races.
                                 if (!escaped) {
                                     const sc0 = bot.entity.position.floored();
-                                    const fillS = pickFiller();   // ★#5 贱料优先, 木料末位回退
+                                    const fillS = await _ensureFiller('leash-stair');   // ★#5 贱料优先; 无贱料就近挖一块
                                     if (fillS) {
                                         for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
                                             const open = (b) => !b || b.boundingBox !== 'block';
@@ -1525,7 +1614,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                                 if (!escaped) {
                                     _dbg(`LEASH walled-in → pillar up 3 with carried blocks`);
                                     for (let pu = 0; pu < 3; pu++) {
-                                        const fillL = pickFiller();   // ★#5 贱料优先, 木料末位回退
+                                        const fillL = await _ensureFiller('leash-pillar');   // ★#5 贱料优先; 无贱料就近挖一块
                                         if (!fillL) break;
                                         const yb = bot.entity.position.y;
                                         const hL = bot.blockAt(bot.entity.position.offset(0, 2, 0));
@@ -1627,6 +1716,11 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         // bot.findBlocks returns many coords (getNearestBlock returns only the single closest, which
         // is exactly what kept handing us back the same unreachable tree every pass).
         let nearest = null, ndist = Infinity, nearestAnyDist = Infinity, nearestAnyDy = 0;   // nearestAny = closest detected tree INCLUDING blacklisted (cost model: don't plant a sapling when a real tree is right here)
+        // ★req (2026-07-08 用户令: "确实搜到了目标 也可以跨水"): 水边树不再被 riskyTree 永久丢弃,
+        //   而是记为 wet 回退候选。有旱地树时优先旱地(不无谓涉水); 一棵旱地树都没有时, 把最近的 wet
+        //   树扶正为 nearest, 交给真正的寻路(collectBlock/goToPosition, liquidCost 高但有限→有路就跨)
+        //   去够它; 够不到再由既有 timebox+黑名单收尾。= 搜到目标就允许跨水, 但不为水边树放弃眼前旱地树。
+        let _wetNear = null, _wetD = Infinity;
         // ★TREE-FAMINE leash extension: with 8+ trees blacklisted (all unreachable
         // jungle canopies), an 80-block leash re-scans the same dead orchard forever —
         // the whole rebuild is gated on ONE log. Famine (blacklist≥8) temporarily
@@ -1645,6 +1739,9 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         })();
         const _leashR = _noWood0 ? 256 : (_unreach.size >= 8 ? 160 : 80);
         let riskySkipped = 0;
+        // ★risk 归因 (session#14): riskySkip 此前只有总数, 无法区分"近处的树全在水边(往海走坐实)"
+        // 还是"全是够不到的高台树(高树崖模式 [[chopwood-high-tree-nopick-cliff]])"。分桶 + 记最近险树。
+        let _riskWater = 0, _riskHigh = 0, _riskNear = '', _riskNearD = Infinity;
         // ★C297 TRUNK-BASE targeting (用户实拍根因: 雨林高树 — findBlocks 返回的"最近 log"常是树冠高处
         // 那截 (dy>5) → riskyTree 判 high-tree 跳过 → 拉黑 → 误当够不到 → 退化乱转/种苗,而那棵树的树干
         // 基部就在地面、完全可达,只是瞄错了目标). 修复: 对每个候选 log,沿其 x,z 列向下扫到最低的连续
@@ -1669,7 +1766,12 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         const riskyTree = (p, d) => {
             if (_criticalForageAllowed()) return '';
             const dy = p.y - bot.entity.position.y;
-            if (d > 4.8 && dy > 5) return 'high-tree';
+            // ★纵向gap判据 (替换旧的 dy>5 绝对值): 裸手踩楼梯上升 1 格约需 1 格水平进深, 所以真正
+            // 攀不上的是"陡坎"——竖直落差超过可用水平进深 (斜率>~45°) 的高原/山壁, 而不是绝对高。
+            // 缓坡上落差 6~9 格的树完全走得上去, 旧 dy>5 把它们误当高树崖拉黑 (→ 退化乱转/种苗)。
+            // 判据: 既要够高 (dy≥8, 低于此无坎可言) 又要够陡 (dy 超过水平进深 + 缓冲) 才算 high-tree。
+            const horiz = Math.hypot(p.x - bot.entity.position.x, p.z - bot.entity.position.z);
+            if (d > 4.8 && dy >= 8 && dy > horiz + 2) return 'high-tree';
             if (d > 4.8 && _wlIds.length) {
                 let hit = null;
                 try { hit = bot.findBlocks({ matching: _wlIds, point: new Vec3(Math.floor(p.x) + 0.5, Math.floor(p.y) + 0.5, Math.floor(p.z) + 0.5), maxDistance: 3, count: 1 }); } catch (e) { hit = null; }
@@ -1683,12 +1785,29 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         //   修: 合并成 1 次 findBlocks(ID 数组 matching 全部 log 类型)。mineflayer findBlocks 支持数组匹配
         //   (getMatchingFunction→isMatchingType, palette 快速跳过 + indexOf), 结果 = 8 类型的并集(同候选集),
         //   处理时用 blockAt(base).name 反推类型 t 供日志。~8x 降本, 语义等价。
+        // ★req#1 (2026-07-08 用户令: "40太短"): 检测环随失败次数(stale)动态放大 64→128, 不再死守 40。
+        //   健康林区 count:16 立刻早退, 成本不变; 只有贫树区才把八面体扫穿, 而那正是需要看更远的时候。
+        //   看得更远 → 更早"看到"真实的树并直接寻路过去(可跨水), 从根上减少下面无目标的 moveAway 逃荒。
+        //   findBlocks 只能看已加载区块(视距~128b), 再远靠 oracle 定向远征 / land-bias 漫游把新区块拽进来。
+        const _scanR = Math.min(128, 64 + Math.max(0, stale) * 24);
         {
             const logIds = LOGS.map(t => (bot.registry && bot.registry.blocksByName[t] ? bot.registry.blocksByName[t].id : null)).filter(v => v != null);
             let cands = [];
-            if (logIds.length) { try { cands = bot.findBlocks({ matching: logIds, maxDistance: 40, count: 16 }) || []; } catch (e) { cands = []; } }
-            if (!cands.length) { // fallback: 单类型 getNearestBlock 兜底(与原逐类型 fallback 同效, 取任一最近)
-                for (const t of LOGS) { const b = world.getNearestBlock(bot, t, 40); if (b) { cands = [b.position]; break; } }
+            // ★2026-07-09 socket-drop 根因修 (用户令 A, 与 scoutResources findTree 同款): 旧代码单发同步
+            //   findBlocks(maxDist≤128) — 贫树/无树区凑不满 count:16 → 扫穿整个体积同步冻结事件循环 12–24s →
+            //   bot 停读 MC socket → socketClosed → 重连循环 (实录 act=chopWood 是 >8s 冻结头号来源)。
+            //   改分级: 32b 同步(近树最常见, 秒回零 async 税) → 都没有才 yield 让路(放行 socket 读)后扫 64b /
+            //   _scanR。命中即停 → 健康林区永不走到大扫描; 贫树区把大扫描拆成"让路后单发", socket 不饿死。
+            if (logIds.length) {
+                const _stages = [32, Math.min(64, _scanR), _scanR].filter((v, i, a) => v > 0 && a.indexOf(v) === i);
+                for (let _si = 0; _si < _stages.length; _si++) {
+                    if (_si > 0) await new Promise(r => setImmediate(r));   // 让路: 大环扫描前放行事件循环/socket
+                    try { cands = bot.findBlocks({ matching: logIds, maxDistance: _stages[_si], count: 16 }) || []; } catch (e) { cands = []; }
+                    if (cands.length) break;
+                }
+            }
+            if (!cands.length) { // fallback: 单类型兜底(与原逐类型 fallback 同效, 取任一最近); 用 async 版, 每类型间让路
+                for (const t of LOGS) { await new Promise(r => setImmediate(r)); const b = await world.getNearestBlockAsync(bot, t, _scanR); if (b) { cands = [b.position]; break; } }
             }
             let _yc = 0;
             for (const p of cands) {
@@ -1701,7 +1820,14 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                 if (_blk(key)) continue;                       // skip blacklisted unreachable tree
                 if (_opts.criticalForageLocalOnly && (d > 10.5 || (base.y - bot.entity.position.y) > 5)) continue;
                 const risk = riskyTree(base, d);
-                if (risk) { riskySkipped++; continue; }
+                if (risk) {
+                    riskySkipped++;
+                    if (risk === 'water-edge') _riskWater++; else _riskHigh++;
+                    if (d < _riskNearD) { _riskNearD = d; _riskNear = `${risk === 'water-edge' ? 'water' : 'hi'}@${Math.floor(base.x)},${Math.floor(base.y)},${Math.floor(base.z)}`; }
+                    // ★water-edge 树记为 wet 回退候选(high-tree 崖树不留 — 那是裸手真攀不上, 另有处理)。
+                    if (risk === 'water-edge' && d < _wetD) { _wetD = d; const bb = bot.blockAt(base); _wetNear = { b: bb, t: (bb && bb.name) || 'log', key, drop: Math.round(p.y - base.y) }; }
+                    continue;
+                }
                 if (d < ndist) {
                     const bb = bot.blockAt(base);
                     const t = (bb && bb.name) || 'log';        // ★合并扫描后从方块反推类型(原来靠外层 for t)
@@ -1709,7 +1835,16 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                 }   // drop = how far the canopy log was lowered to its base (★C297 evidence)
             }
         }
-        _dbg(`iter${i} y=${Math.floor(bot.entity.position.y)} nearest=${nearest ? nearest.t + '@' + ndist.toFixed(1) + 'b' + (nearest.drop > 1 ? `↓${nearest.drop}(★C297base)` : '') : 'NONE'} total=${total()} stale=${stale} surfaced=${surfaced} blk=${_unreach.size} riskySkip=${riskySkipped}`);
+        // ★req (2026-07-08): 没有任何旱地树 → 把最近的 water-edge 树扶正为目标, 允许寻路跨水去够它。
+        //   放在 nearest 选定之后, 保证"有旱地树时绝不因水边树分心"; 只有 nearest=null 才回退。
+        if (!nearest && _wetNear) {
+            nearest = _wetNear; ndist = _wetD;
+            _dbg(`no dry tree — promoting water-edge target ${_wetNear.t}@${_wetD.toFixed(1)}b ${(() => { const c = _wetNear.key.split(',').map(Number); return _bearingTo(c[0], c[2]); })()} (寻路跨水去够它, 够不到再 timebox/黑名单)`);
+        }
+        // ★方位化 (session#14): 给选中的树补罗盘方位, 给 riskySkip 补 water/hi 分桶+最近险树坐标
+        const _tgtBrg = (nearest && nearest.key) ? ' ' + (() => { const c = nearest.key.split(',').map(Number); return _bearingTo(c[0], c[2]); })() : '';
+        const _riskBrk = riskySkipped > 0 ? `[water:${_riskWater} hi:${_riskHigh}${_riskNear ? ' near=' + _riskNear : ''}]` : '';
+        _dbg(`iter${i} y=${Math.floor(bot.entity.position.y)} nearest=${nearest ? nearest.t + '@' + ndist.toFixed(1) + 'b' + _tgtBrg + (nearest.drop > 1 ? `↓${nearest.drop}(★C297base)` : '') : 'NONE'} total=${total()} stale=${stale} surfaced=${surfaced} blk=${_unreach.size} riskySkip=${riskySkipped}${_riskBrk}`);
         // ★C342 (T-0055, composes with C339): a CLOSE trunk we can't SEE is leaf-occluded — C339 now
         // (rightly) refuses to x-ray-chop it, but the HUMAN fix is to CLEAR the intervening leaves, not
         // give up → blacklist. Dig the nearest reachable occluding leaf (leaves are NOT gated by C339)
@@ -1835,10 +1970,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                 _dbg(`surfacing hard-failed in no-pick stone box — return control to mobility`);
                 return false;
             }
-            if (!_surfOk && bot.food <= 2 && !bot.inventory.items().some(it => /_pickaxe$/.test(it.name))) {
-                _dbg(`surfacing hard-failed under famine (food=${bot.food}, no pick) — return control`);
-                return false;
-            }
+            // 饥饿惰性: 原 famine(food<=2,no pick) 早退已移除
             continue;
         }
         if (!nearest) {
@@ -1857,10 +1989,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                     _dbg(`no-log surfacing hard-failed in no-pick stone box — return control to mobility`);
                     return false;
                 }
-                if (!_surfOk && bot.food <= 2 && !bot.inventory.items().some(it => /_pickaxe$/.test(it.name))) {
-                    _dbg(`no-log surfacing hard-failed under famine (food=${bot.food}, no pick) — return control`);
-                    return false;
-                }
+                // 饥饿惰性: 原 famine(food<=2,no pick) 早退已移除
                 continue;
             }
             // ★On the surface with NO reachable natural tree → grow our own from a carried
@@ -1904,18 +2033,51 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                 if (bot.entity.position.distanceTo(_m0) >= 8) { stale = 0; continue; }   // 有实位移 → 重扫树
                 // <8b = 被地形钉死, 落进下面的旧 moveAway/raw-traverse 链 (yaw 已锁向森林)
             }
-            // No trees in 40-block range and we're at/near the surface — we're in a BARREN
-            // or WATER zone (the water-edge spawn: 1hr stuck here, 0 logs). A flat 12-block
+            // ★达标即退 (2026-07-09 用户令 "堵 chopWood 达标即退"): 走到这一步 = 就地扫树/种苗/oracle
+            //   定向远征都没能落到一棵可砍的树。接下来的 moveAway/raw-traverse 是"水盲盲走 + 沿途铲地皮"
+            //   的逃荒 (正是用户实拍的"边跑边随地乱挖")。只有"无木求生"的 bootstrap (0原木 & <4板) 才值得
+            //   赌命逃荒去找远处森林; 手里已有木料的只是 top-up (例: "先确保3石镐" 早已满仓, 补给却仍要
+            //   凑 planksEq=64) → 果断归还控制, 绝不空转铲地皮。food 急救 forage 不受此闸 (仍需觅食)。
+            const _haveWoodNow = (() => {
+                try {
+                    const it = bot.inventory.items();
+                    const lg = it.filter(i => /_log$/.test(i.name || '')).reduce((s, i) => s + i.count, 0);
+                    const pl = it.filter(i => /_planks$/.test(i.name || '')).reduce((s, i) => s + i.count, 0);
+                    return lg > 0 || pl >= 4;
+                } catch (e) { return false; }
+            })();
+            if (_haveWoodNow && !_opts.allowCriticalForage) {
+                _dbg(`chopWood 达标即退 at iter${i}: 无可砍树 + 已备木料(非bootstrap, planksEq=${_planksEq()} logs=${total()}) — 不进 relocate 逃荒, 归还控制`);
+                _motion('chopWood.enough_wood_no_tree_bail', { where: 'noNearest', iter: i, stale, planksEq: _planksEq(), logs: total() });
+                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
+                try { bot.clearControlStates(); } catch (e) {}
+                return total();
+            }
+            // No trees in the (now dynamic _scanR) range and we're at/near the surface — we're
+            // in a BARREN zone (the water-edge spawn: 1hr stuck here, 0 logs). A flat 12-block
             // moveAway never escapes a big water body, and moveAway often can't even path
             // across deep water → the bot wandered in place forever. ESCALATE distance hard
-            // (16→28→40→56) AND, if moveAway couldn't actually move us (pinned in water),
-            // raw-swim/sprint a committed heading to physically cover ground and break out.
+            // (16→28→40→56→72) AND, if moveAway couldn't move us OR put us in water, raw-sprint
+            // a committed LAND-BIAS heading to physically cover ground on dry land and break out.
             stale++;
-            const dist = stale <= 1 ? 16 : (stale <= 2 ? 28 : (stale <= 3 ? 40 : 56));
-            log(bot, `No logs within 40 blocks (x${stale}) — relocating ${dist} blocks to escape the barren/water zone...`);
+            // ★relocate 距离随 stale 拉长 (16→28→40→56→72), 与上面动态放大的检测环配套:
+            //   多数情况下更大的检测环已"看到"树 → 直接寻路过去(允许跨水去真实的树), 走不到这一步。
+            const dist = stale <= 1 ? 16 : (stale <= 2 ? 28 : (stale <= 3 ? 40 : (stale <= 4 ? 56 : 72)));
+            log(bot, `No logs within ${_scanR} blocks (x${stale}) — relocating ${dist} blocks (land-only) to escape the barren zone...`);
             const _p0 = bot.entity.position.clone();
             await skills.moveAway(bot, dist).catch(() => {});
-            if (bot.entity.position.distanceTo(_p0) < 4) {
+            const _adv = bot.entity.position.distanceTo(_p0);
+            const _inWater = (() => { try { const b = bot.blockAt(bot.entity.position.floored()); return !!(b && /water/.test(b.name || '')); } catch (e) { return false; } })();
+            {   // ★方位诊断 (session#14): moveAway 后的净位移+罗盘方位 — 坐实/证伪"往海走"的关键一行
+                const _pn = bot.entity.position;
+                _dbg(`relocate(moveAway) stale=${stale} dist=${dist} adv=${_adv.toFixed(1)}b ${Math.floor(_p0.x)},${Math.floor(_p0.z)}→${Math.floor(_pn.x)},${Math.floor(_pn.z)} ${_bearingTo(_pn.x, _pn.z, _p0.x, _p0.z)}${_inWater ? ' ★IN-WATER' : ''}`);
+            }
+            // ★req#2 (2026-07-08 用户令: "不要往水边乱跑很呆, 除非寻路真的寻到"): moveAway 是水盲的
+            //   (GoalInvert(GoalNear) 只要"够远的任意点", pathfinder 觉得下海最省就下海 → 无目标乱涉水, 很呆)。
+            //   凡是 moveAway 把我们送进水里(_inWater), 或压根没挪动(adv<4), 都判失败, 改用下面的 land-bias
+            //   raw-traverse: 采样 8 个 yaw 选最内陆方向硬走, 把 bot 拽回/留在陆地。
+            //   真正跨水只在"检测环扫到真实的树、collectBlock 寻路过去"时才发生 — 那是允许克服脱水本能的正当跨水。
+            if (_adv < 4 || _inWater) {
                 // moveAway made no headway (deep water / pinned) — force a raw traverse.
                 // ★LOCKED EXPEDITION HEADING (the quadrant rotation walked N/E/S/W in
                 // turn = a plus-sign with ZERO net displacement; the bot orbited the
@@ -1924,14 +2086,47 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                 // rotate 90° when THAT heading provably stalls. Cumulative calls walk
                 // a straight line out of any famine zone.
                 try {
-                    if (typeof bot._chopExpYaw !== 'number') bot._chopExpYaw = Math.random() * Math.PI * 2;
+                    // ★_inWater 时强制重采样最内陆 yaw: 若沿用上次锁定的 yaw, 它很可能就是把我们送进水里的那个方向。
+                    const _freshRand = (typeof bot._chopExpYaw !== 'number') || _inWater;
+                    if (_freshRand) {
+                        // ★LAND-BIAS 初始远征 yaw (2026-07-08 用户令): 旧版首次 yaw 纯随机 (src=RANDOM) —
+                        //   海岸出生点 moveAway 被水钉死后, 随机 sprint yaw 常年指海 → 直接把 bot 送进海里
+                        //   (relocate(raw-traverse) ★IN-WATER 实证)。改为采样 8 个 yaw、沿射线探 4 格深水,
+                        //   从最内陆(深水最少)的 yaw 起步; 平手随机起始序破。与 scoutResources 的 land-bias 对齐。
+                        const _pp = bot.entity.position, _refY = Math.round(_pp.y);
+                        const _isWaterCol = (x, z) => {
+                            try {
+                                for (let dy = 2; dy >= -3; dy--) {
+                                    const b = bot.blockAt(new Vec3(x, _refY + dy, z));
+                                    if (!b || /air/.test(b.name || '')) continue;
+                                    if (!/water/.test(b.name || '')) return false;
+                                    const bl = bot.blockAt(new Vec3(x, _refY + dy - 1, z));
+                                    return !!(bl && /water/.test(bl.name || ''));
+                                }
+                            } catch (e) {}
+                            return false;
+                        };
+                        let _bestYaw = Math.random() * Math.PI * 2, _bestW = 99;
+                        const _yoff = Math.floor(Math.random() * 8);
+                        for (let k = 0; k < 8; k++) {
+                            const y = (((k + _yoff) % 8) * Math.PI) / 4;
+                            const ux = -Math.sin(y), uz = Math.cos(y);
+                            let w = 0;
+                            for (let r = 1; r <= 4; r++) { if (_isWaterCol(Math.round(_pp.x + ux * 8 * r), Math.round(_pp.z + uz * 8 * r))) w++; }
+                            if (w < _bestW) { _bestW = w; _bestYaw = y; }
+                        }
+                        bot._chopExpYaw = _bestYaw; bot._chopExpYawSrc = _bestW > 0 ? `landbias(w${_bestW})` : 'landbias';
+                    }
                     const yaw = bot._chopExpYaw;
                     const _e0 = bot.entity.position.clone();
+                    _dbg(`relocate(raw-traverse) pinned (moveAway adv<4b) → sprint yaw=${_yawCompass(yaw)} src=${bot._chopExpYawSrc || 'locked'}`);   // ★最直接把 bot 送向海/南的一行, 此前完全无记录
                     await bot.look(yaw, 0, true);
                     bot.setControlState('forward', true); bot.setControlState('sprint', true); bot.setControlState('jump', true);
                     await new Promise(r => setTimeout(r, 6000));
                     bot.clearControlStates();
-                    if (bot.entity.position.distanceTo(_e0) < 4) bot._chopExpYaw = (yaw + Math.PI / 2) % (Math.PI * 2);   // heading blocked — rotate
+                    const _adv2 = bot.entity.position.distanceTo(_e0);
+                    if (_adv2 < 4) { bot._chopExpYaw = (yaw + Math.PI / 2) % (Math.PI * 2); bot._chopExpYawSrc = 'rotated'; _dbg(`raw-traverse STALLED adv=${_adv2.toFixed(1)}b → rotate 90° → yaw=${_yawCompass(bot._chopExpYaw)}`); }   // heading blocked — rotate
+                    else _dbg(`raw-traverse adv=${_adv2.toFixed(1)}b → ${Math.floor(bot.entity.position.x)},${Math.floor(bot.entity.position.z)} (heading held)`);
                 } catch (e) { try { bot.clearControlStates(); } catch (_) {} }
             }
             if (stale >= 8) break; continue;
@@ -2045,7 +2240,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                     while (lowDy > -4) { const b2 = bot.blockAt(bp.offset(0, lowDy - 1, 0)); if (b2 && /_log$|_wood$/.test(b2.name)) lowDy--; else break; }
                     let dug = 0;
                     for (let dy = lowDy; dy <= 8; dy++) {
-                        if (bot.interrupt_code || bot.death_abort || bot._chopGen !== _gen) break;
+                        if (bot.interrupt_code || bot.death_abort || _superseded()) break;
                         const lb = bot.blockAt(bp.offset(0, dy, 0));
                         if (!lb || !/_log$|_wood$/.test(lb.name)) { if (dy > 0) break; else continue; }
                         if (bot.entity.position.offset(0, 1.6, 0).distanceTo(lb.position.offset(0.5, 0.5, 0.5)) > 4.8) break;   // out of arm's reach — stop, don't leave a swing-at-air loop
@@ -2167,7 +2362,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                     let _lastCY = Math.floor(bot.entity.position.y), _flatRounds = 0;
                     const _climbMax = tgt ? 40 : 3;
                     for (let _climb = 0; _climb < _climbMax; _climb++) {
-                    if (bot.death_abort || bot.health <= 4 || bot.interrupt_code || _needsFoodYield()) {
+                    if (bot.death_abort || (_hpInstincts() && bot.health <= 4) || bot.interrupt_code || _needsFoodYield()) {
                         if (_needsFoodYield()) _dbg(`pinned-stair LOW-FOOD BAIL food=${bot.food}, no edible — stop climb`);
                         break;
                     }

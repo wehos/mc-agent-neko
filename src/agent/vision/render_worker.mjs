@@ -76,6 +76,10 @@ async function renderFrame(msg) {
     process.send({ t: 'frame', id, jpeg: buf.toString('base64') });
 }
 
+// ★2026-07-09 孤儿防线 (render-worker 泄漏修的配套): Windows 上父进程退出不会连带杀子进程,
+//   GL/canvas 的活句柄又让本进程永不自然退出 → 父死后变 0.6-1GB 的永久孤儿。IPC 一断即自杀。
+process.on('disconnect', () => process.exit(0));
+
 process.on('message', async (msg) => {
     try {
         switch (msg && msg.t) {

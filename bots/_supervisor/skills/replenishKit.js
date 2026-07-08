@@ -93,7 +93,7 @@ export default async function replenishKit(bot, ctx, opts = {}) {
         return false;
     };
 
-    prog(`replenishKit: START picks=${before[0]} stick=${before[1]} planks=${before[2]} logs=${before[3]} table=${before[4]} planksEq=${planksEq()} y=${Math.round(bot.entity.position.y)} onSurface=${onSurface()} night=${isNight()} hostiles16=${hostilesNear(16)} hp=${Math.round(bot.health)} food=${bot.food}`);
+    prog(`replenishKit: START picks=${before[0]} stick=${before[1]} planks=${before[2]} logs=${before[3]} table=${before[4]} planksEq=${planksEq()} y=${Math.round(bot.entity.position.y)} onSurface=${onSurface()} night=${isNight()} hostiles16=${hostilesNear(16)} hp=${Math.round(bot.health)}`);
 
     // 已达标 → 诚实 false (不该被派发到这; isGoalDone 释放承诺, 提案端负责别重复提)
     if (picks() >= 3 && tierPickGoalMet() && planksEq() >= 64 && cnt('stick') >= 24) {   // ★3镐/64板/24棍 + tier 镐达标(铁4/钻3) — 棍=地下石镐 fodder 弹药; 与 world_model REPLENISH_*/pickStockPlan 同步

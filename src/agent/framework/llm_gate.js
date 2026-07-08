@@ -20,12 +20,23 @@ const CFG = path.resolve(process.cwd(), 'bots', '_supervisor', 'decision-config.
 
 let _enabled = null;        // cached; null = unread
 let _prompter = null;       // injected async (task, world, reason) => verdict, wired by the agent boot
+let _cfgCache = null;       // ★perf 2026-07-09: last parsed config
+let _cfgReadAt = 0;         //   + read timestamp — llmGateEnabled() is polled from the sync gate
+const CFG_TTL_MS = 5000;    //   predicate (world_model llmGateEnabled path), and readCfg used to hit
+                            //   disk on EVERY call. A 5s TTL still honours a live flag flip within
+                            //   seconds (and a watchdog restart picks it up immediately); the module
+                            //   is loaded once (not hot-reimported), so a module-level cache persists.
 
 /** BOM-safe config read (mirrors world_model.js:76-105 — PowerShell-written JSON can carry a BOM
- *  that makes JSON.parse throw, which a silent catch would balloon into a dead-idle deadlock). */
+ *  that makes JSON.parse throw, which a silent catch would balloon into a dead-idle deadlock).
+ *  TTL-cached: re-reads at most once per CFG_TTL_MS. */
 function readCfg() {
-    try { return JSON.parse(fs.readFileSync(CFG, 'utf8').replace(/^﻿/, '')) || {}; }
-    catch (e) { return {}; }
+    const now = Date.now();
+    if (_cfgCache && (now - _cfgReadAt) < CFG_TTL_MS) return _cfgCache;
+    try { _cfgCache = JSON.parse(fs.readFileSync(CFG, 'utf8').replace(/^﻿/, '')) || {}; }
+    catch (e) { _cfgCache = {}; }
+    _cfgReadAt = now;
+    return _cfgCache;
 }
 
 /** Is the gate ON? Default OFF (pure instinct). Re-reads config cheaply so a flag flip needs no

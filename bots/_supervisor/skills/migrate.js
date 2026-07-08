@@ -36,6 +36,11 @@ const dbg = (s) => { try { fs.appendFileSync(MIGRATELOG, `[${new Date().toISOStr
 const LAND_HUNT = ['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'mooshroom', 'goat'];
 const NIGHT_START = 13000, NIGHT_END = 23000;
 
+// ★2026-07-09 用户令 HP/食物本能熔断: 这两个闸门直读 process.env, 控"因低血/因饿"行为;
+// 任一/双闸开(=== '1')恢复原行为, 默认关(!= '1', 含未设)时相应低血/低饿分支变惰性。
+const _hpOn   = () => process.env.MC_HP_INSTINCTS   === '1';
+const _foodOn = () => process.env.MC_FOOD_INSTINCTS === '1';
+
 // ---------------------------------------------------------------------------
 // PURE helpers (offline-testable — no bot, no I/O)
 // ---------------------------------------------------------------------------
@@ -110,8 +115,9 @@ function shouldMigrate(signals) {
     if (s.force) return { go: true, reason: 'force=true (manual / last-resort)' };
     if (s.isNight) return { go: false, reason: 'night — do not start a long march (bunker)' };
     if (s.actionableClose) return { go: false, reason: 'actionable hostile close — handle threat first' };
-    if (s.hp < (s.gateHp ?? 14)) return { go: false, reason: `hp=${s.hp} < ${s.gateHp ?? 14} — too fragile to migrate` };
-    if (s.food < (s.gateFood ?? 12)) return { go: false, reason: `food=${s.food} < ${s.gateFood ?? 12} — too low for a long march` };
+    // ★2026-07-09 用户令 HP/食物本能熔断: 低血/低饿 no-go start-gate; 任一闸开恢复。
+    if (_hpOn() && s.hp < (s.gateHp ?? 14)) return { go: false, reason: `hp=${s.hp} < ${s.gateHp ?? 14} — too fragile to migrate` };
+    if (_foodOn() && s.food < (s.gateFood ?? 12)) return { go: false, reason: `food=${s.food} < ${s.gateFood ?? 12} — too low for a long march` };
     if ((s.msSinceLastMigrate ?? Infinity) < (s.cooldownMs ?? 1200000))
         return { go: false, reason: `migrated ${Math.round((s.msSinceLastMigrate || 0) / 60000)}min ago < cooldown — give the new area a chance` };
     // Unlivable evidence: EITHER a confirmed food desert (ocean biome / streaks) OR we keep
@@ -139,9 +145,21 @@ function readJSON(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } ca
 function readMState() { return readJSON(MSTATE) || { oceanStreak: 0, noAnimalStreak: 0, lastMigrateAt: 0, barren: null }; }
 function writeMState(s) { try { fs.writeFileSync(MSTATE, JSON.stringify(s)); } catch (e) {} }
 
-function readRecentDeaths(n = 60) {
+// ★perf 2026-07-09: death_log.jsonl grows all session and was read+split whole on every march-leg
+// probe. Cache the last-64 raw lines on the persistent bot object (~15s TTL, shared with the mining
+// skills); deaths only accrue on death, so staleness is harmless.
+function readRecentDeaths(bot, n = 60) {
     try {
-        return fs.readFileSync(DEATHLOG, 'utf8').trim().split('\n').slice(-n)
+        const now = Date.now();
+        let lines;
+        const m = bot && bot._deathLinesMemo;
+        if (m && now - m.t < 15000) lines = m.lines;
+        else {
+            lines = [];
+            try { lines = fs.readFileSync(DEATHLOG, 'utf8').trim().split('\n').slice(-64); } catch (e) {}
+            if (bot) bot._deathLinesMemo = { t: now, lines };
+        }
+        return lines.slice(-n)
             .map(l => { try { return JSON.parse(l); } catch (e) { return null; } })
             .filter(r => r && typeof r.x === 'number');
     } catch (e) { return []; }
@@ -226,7 +244,7 @@ export default async function migrate(bot, ctx, opts = {}) {
             for (const lp of logs) { const ly = (lp && lp.position) ? lp.position.y : (lp ? lp.y : null); if (ly != null && ly <= by + 2 && ly >= by - 6) reachableTrees++; }
         } catch (e) {}
         try { grass = (world.getNearestBlocks(bot, ['grass_block', 'short_grass', 'tall_grass'], 24, 8) || []).length; } catch (e) {}
-        const deaths = readRecentDeaths();
+        const deaths = readRecentDeaths(bot);
         const deathsNear = deaths.filter(d => Math.hypot(d.x - p.x, d.z - p.z) < 24).length;
         return { biome, landAnimals, trees, reachableTrees, grass, deathsNear, x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) };
     };
@@ -237,7 +255,7 @@ export default async function migrate(bot, ctx, opts = {}) {
     const dzone = adv && adv.dzone ? adv.dzone : null;
     const pos0 = bot.entity.position.clone();
     const insideDeathZone = !!(dzone && Math.hypot(pos0.x - dzone.cx, pos0.z - dzone.cz) <= (dzone.r || 0));
-    const deaths = readRecentDeaths();
+    const deaths = readRecentDeaths(bot);
     // food-death proxy: deaths clustered near us (the spawn we keep dying at). The death log
     // doesn't always carry a cause field, so ">=3 deaths within 40b of here" == we keep dying here.
     const foodDeathsClustered = deaths.filter(d => Math.hypot(d.x - pos0.x, d.z - pos0.z) < 80).length >= 3;
@@ -363,8 +381,10 @@ export default async function migrate(bot, ctx, opts = {}) {
             continue;
         }
         if (closeCreeper()) { abort = `creeper point-blank at leg ${leg} — yield to defense/EVAC`; break; }   // C263: only an unavoidable creeper aborts; other mobs handled by reflex (interrupt_code) or walked past
-        if (Math.round(bot.health) <= abortHp) { abort = `hp=${Math.round(bot.health)} <= ${abortHp} at leg ${leg}`; break; }
-        if (bot.food < legFoodFloor && !edibleHeld()) {
+        // ★2026-07-09 用户令 HP/食物本能熔断: 低血中止行军; HP 闸开恢复。
+        if (_hpOn() && Math.round(bot.health) <= abortHp) { abort = `hp=${Math.round(bot.health)} <= ${abortHp} at leg ${leg}`; break; }
+        // ★2026-07-09 用户令 HP/食物本能熔断: 低饿 forage 补给+中止行军整块; 食物闸开恢复。
+        if (_foodOn() && bot.food < legFoodFloor && !edibleHeld()) {
             // Top up before marching the last food away (forage budget lesson). One bounded try.
             log_(`leg ${leg}: food=${bot.food} < floor ${legFoodFloor} no edible → forage top-up`);
             try { await skills.customSkill(bot, 'forage', { targetFood: 14 }); } catch (e) {}
@@ -403,7 +423,7 @@ export default async function migrate(bot, ctx, opts = {}) {
         let legAdv = 0;
         for (let h = 0; h * HOP < legBlocks; h++) {
             if (bot.interrupt_code || Date.now() - t0 > maxMs) break;
-            if (isNight() || closeCreeper() || Math.round(bot.health) <= abortHp) break;   // C263: bail to outer gates (creeper-only, not every nearby mob)
+            if (isNight() || closeCreeper() || (_hpOn() && Math.round(bot.health) <= abortHp)) break;   // C263: bail to outer gates (creeper-only, not every nearby mob) ★2026-07-09 用户令 HP/食物本能熔断: 低血中止 hop 仅 HP 闸开;夜/苦力怕不变。
             const hx = Math.round(bot.entity.position.x + cur.x * HOP);
             const hz = Math.round(bot.entity.position.z + cur.z * HOP);
             const hb = bot.entity.position.clone();

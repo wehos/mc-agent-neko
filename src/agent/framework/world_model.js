@@ -17,7 +17,7 @@
  * precise coords (blueprint §C hard constraint).
  */
 
-import { EMPTY_WORLD, PROPOSAL_KIND, foodInstinctsEnabled } from './contracts.js';
+import { EMPTY_WORLD, PROPOSAL_KIND, foodInstinctsEnabled, hpInstinctsEnabled } from './contracts.js';
 import { readFileSync, appendFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -75,6 +75,12 @@ let MINE_NIGHT_FOOD = 10;  // min food to commit to mining through the night
 let BED_REACH_DIST = 64;   // max dist to a known bed for GO_BED to be affordable
 let WOOD_REACH_DIST = 24;  // max dist to a known wood node for WOOD_BUFFER opening
 const FOOD_STOCK = 16;     // food level considered "stocked" (not just survival)
+// ★2026-07-08 两态承诺锁 (opening churn 修): 开局提案 OPENING_SCOUT@92 与 BOOTSTRAP_KIT@90 只差 2,
+//   commitGoal 释放(isGoalDone 闪真)后重选会在两者间翻转 → bot 左右乱晃。用户令: 决策进入"进行态"
+//   立即抬权焊死。进行态 = bot._commitment.kind 命中某开局 kind → 出表排序前给它 +BOOST, 令重选必再赢
+//   同一目标, 不翻给对手。仅影响开局 kind 的相对排名; 失败冷却(上方 cd 过滤)仍能撤下真失败的档 → 不会
+//   把坏选择永久焊死。见 docs/ 或 [[chopwood-high-tree-nopick-cliff]]。
+const OPENING_COMMIT_BOOST = 8;
 // ── ★T-0093/T-0092 tier-chain buffers ("要有富余不是刚够" 从木/食扩到铁/钻). The bot stays
 //    committed to a tier's underground venture until it has banked a BUFFER, not the bare minimum,
 //    so it升级 once (and brings spares) instead of下地→上浮→再下地 thrashing. const→let so the
@@ -420,6 +426,9 @@ function lethalEnvThreat(w) {
     return creeperLethal || !!t.takingDamage || (v.hp || 20) <= 4 || swarmPin;
 }
 function isFamineStall(w) {
+    // 饥饿惰性 (用户定调 2026-07-08): 默认 (MC_FOOD_INSTINCTS off) 饥饿不驱动任何行为 —
+    //   饥荒僵局不成立, 常规防御 HOLD 照常生效, 也不写 famine-forage-unlock 日志。饿死无所谓。
+    if (!foodInstinctsEnabled()) return false;
     const v = w.vitals || {};
     return !lethalEnvThreat(w) && (v.food || 0) <= 2 && (v.hp || 20) < 10 && !v.canRegen;
 }
@@ -606,6 +615,7 @@ export function proposeTasks(world, bot) {
     //    回头恢复: 设 MC_FOOD_INSTINCTS=1 重启。见 contracts.foodInstinctsEnabled /
     //    docs/food-instincts-disabled.md。
     const foodInstincts = foodInstinctsEnabled();
+    const hpInstincts = hpInstinctsEnabled();   // ★2026-07-09 hp 侧同构闸 (narrow: 只熔断"因低血"任务闸/求生派发, 威胁触发战斗自保保留)
 
     // ★危血禁下深矿 (T-0098续 / 06-25T12:31 实锤: hp8 food17 被 GO_UNDERGROUND@45 派 mineDown,
     //   从 y62 下潜 48 层到 y14,全程不回血(food<18=低于 MC 自然回血线),遇地下僵尸 dist1 裸甲一击死).
@@ -615,7 +625,8 @@ export function proposeTasks(world, bot) {
     //   GET_DIAMOND@46),不动 sufficientForUnderground(本文件:134 警告: 收紧它=回归 T-0088/T-0060 石棺
     //   死锁)、不动地表 smelt/craft(GET_IRON_TOOLS@47=furnace 作业非下矿)。夜 MINE_THROUGH_NIGHT 不在
     //   此 gate(夜决策由 computeNightPlan 的 alreadyDeepEnclosed/FIGHT 链自管,避免破坏夜庇护 fallback)。
-    const hpSafeForUnderground = vitals.hp >= 12 || (vitals.hp >= 8 && vitals.food >= 18);
+    // ★2026-07-09 用户令: 双闸全 OFF 时 hp/food 不再阻挡下矿 (因低血/因饿不打断任务, 死了拉倒); 任一闸开恢复原安全门。
+    const hpSafeForUnderground = (!hpInstincts && !foodInstincts) || vitals.hp >= 12 || (vitals.hp >= 8 && vitals.food >= 18);
 
     // ── ★T-0093 NORTH STAR: stamp the explicit tier state onto the world model EVERY pass.
     //    modes.js rebuilds bot._world right before calling proposeTasks, then flushes it to
@@ -840,7 +851,7 @@ export function proposeTasks(world, bot) {
     //     (don't chase diamonds unarmored). Only fire on the surface in daylight when safe (the actual
     //     descent happens via mineDown with a tier-correct targetY).
     const tierReady = isBootstrapDone(w, bot) && time.phase === 'day' && !(threat.actionable > 0)
-        && (vitals.food >= 8) && surfaceGate.mode !== 'hold';
+        && (!foodInstincts || vitals.food >= 8) && surfaceGate.mode !== 'hold';
     if (overworld && tierReady) {
         // RUNG 1: stone tier + enough banked iron, but no iron pick yet → smelt then craft iron tools.
         //   Two-state dispatch over EXISTING real skills (no假执行): if raw_iron isn't smelted yet,
@@ -892,7 +903,7 @@ export function proposeTasks(world, bot) {
         //   与 dive-ration(:917) 两个既有不变量; day/safe/surfaceGate 由外层 tierReady 已保证。
         if (hasIronTierPick(w) && ironForArmor(bot) < ironDemandTotal(w, bot)
             && kit.sufficientForUnderground && hpSafeForUnderground
-            && (carriedRations(bot) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档: 贫瘠世界口粮存不下来, 满腹+灰区兜底+keepInv 等效(夜挖门同理)
+            && (!foodInstincts || carriedRations(bot) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档: 贫瘠世界口粮存不下来, 满腹+灰区兜底+keepInv 等效(夜挖门同理)
             const demand = ironDemandTotal(w, bot);
             // ★2026-07-06 用户令 (oracle视角挖铁): ore-oracle 已扫铁坐标 → mineOres 直奔;
             //   oracle 缺失/陈旧才回退盲挖 mineDown 铁带。kind/isGoalDone 簿记不变。
@@ -911,7 +922,7 @@ export function proposeTasks(world, bot) {
         //   the diamond band on purpose instead of the open-ended shallow descent.
         if (hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < diamondTarget(bot) && !diamondGearComplete(bot) && hpSafeForUnderground
             && kit.sufficientForUnderground
-            && (invCount(bot, /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档(贫瘠世界口粮存不下, 满腹+灰区兜底+keepInv 等效); ★T-0092 (worker-sync): armor>=4(full set=24 iron, unreachable since GET_ARMOR yields at <4) → armor>=1(reachable from one craftArmor pass) so an iron-tooled+lightly-armored bot actually commits GET_DIAMOND → mineDiamonds descends to y-52. NOT >=0. ★tool-budget: also gated on kit.sufficientForUnderground (spare-with-table or field-recraft kit) like GO_UNDERGROUND — the skill-side pick guard is the LAST line, not the plan; TOOL_UPKEEP@47 restores the invariant first. ★dive rations (task #9): >=2 carried edibles or GET_FOOD stocks first — the y12 famine surfacing (checkpoint #6) ate the whole night's descent.
+            && (!foodInstincts || invCount(bot, /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档(贫瘠世界口粮存不下, 满腹+灰区兜底+keepInv 等效); ★T-0092 (worker-sync): armor>=4(full set=24 iron, unreachable since GET_ARMOR yields at <4) → armor>=1(reachable from one craftArmor pass) so an iron-tooled+lightly-armored bot actually commits GET_DIAMOND → mineDiamonds descends to y-52. NOT >=0. ★tool-budget: also gated on kit.sufficientForUnderground (spare-with-table or field-recraft kit) like GO_UNDERGROUND — the skill-side pick guard is the LAST line, not the plan; TOOL_UPKEEP@47 restores the invariant first. ★dive rations (task #9): >=2 carried edibles or GET_FOOD stocks first — the y12 famine surfacing (checkpoint #6) ate the whole night's descent.
             // Dispatch the DEDICATED mineDiamonds skill: it water-aware-descends to the diamond band,
             // x-ray finds + vein-follows diamonds, banks each haul, and LOOPS until count is reached —
             // exactly the "在该层定向循环直到挖到目标矿" T-0092 asks for. (Generic mineDown only
@@ -1022,7 +1033,7 @@ export function proposeTasks(world, bot) {
         //   cooldown suppresses ENTER_NETHER → GET_PORTAL_KIT takes over (self-healing).
         if (overworld && tierReady && eneeds.hasDiamondPick && eneeds.blazeShort > 0
             && (eneeds.obsOk || !!eg.netherPortalOverworld)
-            && vitals.food >= 12 && (vitals.armor || 0) >= 4 && swords >= 1 && fillBlocks >= 32) {
+            && (!foodInstincts || vitals.food >= 12) && (vitals.armor || 0) >= 4 && swords >= 1 && fillBlocks >= 32) {
             push({ kind: PROPOSAL_KIND.ENTER_NETHER, priority: (!eneeds.obsOk && eg.netherPortalOverworld) ? 52.5 : 52, skill: 'realNetherPortal',
                    args: [],
                    rationale: `portal kit ready (obsidian≥10 + flint_and_steel) + geared — build, light and walk the nether portal (blaze rods short ${eneeds.blazeShort})`,
@@ -1044,7 +1055,7 @@ export function proposeTasks(world, bot) {
         //   dusk via the nightPre path and (b) once committed the !isNightPlan guard stops
         //   GO_BED/SEAL from re-flipping it.
         if (overworld && time.phase !== 'day' && eneeds.blazeShort === 0 && eneeds.pearlsShort > 0
-            && (vitals.armor || 0) >= 4 && vitals.food >= 12 && vitals.hp >= 14
+            && (vitals.armor || 0) >= 4 && (!foodInstincts || vitals.food >= 12) && (!hpInstincts || vitals.hp >= 14)
             && !(threat.actionable > 0 && vitals.hp < 10)) {
             push({ kind: PROPOSAL_KIND.HUNT_PEARLS, priority: 94.5, skill: 'enderPearls',
                    args: [{ pearlTarget: eneeds.pearlsShort + eneeds.pearls, maxMs: 360000 }],
@@ -1063,7 +1074,7 @@ export function proposeTasks(world, bot) {
         //   One sticky commitment; setupEndPortal is phase-aware + resumable from persisted eg
         //   state (strongholdKnown && eyes>0 lets a partially-stocked bot resume after eye losses).
         if (overworld && tierReady && (eneeds.eyesShort === 0 || (eg.strongholdKnown && eneeds.eyes > 0))
-            && vitals.food >= 14 && (vitals.armor || 0) >= 4 && swords >= 1 && fillBlocks >= 64) {
+            && (!foodInstincts || vitals.food >= 14) && (vitals.armor || 0) >= 4 && swords >= 1 && fillBlocks >= 64) {
             // @53 when canFinishNow (see the :591 ladder above): finish with the eyes in hand
             // instead of losing the @52 push-order tie to a resupply roundtrip.
             push({ kind: PROPOSAL_KIND.GO_END, priority: canFinishNow ? 53 : 52, skill: 'setupEndPortal',
@@ -1163,7 +1174,10 @@ export function proposeTasks(world, bot) {
     //    self_defense reflex owns combat; NONE means daytime/no night decision. ──
     if (overworld && time.phase !== 'day') {
         // ★用户spec: "一到晚上就无脑seal/bootstrap"是错的——夜里夜间决策必须压过白天作业(BOOTSTRAP_KIT 90).
-        // 夜间四选一全部 >90(在HOLD 95之下), 按用户序 下矿整晚94>去床93>挖三填一92>seal堡垒91. 只夜出.
+        // 夜间任务全部 >90(在HOLD 95之下): MINE@94 / SMELT@94 / GO_BED@93 / DIG_ONE@92 / SEAL@91. 只夜出.
+        // ★注 (2026-07-08 respec): computeNightPlan 每 tick 只返回【一个】决策, 夜内先后由 modes.js 的【链序】定,
+        //   不是这里的优先级数字 (数字只保证整个夜带 >白天90 且 <HOLD95). 用户令链序:
+        //   近床≤15 > [炼铁·保留] > 下矿 > 挖三填一(就地|≤15格找地) > 黄昏远床 > SEAL_FORT(裸hold). 详见 modes.js computeNightPlan.
         const np = w.nightPlan || {};
         switch (np.decision) {
             case 'SMELT_IRON': {
@@ -1269,7 +1283,7 @@ export function proposeTasks(world, bot) {
     // food like they carry torches: >=2 edible items or don't start the descent — GET_FOOD
     // @higher priority then stocks up first.)
     if (overworld && kit.sufficientForUnderground && surfaceGate.mode !== 'hold' && !threat.actionable && hpSafeForUnderground
-        && (carriedRations(bot) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档 (同 GET_DIAMOND/GET_IRON_ARMOR_SET/夜挖门)
+        && (!foodInstincts || carriedRations(bot) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档 (同 GET_DIAMOND/GET_IRON_ARMOR_SET/夜挖门)
         push({ kind: PROPOSAL_KIND.GO_UNDERGROUND, priority: 45, skill: 'mineDown',
                args: [{ targetY: IRON_TARGET_Y }],
                rationale: `kitted + gate open — descend to the iron band (y${IRON_TARGET_Y}) and mine iron (have ${ironForArmor(bot)}/${IRON_BUFFER}), stay committed underground`,
@@ -1396,6 +1410,23 @@ export function proposeTasks(world, bot) {
         }
     } catch (e) {}
 
+    // ★2026-07-08 两态承诺锁 (进行态抬权): 若已承诺某开局 kind (OPENING_SCOUT / BOOTSTRAP_KIT /
+    //   OPENING_VILLAGE) 且它仍在表内(未被上面的失败冷却撤下), 排序前给它 +OPENING_COMMIT_BOOST。
+    //   → 承诺释放后的重选必再选中同一 kind, 消除 SCOUT@92↔BOOTSTRAP@90 的 2 分翻转。放在冷却过滤之后:
+    //   真失败被冷却撤下的 kind 不在 out 里 → find 不中 → 抬不了权 → 不会把坏选择永久焊死(逃逸保留)。
+    // ★★DAY-ONLY 门 (2026-07-08 夜链 respec 评审补): 此抬权只为消【日间】SCOUT↔BOOTSTRAP churn
+    //   (OPENING_SCOUT 本就日间限). 但 BOOTSTRAP_KIT@90(noPick) 无相位门, 夜里也在表内 —— 若在此
+    //   抬到 98, commitGoal 的 nightPre (只在 night plan.priority > livePri 时夺权; 夜带顶格 94) 就【永远
+    //   夺不回】, 一个夜幕降临时还在 bootstrap 的无镐 bot 会整夜跑 prepNether 黑灯砍树, 正好击穿
+    //   "SEAL_FORT@91 必须压过 BOOTSTRAP_KIT@90" 这条夜链红线. 故仅白天抬权; 黄昏/夜里不抬 → 夜链照常夺权.
+    try {
+        const _cc = bot && bot._commitment && bot._commitment.kind;
+        if (time.phase === 'day' && (_cc === TASK.OPENING_SCOUT || _cc === PROPOSAL_KIND.BOOTSTRAP_KIT || _cc === TASK.OPENING_VILLAGE)) {
+            const _p = out.find(o => o.kind === _cc);
+            if (_p) _p.priority += OPENING_COMMIT_BOOST;
+        }
+    } catch (e) {}
+
     out.sort((a, b) => b.priority - a.priority);
     return out;
 }
@@ -1494,6 +1525,13 @@ export function isGoalDone(kind, world, bot) {
         // ── Opening tasks. SCOUT is done once both wood + village are known landmarks. ──
         case TASK.OPENING_SCOUT: {
             const lm = (w.landmarks) || {};
+            // ★2026-07-08 两态承诺锁 (硬化释放): 前瞻态(未承诺 SCOUT)保持原判据 — 字节一致。
+            //   进行态(已承诺 SCOUT)不因 lm.wood&&lm.village 闪真而释放(该判据会抖 → SCOUT↔BOOTSTRAP
+            //   翻转根因之一); 改认更稳的 phase 信号: computeOpening 真正离开 SCOUT 相(找到可达 wood /
+            //   近村庄 / bootstrap 完成)才 done。phase 仍 SCOUT=继续侦察(正确); 若 scout 真失败, 上游
+            //   3-strike 派发冷却会撤下 SCOUT 提案 → 不会永久焊死。
+            const committedToScout = !!(bot && bot._commitment && bot._commitment.kind === TASK.OPENING_SCOUT);
+            if (committedToScout) return !!(w.opening && w.opening.phase && w.opening.phase !== 'SCOUT');
             return !!(lm.wood && lm.village);
         }
         case TASK.OPENING_VILLAGE: {
@@ -1904,9 +1942,27 @@ function bedKnown(bot) {
         const lm = bot && bot._world && bot._world.landmarks;
         if (lm && (lm.bed || (lm.counts && Number(lm.counts.bed) > 0))) return true;
     } catch (e) {}
+    // ★perf 2026-07-09: this bed.json read used to hit disk on EVERY ~2s decide-tick whenever no
+    // bed landmark was known yet (the churny early/mid-game state) — reached from the sync
+    // proposeTasks/isGoalDone(GET_BED) chain, so it can't be awaited. It is the credible source of
+    // the documented ~515ms world_model frame-stall (a slow read under Windows AV / a concurrent
+    // supervisor rewrite blocks the whole tick). Memoize the disk result on bot._bedFileMemo with a
+    // short TTL: the "real placed bed" flag flips at most once per life, and a freshly-placed bed is
+    // caught earlier+in-memory by the landmarks check above (modes.js C328), so 10s is plenty fresh.
+    // Path resolved via import.meta.url (matching endgameState above) instead of the old cwd-relative
+    // 'bots/_supervisor/bed.json' — robust if cwd ever isn't the project root.
     try {
-        const bj = JSON.parse(readFileSync('bots/_supervisor/bed.json', 'utf8'));
-        if (bj && typeof bj.x === 'number' && !bj.src) return true;   // spawn anchored by a real placed bed
+        const now = Date.now();
+        const memo = bot && bot._bedFileMemo;
+        if (memo && (now - memo.t) < 10000) return memo.v;
+        let v = false;
+        try {
+            const p = resolve(dirname(fileURLToPath(import.meta.url)), '../../../bots/_supervisor/bed.json');
+            const bj = JSON.parse(readFileSync(p, 'utf8'));
+            if (bj && typeof bj.x === 'number' && !bj.src) v = true;   // spawn anchored by a real placed bed
+        } catch (e) {}
+        if (bot) bot._bedFileMemo = { t: now, v };
+        return v;
     } catch (e) {}
     return false;
 }

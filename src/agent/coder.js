@@ -117,7 +117,11 @@ export class Coder {
     async  _lintCode(code) {
         let result = '#### CODE ERROR INFO ###\n';
         const codeNoComments = code.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
-        const skillRegex = /((?:skills|world)\.(.*?))\(/g;
+        // 只匹配真正的调用 skills.foo( / world.bar( —— 函数名必须是合法标识符。
+        // 旧正则 (.*?) 会把出现在字符串/日志文本里的 "skills.breakBlockAt failed..." 一路
+        // 贪吃到后面(尤其是 _stageCode 注入的 "; if(bot.interrupt_code)" 里的 '(')，
+        // 造出一个根本不存在的"函数名"，把合法代码误判成缺失技能 → 无限重生成 → 任务永远做不动。
+        const skillRegex = /((?:skills|world)\.([A-Za-z_$][\w$]*))\s*\(/g;
         const skills = [];
         let match;
         while ((match = skillRegex.exec(codeNoComments)) !== null) {

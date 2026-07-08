@@ -96,20 +96,30 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
       if (SURFACE_SEAL_DISABLED) {
         // ★封箱已禁用 (docs/shelter-mechanism-disabled.md): 不砌任何墙。但 seal 禁用后 "dig_one 不可行" 的
         //   地形不再有保命落点(直落裸 hold = 露天挨打死循环, 对有镐 bot 一样成立)。★G1(2026-07-07 用户令):
-        //   ① 就地试挖三填一(digOneCapOne 徒手可挖 dirt/grass/sand/gravel, 自带 gravity/aquifer/y≤16 守卫);
-        //   ② 就地不成 → 扫最近"可挖软土地带" relocate 过去再挖(用户令: 寻找最近可挖地带);
-        //   ③ 扫不到(石台孤岛/含水层遍布)→ 老实 no-op hold(物理下限, 交 surviveNow/死亡出口)。绝不砌 wall-ring。
-        const SOFT_FLOOR = /^(dirt|coarse_dirt|rooted_dirt|grass_block|podzol|mycelium|sand|red_sand|gravel|clay|mud|moss_block|dirt_path|farmland)$/;
-        const softFloorUnder = (fx, fy, fz) => { try { const b = bot.blockAt(new Vec3(fx, fy - 1, fz)); return !!(b && SOFT_FLOOR.test(b.name || '')); } catch (e) { return false; } };
+        //   ★前置: 【仅有镐】才走挖三填一 (§7.3: 无镐徒手挖软土会自埋树底→wood 死锁; 无镐 = 直接裸 hold);
+        //   ① 就地试挖三填一(digOneCapOne, 自带 gravity/aquifer/y≤16 守卫);
+        //   ② 就地不成 → ≤15格由近及远扫"可挖三填一的地面"(软土 / 石系, 排重力柱) relocate 过去再挖(用户令 2026-07-08: 半径 5→15);
+        //   ③ 无镐 / 扫不到(石台孤岛/含水层遍布)→ 老实 no-op hold(物理下限, 交 surviveNow/死亡出口)。绝不砌 wall-ring。
+        // ★"可挖三填一的地面"判据 (用户令 2026-07-08: 15格内找可挖地). 徒手→只认软土; 有镐→石系也算.
+        //   排除 sand/red_sand/gravel 重力柱 (digOneCapOne 会拒) + y≤16 (dig_one 是浅层夜庇护) — 别 relocate 到注定被拒的落点.
+        const _hasPickInv = () => { try { return bot.inventory.items().some(i => /_pickaxe$/.test(i.name || '')); } catch (e) { return false; } };
+        const DIG_SOFT = /^(dirt|coarse_dirt|rooted_dirt|grass_block|podzol|mycelium|clay|mud|moss_block|dirt_path|farmland)$/;
+        const DIG_STONE = /(stone|deepslate|tuff|andesite|diorite|granite|cobbled|blackstone|basalt|calcite|dripstone|_ore$)/;
+        const diggableUnder = (fx, fy, fz) => { try { if (fy - 1 <= 16) return false; const b = bot.blockAt(new Vec3(fx, fy - 1, fz)); if (!b) return false; const n = b.name || ''; return DIG_SOFT.test(n) || (_hasPickInv() && DIG_STONE.test(n)); } catch (e) { return false; } };
         let dug = false;
-        if (!isDay() && !bot.interrupt_code && bot.health > 0) {
-            dug = await skills.digOneCapOne(bot).catch(() => false);   // ① 就地挖三填一
+        // ★无镐硬门 (§7.3 红线 + 2026-07-08 夜链 respec 评审补): SEAL_FORT 对无镐 bot 必须是【真裸 hold】,
+        //   不徒手挖三填一 —— digOneCapOne 徒手可挖软土(dirt/grass ~750ms, 远低于 4500ms 不可挖门), 一个森林里
+        //   无镐 bot 被挖下 1 格封顶后, 天亮周围树"抬高+4不可达" → chopWood 全 blacklist → wood=0 bootstrap 死锁
+        //   (modes.js:6349-6354 决策层正是为此把 dig_one 卡"必须真镐"; 执行层这里同门, 决策/执行一致).
+        //   keepInv 开着, 无镐裸 hold 挨打死了也只重生, 严格优于自埋死锁. 半径 5→15 更放大了自埋触达面 → 更要卡.
+        if (!isDay() && !bot.interrupt_code && bot.health > 0 && _hasPickInv()) {
+            dug = await skills.digOneCapOne(bot).catch(() => false);   // ① 就地挖三填一 (仅有镐)
             if (!dug && !bot.interrupt_code && bot.health > 0) {
-                // ② relocate: 由近及远环扫可站+脚下软土地带 (≤5b, 命中即停; bot 本已露天, 短途走位比裸站安全)
+                // ② relocate: 由近及远环扫"可站+脚下可挖地" (≤15b, 命中即停; 用户令 2026-07-08 半径 5→15; bot 本已露天, 走位比裸站安全)
                 const here = bot.entity.position.floored();
                 let best = null;
                 outer:
-                for (let r = 1; r <= 5; r++) {
+                for (let r = 1; r <= 15; r++) {
                     for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
                         if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;   // 只扫第 r 环
                         const cx = here.x + dx, cz = here.z + dz;
@@ -117,12 +127,12 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
                             const fy = here.y + dy;
                             const feet = bot.blockAt(new Vec3(cx, fy, cz));
                             const head = bot.blockAt(new Vec3(cx, fy + 1, cz));
-                            if (feet && feet.boundingBox === 'empty' && head && head.boundingBox === 'empty' && softFloorUnder(cx, fy, cz)) { best = { x: cx, y: fy, z: cz }; break outer; }
+                            if (feet && feet.boundingBox === 'empty' && head && head.boundingBox === 'empty' && diggableUnder(cx, fy, cz)) { best = { x: cx, y: fy, z: cz }; break outer; }
                         }
                     }
                 }
                 if (best) {
-                    log(bot, `nightShelter: 硬地/不可挖 → relocate 最近可挖软土 (${best.x},${best.y},${best.z}) 再挖三填一 (用户令).`);
+                    log(bot, `nightShelter: 硬地/不可挖 → relocate 最近可挖地 (${best.x},${best.y},${best.z}, ≤15b) 再挖三填一 (用户令).`);
                     try { await skills.goToPosition(bot, best.x, best.y, best.z, 1); } catch (e) {}
                     if (!bot.interrupt_code && bot.health > 0) dug = await skills.digOneCapOne(bot).catch(() => false);
                 }
@@ -135,7 +145,7 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
             try { bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop(); } catch (e) {}
             try { bot.clearControlStates(); } catch (e) {}
             setSealed(false);
-            log(bot, 'nightShelter: 封箱禁用 + dig_one 不可行(硬地/无软土可迁) — 原地 hold, 受威胁即让位反射/re-decide.');
+            log(bot, `nightShelter: 封箱禁用 + ${_hasPickInv() ? 'dig_one 不可行(硬地/无软土可迁/含水)' : '无镐(不徒手挖三填一防自埋树底 §7.3)'} — 原地裸 hold, 受威胁即让位反射/re-decide.`);
         }
       } else {
         const p = bot.entity.position.floored();

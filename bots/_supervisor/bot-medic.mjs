@@ -61,6 +61,10 @@ const recentDrownings = () => { try { return fs.readFileSync(path.join(SUP, 'dea
 const cheatEmpty = () => { try { return fs.readFileSync(CHEAT, 'utf8').trim().length === 0; } catch (e) { return true; } };
 const writeCheat = (lines) => { try { fs.writeFileSync(CHEAT, lines.join('\n') + '\n'); log('APPLIED: ' + lines.filter(c => c !== '/gamerule keepInventory true').join(' | ')); } catch (e) { log('cheat write err ' + e.message); } };
 
+// ★2026-07-09 用户令 HP/食物本能熔断: 两个熔断器默认 OFF (值≠'1' 即 inert); 置 '1' 恢复原行为。
+const _foodOn = () => process.env.MC_FOOD_INSTINCTS === '1';
+const _hpOn   = () => process.env.MC_HP_INSTINCTS   === '1';
+
 let lastApply = 0;
 let lastSpawnSet = 0;
 
@@ -141,7 +145,8 @@ function tick() {
   // (no logs → can't make a table). Keep it table+wood stocked so sufficientForUnderground stays true and
   // GET_DIAMOND engages. Real fix = decision-layer stocks wood BEFORE descending (attended).
   if ((inv.crafting_table || 0) < 1 && armorN >= 1 && ironPickN >= 1) { cmds.push('/give @s crafting_table 2', '/give @s oak_planks 12', '/give @s stick 8'); act = true; log(`TRIGGER table-maintenance (no table + iron-tier) → carriedTable so surfaceGate allows descent for diamonds`); }
-  if (hp < 10 && food < 18 && !edible) { cmds.push('/effect give @s minecraft:instant_health 1 10', '/effect give @s minecraft:saturation 1 5', '/give @s cooked_beef 32'); act = true; log(`TRIGGER famine hp=${hp} food=${food}`); }   // ★food<14→<18 (worker-frozen 0701): MC regen needs food≥18 — a bot at hp8/food14-17 is stuck LOW-HP not regening (live: hp8/food14 pinned 14min, stall building), the old food<14 gate missed the 14-17 no-regen zone. Heal+feed so it can regen and resume.
+  // ★2026-07-09 用户令 HP/食物本能熔断: FAMINE 作弊补给 (instant_health+beef) 是饥饿驱动的低血/低饱行为; MIXED hp+food, 双闸全 OFF 时 inert, 任一/双闸开恢复。
+  if ((_hpOn() || _foodOn()) && hp < 10 && food < 18 && !edible) { cmds.push('/effect give @s minecraft:instant_health 1 10', '/effect give @s minecraft:saturation 1 5', '/give @s cooked_beef 32'); act = true; log(`TRIGGER famine hp=${hp} food=${food}`); }   // ★food<14→<18 (worker-frozen 0701): MC regen needs food≥18 — a bot at hp8/food14-17 is stuck LOW-HP not regening (live: hp8/food14 pinned 14min, stall building), the old food<14 gate missed the 14-17 no-regen zone. Heal+feed so it can regen and resume.
   if (freeWedge) { cmds.push('/tp @s ~14 ~5 ~14'); act = true; log(`TRIGGER FREE-wedge tp-unwedge y=${v.y} jumpFails=${jumpFails}`); }
   if (swimWedge) { cmds.push('/effect give @s minecraft:water_breathing 800 1', '/tp @s ~5 ~4 ~5'); act = true; log(`TRIGGER swim-wedge mob=${v.mob} jumpFails=${jumpFails} y=${v.y} — water_breathing + surface tp-nudge`); }
   const drowningLoop = recentDrownings() >= 1;   // ★lowered 2→1 (worker-frozen 0701): with no bed, even ONE drowning resets the bot to spawn (costly progress-reset) — react on the first drowning, not the second

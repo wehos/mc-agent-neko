@@ -8,9 +8,27 @@ import fs from 'fs';
 import path from 'path';
 const PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
 const prog = (s) => { try { fs.appendFileSync(PROG, `[${new Date().toISOString()}] ${s}\n`); } catch (e) {} };
+// ★perf 2026-07-09: death_log.jsonl grows all session and was re-read+split twice per collect-loop
+// iteration here. Cache the last-64 raw lines on the persistent bot object (~15s TTL, shared across
+// skills); death zones don't shift within a loop (a death aborts the skill), so staleness is harmless.
+function _deathLinesCached(bot) {
+    try {
+        const now = Date.now();
+        const m = bot && bot._deathLinesMemo;
+        if (m && now - m.t < 15000) return m.lines;
+        let lines = [];
+        try { lines = fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'death_log.jsonl'), 'utf8').trim().split('\n').slice(-64); } catch (e) {}
+        if (bot) bot._deathLinesMemo = { t: now, lines };
+        return lines;
+    } catch (e) { return []; }
+}
 
 const TOOL_TIER = ['wooden', 'stone', 'iron', 'diamond', 'netherite'];
 const FOOD_RE = /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|^cod$|^salmon$|melon_slice|sweet_berries|_stew|^rabbit$|baked_/;
+// ★2026-07-09 用户令 HP/食物本能熔断: 两个熔断器, 默认关闭(值≠'1')=因低血/因饿的本能失效;
+// 置 '1' 恢复原行为。food breaker: MC_FOOD_INSTINCTS==='1'; hp breaker: MC_HP_INSTINCTS==='1'。
+const _foodOn = () => process.env.MC_FOOD_INSTINCTS === '1';
+const _hpOn = () => process.env.MC_HP_INSTINCTS === '1';
 // CHANCE-DROP SOURCES (2026-07-02, flint task): minecraft-data's block.drops lists
 // only the GUARANTEED drop — gravel.drops=[gravel], verified 1.21.1 — so
 // mc.getItemBlockSources('flint') returns [] and COLLECT dead-ended at "NO KNOWN
@@ -83,7 +101,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
     if (have() >= need) return true;
     const edibleHeld = () => bot.inventory.items().some(i => i && i.name && FOOD_RE.test(i.name) && i.name !== 'rotten_flesh');
     const foodGoal = FOOD_RE.test(item);
-    const lowFoodNoSnack = () => bot.food <= 8 && !edibleHeld();
+    const lowFoodNoSnack = () => _foodOn() && bot.food <= 8 && !edibleHeld();   // ★2026-07-09 用户令 HP/食物本能熔断: 纯食物门(资源/砍原木/木板闸共用); 食物闸开恢复。
     const hostileNear = (r = 12) => {
         try {
             return Object.values(bot.entities || {}).some(e => e && e.position && mc && mc.isHostile && mc.isHostile(e) && e.position.distanceTo(bot.entity.position) < r);
@@ -123,14 +141,14 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
     const optionalWoodSafe = () => {
         if (!openSurfaceNow()) return { ok: false, reason: `not true surface y=${Math.floor(bot.entity.position.y)} mob=${bot._mobility ? bot._mobility.state : '-'}` };
         if (hostileNear(24)) return { ok: false, reason: 'hostile near 24b' };
-        if (bot.food <= 14 && !edibleHeld()) return { ok: false, reason: `food=${bot.food}, no edible held` };
+        if (_foodOn() && bot.food <= 14 && !edibleHeld()) return { ok: false, reason: `food=${bot.food}, no edible held` };   // ★2026-07-09 用户令 HP/食物本能熔断: 纯食物门(可选木缓冲); 食物闸开恢复。
         if (lowHpWorkRisk()) return { ok: false, reason: `hp=${Math.round(bot.health)} hostile near` };
         return cheapWoodTarget();
     };
     const moderateUndergroundWorkOk = () => {
         try {
             if (openSurfaceNow()) return false;
-            if (bot.food < 8 || bot.health < 14 || edibleHeld()) return false;
+            if ((_hpOn() || _foodOn()) && (bot.food < 8 || bot.health < 14 || edibleHeld())) return false;   // ★2026-07-09 用户令 HP/食物本能熔断: 混合血/食物豁免门; 任一/双闸开恢复。
             if (!bot.inventory.items().some(i => /_pickaxe$/.test(i.name || ''))) return false;
             if (hostileNear(12)) return false;
             const p = bot.entity.position.floored();
@@ -174,7 +192,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
     } else if (!foodGoal && lowFoodNoSnack() && essentialUndergroundKitGoal && moderateUndergroundWorkOk()) {
         prog(`${tag}LOW-FOOD resource gate ${item}: food=${bot.food}, hp=${Math.round(bot.health)} calm/enclosed with pick — allow essential local underground kit work`);
     }
-    if (!foodGoal && bot.food <= 2 && !edibleHeld()) {
+    if (!foodGoal && _foodOn() && bot.food <= 2 && !edibleHeld()) {   // ★2026-07-09 用户令 HP/食物本能熔断: 纯食物饥荒保险; 食物闸开恢复。
         prog(`${tag}FAMINE-FUSE ${item}: food=${bot.food}, hp=${Math.round(bot.health)} no edible — refuse resource subgoal`);
         try { bot.clearControlStates(); } catch (e) {}
         try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
@@ -445,6 +463,15 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                     prog(`${tag}★NIGHT-EXPOSED table-walk refused — defer table-craft to day (${bot._prepTableRecoveryBlockedReason})`);
                     return false;
                 }
+                // ★admin 独占 (2026-07-08 用户令 #2): admin 任务期间【禁止为工作台远征】。prepNether 的
+                //   "prefer station over cave wood climb" 曾把站在可达树旁的 bot 拽向够不到的地下工作台
+                //   (@-91,55,246 等陈旧/跨世界注册点), 半路摔进无镐石坑 → 左右横跳。admin 时只认贴脸台
+                //   (d<=2.5, 无真穿行), 其余一律就地 craft/place, 绝不远走去追一个可能根本不在本世界的站点。
+                const _adminOwned = (() => { try { return !!(bot._adminMission && bot._adminMission.active) || (!!bot._extIntentUntil && Date.now() < bot._extIntentUntil); } catch (e) { return false; } })();
+                if (_adminOwned && d > 2.5) {
+                    prog(`${tag}★ADMIN 独占 — 拒绝为工作台远征 ${d.toFixed(1)}b (@${reg.x},${reg.y},${reg.z}); 就地 craft/place`);
+                    return false;
+                }
                 if ((!pocket && d <= 12) || mustReuseTable) {
                     prog(`${tag}registered table @${reg.x},${reg.y},${reg.z} — walking to reuse${mustReuseTable ? ' (no local wood/table; prefer station over cave wood climb)' : ''}`);
                     try {
@@ -646,7 +673,8 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
         // both go stale → froze the whole (best-resourced) run until the watchdog hard-restarted
         // it 379s later. A timeout returns control to achieve, which re-evaluates (logs → resets
         // the freeze clock → keeps the bot ALIVE + its kit, then re-dives) instead of freezing.
-        await step('feed up to full HP before dive', () => Promise.race([
+        // ★2026-07-09 用户令 HP/食物本能熔断: 潜矿前 feedUp 觅食派发(因饿驱动); 食物闸开恢复。
+        if (_foodOn()) await step('feed up to full HP before dive', () => Promise.race([
             skills.customSkill(bot, 'feedUp', 18),
             new Promise((_, rej) => setTimeout(() => rej(new Error('feedUp-timeout')), 60000)),
         ]).catch(e => { try { bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} }));
@@ -817,7 +845,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                     return false;
                 }
             } catch (e) {}
-            if (bot.health <= 8 && bot.food < 18) {
+            if ((_hpOn() || _foodOn()) && bot.health <= 8 && bot.food < 18) {   // ★2026-07-09 用户令 HP/食物本能熔断: 混合血/食物挖矿门(surfaceUp); 任一/双闸开恢复。
                 const yy = Math.floor(bot.entity.position.y);
                 prog(`${tag}LOW-HP mining gate — hp=${Math.round(bot.health)} food=${bot.food} at y=${yy}; surface/feed before more ${block}`);
                 try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
@@ -825,7 +853,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                 try { await skills.customSkill(bot, 'surfaceUp', Math.max(48, yy + 12)); } catch (e) { prog(`${tag}LOW-HP surfaceUp err ${e.message}`); }
                 return false;
             }
-            if (bot.food <= 12 && !edibleHeld() && miningBlock) {
+            if (_foodOn() && bot.food <= 12 && !edibleHeld() && miningBlock) {   // ★2026-07-09 用户令 HP/食物本能熔断: 纯食物挖矿门(surface/feed); 食物闸开恢复。
                 const yy = Math.floor(bot.entity.position.y);
                 if (moderateUndergroundWorkOk()) {
                     prog(`${tag}LOW-FOOD mining gate — food=${bot.food} hp=${Math.round(bot.health)} at y=${yy}; calm/enclosed with pick, allow essential local ${block} work instead of surface/feed`);
@@ -876,8 +904,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
             // 圈内,缰绳反而圈住它): death_log 近50条里,16格内有3+死亡=雷区;身处雷区采矿
             // → 背着死亡质心撤24格再继续。x/z字段(为此而加)的第一个自动化消费者。
             try {
-                const dlF = path.resolve(process.cwd(), 'bots', '_supervisor', 'death_log.jsonl');
-                const dl = fs.readFileSync(dlF, 'utf8').trim().split('\n').slice(-50);
+                const dl = _deathLinesCached(bot).slice(-50);
                 const me3 = bot.entity.position;
                 let nd = 0, cx3 = 0, cz3 = 0;
                 for (const ln of dl) { try { const r = JSON.parse(ln); if (typeof r.x === 'number' && Math.hypot(r.x - me3.x, r.z - me3.z) < 16) { nd++; cx3 += r.x; cz3 += r.z; } } catch (e) {} }
@@ -957,7 +984,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                 new Promise((_, rej) => setTimeout(() => rej(new Error('collect-timeout')), 25000)),
             ]).catch(e => { try { bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} throw e; }));
             if (have() >= need) break;
-            if (!foodGoal && (lowHpWorkRisk() || (bot.health <= 12 && bot.food <= 10 && !edibleHeld()))) {
+            if (!foodGoal && (lowHpWorkRisk() || ((_hpOn() || _foodOn()) && bot.health <= 12 && bot.food <= 10 && !edibleHeld()))) {   // ★2026-07-09 用户令 HP/食物本能熔断: 混合血/食物探矿让位(lowHpWorkRisk 属因怪, 保留); 任一/双闸开恢复。
                 prog(`${tag}mine probe safety yield — hp=${Math.round(bot.health)} food=${bot.food} hostile=${hostileNear(12)}; stop optional ore route`);
                 motion('achieve.probe.safety_yield', { item, block, hp: Math.round(bot.health || 0), food: bot.food, hostileNear: hostileNear(12) });
                 try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
@@ -977,7 +1004,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
             // _inDZ fire next time (self-correcting).
             let _inDZ = false;
             try {
-                const dlZ = fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'death_log.jsonl'), 'utf8').trim().split('\n').slice(-50);
+                const dlZ = _deathLinesCached(bot).slice(-50);
                 const meZ = bot.entity.position;
                 let ndZ = 0, digDanger = 0;
                 const DIG_DANGER = /lava|fall|suffocat|magma|cramming|wall|in_wall/i;

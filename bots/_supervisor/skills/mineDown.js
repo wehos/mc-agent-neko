@@ -204,6 +204,34 @@ export default async function mineDown(bot, ctx, opts = {}) {
     const entryY = Math.round(bot.entity.position.y);
     const oreUnitsAtEntry = oreUnits();
 
+    // ★2026-07-08 到层背包满就地清理 (钻石"够不到"根因 4, 见 [[diamond-never-reached-blocker-stack]]):
+    //   实录 bot 抵 targetY 后 'pack full (free=1) — stop at-depth mining' ×4 + 'diamondBank: no chest
+    //   available' → 到了矿层却因满包不挖。像真玩家那样丢弃【过量低值填料】腾格续挖: 保留足量圆石/深板岩
+    //   作封壁料 (mineDiamonds sealLevel/tunnelAside 要用), 矿石(raw_*/煤/钻/青金/红石/铁/金)永不丢。
+    //   bounded (每类只丢超储备部分)、不 throw、腾出 >2 空格即早停。
+    const _DECLUTTER_KEEP = { cobblestone: 128, cobbled_deepslate: 64, dirt: 16 };
+    const _DECLUTTER_JUNK = ['cobblestone', 'cobbled_deepslate', 'deepslate', 'tuff', 'andesite', 'diorite', 'granite', 'dirt', 'gravel', 'netherrack'];
+    const declutterAtDepth = async () => {
+        let tossed = 0;
+        for (const name of _DECLUTTER_JUNK) {
+            try {
+                const items = bot.inventory.items().filter(it => it.name === name);
+                const have = items.reduce((s, it) => s + it.count, 0);
+                let surplus = have - (_DECLUTTER_KEEP[name] || 0);
+                if (surplus <= 0) continue;
+                for (const it of items) {
+                    if (surplus <= 0) break;
+                    const n = Math.min(it.count, surplus);
+                    try { await bot.toss(it.type, null, n); tossed += n; surplus -= n; } catch (e) {}
+                    await new Promise(r => setTimeout(r, 80));
+                }
+                let f = 0; try { f = bot.inventory.emptySlotCount(); } catch (e) {}
+                if (f > 2) break;
+            } catch (e) {}
+        }
+        return tossed;
+    };
+
     // ★checkpoint#25 P1-A AT-BAND DELEGATE (06:53:58-06:54:03 实录: bot 首次抵达 y=12 钻石带后,
     // 三次 mineDown 派发全部 {endY:12, dug:0, abort:null, failed:true} — 起点已在目标层, mineDown
     // 是"只下降"的技能, 下降 0 被 return-contract 判败 → 3 振 → DUSK_MINE_NIGHT 冷却在钻石层
@@ -413,6 +441,40 @@ export default async function mineDown(bot, ctx, opts = {}) {
     // prime iron band, so branch-mining at y≈17 is fully productive for the iron goal (diamonds get their
     // own mineDiamonds@y-11). Tolerance = 6 blocks above targetY.
     const DESCEND_TOLERANCE = 6;
+    // ★2026-07-09 用户令 "以怪为基准做 hazard 感知, 不用管空腔; 只有怪在附近才特别注意": 台阶是双向敞开
+    //   的走廊 — 挖进空洞/黑腔无所谓(怪不在就照挖), 但挖进【有活怪】的洞就是给怪修上行高速。故下潜途中
+    //   逐步复查: HOSTILE_STEER_R 内有敌对怪且当前 heading 正朝它挖(或怪贴到点前) → 把楼梯拐向背离怪的
+    //   基点(复用 START 的 away-from-hostile 推导 + fluid/wedge 换向记忆, 不撞已知流体/楔死列)。无怪 →
+    //   一律不动, 照常直挖。贴到臂展(<4b)来不及拐的兜底 yield 仍在循环体里(交给 self_defense 反射)。
+    const HOSTILE_STEER_R = 10;
+    const steerFromHostile = () => {
+        try {
+            const p = bot.entity.position;
+            let best = null, bd = Infinity;
+            for (const e of Object.values(bot.entities || {})) {
+                if (!(e && e !== bot.entity && e.position && ctx.mc.isHostile(e))) continue;
+                const d = e.position.distanceTo(p);
+                if (d < bd) { bd = d; best = e; }
+            }
+            if (!best || bd > HOSTILE_STEER_R) return;
+            const dx = p.x - best.position.x, dz = p.z - best.position.z;   // bot − mob (points AWAY from mob)
+            const toward = (sx * -dx + sz * -dz) > 0;                        // heading · (mob − bot) > 0 = 正朝怪挖
+            if (!toward && bd >= 5) return;                                  // 没朝怪挖且非点前 → 台阶保持不动
+            let ax, az;                                                      // away-heading = 背离怪的主轴 (镜像 START)
+            if (Math.abs(dx) >= Math.abs(dz)) { ax = Math.sign(dx) || 1; az = 0; } else { ax = 0; az = Math.sign(dz) || 1; }
+            let cand = [ax, az];
+            const avoid = (bot._mineDownFluidAvoid || []).filter(a => Date.now() - a.at < 600000 && Math.hypot(a.x - p.x, a.z - p.z) < 8);
+            const blocked = ([cx2, cz2]) => avoid.some(a => a.sx === cx2 && a.sz === cz2);
+            if (blocked(cand)) {   // away-heading 撞已知流体/楔死记忆 → 退而取任一"非朝怪"的干净基点
+                const alt = [[1, 0], [0, 1], [-1, 0], [0, -1]].filter(([cx2, cz2]) => (cx2 * -dx + cz2 * -dz) <= 0 && !blocked([cx2, cz2]));
+                if (!alt.length) return;                                     // 没有干净的背怪方向 → 交给 4b bail / 流体逻辑收尾
+                cand = alt[0];
+            }
+            if (cand[0] === sx && cand[1] === sz) return;                    // 已经就是背怪基点
+            sx = cand[0]; sz = cand[1];
+            log_(`hostile-steer: ${best.name || 'mob'} @${bd.toFixed(1)}b — 拐向背离怪 heading=${sx},${sz} (以怪为基准, 不把台阶挖进怪堆)`);
+        } catch (e) {}
+    };
     for (let i = 0; i < steps; i++) {
         const cur = bot.entity.position;
         const cy = Math.round(cur.y);
@@ -434,9 +496,14 @@ export default async function mineDown(bot, ctx, opts = {}) {
             log_(`reached targetY=${targetY} at step ${i} — branch-mining loop for ore (oreUnits=${lastUnits})`);
             while (rounds++ < 8) {
                 if (bot.interrupt_code) { abort = 'interrupted at-depth branch loop'; break; }
-                // pack full → stop mining, let the higher layer bank/declutter (drops would be lost).
+                // pack full → 先就地清理过量填料腾格续挖 (根因 4); 清完仍满才停交上层 bank。
                 let free = 36; try { free = bot.inventory.emptySlotCount(); } catch (e) {}
-                if (free <= 1) { log_(`pack full (free=${free}) — stop at-depth mining (bank/declutter)`); break; }
+                if (free <= 1) {
+                    let freed = 0; try { freed = await declutterAtDepth(); } catch (e) {}
+                    let free2 = free; try { free2 = bot.inventory.emptySlotCount(); } catch (e) {}
+                    if (free2 <= 1) { log_(`pack full (free=${free2}) after declutter — stop at-depth mining (bank)`); break; }
+                    log_(`at-depth declutter freed slots (free ${free}→${free2}, tossed ${freed} junk) — keep mining`);
+                }
                 // pick guard: about to break + can't recraft → return before stranding deep.
                 if (pickAboutToBreak() && !canCraftPick()) { log_('pick about to break + no recraft — stop at-depth mining'); break; }
                 try { await skills.customSkill(bot, 'branchMine', 24); } catch (e) { log_(`branchMine threw: ${e && e.message || e}`); break; }
@@ -446,6 +513,8 @@ export default async function mineDown(bot, ctx, opts = {}) {
             }
             break;
         }
+        // ★以怪为基准: 先尝试把这一步的 heading 拐离近怪 (10b 内且正朝怪挖) — 提前避, 别等贴脸。
+        steerFromHostile();
         // bail to survival if an actionable hostile got close (shouldn't in a sealed stair, but guard)
         try {
             const close = Object.values(bot.entities || {}).some(e => e && e !== bot.entity && e.position && ctx.mc.isHostile(e) && e.position.distanceTo(cur) < 4);

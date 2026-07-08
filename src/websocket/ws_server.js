@@ -240,7 +240,9 @@ class WSMessageServer {
     // as the idle/holding fallback. No coordinates (the LLM doesn't need them). Returns {text,...}.
     _statusNL(bot) {
         const hp = Math.round(bot.health ?? 0);
-        const food = bot.food ?? 0;
+        // ★2026-07-09 用户令: 饥饿信息(有点饿/食物充足…)不再进 chat log 与 admin LLM 的 ws 通道 —— 与
+        //   [[hunger-fully-inert]] 定调一致(饥饿不 gate/不改道/不上报)。这里刻意不读 bot.food, 状态人话与
+        //   bot_status_nl 载荷里都不再带任何食物字段, 下游 LLM 也就无从叙述"有点饿/食物充足"。
         const tod = (() => { try { return bot.time.timeOfDay || 0; } catch (e) { return 0; } })();
         const night = tod >= 12542 && tod <= 23459;
         const dim = (bot.game && bot.game.dimension) || 'overworld';
@@ -273,7 +275,6 @@ class WSMessageServer {
         } catch (e) {}
 
         const hpTxt = hp >= 20 ? '血满' : hp >= 15 ? '血挺足' : hp >= 10 ? '半血' : hp >= 6 ? '血不多' : '快没血';
-        const foodTxt = food >= 18 ? '吃得饱' : food >= 12 ? '食物中等' : food >= 6 ? '有点饿' : '很饿';
         const svnActive = (bot._surviveNowUntil && Date.now() < bot._surviveNowUntil)
             || skill === 'surviveNow' || kind === 'SURVIVE_NOW';
         const goal = missionText ? this._missionGoalPhrase(missionText) : this._goalPhrase(kind, skill);   // 短目标短语, 或 null
@@ -309,7 +310,7 @@ class WSMessageServer {
         //   🤖[自主]=内核自主行动。让人(和外部 LLM)一眼知道 bot 现在听谁的。
         const onCommand = (bot._extIntentUntil && Date.now() < bot._extIntentUntil)
             || (this.agent && this.agent.supervised_skill === 'ws');
-        let text = (onCommand ? '🎯[按指令] ' : '🤖[自主] ') + head + '，' + hpTxt + '、' + foodTxt;
+        let text = (onCommand ? '🎯[按指令] ' : '🤖[自主] ') + head + '，' + hpTxt;
         if (dim === 'the_nether') text += '，在下界';
         else if (dim === 'the_end') text += '，在末地';
         text += hostiles > 0 ? `，附近有${hostiles}只怪${names.length ? `（${names.join('、')}）` : ''}` : '，周围没怪';
@@ -320,7 +321,7 @@ class WSMessageServer {
         //   ★任务态视为"在做事"(非空闲) —— 免得任务中途的短暂空隙被去抖成"停下"。
         const isIdle = !svnActive && !act && !goal && !missionText;
         // ★任务态: 抹掉不相干的 kernel kind(否则下游 LLM 又照它叙述成"在挖矿"), 改附 mission 原文让其精确叙述。
-        return { text, kind: missionText ? null : kind, skill, hp, food, hostiles, night, dim, idle: isIdle, mission: missionText || undefined };   // ★不含坐标(LLM 不需要)
+        return { text, kind: missionText ? null : kind, skill, hp, hostiles, night, dim, idle: isIdle, mission: missionText || undefined };   // ★不含坐标, 也不含食物字段(用户令: 饥饿不进 admin ws)
     }
 
     // Short GOAL phrase (what it's trying to achieve) — context / idle-fallback only, never the
@@ -450,6 +451,19 @@ class WSMessageServer {
             return;
         }
         console.log(`📷 Camera/viewer init ENABLED (screenshot interval ${_ssMs}ms)`);
+        // ★2026-07-09 全局卡顿根因修 (render-worker 泄漏): 每次掉线重连 spawn → setAgent →
+        //   这里无条件 new CameraProc, 旧相机从不 cleanup() → 每重连泄漏一个 ~0.6-1GB 的
+        //   render_worker 子进程 (实录 5 个并存 ≈4.1GB, 32GB 只剩 1GB 空闲 → 系统换页 →
+        //   客户端+bot 一顿一顿)。杀 worker 没用: 旧 CameraProc 的 exit-respawn 还活着会复活它,
+        //   必须走 cleanup() (置 _destroyed → 杀 worker 且不复活, 并摘掉旧 bot 的 worldView 监听)。
+        if (this.screenshotInterval) { clearInterval(this.screenshotInterval); this.screenshotInterval = null; }
+        if (this.camera) {
+            try { this.camera.cleanup(); } catch (e) { /* 回收失败不挡新相机 */ }
+            this.camera = null;
+        }
+        // 竞态防线: import() 是异步的, 两次快速重连可能有两个 then 同时在飞 —— 只认最新一代,
+        // 旧代 then 落地时立即 cleanup 自己刚建的相机, 不覆盖 this.camera。
+        const _camEpoch = (this._cameraEpoch = (this._cameraEpoch || 0) + 1);
         /* eslint-disable no-unreachable */
         try {
             // CameraProc isolates the GL renderer in a child process (crash-safe).
@@ -458,11 +472,18 @@ class WSMessageServer {
             // Lazy-loaded ONLY here (screenshots enabled) so the prismarine-viewer /
             // headless-gl chain is never imported at startup.
             import('../agent/vision/camera_proc.js').then(({ CameraProc }) => {
-                this.camera = new CameraProc(agent.bot, `./bots/${agent.name}/screenshots/`);
+                const cam = new CameraProc(agent.bot, `./bots/${agent.name}/screenshots/`);
+                if (_camEpoch !== this._cameraEpoch) {   // 已被更新一代取代 → 自毁, 不泄漏
+                    try { cam.cleanup(); } catch (e) { /* ignore */ }
+                    return;
+                }
+                this.camera = cam;
                 this.camera.on('ready', () => {
+                    if (_camEpoch !== this._cameraEpoch) return;   // ready 迟到于换代 → 不再起定时器
                     console.log('Camera initialized for WebSocket screenshots (forced initialization)');
                     // Wait a bit more for bot to be fully ready before starting screenshots
                     setTimeout(() => {
+                        if (_camEpoch !== this._cameraEpoch) return;
                         this.startScreenshotTimer();
                     }, 5000); // Wait 5 seconds after camera is ready
                 });
@@ -1126,6 +1147,8 @@ class WSMessageServer {
             ? Math.max(200, Math.min(10000, envMs))
             : 1000;
         console.log(`📷 Screenshot timer starting at ${intervalMs}ms interval`);
+        // 防重入 (2026-07-09 render-worker 泄漏修的配套): 重连换代时不叠双定时器。
+        if (this.screenshotInterval) { clearInterval(this.screenshotInterval); this.screenshotInterval = null; }
         // Skip if previous screenshot is still in progress so we never
         // queue captures faster than the camera can produce them; the
         // 1s default plus this gate makes the effective rate

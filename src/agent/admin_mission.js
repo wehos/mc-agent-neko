@@ -140,6 +140,12 @@ export class AdminMission {
         this._epoch++;                                   // bump generation → breaks any in-flight OLD turn via checkInterrupt
         // Wrest the body BEFORE any await (fixes the override handoff stall).
         try { this.agent.requestInterrupt(); } catch (e) {}
+        // ★admin 独占硬抢占 (2026-07-08 用户令 #1): 冻结内核【新提案】不够 — boot 时 commitGoal 已 commit 的
+        //   BOOTSTRAP_KIT/prepNether 是 sticky 的, 会在 mission turn 间隙/结束后复活抢身体 (实证: "砍树"期间
+        //   getWood 站在可达树旁, 内核 committed prepNether 却把 bot 拽向够不到的地下工作台 → 摔坑 + 左右横跳)。
+        //   同步丢弃 bot._commitment → 内核既不复派该蓝图、mission 结束后也重新 propose 干净选择; 一并清 prepNether
+        //   的工作台恢复闸旗标 (免残留拽拉)。commitGoal 在 admin 冻结期不会跑, 故清一次即锁死为 null。
+        try { const b = this._bot(); if (b) { b._commitment = null; b._prepTableRecoveryBlockedUntil = 0; } } catch (e) {}
 
         this.mission = mine;
         this.state = RUNNING;
@@ -200,9 +206,13 @@ export class AdminMission {
         this._maybeExtendDeadline(now);
         if (now > m.deadlineAt) { this.end('impossible', 'deadline'); return; }
 
-        // Roll extIntent ONLY while the loop is truly ACTIVE — a conversation-paused mission must
-        // stop muzzling survival (paused ≠ active).
-        if (this.agent.self_prompter.isActive()) {
+        // Roll extIntent while the mission is genuinely WORKING — either the self-prompt loop is
+        // ACTIVE, or a supervised skill owns the body (mineOres/replenishKit/chopWood run for
+        // minutes with the prompter PAUSED/parked, so gating on isActive() alone let the 5-min
+        // window silently expire mid-skill → kernel un-froze → autonomous REPLENISH_KIT劫走任务;
+        // 2026-07-09 实证 18:09 `🤖[自主]REPLENISH_KIT`). A conversation-paused mission with NO skill
+        // running is still (rightly) NOT refreshed — paused-chat ≠ working, survival un-muzzles.
+        if (this.agent.self_prompter.isActive() || this.agent.supervised_skill || bot._currentSkill) {
             try { bot._extIntentUntil = now + MISSION_EXTINTENT_MS; } catch (e) {}
         }
 

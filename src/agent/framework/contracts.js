@@ -254,3 +254,19 @@ export const FRAMEWORK_ENABLED_DEFAULT = true;
 export function foodInstinctsEnabled() {
     return process.env.MC_FOOD_INSTINCTS === '1';
 }
+
+/**
+ * ★2026-07-09 用户令: "所有食物相关的机制全部熔断, 禁止因低血和饥饿度打断任何行动, 饿死/死了拉倒。"
+ * hp 侧总闸, 与 foodInstinctsEnabled 同构 (默认 OFF = 熔断; 任何非 '1' 值含未设置 = 熔断)。
+ * OFF 时被熔断的触发点 (完整清单见 docs/hp-instincts-disabled.md):
+ *   • kernel._grayZoneSignal 的 hp<12 灰区触发 + 夜锚僵局的 hp/food 不适限定 + hp<=6/food<=2 危急解卷
+ *   • arbiter.vitalNow 的 hp<=4 掉血地板 (溺水/着火/岩浆等环境致命地板【保留】— 那不是"因低血")
+ *   • modes.js lowHpNoRegenContainedHold / noRegenSafeAirHold (低血无回血时冻住身体的 hold 家族)
+ *   • modes.js auto_eat (与 food 闸联合: 两闸全 OFF = 永不进食 — 进食的 execute() 会打断在跑技能)
+ *   • 技能内纯低血 BAIL/让位 (branchMine/chopWood/mineOres — 外挂模块直读 env, 不 import 本文件)
+ * 战斗/威胁触发的防御与让位(self_defense, 围殴 swarm>=2, creeper 贴脸)不在此闸内 — 那是"因怪", 不是"因低血"。
+ * RE-ENABLE 旧行为: MC_HP_INSTINCTS=1 + 重启。Pure env read, 热重载/重启安全。
+ */
+export function hpInstinctsEnabled() {
+    return process.env.MC_HP_INSTINCTS === '1';
+}

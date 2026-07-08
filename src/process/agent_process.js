@@ -14,7 +14,11 @@ export class AgentProcess {
         this.count_id = count_id;
         this.running = true;
 
-        let args = [init_agent_path, this.name];
+        // ★2026-07-09 掉线加固 (child OOM): 干活的是这个子进程(init_agent.js), 但它由 spawn(process.execPath,…)
+        //   拉起, 从不继承 watchdog 给 main.js 的 --max-old-space-size/--expose-gc → 跑在 Node 默认 ~2GB 堆上限,
+        //   挖矿/砍树内存涨到 ~2.5GB 就 OOM 退出(实录 crash: heap 2475/2602MB), 且因缺 --expose-gc, agent.js
+        //   里"堆>2GB 强制 GC"的泄压阀(global.gc)恒为 undefined = 死的。补上父进程同款 node flags。
+        let args = ['--max-old-space-size=8192', '--expose-gc', init_agent_path, this.name];
         args.push('-n', this.name);
         args.push('-c', count_id);
         if (load_memory)

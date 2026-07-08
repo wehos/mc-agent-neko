@@ -112,6 +112,13 @@ export class Agent {
             if (message === "") return;
             if (username === this.name) return;
             if (settings.only_chat_with.length > 0 && !settings.only_chat_with.includes(username)) return;
+            // ★2026-07-08 修: 斜杠 (/tp /give /gamemode …) 是 MC 服务器作弊命令, 不是给 bot 的指令 ——
+            //   闸从 bot.on('chat') 上提到这个公共入口, 让 whisper 私聊路 + admin 兜底路一并覆盖
+            //   (bot 自己的命令语法是 !command, 从不以 / 开头, 故不会误挡)。
+            if (typeof message === 'string' && /^\s*\//.test(message)) {
+                console.log(`[chat] 忽略斜杠作弊命令(非 admin 指令): ${String(message).slice(0, 60)}`);
+                return;
+            }
             try {
                 if (ignore_messages.some((m) => message.startsWith(m))) return;
 
@@ -386,6 +393,7 @@ export class Agent {
 
     async initBot() {
         this.bot = initBot(this.name);
+        this._stampBotEpoch();
         this._disconnectHandled = false;
         
         // Increase max listeners to prevent warnings when multiple systems listen to events
@@ -417,16 +425,24 @@ export class Agent {
             }
         });
 
+        // ★2026-07-08 掉线加固: spawn-timeout 不再 process.exit(1)。服务器刚开 LAN / "under maintenance
+        //   or restarting" 时 bot 30s 内 spawn 不了本属正常 (端口在, 但世界还在载 / LoginGuard 拒登)。旧版
+        //   直接退进程 → 杀掉 48909 → watchdog + agent_process 双双每 ~60s 重启 = 崩溃循环, 且与
+        //   maxReconnectAttempts=Infinity 的"先起 N.E.K.O. 再开 LAN"设计自相矛盾。改为: 超时 = 当一次掉线,
+        //   走既有重连路 (initBot 新 bot + 退避), 进程存活等世界起来。计时器存在 this 上, 并在重连入口 /
+        //   spawn 成功时清零, 杜绝上一次连接尝试留下的陈旧计时器在"重连成功后"误触 (实录: reconnected 后仍
+        //   exit code 1 = 头一发 createBot 的 30s 计时器从没被清)。
         const spawnTimeoutDuration = settings.spawn_timeout || 30;
-        const spawnTimeout = setTimeout(() => {
-            const msg = `Bot has not spawned after ${spawnTimeoutDuration} seconds. Exiting.`;
-            log(this.name, msg);
-            process.exit(1);
+        if (this._spawnTimeout) { clearTimeout(this._spawnTimeout); this._spawnTimeout = null; }
+        this._spawnTimeout = setTimeout(() => {
+            this._spawnTimeout = null;
+            log(this.name, `Bot has not spawned after ${spawnTimeoutDuration}s (server slow/refusing) — reconnecting, NOT exiting.`);
+            void this.handleBotDisconnection('spawn-timeout');
         }, spawnTimeoutDuration * 1000);
         
         this.bot.once('spawn', async () => {
             try {
-                clearTimeout(spawnTimeout);
+                if (this._spawnTimeout) { clearTimeout(this._spawnTimeout); this._spawnTimeout = null; }
                 // HARD-DISABLED (unconditional): the prismarine-viewer browser renderer
                 // crashes the agent subprocess (exit 1) → auto-restart → ~15s offline → bot
                 // dies AFK. Env-gating didn't survive subprocess restarts, so the viewer (and
@@ -695,6 +711,10 @@ export class Agent {
         if (this._disconnectHandled) return;
         this._disconnectHandled = true;
 
+        // ★掉线加固: 清掉这个 (已死) bot 实例挂着的 spawn-timeout, 免得它的陈旧计时器在稍后重连成功
+        //   之后才 fire、把活着的连接又拽回重连 (或旧版里直接 process.exit(1))。
+        if (this._spawnTimeout) { clearTimeout(this._spawnTimeout); this._spawnTimeout = null; }
+
         const { msg } = handleDisconnection(this.name, reason);
 
         // Debug output for bot disconnection
@@ -705,6 +725,35 @@ export class Agent {
         const attemptCapStr = Number.isFinite(this.maxReconnectAttempts) ? String(this.maxReconnectAttempts) : '∞';
         console.log('🔄 Reconnect attempts:', this.reconnectAttempts, '/', attemptCapStr);
         console.log('========================================\n');
+
+        // ★2026-07-09 断线原因结构化 (实录 01:23 事故: 所有断线被 LoginGuard 抹成 "Server is under
+        //   maintenance or restarting", 真实 errno 埋在堆栈里, "谁发起的"完全查不到)。分类 initiator:
+        //   self = reconnectNow 自杀式重连 | network = errno/socket 层 | server = 服务器踢(kick 文案)
+        //   | unknown。一行 JSONL 落 bots/_supervisor/disconnects.jsonl, 事后 grep 即得断线史。
+        try {
+            const rawStr = (reason && reason.message) ? String(reason.message) : String(reason ?? '');
+            let initiator = 'unknown';
+            let code = (reason && reason.code) || null;
+            if (this._selfDisconnect && Date.now() - this._selfDisconnect.at < 60000) {
+                initiator = 'self';
+                code = this._selfDisconnect.reason;
+            } else if (code || /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EHOSTUNREACH|socketClosed/i.test(rawStr)) {
+                initiator = 'network';
+                if (!code) code = (rawStr.match(/ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EHOSTUNREACH/i) || ['socketClosed'])[0];
+            } else if (/kick|banned|duplicate|another location|shutting down|timed out/i.test(rawStr)) {
+                initiator = 'server';
+            }
+            this._selfDisconnect = null;
+            const pos = this.bot && this.bot.entity && this.bot.entity.position;
+            const rec = {
+                ts: Date.now(), iso: new Date().toISOString(), initiator, code,
+                reason: rawStr.slice(0, 200), attempt: this.reconnectAttempts,
+                epoch: this._botEpoch || 0,
+                pos: pos ? [Math.round(pos.x), Math.round(pos.y), Math.round(pos.z)] : null,
+            };
+            console.log(`🧾 disconnect classified: initiator=${initiator} code=${code || '-'}`);
+            fs.appendFileSync('bots/_supervisor/disconnects.jsonl', JSON.stringify(rec) + '\n');
+        } catch (e) {}
         
         // Always send task_finished message when bot disconnects
         try {
@@ -745,13 +794,19 @@ export class Agent {
         setTimeout(async () => {
             try {
                 // Create new bot instance
+                const deadBot = this.bot;
                 this.bot = initBot(this.name);
+                this._stampBotEpoch();
                 this._disconnectHandled = false;
-                
+
                 // Re-initialize modes for the new bot instance
                 initModes(this);
-                
+
                 this.setupBotEventHandlers();
+                // ★2026-07-09 GHOST-STACK KILL: 上一代 bot 对象上仍在跑的技能/内核循环 (实录: 重连后
+                //   prepNether→chopWood 幽灵在柱顶坐标冻结狂刷 6 小时, 还把真 bot 身边的树拉黑) —
+                //   毒化尸体, 让任何残留 await 链一碰就 STALE-BOT 退出。
+                this._poisonDeadBot(deadBot);
                 console.log(`✅ Bot reconnected successfully (attempt ${this.reconnectAttempts})`);
             } catch (error) {
                 console.error(`❌ Reconnection attempt ${this.reconnectAttempts} failed:`, error);
@@ -776,6 +831,9 @@ export class Agent {
         if (this._reconnectNowInFlight) return; // don't stack self-triggered reconnects
         this._reconnectNowInFlight = true;
         setTimeout(() => { this._reconnectNowInFlight = false; }, 30000); // clear the guard well after reconnect settles
+        // ★2026-07-09 断线原因结构化: 标记"这次断线是我自己发起的", handleBotDisconnection 据此把
+        //   initiator 记成 self(而非笼统的 socketClosed/LoginGuard 文案), 事后可分清自杀式重连 vs 服务器踢。
+        this._selfDisconnect = { reason: String(reason), at: Date.now() };
         console.log(`♻️ reconnectNow(${reason}) — dropping connection to break a wedge (NO process exit)`);
         try {
             // bot.quit fires 'end' → handleBotDisconnection → reconnect (existing path).
@@ -784,6 +842,57 @@ export class Agent {
             // If quit throws (bot already half-dead), drive the disconnection handler directly.
             try { this.handleBotDisconnection(reason); } catch (e2) {}
         }
+    }
+
+    // ★2026-07-09 BOT INSTANCE EPOCH: 每个 bot 实例一个递增世代号。重连 = 换代; 旧实例上残留的
+    //   async 循环 (kernel 任务/技能重试/mode 计时器) 用它识别自己已过期。配合 _poisonDeadBot 用。
+    _stampBotEpoch() {
+        this._botEpoch = (this._botEpoch || 0) + 1;
+        try { this.bot._instanceEpoch = this._botEpoch; } catch (e) {}
+    }
+
+    // ★2026-07-09 GHOST-STACK KILL (实录 01:07 重连后 prepNether/chopWood 幽灵栈在旧 bot 上跑了
+    //   几小时: 坐标冻在柱顶、四向 sprint adv=0.0、把真 bot 附近的橡树按 "occluded x-ray" 拉黑,
+    //   还双写 status/progress/proposeTasks 污染监工)。根因: 重连只换 this.bot, 旧对象上挂着的
+    //   await 链没人打断 — 死 socket 上的动作静默无效, 循环永不退出。
+    //   修: 毒化尸体 —— 动作类方法 (dig/place/craft/寻路/收集/攻击/装备) 换成 throw STALE-BOT,
+    //   让残留循环一碰就炸出它们自己的 catch/finally 收尾; 控制/聊天类 (setControlState/chat/...)
+    //   换成静默 no-op (它们常被 tick 收尾代码调用, throw 会制造 uncaught 噪音)。每方法首次触发
+    //   记一行 ★STALE-BOT 到 progress.txt, 幽灵从"只能靠人肉对坐标发现"变成日志自曝。
+    _poisonDeadBot(deadBot) {
+        if (!deadBot || deadBot === this.bot || deadBot._poisoned) return;
+        deadBot._poisoned = true;
+        const epoch = deadBot._instanceEpoch || 0;
+        try { deadBot.interrupt_code = true; } catch (e) {}
+        const logged = new Set();
+        const note = (method) => {
+            if (logged.has(method)) return;
+            logged.add(method);
+            try {
+                fs.appendFileSync('bots/_supervisor/progress.txt',
+                    `[${new Date().toISOString()}] ★STALE-BOT epoch=${epoch} (now ${this._botEpoch}): ghost loop called ${method}() on a superseded bot instance — refused\n`);
+            } catch (e) {}
+        };
+        const bomb = (method) => () => {
+            note(method);
+            throw new Error(`STALE-BOT: bot instance epoch ${epoch} was superseded by a reconnect — ${method}() refused; this loop must exit`);
+        };
+        const mute = (method) => () => { note(method); };
+        // 控制/寻路/瞄准也 throw — 实录幽灵是"纯走路"循环 (setControlState 转向+sprint), 只静默
+        //   杀不死它。毒化发生在重连成功后 (断线 ≥10s), 旧 bot 的合法 teardown 早已结束, 可以放心炸。
+        for (const m of ['dig', 'placeBlock', 'equip', 'unequip', 'craft', 'activateItem', 'activateBlock', 'useOn',
+            'attack', 'consume', 'setControlState', 'clearControlStates', 'lookAt', 'look'])
+            try { if (typeof deadBot[m] === 'function') deadBot[m] = bomb(m); } catch (e) {}
+        for (const m of ['chat', 'whisper', 'swingArm'])
+            try { if (typeof deadBot[m] === 'function') deadBot[m] = mute(m); } catch (e) {}
+        try {
+            if (deadBot.pathfinder) {
+                deadBot.pathfinder.goto = bomb('pathfinder.goto');
+                deadBot.pathfinder.setGoal = bomb('pathfinder.setGoal');
+            }
+        } catch (e) {}
+        try { if (deadBot.pvp) deadBot.pvp.attack = bomb('pvp.attack'); } catch (e) {}
+        try { if (deadBot.collectBlock) deadBot.collectBlock.collect = bomb('collectBlock.collect'); } catch (e) {}
     }
 
     async handleMessage(source, message, max_responses=null) {
@@ -1114,16 +1223,20 @@ export class Agent {
         // newlines are interpreted as separate chats, which triggers spam filters. replace them with spaces
         message = message.replaceAll('\n', ' ');
 
+        // ★2026-07-09 死连接兜底 (实录 unhandledRejection: bot._client.chat is not a function —
+        //   whisper/chat 打在已断开/半拆除的连接上)。try/catch 包住, 断线窗口的聊天丢弃即可, 别炸日志。
         if (settings.only_chat_with.length > 0) {
             for (let username of settings.only_chat_with) {
-                this.bot.whisper(username, message);
+                try { this.bot.whisper(username, message); } catch (e) { console.warn(`openChat: whisper dropped (bot connection dead): ${e.message}`); }
             }
         }
         else {
             if (settings.speak) {
                 speak(to_translate, this.prompter.profile.speak_model);
             }
-            if (settings.chat_ingame) {this.bot.chat(message);}
+            if (settings.chat_ingame) {
+                try { this.bot.chat(message); } catch (e) { console.warn(`openChat: chat dropped (bot connection dead): ${e.message}`); }
+            }
             sendOutputToServer(this.name, message);
         }
         

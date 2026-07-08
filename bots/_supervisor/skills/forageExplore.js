@@ -15,12 +15,18 @@
 //   caller stuck in a no-recovery permanent-freeze may pass abortHp:1 to force a venture out
 //   (frozen-forever is worse than walk-to-find-or-respawn).
 
+// ★2026-07-09 用户令 HP/食物本能熔断: 本能开关 (直接读 env, 默认 OFF; 值 '1' 恢复原行为)。
+const _hpOn   = () => process.env.MC_HP_INSTINCTS   === '1';
+const _foodOn = () => process.env.MC_FOOD_INSTINCTS === '1';
+
 // PURE readiness gate — offline-testable. Exploring is only safe when healthy in daylight.
 function exploreReady(state) {
     const s = state || {};
     if (s.isNight) return { ok: false, reason: 'night — do not explore (mobs); shelter' };
-    if (s.hp < (s.gateHp ?? 14)) return { ok: false, reason: `hp=${s.hp} < ${s.gateHp ?? 14} — too fragile to explore` };
-    if (s.food < (s.gateFood ?? 10)) return { ok: false, reason: `food=${s.food} < ${s.gateFood ?? 10} — too low to travel far` };
+    // ★2026-07-09 用户令 HP/食物本能熔断: HP 起始门 (太脆弱不敢探索); HP 闸开恢复。
+    if (_hpOn() && s.hp < (s.gateHp ?? 14)) return { ok: false, reason: `hp=${s.hp} < ${s.gateHp ?? 14} — too fragile to explore` };
+    // ★2026-07-09 用户令 HP/食物本能熔断: 食物起始门 (太饿走不远); 食物闸开恢复。
+    if (_foodOn() && s.food < (s.gateFood ?? 10)) return { ok: false, reason: `food=${s.food} < ${s.gateFood ?? 10} — too low to travel far` };
     if (s.actionableClose) return { ok: false, reason: 'actionable hostile close — handle threat first' };
     return { ok: true, reason: `healthy daylight (hp=${s.hp} food=${s.food}) — explore for food` };
 }
@@ -95,7 +101,8 @@ export default async function forageExplore(bot, ctx, opts = {}) {
         // Re-check safety each leg — abort to survival if night falls / threat / hp drop.
         if (isNight()) { log_(`abort: night fell at leg ${i}`); return { explored: true, found: false, reason: 'night fell — return to shelter' }; }
         if (closeActionable()) { log_(`abort: actionable hostile at leg ${i}`); return { explored: true, found: false, reason: 'hostile close' }; }
-        if (bot.health <= (opts.abortHp ?? 6)) { log_(`abort: hp=${Math.round(bot.health)} <= ${opts.abortHp ?? 6} dropped at leg ${i}`); return { explored: true, found: false, reason: 'hp dropped' }; }
+        // ★2026-07-09 用户令 HP/食物本能熔断: 逐段低血中止; HP 闸开恢复。
+        if (_hpOn() && bot.health <= (opts.abortHp ?? 6)) { log_(`abort: hp=${Math.round(bot.health)} <= ${opts.abortHp ?? 6} dropped at leg ${i}`); return { explored: true, found: false, reason: 'hp dropped' }; }
 
         // Found land food in range? Hand off to the proven forage skill to hunt+eat.
         const a = landAnimal();

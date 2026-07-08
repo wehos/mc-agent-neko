@@ -32,6 +32,7 @@
 import fs from 'fs';
 import path from 'path';
 import { withTimeout } from '../../utils/timeout.js';
+import { hpInstinctsEnabled } from './contracts.js';
 
 const ARB_FILE = path.resolve(process.cwd(), 'bots', '_supervisor', 'arbitration.json');
 const PROGRESS_FILE = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
@@ -90,7 +91,9 @@ export function vitalNow(bot) {
             const wet = [bot.blockAt(pw), bot.blockAt(pw.offset(0, 1, 0))].some(b => b && /water/.test(b.name || ''));
             if (wet) return true;
         }
-        if ((bot.health ?? 20) <= 4 && Date.now() - (bot.lastDamageTime || 0) < 4000) return true;
+        // ★2026-07-09 用户令 (低血/饥饿全熔断): hp<=4 掉血地板默认熔断 — 低血不再是打断/抢体
+        //   理由, 死了拉倒。环境致命地板 (溺水/着火/岩浆) 保留 — 那是"因环境", 不是"因低血"。
+        if (hpInstinctsEnabled() && (bot.health ?? 20) <= 4 && Date.now() - (bot.lastDamageTime || 0) < 4000) return true;
         if (bot.entity) {
             // ★评审F2: prismarine-entity 没有 onFire 属性(运行时实证) — 着火状态在共享
             // metadata flags 字节的 bit0。方块检查(下一行)只覆盖"站在火/岩浆里"。

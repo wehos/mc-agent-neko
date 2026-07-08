@@ -56,6 +56,10 @@ const readOakAppleBackoff = () => {
 
 export default async function missionNether(bot, ctx) {
     const { skills, world, log } = ctx;
+    // ★2026-07-09 用户令 HP/食物本能熔断: 两个外部熔断开关(默认 OFF, 仅 '1' 恢复原行为)。
+    // 这些 supervisor 模块直接读 process.env(不 import contracts.js)。
+    const _foodOn = () => process.env.MC_FOOD_INSTINCTS === '1';
+    const _hpOn   = () => process.env.MC_HP_INSTINCTS   === '1';
     const has = (n) => world.getInventoryCounts(bot)[n] || 0;
     const FOOD_RE = /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|^cod$|^salmon$|melon_slice|sweet_berries|_stew|^rabbit$|baked_/;
     const HOSTILE_RE = /zombie|skeleton|creeper|spider|witch|drowned|husk|stray|pillager|cave_spider/i;
@@ -227,7 +231,7 @@ export default async function missionNether(bot, ctx) {
     };
     const tableRecoveryHold = () => {
         try {
-            if (bot.health < 14 || bot.food < 14) return false;
+            if ((_hpOn() || _foodOn()) && (bot.health < 14 || bot.food < 14)) return false;   // ★2026-07-09 用户令 HP/食物本能熔断: table-recovery hold 的血/饱和门(mixed); 任一/双闸开恢复。
             if (tableRecoveryThreat(12).actionable > 0) return false;
             if (has('crafting_table') > 0 || world.getNearestBlock(bot, 'crafting_table', 4)) return false;
             if (maxHeldPlankStack() >= 4 || heldLogs() > 0) return false;
@@ -241,6 +245,7 @@ export default async function missionNether(bot, ctx) {
     };
     const lowFoodHoldEvidence = () => {
         try {
+            if (!_foodOn()) return null;   // ★2026-07-09 用户令 食物本能熔断: 低食物 hold 证据(纯食物); 食物闸开恢复。
             if (edibleHeld() || bot.food > 10) return null;
             const tail = freshProgressTail();
             if (!/(HUNGER\/LOWHP gate|HUNGRY\/LOWHP .*night|hungry-night hold|no concrete food signal before cave climb|last surface\/feedUp found no food)/.test(tail)) return null;
@@ -433,7 +438,7 @@ export default async function missionNether(bot, ctx) {
                 // catches a night-respawn drift. Safe: still gated by naked(inv<=8)+full-hp+day+no-pointblank
                 // +5min-throttle — fires only when the bot has made NO local progress near the bad spawn,
                 // which is exactly when migrating off it is right. (48 == the old arming radius.)
-                if (_sd < 48 && bot.health >= 18 && _invTotal <= 8
+                if (_sd < 48 && (!_hpOn() || bot.health >= 18) && _invTotal <= 8   // ★2026-07-09 用户令 HP 本能熔断: 满血 respawn 触发门(纯 HP 前置); HP 闸开恢复。
                     && !isNightNow() && actionableHostilesNear(5) === 0
                     && (!bot._lastC226FireAt || Date.now() - bot._lastC226FireAt > 5 * 60 * 1000)) {
                     bot._lastC226FireAt = Date.now();
@@ -457,7 +462,7 @@ export default async function missionNether(bot, ctx) {
             const _mig = bot._world && bot._world.migration;
             const _noPick293 = !bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
             const _todNow = (bot.time && typeof bot.time.timeOfDay === 'number') ? bot.time.timeOfDay : 6000;
-            if (_mig && _mig.inDeathZone && _mig.recommend && _noPick293 && bot.health >= 14
+            if (_mig && _mig.inDeathZone && _mig.recommend && _noPick293 && (!_hpOn() || bot.health >= 14)   // ★2026-07-09 用户令 HP 本能熔断: 死亡区逃离血量储备门(纯 HP 前置); HP 闸开恢复。
                 && !isNightNow() && _todNow < 11000 && actionableHostilesNear(6) === 0
                 && (!bot._lastC293FireAt || Date.now() - bot._lastC293FireAt > 4 * 60 * 1000)) {
                 bot._lastC293FireAt = Date.now();
@@ -522,7 +527,7 @@ export default async function missionNether(bot, ctx) {
                 const inMelee = Object.values(bot.entities).some(e =>
                     e && e.position && e.name && HOSZ.test(e.name) && e.position.distanceTo(p0) < 6);
                 if (!inMelee) {
-                    const pocketLowFoodNoExit = bot.food <= 6
+                    const pocketLowFoodNoExit = _foodOn() && bot.food <= 6   // ★2026-07-09 用户令 食物本能熔断: KILL-BOX 低食物抑制驱逐(纯食物); 食物闸开恢复。
                         && !edibleHeld()
                         && !safeCloseFoodSignal()
                         && actionableHostilesNear(12) === 0
@@ -555,7 +560,7 @@ export default async function missionNether(bot, ctx) {
                     // cluster. Climb to a high, open column first; only then walk sideways.
                     // next iter expels radially from up there.
                     if (p0.y < 70 || hasOverheadCover()) {
-                        const containedLowFood = bot.food <= 6
+                        const containedLowFood = _foodOn() && bot.food <= 6   // ★2026-07-09 用户令 食物本能熔断: KILL-BOX 低食物抑制上浮驱逐(纯食物); 食物闸开恢复。
                             && !edibleHeld()
                             && !safeCloseFoodSignal()
                             && actionableHostilesNear(12) === 0
@@ -808,7 +813,7 @@ export default async function missionNether(bot, ctx) {
         // straight into prepNether→forageExplore wandering into barren mountains, never migrating).
         try {
             // ★2026-07-05 预审 P0 配套: migrate 是主世界语义(biome 搬迁), 下界不派。
-            if (!inNether() && !isNightNow() && actionableHostilesNear(8) === 0 && Math.round(bot.health) >= 14 && bot.food >= 6
+            if (!inNether() && !isNightNow() && actionableHostilesNear(8) === 0 && (!_hpOn() || Math.round(bot.health) >= 14) && (!_foodOn() || bot.food >= 6)   // ★2026-07-09 用户令 HP/食物本能熔断: early migrate 血/饱和储备门(纯前置; 保留 actionableHostilesNear 安全门); 任一/双闸开恢复。
                 && (!bot._lastMigrateTryAt || Date.now() - bot._lastMigrateTryAt > 120000)) {
                 bot._lastMigrateTryAt = Date.now();
                 let mr = null;
@@ -959,21 +964,21 @@ export default async function missionNether(bot, ctx) {
                     await wait(5000);
                     continue;
                 }
-                if (bodyBudgetFamine()) {
+                if ((_hpOn() || _foodOn()) && bodyBudgetFamine()) {   // ★2026-07-09 用户令 HP/食物本能熔断: BREAKOUT body-budget famine 保命 hold(mixed hp+food); 任一/双闸开恢复。
                     prog(`★BREAKOUT gated: body-budget famine hp=${Math.round(bot.health)} food=${bot.food} hostiles10=${hostilesNear(10)} actionable10=${actionableHostilesNear(10)}; no tunneling/sprint, preserve sealed body`);
                     try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
                     try { bot.clearControlStates(); } catch (_) {}
                     await wait(10000);
                     continue;
                 }
-                if (famineCritical()) {
+                if ((_hpOn() || _foodOn()) && famineCritical()) {   // ★2026-07-09 用户令 HP/食物本能熔断: BREAKOUT famine-critical 保命 hold(mixed hp+food); 任一/双闸开恢复。
                     prog(`★BREAKOUT gated: famine-critical hp=${Math.round(bot.health)} food=${bot.food}; no tunneling/sprint, preserve body for feedUp/shelter`);
                     try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
                     try { bot.clearControlStates(); } catch (_) {}
                     await wait(5000);
                     continue;
                 }
-                if (noRegenNoFood() && actionableHostilesNear(10) === 0) {
+                if (_foodOn() && noRegenNoFood() && actionableHostilesNear(10) === 0) {   // ★2026-07-09 用户令 食物本能熔断: BREAKOUT no-regen forage/relocate 派发(保留 actionableHostilesNear 安全门); 食物闸开恢复。
                     // ★C224b: no-regen + no-food is an ABSORBING hold — passive waiting never restores
                     // food, and hp can't regen until food≥18, so a hurt bot freezes forever (live: hp9
                     // food17 held at the forest surface, every subsystem holding, feedUp refusing "no
@@ -1221,7 +1226,7 @@ export default async function missionNether(bot, ctx) {
             continue;
         }
         const noRegenRemain = noRegenBackoffRemain();
-        if (noRegenNoFood() && noRegenRemain.any > 0) {
+        if ((_hpOn() || _foodOn()) && noRegenNoFood() && noRegenRemain.any > 0) {   // ★2026-07-09 用户令 HP/食物本能熔断: no-regen 站桩 stand-down(mixed hp+food; 威胁/夜间避难经末尾无条件 prepNether 兜底); 任一/双闸开恢复。
             const oakReady = boundedOakAppleReady();
             if (oakReady && noRegenRemain.surface > 0) {
                 bot._prepNoFoodSurfaceBackoffUntil = 0;
@@ -1355,7 +1360,7 @@ export default async function missionNether(bot, ctx) {
         // and plant a bed. If migrate declines (not a confirmed desert / unhealthy / cooldown),
         // it returns instantly and we fall through to the normal prepNether grind. Only attempt
         // in the healthy post-respawn window (hp≥14/food≥12) — a long march needs reserves.
-        if (!isNightNow() && actionableHostilesNear(8) === 0 && Math.round(bot.health) >= 14 && bot.food >= 6
+        if (!isNightNow() && actionableHostilesNear(8) === 0 && (!_hpOn() || Math.round(bot.health) >= 14) && (!_foodOn() || bot.food >= 6)   // ★2026-07-09 用户令 HP/食物本能熔断: cross-continent migrate 血/饱和储备门(纯前置; 保留 actionableHostilesNear 安全门); 任一/双闸开恢复。
             && (!bot._lastMigrateTryAt || Date.now() - bot._lastMigrateTryAt > 120000)) {
             bot._lastMigrateTryAt = Date.now();
             let mr = null;
@@ -1373,7 +1378,7 @@ export default async function missionNether(bot, ctx) {
             const night = t >= 13000 && t <= 23000;
             const edible = bot.inventory.items().some(i => /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|^cod$|^salmon$|melon_slice|sweet_berries|_stew|^rabbit$|baked_/.test(i.name));
             const bottomBodyBudgetFamine = bot.health <= 8 && bot.food <= 6 && !edible;
-            if ((bot.food <= 2 && !edible) || bottomBodyBudgetFamine) {
+            if ((_hpOn() || _foodOn()) && ((bot.food <= 2 && !edible) || bottomBodyBudgetFamine)) {   // ★2026-07-09 用户令 HP/食物本能熔断: FAMINE backoff 站桩/觅食(mixed hp+food); 任一/双闸开恢复。
                 const hostilePressure = actionableHostilesNear(16) > 0;
                 // ★C228: a FAMINE backoff at food0 in a FOOD DESERT is an ABSORBING state — holding
                 // still guarantees no food, hp can't regen (food<18), and easy-difficulty hunger
@@ -1461,7 +1466,7 @@ export default async function missionNether(bot, ctx) {
                     && !edible
                     && !inNether()
                     && actionableHostilesNear(16) === 0 && hostilesNear(16) === 0;
-                if (ventureSafeDay) {
+                if (_foodOn() && ventureSafeDay) {   // ★2026-07-09 用户令 食物本能熔断: C233 healthy-but-starving 觅食/迁移(纯食物派发; ventureSafeDay 内 actionableHostilesNear 安全门保留); 食物闸开恢复。
                     const ventureMigrate = (bot._famineForageFailCount || 0) >= 2
                         && (!bot._lastFamineMigrateAt || Date.now() - bot._lastFamineMigrateAt > 300000);
                     if (ventureMigrate) {

@@ -16,6 +16,8 @@ const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 
 export default async function mineDiamonds(bot, ctx, count = 3) {
     const { skills, world, Vec3, log } = ctx;
+    // ★2026-07-09 用户令 HP/食物本能熔断: 外部熔断闸 (默认 OFF, 值='1' 恢复原行为)。
+    const _hpOn = () => process.env.MC_HP_INSTINCTS === '1';
     const yNow = () => Math.floor(bot.entity.position.y);
     const has = (n) => world.getInventoryCounts(bot)[n] || 0;
     const dia = () => has('diamond');
@@ -115,7 +117,7 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
             const tableOk = has('crafting_table') >= 1 || (() => { try { return !!world.getNearestBlock(bot, 'crafting_table', 4); } catch (e) { return false; } })();
             if (!tableOk) return false;
             // 安全闸: 冶炼+锻造全程静止, 别在战斗/低血/水下/近怪时开工
-            if ((bot.health || 20) < 12) return false;
+            if (_hpOn() && (bot.health || 20) < 12) return false;   // ★2026-07-09 用户令 HP/食物本能熔断: 低血不再阻止就地补镐(纯 HP 闸); HP 闸开恢复。
             if (inWater()) return false;
             if (hostileNearCraft(10)) return false;
             bot._lastPickCraftAt = now;   // 先占坑防重入(即便本轮部分失败也隔 60s 再试, 跨派发)
@@ -176,6 +178,9 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
             const dxz = Math.hypot(tgt.x - p0.x, tgt.z - p0.z);
             if (dxz < 250) {
                 oracleDia = tgt;
+                // ★2026-07-08 D 持有式路线 (见 [[diamond-never-reached-blocker-stack]]): 把锁定的脉柱坐标挂 bot,
+                //   下潜期 tunnelAside 侧绕时据此偏向脉柱 (让井随脉走、不乱飘)。仅坐标+安全前瞻, 不动 reach-gate/oracle。
+                try { bot._diamondRoute = { x: tgt.x, y: tgt.y, z: tgt.z, ts: Date.now() }; } catch (e) {}
                 log(bot, `⛏️ ORACLE 钻石锁定 @${tgt.x},${tgt.y},${tgt.z} (平距 ${Math.round(dxz)}b, 库存告示 ${oo.totalFound} 颗) — 直奔目标柱`);
                 if (dxz > 8) {
                     await Promise.race([
@@ -221,7 +226,17 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     // ground, sealing any water exposed and laying a floor so we don't drop. Returns
     // true if we managed to move to a new x,z.
     const tunnelAside = async () => {
-        for (const [dx, dz] of SIDES) {
+        // ★2026-07-08 D: 侧移偏向 oracle 脉柱 — 竖井被迫侧绕(下方水/digDown 失败)时, 优先选【拉近脉柱
+        //   水平距离】的方向, 让井随脉走而非乱飘。只重排"先试哪个安全方向", 下方所有 LAVA/流体/封壁/铺地
+        //   守卫一字不动 (前瞻安全仍是唯一权威, 不越过任何护栏, 不碰 reach-gate)。
+        const rt = (typeof oracleDia === 'object' && oracleDia && Number.isFinite(oracleDia.x)) ? oracleDia : null;
+        const pf0 = bot.entity.position.floored();
+        const sides = rt
+            ? [...SIDES].sort((a, b) =>
+                (Math.abs(pf0.x + a[0] - rt.x) + Math.abs(pf0.z + a[1] - rt.z)) -
+                (Math.abs(pf0.x + b[0] - rt.x) + Math.abs(pf0.z + b[1] - rt.z)))
+            : SIDES;
+        for (const [dx, dz] of sides) {
             const p0 = bot.entity.position.floored();
             const ahead = blk(new Vec3(p0.x + dx, p0.y, p0.z + dz));
             if (ahead && LAVA.has(ahead.name)) continue; // never walk into lava
@@ -248,6 +263,23 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     // digging deeper. This walls off side aquifers while we can still reach them, so
     // the shaft never floods. Water/lava directly below -> dodge sideways instead of
     // punching through. ~1 dig per level: fast in dry stone, only slows near hazards.
+    // ★2026-07-09 用户令 "以怪为基准做 hazard 感知, 不用管空腔; 只有怪在附近才特别注意": 竖井不看空洞,
+    //   只看活怪。破下方那格前, 若井底附近(臂展内、与脚同层或更低)有敌对生物 → 不往下捅 (竖井会把自己
+    //   直接掉到怪脸上), 侧移一柱重开井 (tunnelAside 已偏向 oracle 脉柱); 侧不开就短 hold 让战斗/自保反射
+    //   清场再重判。无怪 → 照挖 (黑洞/空腔照穿)。
+    const DESC_HOSTILE_RE = /zombie|skeleton|creeper|spider|witch|enderman|drowned|husk|stray|slime|silverfish|cave_spider|warden|phantom|piglin|zombified|zoglin|hoglin/i;
+    const hostileNearShaft = () => {
+        try {
+            const p = bot.entity.position;
+            for (const e of Object.values(bot.entities || {})) {
+                if (!(e && e.position && e.name && DESC_HOSTILE_RE.test(e.name))) continue;
+                const horiz = Math.hypot(e.position.x - p.x, e.position.z - p.z);
+                const dy = e.position.y - p.y;                 // 负=在脚下
+                if (horiz <= 5 && dy <= 1 && dy >= -10) return e;   // 贴着竖井、与脚同层或更低 = 正要挖进它
+            }
+        } catch (e) {}
+        return null;
+    };
     let guard = 0, stalls = 0, drownStrikes = 0;
     while (yNow() > TARGET_Y && guard++ < 250) {
         if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
@@ -292,6 +324,13 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
         if (below && WATER.has(below.name)) {
             log(bot, `water below at y=${feetY} — tunneling aside to dodge aquifer`);
             if (!(await tunnelAside())) { if (++stalls > 6) break; }
+            continue;
+        }
+        const _hm = hostileNearShaft();
+        if (_hm) {
+            const _h = Math.hypot(_hm.position.x - bot.entity.position.x, _hm.position.z - bot.entity.position.z);
+            log(bot, `⚠️ hostile ${_hm.name} near shaft bottom (h=${_h.toFixed(1)} dy=${(_hm.position.y - bot.entity.position.y).toFixed(1)}) at y=${feetY} — 有怪不往下捅, 侧移重开井 (以怪为基准)`);
+            if (!(await tunnelAside())) { await new Promise(r => setTimeout(r, 500)); if (++stalls > 6) break; }
             continue;
         }
         const ok = await skills.digDown(bot, 1).catch(() => false);

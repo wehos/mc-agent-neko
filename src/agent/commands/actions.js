@@ -359,6 +359,12 @@ export const actionsList = [
             'target_food': { type: 'int', description: 'food level to reach (1-20), default 18', domain: [1, 20] }
         },
         perform: runAsAction(async (agent, target_food) => {
+            // ★2026-07-09 用户令「食物本能熔断」: MC_FOOD_INSTINCTS 关(默认)时 !getFood 不再派 feedUp
+            //   主动觅食/捕猎(那正是"接指令就乱逛"的来源)。背包已有食物由 auto-eat 插件自动吃, 无需主动觅食。
+            //   恢复原行为: MC_FOOD_INSTINCTS=1。见 contracts.foodInstinctsEnabled / docs/food-instincts-disabled.md。
+            if (process.env.MC_FOOD_INSTINCTS !== '1') {
+                return 'Food instincts disabled (MC_FOOD_INSTINCTS off): not foraging/hunting; auto-eat handles any food already in the bag.';
+            }
             await skills.customSkill(agent.bot, 'feedUp', Math.max(1, Math.min(20, parseInt(target_food) || 18)));
         }, false, 10) // 10 minute timeout
     },
