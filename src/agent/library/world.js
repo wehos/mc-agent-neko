@@ -19,11 +19,20 @@ export function getNearestFreeSpace(bot, size=1, distance=8) {
         maxDistance: distance,
         count: 1000
     });
+    // ★2026-07-08 用户报"工作台放置被身体挡住"根因: findBlocks 把 bot 脚下的 air 格(距离0)排在首位,
+    //   getNearestFreeSpace 于是把【bot 自己站的格】当空位返回 → placeBlock 撞 botAabbIntersectsBlock
+    //   被拒("target intersects bot body") → craftRecipe 拿不到台 → 对 null 台 bot.craft 抛裸错 → 动作
+    //   反复重试撞进 15s 不停窗口 → reconnectNow('action-refused-stop') 主动断线(卡退)。排除 bot 自身占用
+    //   的两格(脚+头), 让窄坑里仅剩的开口被选中; 真封死才返回 null(上层据此干净退出, 不再对 undefined 取 .x)。
+    const _foot = bot.entity.position.floored();
+    const _occupied = new Set([`${_foot.x},${_foot.y},${_foot.z}`, `${_foot.x},${_foot.y + 1},${_foot.z}`]);
     for (let i = 0; i < empty_pos.length; i++) {
         let empty = true;
         for (let x = 0; x < size; x++) {
             for (let z = 0; z < size; z++) {
-                let top = bot.blockAt(empty_pos[i].offset(x, 0, z));
+                let cell = empty_pos[i].offset(x, 0, z);
+                if (_occupied.has(`${cell.x},${cell.y},${cell.z}`)) { empty = false; break; }  // never place on the bot's own body
+                let top = bot.blockAt(cell);
                 let bottom = bot.blockAt(empty_pos[i].offset(x, -1, z));
                 if (!top || !top.name == 'air' || !bottom || bottom.drops.length == 0 || !bottom.diggable) {
                     empty = false;
@@ -36,6 +45,7 @@ export function getNearestFreeSpace(bot, size=1, distance=8) {
             return empty_pos[i];
         }
     }
+    return null;   // ★no free space (was implicit undefined → callers did pos.x and threw TypeError)
 }
 
 

@@ -71,6 +71,7 @@
 - `nightShelter.js` mode `'seal'` 的**砌墙循环** (feet/head/ceiling 环) — 改为原地 hold，不放任何方块。
 - `nightShelter.js` **PHASE 1.5**「自己在里面」复核补墙 — 整段跳过 (它本身也在砌那个盒子)。
 - `shelter.js` 独立 panic-box 技能 — no-op (返回 0，不放方块)。本就是死代码 (只有 `!newAction` 聊天注释引用，无活派发)。
+- **`prepNether.js` SURVIVE-FIRST 囤 shelter 方块** (`collectBlock('dirt',18)`, ~1596) — 2026-07-08 追禁。这段**只**为喂封箱反射存在 (pillar-box up 要 ~7 预囤方块、自己不挖料)；封箱既禁，它就成了纯空转：裸重生每条命徒手刨 ~18 泥土 (用户观测到的「突然往地下挖」) 去建一个永不落成的 shelter。保留的**挖三填一 `dig_one` / `bunkerDown` 是往下挖、用挖出的土自封顶**，不吃这个预囤 → 禁掉不伤它们。同一个 `NEKO_ENABLE_SEAL_SHELTER` 旗门控，随封箱一起复活/默认一起关。
 
 ### 🟢 保留 (全部其余夜间生存手段)
 - **挖三填一 `dig_one` / `DIG_ONE_CAP`** — 往脚下挖 1 格 + 封顶的下沉口袋。**可挖时照常触发** (`modes.js computeNightPlan` 的 `if (digOneViable) return DIG_ONE_CAP`)。用户明确保留。
@@ -93,8 +94,9 @@
 | 决策层说明 | `src/agent/modes.js` | `computeNightPlan()` 终兜底 (~6098) | 终兜底**照旧返回 `SEAL_FORT`** (保优先级 + unstuck 保护)，注释说明执行层已改 hold；`reason` 改为 `'hold in place — surface wall-box disabled'` |
 | 派发层说明 | `src/agent/framework/world_model.js` | `case 'SEAL_FORT'` (~1237) | 保留派发 `nightShelter('seal')` + `NIGHT_SEAL@91`，注释说明不再砌墙；`rationale` 改为 hold |
 | 死代码 no-op | `bots/_supervisor/skills/shelter.js` | 函数体首 | 禁用时早退 `return 0` + log；原 body 保留在 env-gate 后 |
+| **追禁囤方块** | `bots/_supervisor/skills/prepNether.js` | SURVIVE-FIRST (~1596) | 2026-07-08：`const SEAL_SHELTER_ENABLED = process.env.NEKO_ENABLE_SEAL_SHELTER === '1';` 门控 `if (SEAL_SHELTER_ENABLED && …)` — 默认不再徒手刨土囤 shelter 料 |
 
-**功能改动只有 2 处** (nightShelter.js 的 seal 段 + PHASE 1.5)，其余是注释 / no-op / 死代码标注。
+**功能改动 3 处** (nightShelter.js 的 seal 段 + PHASE 1.5 + prepNether.js 囤方块)，其余是注释 / no-op / 死代码标注。
 
 ---
 

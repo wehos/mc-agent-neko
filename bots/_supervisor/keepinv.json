@@ -2,5 +2,5 @@
   "_comment": "keepInventory verification cache - hard precondition for surviveNow deliberate-death branch. Written by C344v2 read-only in-game query on every spawn (no RCON on user LAN world). Branch self-disables when stale >24h or value!=true.",
   "value": true,
   "verifiedVia": "in-game read-only query /gamerule keepInventory -> commands.gamerule.query",
-  "ts": 1783423783853
+  "ts": 1783477043371
 }

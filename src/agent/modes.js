@@ -50,6 +50,39 @@ function commandedFightActive(bot) {
     try { return !!(bot && bot._commandedFightUntil && Date.now() < bot._commandedFightUntil); } catch (e) { return false; }
 }
 
+// ★2026-07-08 用户令 (admin 意志 = 独占 / 绝对): 当一条 admin 指令/任务正在驱动 (bot._extIntentUntil 新鲜)
+//   且【当前不是致命态】时 → 处于"admin 独占期"。此时除【致命/保命】外, 一切非致命本能、蓝图 (kernel)、
+//   觅食 (feedUp/getFood) 全部冻结让位 admin。唯一放行的打断是 arbiter.vitalNow (溺水/着火/岩浆/hp≤4)。
+//   调用方 (execute() 的本能门 + reflex_watchdog 的强制转移升级) 据此让位。饥饿已退环境, 永不作为让位条件。
+function adminExclusiveActive(bot) {
+    try {
+        if (!(bot && bot._extIntentUntil && Date.now() < bot._extIntentUntil)) return false;
+        let vital = false;
+        try { vital = arbiterVitalNow(bot); } catch (e) {}
+        return !vital;   // 致命时不独占 —— 放行保命反射
+    } catch (e) { return false; }
+}
+
+// ★2026-07-08 用户令 (「周围有怪是否风筝/躲藏要看连通性, 别无脑逃跑」): 射手连通性 = 视线。从 bot 眼睛
+//   到怪身体采样, 中途遇实心方块 = 箭被挡 = 射手够不到 → 不算威胁。近战怪不用视线用寻路 (world.isClearPath,
+//   由 threat_radar 后台算)。fail-safe: 任何异常/不确定当【能看见】(返回 true), 绝不误判成"够不到"而压制逃跑。
+function hasLineOfSight(bot, ent) {
+    try {
+        if (!bot || !bot.entity || !ent || !ent.position) return true;
+        const from = bot.entity.position.offset(0, 1.62, 0);
+        const hy = (typeof ent.height === 'number' ? ent.height : 1.8) * 0.9;
+        const dx = ent.position.x - from.x, dy = (ent.position.y + hy) - from.y, dz = ent.position.z - from.z;
+        const dist = Math.hypot(dx, dy, dz) || 1;
+        const steps = Math.min(40, Math.max(2, Math.ceil(dist * 2)));   // ~0.5 格采样, 上限 40 步
+        for (let s = 1; s < steps; s++) {
+            const t = s / steps;
+            const b = bot.blockAt(from.offset(dx * t, dy * t, dz * t));
+            if (b && b.boundingBox === 'block') return false;   // 实心方块挡箭 = 无视线
+        }
+        return true;
+    } catch (e) { return true; }
+}
+
 function famineBodyFreeze(agent, owner) {
     const bot = agent && agent.bot;
     if (!bot || !bot.entity) return false;
@@ -532,17 +565,31 @@ const modes_list = [
         fall_blocks: ['sand', 'gravel', 'concrete_powder'], // includes matching substrings like 'sandstone' and 'red_sand'
         nearbyHostiles: function (bot) {
             try {
+                // ★2026-07-08 用户令 连通性门 (「周围有怪是否触发风筝/躲藏要看连通性, 别无脑逃跑」):
+                //   除旧的竖直够不到(|dy|≥5 近战)外, 再滤掉【水平寻路/视线够不到 bot】的怪 —— 隔墙/隔沟的
+                //   怪不该触发风筝/躲藏。判据由 threat_radar 后台算入 bot._threatReach (近战 isClearPath /
+                //   射手 hasLineOfSight)。仅在【最近4s没被打到】且缓存【新鲜(<4s)且明确 connected=false】时才
+                //   抑制; 未知/过期一律【保留】(fail-safe: 绝不无证据地压制逃跑)。
+                //   ★唯一兜底 (用户: "被打到后照常逃跑/防御/战斗, 其他情况不管, 越近判定越准所以没事"):
+                //   4s 内被打到 = 铁证够得到 → 门 OFF, 全部照算。creeper 天然不进此门 (threat_radar 不给它
+                //   算 reach → 永无 connected=false → 永不被滤; 主防御走 nearestCreeper)。
+                const _hurt4 = Date.now() - (bot.lastDamageTime || 0) < 4000;
+                const _reach = bot._threatReach;
+                const _unreachable = (e) => {
+                    if (_hurt4 || !_reach) return false;
+                    const r = _reach[e.id];
+                    return !!(r && (Date.now() - r.at) < 4000 && r.connected === false);
+                };
                 return Object.values(bot.entities).filter(e => {
                     if (!(e && e !== bot.entity && e.position && mc.isHostile(e))) return false;
                     if (e.position.distanceTo(bot.entity.position) >= 10) return false;
-                    // ★REACHABILITY 过滤 (怪窝实拍: 荫蔽破碎地形里怪挂在崖上/坑底,80%的
+                    // ★REACHABILITY 竖直过滤 (怪窝实拍: 荫蔽破碎地形里怪挂在崖上/坑底,80%的
                     // "威胁"物理够不到bot(y71骷髅 vs y62bot 整夜零命中),却让 sp 永久占
-                    // 身体,凿崖/作业层结构性饿死——act_trace 全天 20/20 帧 self_preservation,
-                    // y 零爬升。近战怪隔≥5格高差打不到人,不算威胁;远程怪(skeleton/stray/
-                    // pillager/witch)保留(箭/药水越高差)。绕路下来的近战怪 |dy|<5 时自然
-                    // 回到威胁集,响应只延迟几秒。creeper 走 nearestCreeper 不受影响。)
-                    if (/skeleton|stray|pillager|witch|blaze|ghast/.test((e.name || '').toLowerCase())) return true;
-                    return Math.abs(e.position.y - bot.entity.position.y) < 5;
+                    // 身体,凿崖/作业层结构性饿死。近战怪隔≥5格高差打不到人;远程怪(skeleton/
+                    // stray/pillager/witch)箭/药水越高差保留。creeper 走 nearestCreeper 不受影响。)
+                    if (/skeleton|stray|pillager|witch|blaze|ghast/.test((e.name || '').toLowerCase())) return !_unreachable(e);
+                    if (Math.abs(e.position.y - bot.entity.position.y) >= 5) return false;
+                    return !_unreachable(e);   // ★水平连通性门 (见上): 隔墙/隔沟够不到 → 不算威胁
                 });
             } catch (e) { return []; }
         },
@@ -971,10 +1018,11 @@ const modes_list = [
             //   reflex reasserts and shelters. Hard floor (vitalNow: 溺水/着火/岩浆/hp≤4) + REACTIVE
             //   defenses (shouldFlee / creeper dodge) are UNAFFECTED — they fire regardless of admin.
             if (bot._extIntentUntil && Date.now() < bot._extIntentUntil) {
-                const _hp = (typeof bot.health === 'number') ? bot.health : 20;
-                const _food = (typeof bot.food === 'number') ? bot.food : 20;
-                const _missionActive = !!(bot._adminMission && bot._adminMission.active);
-                if (_hp > (_missionActive ? 11 : 6) && _food > (_missionActive ? 7 : 2)) return false;
+                // ★2026-07-08 用户令 (admin 独占/绝对 · 冻结所有非致命本能): 主动夜宿是【非致命预防本能】,
+                //   admin 任务期间一律让位 —— 不再看 hp/food floor (饥饿已退环境; 旧 floor 让饿到 food≤7 就
+                //   恢复夜宿把 admin 拽去封箱)。真·致命自救 (vitalNow: 溺水/着火/岩浆/hp≤4) 走 self_preservation
+                //   的硬地板分支、反应式 shouldFlee/creeper 死战防御独立生效, 均不受本让位影响 (它们不经此门)。
+                return false;
             }
             if (bot.entity.position.y < 50) return false;
             // ★ENCLOSED override (用户: "全知视角判断是否处在封闭地穴——是的话夜里不需要
@@ -1605,6 +1653,8 @@ const modes_list = [
             const WSET = ['water', 'flowing_water'];
             const feetWater = WSET.includes(block.name);
             const headWater = WSET.includes(blockAbove.name);
+            // ★get-out 进度阀门跟踪器: 离开水面即清零 (见下方 [B] 分支 _swimCrossing)
+            if (!feetWater && !headWater) bot._swimYield = null;
             // ===== MLG WATER-BUCKET CLUTCH (highest-priority reflex) =================
             // Falling toward a fatal drop? If we carry a water bucket, slap water on the
             // block we're about to hit so we land in it and take ZERO fall damage — the
@@ -1739,6 +1789,19 @@ const modes_list = [
                 const _rising = _posY > ((bot._swimPrevY === undefined ? _posY : bot._swimPrevY) + 0.05);
                 bot._swimPrevY = _posY;
                 const _jumpFutile = bot.oxygenLevel !== undefined && bot.oxygenLevel <= 8 && !_rising;
+                // ★get-out 进度阀门 (2026-07-08 用户实拍"跌进水里就不出来了 / 防hazard本能没了"): d2175d8 让
+                // goto 期间不因在水里就 get-out, 但它把 get-out 压到【氧≤0 才触发】—— 于是头出水面的浅塘里
+                // bob 一整趟(氧一直满、jump 一直有效)永远不满足解压条件, [C]"游上岸"整程不触发 = 泡水不出来。
+                // 阀门: 只在【真在过水】(净水平位移 ≥2b/4s, 冲刺游泳 ~4-5b/s 轻松达标)时才继续让位随寻路走
+                // (保 d2175d8 "过河不被拽出岸" 的本意); 若 <2b 泡了 >4s(在岸边扑腾上不去 / 路径死在水里 = 该
+                // 掉进去的水), _swimCrossing 转 false → 跳过 [B] → 落到 [C] 游上岸。锚随前进滑动, 正常横渡永不误触。
+                let _swimCrossing = true;
+                {
+                    const _p = bot.entity.position, _s = bot._swimYield;
+                    if (!_s) bot._swimYield = { ax: _p.x, az: _p.z, at: Date.now() };
+                    else if (Math.hypot(_p.x - _s.ax, _p.z - _s.az) >= 2) { _s.ax = _p.x; _s.az = _p.z; _s.at = Date.now(); }
+                    else if (Date.now() - _s.at >= 4000) _swimCrossing = false;
+                }
                 if (drowning && y0 < 55) {
                     // DEEP & out of air (flooded tunnel / aquifer): no shore to swim to.
                     // The OLD code only towered straight UP toward the distant surface —
@@ -1810,9 +1873,9 @@ const modes_list = [
                         try { bot.clearControlStates(); } catch (e) {}
                     });
                 }
-                else if (gotoActive && !drowningDamage && !_jumpFutile) {
-                    // ★用户令: 寻路在驱动、没在淹血、且 hold-jump 确能自救(非顶盖罩死) → 绝不 hijack 去
-                    // get-out("In water — getting out")。只按住 jump 骑水面(不下沉、头出水面持续回氧),
+                else if (gotoActive && !drowningDamage && !_jumpFutile && _swimCrossing) {
+                    // ★用户令 + 进度阀门 _swimCrossing (见上): 寻路在驱动、没在淹血、hold-jump 能自救、【且确在过水
+                    // 前进】 → 绝不 hijack 去 get-out("In water — getting out")。只按住 jump 骑水面(不下沉、头出水面持续回氧),
                     // 方向/路径全交给 pathfinder。氧气真见底扣血(drowningDamage)、或 hold-jump 被实测顶
                     // 不动且氧临界(_jumpFutile, 见上安全网)时本分支才失效,落到下面 surface get-out 接管
                     // —— 即"只有淹掉血才触发 get out"的正常语义 + 顶盖将溺的窄角落保命。这覆盖旧 `pathing
@@ -3494,6 +3557,34 @@ const modes_list = [
                     .filter(e => e && e.position && e.name && HR.test(e.name) && e.position.distanceTo(me) < 24)
                     .map(e => ({ id: e.id, name: e.name, d: +e.position.distanceTo(me).toFixed(1), x: Math.round(e.position.x), y: Math.round(e.position.y), z: Math.round(e.position.z) }));
             } catch (e) { return; }
+            // ★2026-07-08 用户令 连通性判据 (「看连通性别无脑逃跑」): 后台每 ~1.5s 给最近几只【非 creeper】
+            //   敌对算"够不够得到 bot" → 缓存 bot._threatReach[id]={connected,at}, 供 self_preservation 的
+            //   nearbyHostiles 同步读, 过滤掉够不到的怪 (不再对隔墙/隔沟的怪风筝/躲藏)。近战怪 → world.isClearPath
+            //   (走位连通); 射手 (skeleton/stray/pillager/witch/blaze/ghast) → hasLineOfSight (箭走直线)。
+            //   creeper 不算 (归 nearestCreeper 全反应, 天然不进此门)。异步+限最近3只+1.5s 节流防 ELOOP
+            //   ([[pathfinding-cost-tuning]]); 无怪时零成本。fail-safe 在 nearbyHostiles 侧: 未知/过期一律当能够到。
+            try {
+                if (!bot._threatReach) bot._threatReach = {};
+                if (now - (this._reachAt || 0) >= 1500) {
+                    this._reachAt = now;
+                    const me3 = bot.entity.position;
+                    const _RANGED = /skeleton|stray|pillager|witch|blaze|ghast/i;
+                    const cand = Object.values(bot.entities)
+                        .filter(e => e && e.position && e.name && mc.isHostile(e) && !/creeper/i.test(e.name)
+                            && e.position.distanceTo(me3) < 12)
+                        .sort((a, b) => a.position.distanceTo(me3) - b.position.distanceTo(me3))
+                        .slice(0, 3);   // 只算最近 3 只 (够近才致命, 远怪误判也低风险)
+                    for (const e of cand) {
+                        let connected;
+                        if (_RANGED.test(e.name)) connected = hasLineOfSight(bot, e);
+                        else { try { connected = await world.isClearPath(bot, e); } catch (e2) { connected = true; } }
+                        bot._threatReach[e.id] = { connected: !!connected, at: Date.now() };
+                    }
+                    for (const id of Object.keys(bot._threatReach)) {
+                        if (Date.now() - bot._threatReach[id].at > 5000) delete bot._threatReach[id];   // 过期清理
+                    }
+                }
+            } catch (e) {}
             // god's-eye feed: latest 24-block radar snapshot for the overseer process
             // (bots/_supervisor/overseer.mjs). Overwritten every 5s — cheap, and gives
             // the risk engine live mob positions even when nothing is engaged yet.
@@ -3861,7 +3952,12 @@ const modes_list = [
                             // paralysis") while we ARE pinned, forageExplore is the generic leg-walking
                             // venture. 10-min self-cooldown so the escalation can't become its own storm;
                             // every failure path degrades to the old log-only behavior — never throws.
-                            if (now >= (bot._watchdogEscalateAt || 0)) {
+                            // ★2026-07-08 用户令 (admin 意志 = 独占 / 绝对): admin 任务期间【不】强制转移 ——
+                            //   forageExplore/escapePlan 会把身体从 admin 手里夺走 (正是用户禁止的"夺舍")。真·致命
+                            //   走 vitalNow (adminExclusiveActive 内含该判据: 致命时返回 false → 放行救援)。任务卡
+                            //   死由 AdminMission 的 onNoProgress 自评 (!endGoal / !cannotComplete) + 30min deadline
+                            //   兜底, 不靠 watchdog 强拖。上面的 kick(interrupt) 保留 —— 它只让任务原地重规划, 不移身。
+                            if (now >= (bot._watchdogEscalateAt || 0) && !adminExclusiveActive(bot)) {
                                 bot._watchdogEscalateAt = now + 10 * 60000;
                                 const wasBusy = !!(agent.supervised_skill || (agent.actions && agent.actions.executing) || bot._currentSkill);
                                 (async () => {
@@ -4176,6 +4272,18 @@ const modes_list = [
                 const p = bot.entity.position;
                 if (!this.regAnchor || p.distanceTo(this.regAnchor) > 20) { this.regAnchor = p.clone(); this.regAt = now; }
                 if (st === 'FREE') {
+                    // ★MARCH VETO CONSUMER (screenshot 07-08 活锁修): !vetoInstinct("march"/"mobility")
+                    // drops bot._maroonedVetoUntil (framework/instinct.js). While it's live, refuse to
+                    // (re-)escalate the SOFT (纯寻路信号型) MAROONED — re-anchor, clear maroonedAt + the
+                    // noPath history so neither the primary (90s+≥3 noPath) nor the STICKY(lastState=
+                    // MAROONED) branch below can re-trip — handing the body back to the task layer for a
+                    // real window. Only reachable when st computed FREE (has exits/open sky), so genuine
+                    // POCKET/ENTOMBED/SEALED entrapment (st!='FREE') never enters here → real dig-out intact.
+                    if (bot._maroonedVetoUntil && now < bot._maroonedVetoUntil) {
+                        this.regAnchor = p.clone(); this.regAt = now;
+                        this.maroonedAt = 0; this.noPathTimes = [];
+                        bot._marchDir = null; bot._marchFails = 0; bot._maroonedMarchOrigin = null;
+                    } else {
                     // ★CLIMBING heartbeat (凿崖让步: chopWood dig-staircase 是垂直工程,水平
                     // 位移小,正好踩 MAROONED 判定(90s没挪20格)——行军插队把凿崖斩在半路,
                     // FREE窗口(~2min)<凿崖启动(3-4min)=结构性饿死。爬山=有目的工程不是被困:
@@ -4205,6 +4313,7 @@ const modes_list = [
                         this.maroonedAt = now;
                         try { bot._maroonedMarchOrigin = p.clone(); } catch (e) {}
                     }
+                    }   // ← close ★MARCH VETO CONSUMER else (soft-MAROONED escalation)
                 }
                 // ★C285: the MARCH WEDGE BREAKER was MOVED to reflex_watchdog (always-on) — see
                 // its pin-kick block. Putting it here (in the mobility mode's own update) was
@@ -6849,6 +6958,9 @@ const modes_list = [
             const acNow = Date.now();
             let item = world.getNearestEntityWhere(agent.bot, entity => {
                 if (entity.name !== 'item') return false;
+                // ★don't chase items the bot itself just threw away on purpose (discard/discardAway) —
+                // otherwise this instinct notices its own fresh drop and walks right back to re-collect it.
+                if (skills.isSelfDiscardedItem(agent.bot, entity)) return false;
                 const a = this.attempts.get(entity.id);
                 return !(a && a.n >= 3 && acNow < a.until);
             }, 8);
@@ -6966,6 +7078,25 @@ const modes_list = [
 ];
 
 async function execute(mode, agent, func, timeout=-1) {
+    // ★2026-07-08 用户令 (admin 意志 = 独占 / 绝对 · 冻结所有非致命本能): admin 任务 (bot._extIntentUntil
+    //   新鲜) 执行期间, 只有【致命 / 保命本能】能抢身体 —— arbiter.vitalNow 致命地板, 以及 self_preservation /
+    //   self_defense (二者内含 creeper 闪避 / 贴脸死战 / shouldFlee 逃跑的自门, 是真·反应式保命) 与 auto_eat
+    //   (原地从背包进食, 用户令"auto_eat 不用 kill"); mobility 仅在真被封死 (ENTOMBED/SEALED) 时放行脱困自救。
+    //   其余机会主义本能一律让位 admin: hunting / item_collecting / mobility 的 MAROONED march (FREE/SWIM/POCKET
+    //   巡游) / torch_placing / edge_unstick / elbow_room / idle_staring / tool_keeper …—— 这些正是"砍最近的树
+    //   却夺舍去追羊、往水边瞎跑"的元凶。蓝图 (prepNether/proposeTasks) 冻结在 kernel._survivalTick; 本门只冻本能。
+    //   门开在唯一公共入口 execute() (用户原则"门要加公共入口不是单个调用方")。任务结束清 _extIntentUntil →
+    //   本能自然恢复 (冻结 = 暂停, 非永久禁用)。
+    try {
+        const _bot = agent && agent.bot;
+        if (adminExclusiveActive(_bot)) {
+            const _mobState = (_bot._mobility && _bot._mobility.state) || '';
+            const _adminAllowed = mode.name === 'self_preservation' || mode.name === 'self_defense'
+                || mode.name === 'auto_eat'
+                || (mode.name === 'mobility' && /ENTOMBED|SEALED/.test(_mobState));
+            if (!_adminAllowed) return;   // 非致命本能 → admin 独占, 冻结这一拍 (不抢身体)
+        }
+    } catch (e) {}
     // ★仲裁接入点 A (Phase 1, 签核设计 bots/_supervisor/arbitration-design.md): 反射经
     // 这里抢身体 (runAction→stop() 的 interrupt 脉冲) 之前, 先过所有权仲裁。今天的血账:
     // 反射每 8s 抢 pathfinder goal, surfaceUp 夜爬 8min 走 3y (checkpoint#16)。

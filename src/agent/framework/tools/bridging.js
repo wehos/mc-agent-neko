@@ -28,8 +28,10 @@ export async function placeUnderFeet(bot, blockType, opts = {}) {
 }
 
 /**
- * Pillar straight up to targetY (or +N), generously. Repeated generous
- * placeUnderFeet on a single lane hold so reflexes can't yank it mid-pillar.
+ * Pillar straight up IN PLACE to targetY, or (targetY=null) until blocks run out.
+ * skills.pillarUp is now itself a repeated hand-driven placeUnderFeet tower; the
+ * lane hold keeps reflexes from yanking it mid-pillar. Timeout is generous so a
+ * long "pillar until the dirt is gone" climb (e.g. a full stack) isn't cut off.
  */
 export async function pillarUp(bot, targetY = null, opts = {}) {
     const lm = getLaneManager(bot, { log: opts.log });
@@ -37,5 +39,5 @@ export async function pillarUp(bot, targetY = null, opts = {}) {
         const skills = await import('../../library/skills.js');
         if (ctx.preempted()) return false;
         return skills.pillarUp(bot, targetY);
-    }, { label: 'pillar-up', timeoutMs: opts.timeoutMs || 15000, generous: true });
+    }, { label: 'pillar-up', timeoutMs: opts.timeoutMs || 90000, generous: true });
 }

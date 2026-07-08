@@ -131,6 +131,30 @@ export default async function scoutResources(bot, ctx, opts = {}) {
         return null;
     };
 
+    // ── SEA GUARD (2026-07-08): the hop-march below picks a random bearing and marched straight into
+    //    the ocean — bare coastal spawns "往海边跑" then the in-water get-out reflex fights it → the
+    //    dumb shore oscillation. Reject a hop whose destination column is DEEP water (≥2 deep = real
+    //    ocean, not a 1-deep puddle/river ford) so the sweep rotates to a land bearing. If every ray is
+    //    sea (islet), turnIdx exhausts → zero-progress failed → kernel cooldown → MIGRATE/woodBarren
+    //    escape (the correct answer for a boxed-in coastal spawn). ──
+    const Vec3 = ctx.Vec3 || bot.entity.position.constructor;
+    const isAir = (n) => n === 'air' || n === 'cave_air' || n === 'void_air';
+    const destIsDeepWater = (x, z) => {
+        try {
+            // scan around the bot's CURRENT elevation (not entry start.y — it drifts as we hop up/down;
+            // anchoring on stale start.y would probe caves/air after a climb). Widen the window a bit.
+            const refY = Math.round(bot.entity.position.y);
+            for (let dy = 3; dy >= -4; dy--) {
+                const b = bot.blockAt(new Vec3(x, refY + dy, z));
+                if (!b || isAir(b.name)) continue;
+                if (b.name !== 'water') return false;               // land/solid surface → fine
+                const below = bot.blockAt(new Vec3(x, refY + dy - 1, z));
+                return !!(below && below.name === 'water');         // ≥2 water deep → ocean, avoid
+            }
+        } catch (e) {}
+        return false;   // unknown/unloaded → don't over-avoid
+    };
+
     // Initial costs from where we stand.
     let tree = (need === 'village') ? null : findTree();
     let village = (need === 'wood') ? null : (knownVillage() || senseVillage());
@@ -182,6 +206,13 @@ export default async function scoutResources(bot, ctx, opts = {}) {
             const d = dir(TURNS[turnIdx]);
             const hx = Math.round(bot.entity.position.x + d.x * HOP);
             const hz = Math.round(bot.entity.position.z + d.z * HOP);
+            // ★sea guard: don't march into the ocean — rotate to a land bearing instead.
+            if (destIsDeepWater(hx, hz)) {
+                turnIdx++;
+                if (turnIdx < TURNS.length) log_(`hop ${hop} → deep water @${hx},${hz} — turn ${TURNS[turnIdx]}° (avoid sea)`);
+                else log_(`hop ${hop} → all rays sea-blocked — end march (coastal barren → escape)`);
+                continue;
+            }
             const before = bot.entity.position.clone();
             try { await skills.goToPosition(bot, hx, Math.round(bot.entity.position.y), hz, 2); }
             catch (e) { /* PathfindingNoPlan — treated as a stalled hop below */ }

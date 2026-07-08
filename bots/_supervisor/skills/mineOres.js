@@ -130,13 +130,18 @@ export default async function mineOres(bot, ctx, opts = {}) {
         try {
             const oo = bot._world && bot._world.oracleOres;
             if (!(oo && Date.now() - (oo.ts || 0) < 600000)) return [];
-            // 夜挖(yMax 有限)优先扫描器的地下带分层名单 (top-24 山面铁过滤后可能为空)
-            let list = [];
-            if (yMax !== Infinity && ore === 'iron' && Array.isArray(oo.ironDeep) && oo.ironDeep.length) list = oo.ironDeep;
-            else if (Array.isArray(oo[ore]) && oo[ore].length) {
-                list = yMax === Infinity ? oo[ore] : oo[ore].filter(c => c && c.y <= yMax);
+            // ★2026-07-08 深带优先 (oracle-surface-hop-churn 治本): iron 的 top-24 `iron` 列表是"山面表层铁"
+            //   (y53-58 崖面露头), bot 在高台够不着 → 换点蹦跶。深带 `ironDeep` (y48-49) 是密封下潜 vein-follow
+            //   的正主。故 iron 一律优先 ironDeep, 无论白天/夜挖; 仅 ironDeep 缺失/被雷区+幻影过滤空时才回退表层
+            //   `iron` 列表 (聊胜于无)。yMax 有限时对回退列表仍按 y 截断。
+            const filt = (arr) => (Array.isArray(arr) ? arr : []).filter(c => c && !inDeathZone(c) && !isPhantom(c)
+                && (yMax === Infinity || c.y <= yMax));
+            if (ore === 'iron') {
+                const deep = filt(oo.ironDeep);
+                if (deep.length) return deep;
+                return filt(oo.iron);
             }
-            return list.filter(c => c && !inDeathZone(c) && !isPhantom(c));
+            return filt(oo[ore]);
         } catch (e) {}
         return [];
     };
@@ -249,6 +254,25 @@ export default async function mineOres(bot, ctx, opts = {}) {
         }
         // x-ray 64 格内采空 → oracle 下一候选换点; 候选就在脚下(<4b, 单候选自旋)或无候选则支道刷新
         const list = oracleList();
+        // ★2026-07-08 无头苍蝇修 (oracle-surface-hop-churn): region 路径修好后 oracle 开始吐"山面表层铁"
+        //   (iron 列表全 y53-58), bot 站 y80 森林高台, 每个候选是 20-40 格外山坡裸露矿 —— C304 正确判够不着,
+        //   零收获后横向"换点"跳到下一个表层候选 → 在树冠里反复挖树叶满地蹦 (用户实观无头苍蝇; region 修好前
+        //   oracle 恒空走盲挖 mineDown 反而挖到铁 = 回归)。守卫: 只要 bot 仍远高于当前候选矿带 (y-bandY>8),
+        //   零收获意味"坐在矿上方够不着", 密封下潜切进矿脉 (恢复回归前行为), 而非横向蹦到下一个够不着的表层露头。
+        //   下潜到带下方后, collectBlock 就在臂展内 vein-follow。近带内 (y-bandY<=8) 采空才允许横向换点找新脉。
+        const bandY = (() => {
+            try {
+                const ys = list.map(c => c && c.y).filter(v => Number.isFinite(v));
+                if (!ys.length) return null;
+                return Math.min(...ys);   // 取最浅候选带 — 下潜到它下方即进入整撮候选的采集臂展
+            } catch (e) { return null; }
+        })();
+        if (bandY != null && bot.entity.position.y - bandY > 8 && !bot.interrupt_code && !bot.death_abort
+            && deadline - Date.now() > 60000) {
+            prog(`r${rounds}: 仍高悬矿带上方 (y=${Math.floor(bot.entity.position.y)} bandY=${bandY}) — 零收获=够不着, 密封下潜切脉 (不横向蹦表层)`);
+            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(bandY - 2, -58) }); } catch (e) {}
+            continue;
+        }
         const nxt = list.length ? list[rounds % list.length] : null;
         const nxtDist = nxt ? Math.hypot(nxt.x - bot.entity.position.x, nxt.z - bot.entity.position.z) : Infinity;
         if (nxt && nxtDist >= 4 && nxtDist < 250) {

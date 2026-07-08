@@ -28,10 +28,14 @@ $env:MC_FOOD_INSTINCTS = '0'
 # Restart-Agent 及各 keep-alive 都用裸名 'node' 启动 — 若 PATH 里没有 node, 整条链一个也起不来。
 $node22 = 'C:\Users\Administrator\nodejs22'
 if ((Test-Path (Join-Path $node22 'node.exe')) -and ($env:PATH -notlike "*$node22*")) { $env:PATH = "$node22;$env:PATH" }
-# ★2026-07-06 session#5: ore-oracle 离线扫描指向用户自开 LAN 世界「新的世界」的 region 目录
-# (专用服务器 C:\Users\Administrator\mc-server 已停役, ore-oracle.mjs 的默认值指向它已失效)。
-# 在此钉死, 子进程继承 — 与 MC_FRAMEWORK_* 同一"不许靠宿主 shell 碰运气"原则。
-$env:ORE_REGION = 'C:\Users\Administrator\Downloads\.minecraft\saves\新的世界\region'
+# ★2026-07-08 miss-289 修: 旧 $env:ORE_REGION 钉死到
+# 'C:\Users\Administrator\Downloads\.minecraft\saves\新的世界\region' — 该路径已不存在(0 mca),
+# 子进程继承后 289 区块全 miss → oracle 恒空 → mineOres 盲挖下潜送死。真·世界在 Fabric client
+# E: 存档下, 且世界名随「新的世界 (N)」递增。改为只钉 saves 根目录, 由 ore-oracle.mjs 的
+# resolveRegion() 自动取 .mca 最新的世界 (=当前联机世界), 免去每次改名手动追。
+# (不再设 ORE_REGION — 它会硬覆盖自动定位; 如需临时指定某世界再显式设它。)
+Remove-Item Env:\ORE_REGION -ErrorAction SilentlyContinue
+$env:ORE_SAVES = 'E:\MC\.minecraft\versions\1.21.4-Fabric 0.19.3\saves'
 
 # ★T-0095 ATOMIC SINGLETON — replaces the scan-and-kill TOCTOU race below. Two watchdogs spawned
 # near-simultaneously (concurrent SessionStart ensure-stack hooks / a session recycle) each scanned

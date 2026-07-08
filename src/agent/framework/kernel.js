@@ -245,22 +245,20 @@ export class Kernel {
         //   优先级、独占, 直到 gpt-5.4-mini 判定完成"。硬保命反射(modes vitalNow: 溺水/着火/岩浆/hp≤4)
         //   独立于内核、仍生效; 5min 戳是崩溃兜底。
         if (this.bot._extIntentUntil && Date.now() < this.bot._extIntentUntil) {
-            // ★2026-07-07 让位硬保命 (用户 Q2 "独占但让位硬保命" + 实观 bug: 命令让 LLM 死循环重试
-            //   一个做不到的任务(如无树可砍), 独占把求生压住 → bot 掉到 hp=1)。血粮危急时不再让位独占,
-            //   放行下面的 surviveNow 救命强派; 非危急才真正独占。硬保命永远高于任何外部命令。
-            const _hp = (typeof this.bot.health === 'number') ? this.bot.health : 20;
-            const _food = (typeof this.bot.food === 'number') ? this.bot.food : 20;
-            // ★2026-07-07 ADMIN MISSION 让位地板 (red-team 关键修): admin 任务把 _extIntentUntil 每 300ms
-            //   续命, 内核整段让位。若地板停在 hp>6/food>2, 任务会把 bot 长时间卡在 7-11血/3-7粮 的"死区"
-            //   —— 内核灰区求生(确定性: 吃>打>床>觅食>挖墙>求死重置)在此区间不触发, 重演旧 hp=1 惨死。
-            //   任务期间把让位地板抬到 hp>11/food>7: 进入 7-11血/3-7粮 即不再让位, 放行下面的灰区强派
-            //   surviveNow(它 gz-truthy 时在提案市场之前 force-dispatch 并 return, 故不破坏"任务独占 vs
-            //   自主提案")。硬地板 vitalNow 与 hp<=6/food<=2 危急强派恒不变 —— 保命永远赢。
-            const _missionActive = !!(this.bot._adminMission && this.bot._adminMission.active);
-            const _hpFloor = _missionActive ? 11 : 6;
-            const _foodFloor = _missionActive ? 7 : 2;
-            if (_hp > _hpFloor && _food > _foodFloor) return;   // 非危急 → 外部意图独占, 内核让位
-            // 危急 → 不 return, 继续走 surviveNow 强派救命
+            // ★2026-07-08 用户令 (admin 意志 = 独占 / 绝对): admin 任务 (WS task / 游戏内 chat, 由 agent
+            //   LLM=gpt-5.5 执行) 期间, 内核【完全冻结】—— 不派发任何蓝图提案 (prepNether / 夜挖 / FREE_PLAY /
+            //   proposeTasks), 也不 force 灰区求生 (surviveNow)。唯一能打断独占的是【致命事件】: arbiter.vitalNow
+            //   (溺水氧≤8 / 着火 / 岩浆 / hp≤4 掉血)。
+            //   ★旧地板 (mission hp>11 && food>7) 是本次"砍不到树就瞎跑"bug 的根: 无用的砍树巡逻 sprint 把
+            //     food 从 20 烧到 ≤7, 一旦越过 food floor, 让位 return 失效 → 内核复派 prepNether 蓝图 + feedUp
+            //     觅食把身体夺走 (chopWood YIELD superseded gen1→2→3 + !getFood(14))。饥饿在当前版本【已退环境】,
+            //     绝不再作为让位/打断条件。hp 也只认致命 (vitalNow), 不再用 hp>11 的软线。
+            //   任务由 agent 判定 完成 / 无法完成 → handleMessage / AdminMission 的 finally 清 _extIntentUntil →
+            //   内核自主规划 (蓝图 + self-prompt) 自然恢复 (冻结 = 暂停, 非永久禁用)。
+            let _vital = false;
+            try { _vital = arbiterVitalNow(this.bot); } catch (e) {}
+            if (!_vital) return;   // 非致命 → admin 独占, 内核让位 (蓝图提案 + 灰区求生全冻)
+            // 致命 (vitalNow) → 不 return, 继续走下面的 surviveNow 救命强派 (硬保命永远赢)
         }
         const ms = mentalState(this.bot);
         this._trackAnchor();

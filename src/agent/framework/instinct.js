@@ -105,6 +105,20 @@ export function vetoInstinct(bot, name, reason) {
     const e = episodes(bot)[name];
     if (e) { e.vetoed = true; e.vetoReason = reason || 'llm-veto'; }
     else episodes(bot)[name] = { since: Date.now(), vetoed: true, vetoReason: reason || 'llm-veto', asked: true };
+    // ★MARCH BRIDGE (screenshot 07-08 活锁修): the MAROONED "engineered march" that seizes the body
+    // lives in modes.js's `mobility` mode, NOT this REGISTRY (it's only mirrored doc-only in
+    // MODE_BACKED_REFLEXES) — so an episode veto here never reached it and !vetoInstinct("march") was a
+    // silent no-op while the bot livelocked (task movement hard-suppressed by goToPosition/goToGoal's
+    // MAROONED gate; the blind march couldn't bank its 20-block release; STICKY re-latched it). Drop a
+    // bot-level release token the mobility mode consumes next tick: it exits the SOFT (pure-pathfinding-
+    // signal) MAROONED + suppresses re-latch for a window so the task layer regains movement. Genuine
+    // physical entrapment computes st=POCKET/ENTOMBED/SEALED (NOT FREE) upstream, so this never disables
+    // real dig-out.
+    try {
+        if (/^(march|mobility|marooned)$/i.test(String(name || ''))) {
+            bot._maroonedVetoUntil = Date.now() + 90 * 1000;
+        }
+    } catch (e2) {}
     return true;
 }
 

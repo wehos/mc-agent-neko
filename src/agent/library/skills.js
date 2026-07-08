@@ -83,6 +83,17 @@ class _NoScaffoldMovements extends _PFMovements {
     constructor(...args) {
         super(...args);
         this.scafoldingBlocks = [];
+        // ★防摔硬底 (2026-07-08 用户实拍"寻路很轻易掉坑/垫完塔走一步摔死", 且"跟水无关就是掉下去"):
+        // 两条 lib 默认是坠落根源, 且被 maxDropDown 漏掉 —— 在子类里一次性钉死, 所有 `new pf.Movements`
+        // 站点(goToGoal/collectBlock/world.isClearPath/热载技能)统一继承防摔:
+        //   1) infiniteLiquidDropdownDistance 默认 true → 规划器认为"落点是水就任意高度都安全", getLanding
+        //      Block(movements.js:495)对液体落点无视 maxDropDown → bot 从 12 格高塔/崖边一步跨进水里自由落体
+        //      (深水不摔但会溺/困, 浅水/边缘直接摔血)。设 false: 液体落点也受 maxDropDown 约束, 不再高台跳水。
+        //   2) maxDropDown 默认 4(4 格=1 点摔伤)→ 收到 3(3 格=零摔伤)当【全局默认下限】; 真需要更深下潜的
+        //      技能(mineDown/digToSurface)仍各自局部覆盖, 不受影响。配合 goToGoal 已关的 allowParkour(避免
+        //      跳弧下方深坑没跳到直接坠坑), 常规寻路从此不会规划出致命落差。
+        this.infiniteLiquidDropdownDistance = false;
+        this.maxDropDown = 3;
         // ★VINE TRAP (user: recurring, ≥5/15 explorations): don't PLAN to climb vines —
         // the physics treats them as ladders and clings/climbs, trapping the bot in
         // jungles. Removing them from climbables stops the pathfinder routing onto them
@@ -110,15 +121,20 @@ class _NoScaffoldMovements extends _PFMovements {
                 } catch (e) { return 0; }
             });
         }
-        // ★MOB-COST PATHING (2026-07-05 安全自查 C4): pathfinder 内建实体成本本来就开着
-        // (allowEntityDetection=true, 每只怪的碰撞箱按 entityCost/格 计入路径成本, 怪堆叠加),
-        // 但默认 entityCost=1 太软 — 绕路稍贵规划器就贴脸走过 creeper。调到 8: 单怪=明显
-        // 倾向绕行, 怪堆=成本墙; 软成本不阻断可达性(目标在怪身上的猎杀/自卫路径照常可达,
-        // 只多几点代价), 救命反射走仲裁不走寻路, 故不会瘫痪作业。creeper 单独进
-        // entitiesToAvoid (lib 内建 100/格) — 爆炸类不给"绕路太贵就算了"的余地。
-        // 注意: 实体索引只在每次算路时刷新(lib 行为), 跟踪半径=server 实体广播(~48b),
-        // 已远超可视; 途中怪贴近由 self_preservation/self_defense 反射接管。
-        this.entityCost = 8;
+        // ★MOB-COST PATHING (2026-07-05 安全自查 C4; 2026-07-08 平原寻路回归修 = 本次): pathfinder
+        // 内建实体成本 (allowEntityDetection=true) 把每只【非 passable 实体】碰撞箱按 entityCost/格
+        // 计入路径成本。致命细节: lib 的 passableEntities.json 只含投射物/掉落物 —— 牛/羊/猪/鸡/马
+        // 等被动动物全都【不 passable】, 于是每只都按 entityCost/格 加价 (movements.js updateCollision
+        // Index 给每格 stamp cost=1; getMove* 里再 *entityCost)。
+        //   曾把 entityCost 调到 8 意图"硬规避 creeper" —— 那是【错药】: creeper 规避完全由下一行的
+        //   entitiesToAvoid 实现 (lib 内建 100/格, 与 entityCost 无关, 触发 getMove 里 cost>100 剪枝 = 硬
+        //   墙)。entityCost=8 对 creeper 仅 100→800 的无谓放大, 副作用却是把平原上【成群被动动物】每格
+        //   加到 +8 → A* 绕每只牛最多外摆 8 格, 动物游走还令每次重算生成不同蛇形 → 逐拍抖动 = 用户实拍
+        //   "只有 1 格高低的平原都走不利索"。(对抗核实定论: entityCost=8 = 平原走位回归的唯一实锤根因;
+        //   tickTimeout=15/viewDistance=far 只是放大器, 且回调 40 会重新引发 ELOOP 卡顿 → 不动它们。)
+        //   改回 lib 默认 1: 被动动物只 +1/格 (轻微自然绕行, 与原版 mineflayer 一致 → 平原丝滑), creeper
+        //   硬规避不变。近身怪安全始终走 self_preservation/self_defense 反射(仲裁), 本就不靠寻路软成本。
+        this.entityCost = 1;
         try { if (this.entitiesToAvoid && this.entitiesToAvoid.add) this.entitiesToAvoid.add('creeper'); } catch (e) {}
         // ★DON'T DIG OWN INFRASTRUCTURE (2026-07-02 05:21Z white_bed loss — rationale at
         // hardenMovements above). Hooked HERE so every construction site is hardened the
@@ -287,11 +303,13 @@ export async function craftRecipe(bot, itemName, num=1) {
             let hasTable = world.getInventoryCounts(bot)['crafting_table'] > 0;
             if (hasTable) {
                 let pos = world.getNearestFreeSpace(bot, 1, 6);
-                await placeBlock(bot, 'crafting_table', pos.x, pos.y, pos.z);
-                craftingTable = world.getNearestBlock(bot, 'crafting_table', craftingTableRange);
-                if (craftingTable) {
-                    recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, craftingTable);
-                    placedTable = true;
+                if (pos) {   // ★getNearestFreeSpace 可能返回 null(窄坑全封死) — 别对 undefined 取 .x 抛 TypeError
+                    await placeBlock(bot, 'crafting_table', pos.x, pos.y, pos.z);
+                    craftingTable = world.getNearestBlock(bot, 'crafting_table', craftingTableRange);
+                    if (craftingTable) {
+                        recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, craftingTable);
+                        placedTable = true;
+                    }
                 }
             }
             else {
@@ -316,6 +334,19 @@ export async function craftRecipe(bot, itemName, num=1) {
     }
 
     const recipe = recipes[0];
+    // ★2026-07-08 用户报"下指令后 bot 卡退"根因链的收口: 若配方【需要工作台】却没拿到【可达】的台, 绝不把它
+    //   交给 bot.craft。两种坏情况: (a) craftingTable 仍是 null(16格没找到台 + 放新台失败/被身体挡住) —
+    //   mineflayer craft.js:14 直接抛裸错 "Recipe requires craftingTable, but one was not supplied";
+    //   (b) 台找到了但够不到(上面 goToNearestBlock 走近被 MAROONED 锁住导航, distance 仍 >4) — bot.craft
+    //   对够不到的台开窗失败/悬挂。两者都会让失败动作反复重试撞进 action_manager 的 15s 不停窗口 →
+    //   reconnectNow('action-refused-stop') 主动断线(卡退)。这里干净快退, 把身体交还任务层(可 moveAway 到
+    //   开阔地再造台, 或 !vetoInstinct("march") 解锁导航走到已放的台旁)。4.5 与上面第330行的 >4 走近判据一致。
+    if (recipe && recipe.requiresTable
+        && !(craftingTable && bot.entity.position.distanceTo(craftingTable.position) <= 4.5)) {
+        log(bot, `无法制作 ${itemName}: 需要工作台但够不到 —— 附近(${craftingTableRange}格)没有可用的台, 或已找到的台被锁住导航(MAROONED)走不过去, 且当前位置放不下新台。请先 moveAway 到开阔处再造台, 或解除行军锁走到已放的台旁。`);
+        if (placedTable && craftingTable) { try { await reclaimTable(craftingTable.position); } catch (e) {} }
+        return false;
+    }
     console.log('crafting...');
     //Check that the agent has sufficient items to use the recipe `num` times.
     const inventory = world.getInventoryCounts(bot); //Items in the agents inventory
@@ -1107,6 +1138,20 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
     // nearby stone/dirt/log). 'auto' = on iff the search set contains an ore block.
     const veinActive = !isLiquid && (veinFollow === true || (veinFollow === 'auto' && blocktypes.some(n => n.endsWith('_ore'))));
 
+    // ★TRUTHFUL COUNT (root fix for "Collected 4 oak_log 但空包"): `collected` below counts
+    // blocks BROKEN, not drops actually vacuumed. A log broken over water floats off and
+    // `pickupNearbyItems` never catches it — yet the old code still logged "Collected N" and
+    // returned true, so endGoal / getWood judged the mission DONE on a phantom haul. We now
+    // also track the real inventory delta of the drop item and report/return on THAT.
+    // Ores that pick up as a differently-named item drop need the mapping (iron→raw_iron …);
+    // everything else drops as its own block name.
+    const DROP_NAME = { iron: 'raw_iron', gold: 'raw_gold', copper: 'raw_copper' };
+    const dropItem = DROP_NAME[blockType] || blockType;
+    const gainOf = () => bot.inventory.items()
+        .filter(i => i.name === dropItem || i.name === blockType)
+        .reduce((a, i) => a + i.count, 0);
+    const baseGain = gainOf();
+
     let collected = 0;
 
     const movements = new pf.Movements(bot);
@@ -1156,6 +1201,45 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
     // ★C304 DBG: persistent one-liner per ore reach-decision so the gate is observable in-game
     // (mirrors chopDBG — bot.output only reaches the LLM, never a file). Cheap: ore-only.
     const _mineDBG = (m) => { try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ${m}\n`); } catch (e) {} };
+    // ★C304-V (2026-07-08 途径铁不挖根治): the partial/no-path REJECTs below are the false-reject
+    // engine — a buried-through-stone vein makes the 2000ms canDig A* time out as 'partial' with
+    // little progress (or occasionally noPath), so the timed-A* verdict is a coin-flip on server
+    // tick/chunk load, NOT on geometry (实测同一矿同距离一次REJECT一次OK). Disambiguate on GEOMETRY:
+    // voxel-walk the straight line eye→ore-center and classify intermediate cells solid vs open.
+    // BURIED vein = line is (near-)solid stone → A* only stalled on slow digging → ACCEPT. Ore ACROSS
+    // an air gap / ravine (the x-ray case C1 must reject) = line crosses a long contiguous OPEN run
+    // → REJECT. Distance-capped so we never commit to an absurdly deep single ore. Cheap (~a dozen
+    // blockAt, no 2nd pathfind → keeps C9). Downstream C337 LOS + ≤4.6 reach still gate the real dig,
+    // so accepting a buried vein here can NEVER x-ray — it only lets the bot TUNNEL toward it.
+    const _BURIED_MAX_D3 = 12;          // max straight-line commit for one buried vein (~11 stone breaks)
+    const _BURIED_MAX_OPEN_RUN = 1;     // ≥2 contiguous open cells on the line = a real gap the no-scaffold/parkour-off probe can't cross (or a 2-block pit the drop falls into unreachably) → REJECT; a true buried vein reads maxRun=0, so this costs it nothing
+    const _lineBuried = (eye, center, d3) => {
+        try {
+            if (d3 > _BURIED_MAX_D3) return { ok: false, why: `too-deep d3=${d3.toFixed(1)}>${_BURIED_MAX_D3}` };
+            const vx = center.x - eye.x, vy = center.y - eye.y, vz = center.z - eye.z;
+            const dist = Math.sqrt(vx * vx + vy * vy + vz * vz);
+            if (dist < 1.001) return { ok: true, why: 'adjacent' };   // right next to bot — C337 handles it
+            const oreCell = center.floored();
+            const oreKey = `${oreCell.x},${oreCell.y},${oreCell.z}`;
+            const steps = Math.ceil(dist / 0.3);
+            let last = null, n = 0, openN = 0, run = 0, maxRun = 0;
+            for (let s = 1; s < steps; s++) {
+                const t = s / steps;
+                const p = eye.offset(vx * t, vy * t, vz * t);
+                if (p.distanceTo(eye) < 1.6) continue;                // skip bot's own body / tunnel-mouth
+                const cell = p.floored();
+                const key = `${cell.x},${cell.y},${cell.z}`;
+                if (key === last) continue;
+                last = key;
+                if (key === oreKey) continue;                         // the ore's own voxel is solid by definition
+                n++;
+                const b = bot.blockAt(cell);
+                const isOpen = !b || b.boundingBox === 'empty';       // air/cave_air/water/lava all 'empty'
+                if (isOpen) { openN++; run++; if (run > maxRun) maxRun = run; } else run = 0;
+            }
+            return { ok: (maxRun <= _BURIED_MAX_OPEN_RUN), why: `n=${n} open=${openN} maxRun=${maxRun}` };
+        } catch (e) { return { ok: true, why: 'voxel-err(fail-open)' }; }   // C7: never hard-block on internal error
+    };
     const _oreReachable = async (cand) => {
         try {
             const bp = cand.position;
@@ -1168,8 +1252,9 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
             const res = await bot.pathfinder.getPathTo(reachMoves, goal, 2000);
             const st = res ? res.status : 'null';
             if (!res || (res.status !== 'success' && res.status !== 'partial')) {
-                _mineDBG(`★C304 ${cand.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} REJECT status=${st} (no walk/dig path, no bridge)`);
-                return false;
+                const bur = _lineBuried(eye, bp.offset(0.5, 0.5, 0.5), d3);
+                _mineDBG(`★C304 ${cand.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} status=${st} → voxel ${bur.ok ? 'OK buried' : 'REJECT gap/deep'} (${bur.why})`);
+                return bur.ok;
             }
             if (res.status === 'partial') {
                 let remain = Infinity;
@@ -1178,8 +1263,9 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
                     if (pp) remain = Math.hypot(pp.x - bp.x, pp.y - bp.y, pp.z - bp.z);
                 } catch (e) {}
                 if (!(remain < d3 * 0.6)) {
-                    _mineDBG(`★C304 ${cand.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} REJECT partial-no-progress (remain=${Number.isFinite(remain) ? remain.toFixed(1) : '?'})`);
-                    return false;
+                    const bur = _lineBuried(eye, bp.offset(0.5, 0.5, 0.5), d3);
+                    _mineDBG(`★C304 ${cand.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} partial remain=${Number.isFinite(remain) ? remain.toFixed(1) : '?'} → voxel ${bur.ok ? 'OK buried' : 'REJECT gap/deep'} (${bur.why})`);
+                    return bur.ok;
                 }
                 _mineDBG(`★C304 ${cand.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} OK partial-progress (remain=${remain.toFixed(1)})`);
                 return true;
@@ -1349,7 +1435,14 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
                     // block's spot via a dig-capable path so mineflayer auto-vacuums the item,
                     // THEN sweep any stragglers (drops land a couple blocks off through leaves/vines).
                     try { await goToPosition(bot, block.position.x, block.position.y, block.position.z, 1); } catch (e) {}
+                    const preSweep = gainOf();
                     await pickupNearbyItems(bot);
+                    // ★WATER-DRIFT SWEEP: a drop broken next to water floats and drifts out of the
+                    // first pickup's reach (root cause of the -79,168 lakeside chop that logged 4
+                    // logs but banked 0). If the drop item still didn't land, chase once wider.
+                    if (gainOf() === preSweep) {
+                        try { await pickupNearbyItems(bot, 12); } catch (e) {}
+                    }
                     success = true;
                 } else if (r === 'gone') {
                     continue; // vanished before we dug — move on
@@ -1389,8 +1482,14 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
         if (bot.interrupt_code)
             break;  
     }
-    log(bot, `Collected ${collected} ${blockType}.`);
-    return collected > 0;
+    // ★Report/judge on the REAL inventory delta, not the broken-block count. `collected`
+    // (blocks broken) stays the loop's own accounting; `gained` is what actually banked.
+    const gained = gainOf() - baseGain;
+    if (gained < collected)
+        log(bot, `Collected ${gained} ${blockType}. (broke ${collected}; ${collected - gained} drop(s) lost — floated/despawned)`);
+    else
+        log(bot, `Collected ${gained} ${blockType}.`);
+    return gained > 0;
 }
 
 // Flood-fill mine a connected ore vein starting from a just-mined block position.
@@ -1434,15 +1533,16 @@ async function harvestConnectedVein(bot, startPos, blocktypes, max=64) {
     return mined;
 }
 
-export async function pickupNearbyItems(bot) {
+export async function pickupNearbyItems(bot, distance = 8) {
     /**
      * Pick up all nearby items.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {number} distance, search radius for drops. Defaults to 8; pass a larger value
+     *   (e.g. 12) to chase drops that floated/drifted (water) out of the default reach.
      * @returns {Promise<boolean>} true if the items were picked up, false otherwise.
      * @example
      * await skills.pickupNearbyItems(bot);
     **/
-    const distance = 8;
     const maxAttempts = 10; // Prevent infinite loops
     const FOOD_ITEM_RE = /rotten_flesh|beef|porkchop|chicken|mutton|rabbit|cod|salmon|bread|apple|carrot|potato|melon|berries|stew/i;
     const droppedName = (entity) => {
@@ -1479,6 +1579,7 @@ export async function pickupNearbyItems(bot) {
     const getNearestItem = bot => bot.nearestEntity(entity => {
         if (!entity || entity.name !== 'item' || !entity.position) return false;
         if (blacklist[entity.id]) return false;
+        if (isSelfDiscardedItem(bot, entity)) return false;
         const d = bot.entity.position.distanceTo(entity.position);
         if (d >= distance) return false;
         if (miningPickup() && !cheapMiningPickup(entity) && !FOOD_ITEM_RE.test(droppedName(entity))) return false;
@@ -2282,9 +2383,31 @@ export async function equip(bot, itemName) {
     return true;
 }
 
+// ★self-toss anti-repickup registry (user-reported 2026-07-08: items the bot itself just
+// threw away sometimes got walked back over and picked right back up by the background
+// `item_collecting` instinct — nothing distinguished "trash I just tossed on purpose" from
+// "loot worth chasing"). discard() tags every entity spawned by its own bot.toss() calls
+// here; pickupNearbyItems() and the item_collecting instinct both skip tagged ids. TTL
+// outlives vanilla's 5-minute item despawn timer, so a tag never needs early clearing — by
+// the time it could expire the item is already gone from the world.
+const SELF_DISCARD_TTL = 6 * 60 * 1000;
+function pruneSelfDiscarded(bot) {
+    const reg = bot._selfDiscarded;
+    if (!reg) return;
+    const now = Date.now();
+    for (const id of Object.keys(reg)) if (reg[id] < now) delete reg[id];
+}
+export function isSelfDiscardedItem(bot, entity) {
+    const reg = bot._selfDiscarded;
+    if (!reg || !entity) return false;
+    const expiry = reg[entity.id];
+    return typeof expiry === 'number' && expiry > Date.now();
+}
+
 export async function discard(bot, itemName, num=-1) {
     /**
-     * Discard the given item.
+     * Discard the given item. Tags the dropped entity so the bot's own item-collecting
+     * instinct won't immediately notice it and pick it back up.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {string} itemName, the item or block name to discard.
      * @param {number} num, the number of items to discard. Defaults to -1, which discards all items.
@@ -2292,18 +2415,33 @@ export async function discard(bot, itemName, num=-1) {
      * @example
      * await skills.discard(bot, "oak_log");
      **/
+    const registry = bot._selfDiscarded || (bot._selfDiscarded = {});
+    const onSpawn = (entity) => {
+        if (!entity || entity.name !== 'item' || !bot.entity || !entity.position) return;
+        if (entity.position.distanceTo(bot.entity.position) > 3) return;
+        registry[entity.id] = Date.now() + SELF_DISCARD_TTL;
+    };
+    bot.on('entitySpawn', onSpawn);
+
     let discarded = 0;
-    while (true) {
-        let item = bot.inventory.findInventoryItem(itemName);
-        if (!item) {
-            break;
+    try {
+        while (true) {
+            let item = bot.inventory.findInventoryItem(itemName);
+            if (!item) {
+                break;
+            }
+            let to_discard = num === -1 ? item.count : Math.min(num - discarded, item.count);
+            await bot.toss(item.type, null, to_discard);
+            discarded += to_discard;
+            if (num !== -1 && discarded >= num) {
+                break;
+            }
         }
-        let to_discard = num === -1 ? item.count : Math.min(num - discarded, item.count);
-        await bot.toss(item.type, null, to_discard);
-        discarded += to_discard;
-        if (num !== -1 && discarded >= num) {
-            break;
-        }
+        // give the server a moment to broadcast the last toss's spawn packet before we stop listening
+        await new Promise(resolve => setTimeout(resolve, 250));
+    } finally {
+        bot.off('entitySpawn', onSpawn);
+        pruneSelfDiscarded(bot);
     }
     if (discarded === 0) {
         log(bot, `You do not have any ${itemName} to discard.`);
@@ -2311,6 +2449,35 @@ export async function discard(bot, itemName, num=-1) {
     }
     log(bot, `Discarded ${discarded} ${itemName}.`);
     return true;
+}
+
+export async function discardAway(bot, itemName, num=-1, opts={}) {
+    /**
+     * Dedicated "throw this away" skill: walk a short distance from the current spot,
+     * drop the item there, then return — without the bot immediately noticing its own
+     * fresh drop and walking back to pick it up (discard()'s self-toss tag prevents that;
+     * this also protects the walk back to start_loc, which previously passed right next
+     * to the drop and triggered the item_collecting instinct on the way).
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {string} itemName, the item or block name to discard.
+     * @param {number} num, the number of items to discard. Defaults to -1, which discards all items.
+     * @param {{distance?: number, returnToStart?: boolean}} opts, distance to step away before
+     *   tossing (default 5, pass 0 to discard in place) and whether to walk back afterward
+     *   (default true).
+     * @returns {Promise<boolean>} true if the item was discarded, false otherwise.
+     * @example
+     * await skills.discardAway(bot, "rotten_flesh");
+     **/
+    const { distance = 5, returnToStart = true } = opts;
+    const start_loc = bot.entity.position.clone();
+    if (distance > 0) {
+        try { await moveAway(bot, distance); } catch (e) {}
+    }
+    const discarded = await discard(bot, itemName, num);
+    if (returnToStart && distance > 0) {
+        try { await goToPosition(bot, start_loc.x, start_loc.y, start_loc.z, 0); } catch (e) {}
+    }
+    return discarded;
 }
 
 export async function putInChest(bot, itemName, num=-1) {
@@ -3221,15 +3388,22 @@ export async function goToGoal(bot, goal) {
         nonDestructiveMovements.blocksCantBreak.add(mc.getBlockId(block));
     }
     nonDestructiveMovements.canDig = false;
-    // ★走位质量: parkour 开 (上游默认) — 让规划器能跨 1 格缺口/小跳越,破碎地形不再
-    // 只能绕路/挖路 (用户实拍"跨越地形困难"的主因之一). scaffold 仍关(不乱搭),maxDropDown
-    // C281 提到 3(3 格落差零摔伤,允许小落差下跳;4-hop 连跳仍挡),lava 仍在 blocksToAvoid.
-    nonDestructiveMovements.allowParkour = true;
+    // ★防摔回归修 (2026-07-08 用户实拍"寻路很轻易地掉进坑里", 失去 13 HP): parkour 曾从 false 翻成
+    // true 想解"跨越地形困难" —— 但 mineflayer-pathfinder 的 parkour【执行】极不可靠: 规划器判一跳"落点
+    // 安全"就排, 可跳弧【下方是深坑】时物理起跳一旦没跳到(卡顿/贴脸/rubber-band 常有)就直接坠进坑里 =
+    // 用户实拍的"轻易掉坑摔血/摔死"。lib 没有"只走安全 parkour"的开关, 故关掉 parkour: 规划器不再朝深
+    // 坑上方发起跳跃。真要跨 1 格缺口, 下面 destructive 段 canDig 会挖条安全的路过去(慢但不摔)。
+    // maxDropDown 保持 3(3 格落差零摔伤;4-hop 连跳本就挡), lava 仍在 blocksToAvoid。
+    nonDestructiveMovements.allowParkour = false;
     nonDestructiveMovements.maxDropDown = 3;
     nonDestructiveMovements.scafoldingBlocks = [];
     nonDestructiveMovements.placeCost = 2;
     nonDestructiveMovements.digCost = 10;
-    
+    // ★避水路 (2026-07-08 用户实拍"寻路各种跌落到水里"): lib 默认 liquidCost=1, A* 把水潭当"几乎免费的
+    // 平地"直接斜穿过去(每格水 base1+liquid1≈2, 跟绕路一格差不多)→ 老往水里钻。调高 liquidCost 让规划器
+    // 【优先绕开】水: 有旱路就走旱路, 但水是唯一/更短通路时仍会过(加价不是禁行, 过河可达性不受损)。
+    nonDestructiveMovements.liquidCost = 12;
+
     nonDestructiveMovements.liquids.add(mc.getBlockId('water'));
     nonDestructiveMovements.liquids.add(mc.getBlockId('flowing_water'));
     nonDestructiveMovements.liquids.add(mc.getBlockId('lava'));
@@ -3237,8 +3411,9 @@ export async function goToGoal(bot, goal) {
     
     const destructiveMovements = new pf.Movements(bot);
     destructiveMovements.canDig = true;
-    destructiveMovements.allowParkour = true; // ★同上: 破坏式导航也允许 parkour 跨缺口
+    destructiveMovements.allowParkour = false; // ★同上防摔回归修: 破坏式也关 parkour, 跨缺口靠 canDig 挖路(不摔)
     destructiveMovements.maxDropDown = 2;
+    destructiveMovements.liquidCost = 8;   // ★同上避水路(破坏式稍低: 挖路本就更贵, 别把过河逼成绕远大坑)
     // ★C319 (T-0053): let the DESTRUCTIVE fallback BUILD its way out, not just dig. A pocket /
     // mesa-terrace imprisonment (T-0052) is escapable ONLY by PLACING blocks (pillar up / bridge a
     // gap) — canDig alone can't rise out of a pit (digging up just lengthens the shaft you're stuck
@@ -3388,6 +3563,24 @@ export async function goToGoal(bot, goal) {
             if (result.stuckDetected) {
                 // Phase 1: Non-destructive stuck → switch to destructive
                 if (!isDestructive) {
+                    // ★不因"泡在水里晃不动"就切破坏式乱挖 (2026-07-08 用户实拍"移动中莫名其妙挖土", S1 的水域facet):
+                    // 站在水里被浮力晃住 → 3s 内挪不出 1.5b → 触发 PhaseStuck → 老逻辑立刻切 destructive(canDig)
+                    // 朝目标挖泥开路 = "莫名其妙挖土"。水里晃不动是【游泳假象】不是【墙】, 挖土解决不了。改: 脚/头
+                    // 泡水时先 stepEdgeAssist 推一把、留在 non-destructive 继续游, 最多跳过 2 次; 2 次后仍卡(真被水
+                    // 里箱死)才落到下面正常 destructive 促升(C319 口袋自救保留)。只在"站水里"生效, 干地脱困不变。
+                    const _fb = bot.blockAt(bot.entity.position);
+                    const _hb = bot.blockAt(bot.entity.position.offset(0, 1, 0));
+                    const _inWater = /(flowing_)?water$/.test((_fb && _fb.name) || '') || /(flowing_)?water$/.test((_hb && _hb.name) || '');
+                    const _wkey = `${Math.round(bot.entity.position.x)},${Math.round(bot.entity.position.z)}`;
+                    const _wskips = (bot._ndWaterSkipKey === _wkey) ? (bot._ndWaterSkips || 0) : 0;
+                    if (_inWater && _wskips < 2) {
+                        bot._ndWaterSkips = _wskips + 1; bot._ndWaterSkipKey = _wkey;
+                        motionAudit(bot, 'path.water_skip', { seq: navSeq, skips: bot._ndWaterSkips, goal: goalInfo });
+                        await stepEdgeAssist(bot, { why: `path-water-skip-${bot._ndWaterSkips}`, goal: goalInfo, owner: `path:${navSeq}:water-skip` });
+                        await new Promise(r => setTimeout(r, 300));
+                        continue;   // 留在 non-destructive 继续游, 不切挖土
+                    }
+                    bot._ndWaterSkips = 0; bot._ndWaterSkipKey = null;
                     log(bot, `⚠️ Stuck with non-destructive path, switching to destructive...`);
                     motionAudit(bot, 'path.switch', { seq: navSeq, from: 'non-destructive', to: 'destructive', reason: 'stuck', goal: goalInfo });
                     currentMovements = destructiveMovements;
@@ -4601,38 +4794,33 @@ export async function goToSurface(bot) {
     return false;
 }
 
-export async function pillarUp(bot, targetY = null) {
+export async function pillarUp(bot, targetY = null, opts = {}) {
     /**
-     * Tower straight up (the classic "jump and place a block under your feet"
-     * climb) to escape a vertical shaft / deep pit where the pathfinder can't
-     * find a walking route. Locates the open column to climb in, then leans on
-     * the pathfinder's built-in 1x1 tower support — but in short vertical
-     * increments and with digging disabled, so it never times out searching a
-     * tall shaft (the failure that makes plain navigation tunnel sideways and
-     * get stuck) and never wanders off to dig instead of climb.
+     * Pillar straight up IN PLACE: stand exactly where you are, jump and place a
+     * block under your feet, repeat — the classic MLG tower. No column scan, no
+     * pathfinder, no walking (the admin "just pillar up RIGHT HERE" primitive).
+     * It drives the audited placeBlockUnderFeet by hand, so it works in dry pits
+     * AND flooded water columns (holding jump swims the bot up in water, where the
+     * pathfinder's 1x1 towering can't even generate a move — movements.js bails on
+     * `block1.liquid`). Non-combat movement modes are frozen for the climb so a
+     * reflex can't drag the bot off the pillar; combat/eat reflexes stay live, and
+     * a fresh admin command still preempts via bot.interrupt_code.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {number} [targetY], Y to climb to. Defaults to the surface above
-     *   the chosen column (clamped to the open part of that column).
-     * @returns {Promise<boolean>} true if it reached (within 1 of) targetY.
+     * @param {number} [targetY], Y to climb to. null/undefined ⇒ keep pillaring
+     *   until the scaffold blocks run out (the "pillar until the dirt is gone"
+     *   default). Clamped to the world build height.
+     * @param {object} [opts], test seams: opts.placeUnder (place-one-block fn,
+     *   default placeBlockUnderFeet) and opts.sleep (default tickConfirm.sleepMs).
+     * @returns {Promise<boolean>} true if it reached targetY (target given) or
+     *   climbed at least one block / ran out of blocks (no target); false only if
+     *   it could not place a single block.
      * @example
-     * await skills.pillarUp(bot); // climb out of a shaft up to daylight
+     * await skills.pillarUp(bot);      // pillar up in place until blocks run out
+     * await skills.pillarUp(bot, 72);  // pillar up in place until feet reach y=72
      **/
     const MAX_Y = 319;
-    const isPassable = (b) => !b || b.boundingBox === 'empty';
-
-    // How many open (non-solid) blocks rise above (x, fromY) before a ceiling.
-    const openRunUp = (x, z, fromY) => {
-        let y = fromY;
-        while (y <= MAX_Y && isPassable(bot.blockAt(new Vec3(x, y, z)))) y++;
-        return y - fromY;
-    };
-    // Highest solid block at (x,z) — i.e. the "surface".
-    const surfaceY = (x, z) => {
-        for (let y = MAX_Y; y > -64; y--) {
-            if (!isPassable(bot.blockAt(new Vec3(x, y, z)))) return y;
-        }
-        return null;
-    };
+    const place = opts.placeUnder || placeBlockUnderFeet;
+    const sleep = opts.sleep || ((ms) => tickConfirm.sleepMs(ms));
 
     // Only tower with full solid blocks we actually hold (no slabs/stairs/etc,
     // which don't make a reliable 1-high step).
@@ -4655,86 +4843,74 @@ export async function pillarUp(bot, targetY = null) {
         return false;
     }
 
-    const start = bot.entity.position;
-    const bx = Math.floor(start.x), by = Math.floor(start.y), bz = Math.floor(start.z);
+    if (targetY != null) targetY = Math.min(Math.floor(targetY), MAX_Y);
 
-    // --- Find the shaft column ---------------------------------------------
-    // Prefer the column the bot already stands in. Only scan around when it's
-    // capped low (bot tucked in a side pocket, not under the open shaft).
-    let sx = bx, sz = bz;
-    let bestRun = openRunUp(bx, bz, by + 1);
-    if (bestRun < 3) {
-        for (let dx = -2; dx <= 2; dx++) {
-            for (let dz = -2; dz <= 2; dz++) {
-                if (dx === 0 && dz === 0) continue;
-                const nx = bx + dx, nz = bz + dz;
-                // Must be a spot the bot could stand in: feet open, floor solid.
-                const feet = bot.blockAt(new Vec3(nx, by, nz));
-                const floor = bot.blockAt(new Vec3(nx, by - 1, nz));
-                if (!isPassable(feet) || isPassable(floor)) continue;
-                const run = openRunUp(nx, nz, by + 1);
-                if (run > bestRun) { bestRun = run; sx = nx; sz = nz; }
-            }
-        }
-    }
-    if (bestRun < 2) {
-        log(bot, `Can't pillar up: the ceiling is right overhead. You may need to dig up first.`);
-        return false;
-    }
+    // --- Freeze non-combat body-mover modes for the climb ------------------
+    // The admin pillar bypasses the LOCOMOTION lane, so nothing else stops a
+    // tick-driven mode (mobility/unstuck/elbow_room walking off to "unstick" or
+    // reposition) from dragging the bot off the pillar mid-place. Pause exactly
+    // those movement modes and restore them in finally. Combat (self_defense/
+    // self_preservation), auto_eat and a fresh admin interrupt stay live.
+    const GUARD = ['mobility', 'unstuck', 'elbow_room', 'idle_staring', 'item_collecting', 'torch_placing', 'hunting'];
+    const prevModes = {};
+    try { for (const m of GUARD) if (bot.modes && bot.modes.exists && bot.modes.exists(m)) { prevModes[m] = bot.modes.isOn(m); bot.modes.setOn(m, false); } } catch (e) {}
 
-    // --- Decide how high to climb ------------------------------------------
-    if (targetY == null) {
-        const sy = surfaceY(sx, sz);
-        targetY = sy != null ? sy + 1 : by + bestRun;
-    }
-    // Never aim past the open part of the column — towering can't pass a ceiling.
-    targetY = Math.min(Math.floor(targetY), by + bestRun);
-    if (targetY <= by + 1) {
-        log(bot, `Already at the top of this column (y=${by}).`);
-        return true;
-    }
-    log(bot, `Pillaring up column (${sx}, ${sz}) from y=${by} to y=${targetY}.`);
+    const yOf = () => Math.floor(bot.entity.position.y);
+    const heldUsable = () => usable.find(n => bot.inventory.items().some(i => i.name === n));
+    const solidBelowFeet = () => {
+        const ref = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0));
+        return !!(ref && ref.boundingBox === 'block');
+    };
+    // The head cell (feet+1) must be open, or the jump can't clear the feet cell
+    // to place a block there — a real ceiling, so pillaring can't continue.
+    const headOpen = () => {
+        const h = bot.blockAt(bot.entity.position.floored().offset(0, 1, 0));
+        return !h || h.boundingBox !== 'block';
+    };
+    // In water the bot floats a block or two above the block it just placed; stop
+    // swimming and let it sink back down so the cell under its feet is a solid
+    // support to place on (placeBlockUnderFeet needs that reference).
+    const settleOntoFooting = async () => {
+        if (solidBelowFeet()) return true;
+        try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
+        try { bot.clearControlStates && bot.clearControlStates(); } catch (e) {}
+        for (let t = 0; t < 20 && !solidBelowFeet(); t++) await sleep(100);
+        return solidBelowFeet();
+    };
 
-    // Walk under the chosen column first when it isn't the current one.
-    if (sx !== bx || sz !== bz) {
-        try { await goToPosition(bot, sx + 0.5, by, sz + 0.5, 0.5); } catch (e) { /* best effort */ }
-    }
+    const startY = yOf();
+    log(bot, targetY == null
+        ? `Pillaring up IN PLACE from y=${startY} until blocks run out.`
+        : `Pillaring up IN PLACE from y=${startY} to y=${targetY}.`);
 
-    // --- Tower up in increments --------------------------------------------
-    const moves = new pf.Movements(bot);
-    moves.canDig = false;            // only tower, never tunnel
-    moves.allow1by1towers = true;
-    moves.scafoldingBlocks = usable.map(n => mc.getBlockId(n)).filter(id => id != null);
-    moves.placeCost = 1;
-    bot.pathfinder.setMovements(moves);
-
-    const STEP = 6; // short legs so A* never times out searching a tall shaft
+    const MAX_STUCK = 6; // consecutive no-progress tries at one level before giving up
+    let placed = 0, stuck = 0;
     try {
-        while (Math.floor(bot.entity.position.y) < targetY) {
-            if (bot.interrupt_code) { log(bot, `Pillar up interrupted.`); break; }
-            if (!bot.inventory.items().some(i => usable.includes(i.name))) {
-                log(bot, `Ran out of blocks to pillar up with.`);
-                break;
-            }
-            const curY = Math.floor(bot.entity.position.y);
-            const nextY = Math.min(curY + STEP, targetY);
-            try {
-                await bot.pathfinder.goto(new pf.goals.GoalBlock(sx, nextY, sz));
-            } catch (e) {
-                // pathfinder gave up on this leg; progress check below decides.
-            }
-            if (Math.floor(bot.entity.position.y) <= curY) {
-                log(bot, `Stopped climbing at y=${Math.floor(bot.entity.position.y)} (couldn't place higher).`);
-                break;
-            }
+        while (!bot.interrupt_code) {
+            if (targetY != null && yOf() >= targetY) break;
+            if (yOf() >= MAX_Y) { log(bot, `Reached the world build height (y=${yOf()}).`); break; }
+            const name = heldUsable();
+            if (!name) { log(bot, `Out of blocks — pillared ${placed}, now at y=${yOf()}.`); break; }
+            if (!headOpen()) { log(bot, `Ceiling overhead at y=${yOf()} — can't pillar higher (placed ${placed}).`); break; }
+            const y0 = yOf();
+            await settleOntoFooting();
+            try { await place(bot, name, { jumpMs: 1100, settleMs: 260, retries: 3, minClearance: 0.92 }); }
+            catch (e) { try { bot.setControlState && bot.setControlState('jump', false); } catch (_) {} }
+            await sleep(150);
+            if (yOf() > y0) { placed += yOf() - y0; stuck = 0; }
+            else if (++stuck >= MAX_STUCK) { log(bot, `Stuck at y=${yOf()} after ${stuck} tries — stopping (placed ${placed}).`); break; }
         }
     } finally {
-        bot.pathfinder.setGoal(null);
+        try { bot.clearControlStates && bot.clearControlStates(); } catch (e) {}
+        try { for (const m in prevModes) bot.modes.setOn(m, prevModes[m]); } catch (e) {}
     }
 
-    const finalY = Math.floor(bot.entity.position.y);
-    const reached = finalY >= targetY - 1;
-    log(bot, reached ? `Pillared up and reached y=${finalY}.` : `Pillared up to y=${finalY} (target was ${targetY}).`);
+    const finalY = yOf();
+    if (bot.interrupt_code) log(bot, `Pillar up interrupted at y=${finalY} (placed ${placed}).`);
+    // Success = reached the target (target given), or climbed at all / exhausted
+    // the block stock (no target — "pillar until dirt gone" did its job).
+    const reached = targetY != null ? finalY >= targetY : (placed > 0 || heldUsable() == null);
+    log(bot, `Pillar up done: y=${startY}->${finalY} (+${finalY - startY}), placed ${placed} block(s).`);
     return reached;
 }
 

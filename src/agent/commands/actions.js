@@ -102,9 +102,9 @@ export const actionsList = [
     },
     {
         name: '!vetoInstinct',
-        description: 'VETO an executing instinct (e.g. go_to_bed_sleep) — it stops NOW and stays suppressed for the rest of this trigger cycle (e.g. this night), re-arming only when the trigger lapses. Use when an instinct is acting but you judge it wrong right now (a reflex notified you "[本能] ...执行中").',
+        description: 'VETO an executing instinct (e.g. go_to_bed_sleep) — it stops NOW and stays suppressed for the rest of this trigger cycle (e.g. this night), re-arming only when the trigger lapses. Use when an instinct is acting but you judge it wrong right now (a reflex notified you "[本能] ...执行中"). SPECIAL: name "march" (or "mobility"/"marooned") releases the MAROONED road-march that suppresses navigation ("goToPosition/goToGoal suppressed: MAROONED") — use it when you are locally free (open ground, has exits) but movement is stuck being "occupied" by the march; it hands control back to the task layer for ~90s.',
         params: {
-            'name': { type: 'string', description: 'instinct name to veto, e.g. "go_to_bed_sleep"' },
+            'name': { type: 'string', description: 'instinct name to veto, e.g. "go_to_bed_sleep"; or "march"/"mobility" to release a MAROONED movement lock' },
             'reason': { type: 'string', description: 'short reason for the veto' }
         },
         perform: async function (agent, name, reason) {
@@ -112,6 +112,20 @@ export const actionsList = [
                 const fw = await import('../framework/index.js');
                 fw.instinct.vetoInstinct(agent.bot, name, reason || 'llm-veto');
                 try { if (agent.bot.interrupt_code !== undefined) agent.bot.interrupt_code = true; } catch (e) {}
+                // ★MARCH RELEASE: vetoInstinct set bot._maroonedVetoUntil; flip the broadcast state to FREE
+                // NOW so the very next goToPosition/goToGoal isn't blocked for up to the mobility mode's 2s
+                // re-eval. The mobility mode keeps it FREE while the veto window is live (modes.js FREE branch).
+                const isMarch = /^(march|mobility|marooned)$/i.test(String(name || ''));
+                if (isMarch) {
+                    try {
+                        const b = agent.bot;
+                        if (b._mobility && b._mobility.state === 'MAROONED') b._mobility = { ...b._mobility, state: 'FREE', since: Date.now() };
+                        b._marchDir = null; b._marchFails = 0; b._maroonedMarchOrigin = null;
+                        try { b.pathfinder && b.pathfinder.setGoal && b.pathfinder.setGoal(null); } catch (e) {}
+                        try { b.clearControlStates && b.clearControlStates(); } catch (e) {}
+                    } catch (e) {}
+                    return `Released MAROONED march (${reason || 'no reason'}) — navigation handed back to the task layer for ~90s. Path now.`;
+                }
                 return `Vetoed instinct '${name}' for this cycle (${reason || 'no reason'}).`;
             } catch (e) { return `Veto failed: ${e && e.message || e}`; }
         }
@@ -301,10 +315,7 @@ export const actionsList = [
             'num': { type: 'int', description: 'The number of items to discard.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, item_name, num) => {
-            const start_loc = agent.bot.entity.position;
-            await skills.moveAway(agent.bot, 5);
-            await skills.discard(agent.bot, item_name, num);
-            await skills.goToPosition(agent.bot, start_loc.x, start_loc.y, start_loc.z, 0);
+            await skills.discardAway(agent.bot, item_name, num);
         })
     },
     {
@@ -646,9 +657,9 @@ export const actionsList = [
     },
     {
         name: '!pillarUp',
-        description: 'Tower straight up by placing blocks under your feet to climb out of a vertical shaft or deep pit when normal pathfinding can\'t find a way up. Requires placeable full blocks (dirt, cobblestone, etc.) in inventory.',
+        description: 'Pillar straight up IN PLACE: stand where you are and jump-and-place blocks under your feet, over and over, until you run out of blocks (or reach an optional target Y). Does NOT walk anywhere or pathfind — the atomic "climb out RIGHT HERE" action. Works in dry pits and flooded water columns. Requires placeable full blocks (dirt, cobblestone, terracotta, etc.) in inventory.',
         params: {
-            'target_y': { type: 'int', description: 'The Y level to climb to. Use -1 to climb to the surface above.', domain: [-1, 320] }
+            'target_y': { type: 'int', description: 'The Y level to climb to. Use -1 to pillar in place until blocks run out.', domain: [-1, 320] }
         },
         perform: runAsAction(async (agent, target_y) => {
             await skills.pillarUp(agent.bot, (target_y == null || target_y < 0) ? null : target_y);

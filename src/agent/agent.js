@@ -551,23 +551,17 @@ export class Agent {
             // dialog LLM is informed regardless of pending state.
             try {
                 const deathCause = this._inferDamageCause();
-                // ★2026-07-07 用户令: 死亡告警【默认 keep（物品保留）】。旧文案硬编码"物品已掉落原地"是错的
-                //   (本世界 keepInventory 一直 ON)。改为: 只有 keepinv.json 【明确且新鲜(24h内)核实为 false】才
-                //   报"掉落"; 其余一切(核实为 true / 缺失 / 过期 / 无法核实)一律默认"保留"。当前世界丢了作弊权限、
-                //   /gamerule 查询被拒(见 events.log)无法核实 —— 用户决定先乐观默认保留, 根治(恢复查询权限)回头再说。
-                let verifiedDrop = false;
-                try {
-                    const kv = JSON.parse(fs.readFileSync('bots/_supervisor/keepinv.json', 'utf8'));
-                    if (kv && kv.value === false && kv.ts && Date.now() - kv.ts < 86400000) verifiedDrop = true;
-                } catch (e) { /* 缺失/过期/不可读 → 默认 keep */ }
-                const text = verifiedDrop ? '角色阵亡，物品已掉落原地，即将重生。'
-                    : '角色阵亡（死亡不掉落，物品已保留），即将重生。';
+                // ★2026-07-08 用户令: 死亡告警【硬编码不掉落】。本世界 keepInventory 实际一直 ON,
+                //   但 C344v2 的 in-game 查询把 keepinv.json 误写成 value:false(查询被服务器错答/拒答),
+                //   旧的"只在核实为 false 时报掉落"逻辑因此又回退到"物品已掉落原地"错误文案。既然实际死亡
+                //   不掉落, 直接硬编码——不再读 keepinv.json 判文案, 永远报"保留"。
+                const text = '角色阵亡（死亡不掉落，物品已保留），即将重生。';
                 wsServer.broadcast({
                     type: 'alert',
                     severity: 'critical',
                     text,
                     hp: 0,
-                    keepInventory: !verifiedDrop,   // 默认 true(保留); 仅新鲜核实为 false 才 false
+                    keepInventory: true,   // ★硬编码: 死亡不掉落
                     cause: deathCause,
                     timestamp: Date.now(),
                 });

@@ -60,6 +60,24 @@ export class AdminMission {
         try { const b = this._bot(); if (b) b._adminMission = { active: this.state === RUNNING }; } catch (e) {}
     }
 
+    // ── the recurring self-prompt goal, wrapped with the EXCLUSIVE-mission rule ──────────────────
+    // ★2026-07-08 用户令 (admin 意志 = 独占 / 绝对 · 饥饿退环境): the deterministic freezes (kernel
+    //   blueprint freeze @ _survivalTick, execute() 非致命本能冻结) stop the SYSTEM from hijacking the
+    //   body. This closes the LAST leak — the agent LLM SPONTANEOUSLY issuing !getFood / side-tasks
+    //   (repro 2026-07-08 05:02: mid "砍最近的树", food dipped → LLM self-prompted "!getFood(14)" → feedUp
+    //   chased sheep/cow). self_prompter drives the LLM with "goal: '<prompt>'" (self_prompter.js:78),
+    //   so prepending a firm rule to that goal makes the agent itself stay on-task. mine.text stays the
+    //   canonical identity/telemetry string (banners / beginMissionTask / anti-reflexive guard); only
+    //   the self-prompt LOOP sees this wrapped prompt.
+    _loopPrompt(text) {
+        const RULE = '[任务铁律] 你正在执行管理员下达的指令，这是【最高优先级、独占】的任务，专注把它做完。'
+            + '只有三种情况才停止：(1)任务已完成 → !endGoal；(2)确实无法完成（例如所需资源根本不存在或到不了）'
+            + ' → !cannotComplete("简短原因")；(3)遇到致命危险（溺水/着火/岩浆/濒死）。期间【不要】为饥饿或进食'
+            + '分心（本版本饥饿已停用，系统会在需要时自动从背包进食）；【不要】顺手去备战下界、挖矿、找村庄、'
+            + '睡觉等自主目标——它们已被系统冻结、与本任务无关。任务：';
+        return RULE + String(text == null ? '' : text);
+    }
+
     // ── entry: a new admin command ─────────────────────────────────────────────
     // No lock: the mission handoff (_handoff) is synchronous/atomic on the JS thread, and the long
     // drive runs UNLOCKED so a LATER submit can preempt a mid-drive mission instead of queueing.
@@ -115,6 +133,7 @@ export class AdminMission {
         const now = Date.now();
         const mine = { text: mine0.text, taskId: mine0.taskId, origin: mine0.origin,
             startedAt: now, deadlineAt: now + this._maxMs, deaths: 0 };
+        mine.prompt = this._loopPrompt(mine.text);   // ★admin 独占铁律包裹的自驱 goal (见 _loopPrompt)
         // Supersede any running mission FIRST — fires the OLD taskId exactly once. keepLoop so the OLD
         // end() does NOT tear down the shared loop the incoming mission is about to own.
         if (this.state === RUNNING) this.end('superseded', 'new task', { keepLoop: true });
@@ -154,7 +173,7 @@ export class AdminMission {
         if (this.state === RUNNING && this.mission === mine) {
             try {
                 this.agent.self_prompter.owner = this;
-                this.agent.self_prompter.start(mine.text);
+                this.agent.self_prompter.start(mine.prompt || mine.text);
             } catch (e) { console.error('[adminMission] self_prompter.start error:', e && e.message || e); }
         }
     }
@@ -194,7 +213,7 @@ export class AdminMission {
             && !(bot._diedAt && now - bot._diedAt < 4000)) {
             try {
                 this.agent.self_prompter.owner = this;
-                this.agent.self_prompter.start(m.text);
+                this.agent.self_prompter.start(m.prompt || m.text);
             } catch (e) {}
         }
     }
@@ -229,7 +248,7 @@ export class AdminMission {
         if (this.state !== RUNNING) return;   // !endGoal / !cannotComplete already ended it
         if (used) {
             // A command ran → keep going.
-            try { this.agent.self_prompter.owner = this; this.agent.self_prompter.start(m.text); } catch (e) {}
+            try { this.agent.self_prompter.owner = this; this.agent.self_prompter.start(m.prompt || m.text); } catch (e) {}
         } else {
             await this.end('impossible', 'no-progress');
         }
@@ -246,7 +265,7 @@ export class AdminMission {
         try {
             if (this.agent.self_prompter.isStopped()) {
                 this.agent.self_prompter.owner = this;
-                this.agent.self_prompter.start(this.mission.text);
+                this.agent.self_prompter.start(this.mission.prompt || this.mission.text);
             }
         } catch (e) {}
     }

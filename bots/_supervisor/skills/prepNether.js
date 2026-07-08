@@ -1589,11 +1589,21 @@ async function prepNetherInner(bot, ctx) {
     // couldn't roof its 挖三填一 pit → dwelled exposed and died at night (用户实拍 + death #94). One
     // block to seal a dug pit is all it takes; recognize everything it can actually place.
     const buildBlocks = () => { const c = world.getInventoryCounts(bot); return Object.keys(c).filter(n => /^(dirt|coarse_dirt|grass_block|cobblestone|cobbled_deepslate|stone|dirt_path|granite|diorite|andesite|tuff|gravel|sand|red_sand|sandstone|red_sandstone|netherrack)$/.test(n) || /_planks$|_log$|terracotta$/.test(n)).reduce((s, n) => s + c[n], 0); };
-    // NIGHT GATE: sticky re-arm re-enters prepNether every ~8s, and at night this
-    // stocking step was DIGGING THE BOT OUT OF ITS OWN SEALED BUNKER to go find dirt
-    // (alarm caught it punching its own cobblestone cap at 05:09). Block-stocking is
-    // daytime work; at night the bunker IS the survival plan.
-    if (buildBlocks() < 14 && !bot.interrupt_code && !isNightNow()) {
+    // ★SHELTER-BLOCK STOCKING DISABLED — 2026-07-08 (see docs/shelter-mechanism-disabled.md)
+    //   This SURVIVE-FIRST dirt-stocking existed ONLY to feed the surface wall-box ("封箱"/seal)
+    //   reflex — a pillar-box UP needs ~7 pre-carried blocks and digs none of its own. That seal
+    //   is now disabled, so pre-stocking is pure churn: a bare respawn hand-digs ~18 dirt each life
+    //   (the "突然往地下挖" the user reported) for a shelter that never builds. The PRESERVED
+    //   survival paths (挖三填一 dig_one / bunkerDown) dig their OWN cap material on the way down,
+    //   so they don't need this buffer. Gated behind the SAME env flag as the seal → the stocking
+    //   revives together with the wall-box when re-enabled, and stays off by default alongside it.
+    //   Escape hatch: set env NEKO_ENABLE_SEAL_SHELTER=1 before launch.
+    const SEAL_SHELTER_ENABLED = process.env.NEKO_ENABLE_SEAL_SHELTER === '1';
+    // NIGHT GATE (only reachable when re-enabled): sticky re-arm re-enters prepNether every ~8s,
+    // and at night this stocking step was DIGGING THE BOT OUT OF ITS OWN SEALED BUNKER to go find
+    // dirt (alarm caught it punching its own cobblestone cap at 05:09). Block-stocking is daytime
+    // work; at night the bunker IS the survival plan.
+    if (SEAL_SHELTER_ENABLED && buildBlocks() < 14 && !bot.interrupt_code && !isNightNow()) {
         prog(`prepNether: SURVIVE-FIRST — stocking shelter blocks (have ${buildBlocks()})`);
         try { await skills.collectBlock(bot, 'dirt', 18); } catch (e) { prog(`prepNether: stock blocks err ${e.message}`); }
         prog(`prepNether: shelter blocks now ${buildBlocks()}`);

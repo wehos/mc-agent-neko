@@ -91,6 +91,38 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
     // bridge a gap). Mirrors C304. Self-contained (imports pf) so it's live on ③ hot-reload, no restart.
     let _bmReach = null, _bmReachErr = false;
     const _mineDBG = (m) => { try { fs.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ${m}\n`); } catch (e) {} };
+    // ★C305-V (2026-07-08, mirror of C304-V): geometry-based buried-vs-gap disambiguation for the
+    // partial/no-path REJECTs below. Buried straight-through-stone vein → ACCEPT (A* only stalled on
+    // slow digging); ore across an air/ravine gap → REJECT (C1). Distance-capped. Downstream C337
+    // (distToBlock<=4.6 && canSeeBlock, L400/L431) + C305-B carve reach guard (L356) still gate the
+    // real dig, so accepting a buried vein here can never x-ray — it only heads the tunnel toward it.
+    const _BURIED_MAX_D3 = 12;
+    const _BURIED_MAX_OPEN_RUN = 1;   // mirror C304: ≥2 contiguous open cells = real gap / uncrossable 2-block pit → REJECT (true buried vein reads maxRun=0)
+    const _lineBuried = (eye, center, d3) => {
+        try {
+            if (d3 > _BURIED_MAX_D3) return { ok: false, why: `too-deep d3=${d3.toFixed(1)}>${_BURIED_MAX_D3}` };
+            const vx = center.x - eye.x, vy = center.y - eye.y, vz = center.z - eye.z;
+            const dist = Math.sqrt(vx * vx + vy * vy + vz * vz);
+            if (dist < 1.001) return { ok: true, why: 'adjacent' };
+            const oreCell = center.floored();
+            const oreKey = `${oreCell.x},${oreCell.y},${oreCell.z}`;
+            const steps = Math.ceil(dist / 0.3);
+            let last = null, n = 0, openN = 0, run = 0, maxRun = 0;
+            for (let s = 1; s < steps; s++) {
+                const t = s / steps;
+                const p = eye.offset(vx * t, vy * t, vz * t);
+                if (p.distanceTo(eye) < 1.6) continue;
+                const cell = p.floored();
+                const key = `${cell.x},${cell.y},${cell.z}`;
+                if (key === last) continue;
+                last = key;
+                if (key === oreKey) continue;
+                n++;
+                if (open(bot.blockAt(cell))) { openN++; run++; if (run > maxRun) maxRun = run; } else run = 0;
+            }
+            return { ok: (maxRun <= _BURIED_MAX_OPEN_RUN), why: `n=${n} open=${openN} maxRun=${maxRun}` };
+        } catch (e) { return { ok: true, why: 'voxel-err(fail-open)' }; }
+    };
     const _oreReachableBM = async (oreBlock) => {
         if (_bmReachErr) return true;   // pathfinder unavailable → fail open (never block mining outright)
         try {
@@ -115,8 +147,10 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             const res = await bot.pathfinder.getPathTo(_bmReach, new BM_GOALS.GoalNear(bp.x, bp.y, bp.z, 2), 2000);
             const st = res ? res.status : 'null';
             if (!res || (res.status !== 'success' && res.status !== 'partial')) {
-                _mineDBG(`★C305 ${oreBlock.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} REJECT status=${st} (no walk/dig path, no bridge)`);
-                return false;
+                const eye = bot.entity.position.offset(0, 1.62, 0);
+                const bur = _lineBuried(eye, bp.offset(0.5, 0.5, 0.5), d3);
+                _mineDBG(`★C305 ${oreBlock.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} status=${st} → voxel ${bur.ok ? 'OK buried' : 'REJECT gap/deep'} (${bur.why})`);
+                return bur.ok;
             }
             if (res.status === 'partial') {
                 let remain = Infinity;
@@ -125,8 +159,10 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
                     if (pp) remain = Math.hypot(pp.x - bp.x, pp.y - bp.y, pp.z - bp.z);
                 } catch (e) {}
                 if (!(remain < d3 * 0.6)) {
-                    _mineDBG(`★C305 ${oreBlock.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} REJECT partial-no-progress (remain=${Number.isFinite(remain) ? remain.toFixed(1) : '?'})`);
-                    return false;
+                    const eye = bot.entity.position.offset(0, 1.62, 0);
+                    const bur = _lineBuried(eye, bp.offset(0.5, 0.5, 0.5), d3);
+                    _mineDBG(`★C305 ${oreBlock.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} partial remain=${Number.isFinite(remain) ? remain.toFixed(1) : '?'} → voxel ${bur.ok ? 'OK buried' : 'REJECT gap/deep'} (${bur.why})`);
+                    return bur.ok;
                 }
                 _mineDBG(`★C305 ${oreBlock.name}@${bp.x},${bp.y},${bp.z} d3=${d3.toFixed(1)} OK partial-progress (remain=${remain.toFixed(1)})`);
                 return true;
