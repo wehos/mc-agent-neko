@@ -182,7 +182,7 @@ export class Prompter {
             // coding model reaches for a tested procedure (realNetherPortal, chopWood, …)
             // instead of re-deriving it inside newAction. Catalog is best-effort ('' on failure).
             let code_docs = await this.skill_libary.getRelevantSkillDocs(code_task_content, settings.relevant_docs_count);
-            try { code_docs += this.skill_libary.getCustomSkillManifest(); } catch (e) {}
+            try { code_docs += this.skill_libary.getCustomSkillManifest('code'); } catch (e) {}
             prompt = prompt.replaceAll('$CODE_DOCS', code_docs);
         }
         if (prompt.includes('$EXAMPLES') && examples !== null)
