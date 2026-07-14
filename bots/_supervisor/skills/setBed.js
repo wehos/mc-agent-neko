@@ -145,20 +145,18 @@ export default async function setBed(bot, ctx) {
         // scan to 48 and actively path to the spider (daylight spiders are passive — safe to pick
         // off with a sword). attackEntity has a 30s no-progress timeout so it can't hang.
         const _huntSword = firstMatch(/sword$/);
-        // ★远征装备门 (deaths 218+222 同死远西猎场: 木剑+低血跑100格外猎羊/猎蛛,被当地蜘蛛
-        // 1v1收割两次): 床任务合法,但远征必须可生存 — 石剑以上+血≥16+食≥8 才出门打猎。
+        // ★远征装备门: 床任务合法,但远征必须可生存 — 石剑以上+食≥8 才出门打猎。
         // 木剑期夜晚靠地堡扛(挖二封一已验证),床不急于一时。
-        const _huntFit = _huntSword && !/wooden_sword/.test(_huntSword)
-            && bot.health >= 16 && bot.food >= 8;
+        const _huntFit = _huntSword && !/wooden_sword/.test(_huntSword) && bot.food >= 8;
         // ★C226-B1: a naked respawn only ever holds a wooden_sword → the stone-sword gate
         // above is unreachable → it can NEVER hunt → no string/wool → no bed → it respawns
         // FOREVER at the bad spawn (C226 mechanism ④, the death-loop root). The 218/222
-        // lesson behind the strict gate was about FAR low-hp ventures, not adjacent kills:
+        // lesson behind the strict gate was about FAR under-equipped ventures, not adjacent kills:
         // a CLOSE passive target (daylight spider / sheep ≤12b) in a calm area is safe to
         // take with a wooden sword. Allow a SHORT-RANGE opportunistic hunt at a lower bar;
         // the strict gate still governs the 48/64b venture. _huntRange: 48 (strong-fit
         // venture) / 12 (wooden-sword opportunistic) / 0 (no sword → barehanded, skip).
-        const _huntFitClose = _huntSword && bot.health >= 10 && bot.food >= 6;
+        const _huntFitClose = _huntSword && bot.food >= 6;
         const _huntRange = _huntFit ? 48 : (_huntFitClose ? 12 : 0);
         if (woolBest().ct < 3 && !isNight() && hostilesNear(6) <= 2 && _huntRange > 0) {
             const startS = Date.now();
@@ -180,14 +178,14 @@ export default async function setBed(bot, ctx) {
         // (B) SHEEP HUNT — ★直取羊毛 (2026-07-03 任务B: 10:22 失床后 4h beds=0 wool=0, 而村口
         //     反复扫到 sheep@33-40b — 旧门 `_huntRange > 0` 要求有剑, 裸奔=0 → 整段跳过;
         //     木剑档半径 12 又永远够不到 33-40b 的羊 → setBed 无限 defer, 床链断死)。
-        //     羊是零反击的被动生物, 杀羊 ≠ 218/222 的低血远征猎蛛: 白天(日夜门沿用 (A) 的
-        //     isNight) + 无敌对(敌对门沿用原 hostilesNear(10) defer) + hp≥10/food≥6 底线
+        //     羊是零反击的被动生物: 白天(日夜门沿用 (A) 的
+        //     isNight) + 无敌对(敌对门沿用原 hostilesNear(10) defer) + food≥6 底线
         //     即可出手, 无剑也允许(拳头杀羊零风险只是慢, 有剑仍先装剑)。剪刀有则剪优先
         //     (可持续 1-3 毛/羊), 剪完必捡 — 剪下的毛是掉落物, 旧剪刀分支从不 pickup=白剪。
         if (woolBest().ct < 3 && !isNight()) {
             if (hostilesNear(10) > 0) { prog(`setBed: short wool + mobs=${hostilesNear(10)} — defer (have string=${countMatch(/^string$/)})`); return false; }
-            const woolFit = bot.health >= 10 && bot.food >= 6;
-            const _sheepRange = (_huntFit || woolFit) ? 64 : 12;   // 仅低血低食才收缩到贴身
+            const woolFit = bot.food >= 6;
+            const _sheepRange = (_huntFit || woolFit) ? 64 : 12;   // 低食物时收缩到贴身
             const start = Date.now();
             for (let h = 0; h < 6 && woolBest().ct < 3 && (Date.now() - start) < 60000; h++) {
                 if (bot.interrupt_code) { prog('setBed: interrupted during wool hunt'); break; }

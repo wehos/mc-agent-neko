@@ -9,7 +9,7 @@
 // have a home/bed. Full re-arm-after-death value also needs the bed (so respawn lands at
 // the chest) — until then this still protects valuables from being lost on death.
 //
-// Trigger (caller decides): have valuables + near home + safe (not mid-fight / low hp).
+// Trigger (caller decides): have valuables + near home + safe (not mid-fight).
 // Invoked via: {"skill":"bankGear"} or customSkill(bot,'bankGear')
 // ctx = { skills, world, mc, Vec3, log }
 import fs from 'fs';
@@ -78,7 +78,7 @@ export default async function bankGear(bot, ctx) {
         if (m) { const surplus = inv[n] - m[1]; if (surplus > 0) plan.push([n, surplus]); } // bank surplus material
     }
     if (plan.length === 0) { prog('bankGear: nothing valuable to bank'); return false; }
-    if (hostilesNear(12) > 0 || bot.health < 12) { prog(`bankGear: unsafe (mobs=${hostilesNear(12)} hp=${Math.round(bot.health)}) — defer`); return false; }
+    if (hostilesNear(12) > 0) { prog(`bankGear: unsafe (mobs=${hostilesNear(12)}) — defer`); return false; }
 
     // 3) Go to home, ensure a chest there (place ONE at the anchor if missing — this is the
     //    home chest, not litter), deposit.

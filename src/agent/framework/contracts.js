@@ -232,14 +232,11 @@ export const FRAMEWORK_ENABLED_DEFAULT = true;
  *   • proactive foraging / hunting-for-food  (GET_FOOD → feedUp)          world_model.proposeTasks
  *   • sustainable wheat farming              (OPP_WHEAT_FARM → wheatFarm)          〃
  *   • village crop harvesting                (OPENING_VILLAGE → villageHarvest)    〃
- *   • the food-STAT gray-zone survival kick  (food < SVN_FOOD_FLOOR)      kernel._grayZoneSignal
  *   • auto_eat topping up the HUNGER bar     (bot.food <= 17)             modes.js auto_eat
  * See docs/food-instincts-disabled.md for the full inventory + rationale + re-enable steps.
  *
- * ★保命不受影响 (用户令: "只关注补血, 全面放弃对体力的关注"): HP-based survival stays fully live —
- *   surviveNow @ hp<12, self_preservation, vitalNow hard floors, and auto_eat's 补血 branch
- *   (eat from the bag ONLY to unblock HP regen, hp<20 && food<18). Only hunger-bar management
- *   ("补体力") and the farming roam are turned off.
+ * Healing from carried food remains active when it can restore vanilla regeneration.
+ * Absolute HP does not otherwise trigger survival ownership or recovery work.
  *
  * ★DELIBERATE DEFAULT = DISABLED. Unlike the migration flags (MC_FRAMEWORK_V2 …, whose flag-OFF
  *   is byte-identical legacy behavior), this one defaults OFF because the user wants the disable
@@ -256,39 +253,15 @@ export function foodInstinctsEnabled() {
 }
 
 /**
- * ★2026-07-09 用户令: "所有食物相关的机制全部熔断, 禁止因低血和饥饿度打断任何行动, 饿死/死了拉倒。"
- * hp 侧总闸, 与 foodInstinctsEnabled 同构 (默认 OFF = 熔断; 任何非 '1' 值含未设置 = 熔断)。
- * OFF 时被熔断的触发点 (完整清单见 docs/hp-instincts-disabled.md):
- *   • kernel._grayZoneSignal 的 hp<12 灰区触发 + 夜锚僵局的 hp/food 不适限定 + hp<=6/food<=2 危急解卷
- *   • arbiter.vitalNow 的 hp<=4 掉血地板 (溺水/着火/岩浆等环境致命地板【保留】— 那不是"因低血")
- *   • modes.js lowHpNoRegenContainedHold / noRegenSafeAirHold (低血无回血时冻住身体的 hold 家族)
- *   • modes.js auto_eat (与 food 闸联合: 两闸全 OFF = 永不进食 — 进食的 execute() 会打断在跑技能)
- *   • 技能内纯低血 BAIL/让位 (branchMine/chopWood/mineOres — 外挂模块直读 env, 不 import 本文件)
- * 战斗/威胁触发的防御与让位(self_defense, 围殴 swarm>=2, creeper 贴脸)不在此闸内 — 那是"因怪", 不是"因低血"。
- * RE-ENABLE 旧行为: MC_HP_INSTINCTS=1 + 重启。Pure env read, 热重载/重启安全。
- */
-export function hpInstinctsEnabled() {
-    return process.env.MC_HP_INSTINCTS === '1';
-}
-
-/**
- * ★2026-07-09 用户令: "self-propose 和 surviveNow 两个都彻底禁 — idle 时什么都不自主干, 只听 admin
- *   指令; 僵局不再自动 RELOCATE 拽走。" 深挖被莫名拽走的元凶就是这俩在 newAction 冻结闸的缝隙里逮到
- *   idle/僵局强派 (self-propose 派蓝图 / surviveNow 锚点>5min RELOCATE)。
+ * ★2026-07-09 用户令: self-propose 禁用时 idle 什么都不自主干, 只听 admin 指令。
+ *   低血量强派路径已从 kernel 删除，不属于本开关，也不能由环境变量恢复。
  *
  * ★selfProposeEnabled: 门 kernel._survivalTick 的空闲自主派发路径 (proposeTasks→commitGoal→decide→
  *   _commit)。OFF = 内核永不自主找活; admin 任务派发 (AdminMission / handleMessage 经 self_prompter)
  *   独立于此路径, 不受影响。
- * ★surviveNowEnabled: 门 kernel._survivalTick 的灰区强派 (SURVIVE_NOW / surviveNow)。OFF = 僵局/血粮
- *   灰区一律不强派 surviveNow (hp/food 触发本已被 MC_HP/FOOD_INSTINCTS 熔断, 剩的锚点>5min 僵局路一并断)。
- *
- * 两者【均不碰保命地板】: vitalNow (溺水/着火/岩浆/hp≤4) + self_defense + reflexes 独立生效。
- * DELIBERATE DEFAULT = DISABLED (与 hp/food 闸同理由: 熔断须跨每条重启路径恒为 LIVE, 代码默认最保险)。
- * RE-ENABLE: MC_SELF_PROPOSE=1 / MC_SURVIVE_NOW=1 + 重启。Pure env read, 热重载/重启安全。
+ * 此开关【不碰环境保命地板】: vitalNow (溺水/着火/岩浆) + self_defense + reflexes 独立生效。
+ * DELIBERATE DEFAULT = DISABLED. RE-ENABLE self-propose with MC_SELF_PROPOSE=1 + restart.
  */
 export function selfProposeEnabled() {
     return process.env.MC_SELF_PROPOSE === '1';
-}
-export function surviveNowEnabled() {
-    return process.env.MC_SURVIVE_NOW === '1';
 }

@@ -166,8 +166,7 @@ export default async function slayDragon(bot, ctx, opts = {}) {
         await safeGoTo(t.x, bot.entity.position.y, t.z, 2);
         raiseShield();
         await eatUp(18);
-        const r0 = Date.now();
-        while (!stop() && bot.health < 14 && Date.now() - r0 < 30000) await skills.wait(bot, 1000);   // interrupt-aware
+        if (!stop()) await skills.wait(bot, 1000);
         lowerShield();
     };
     const breathNear = (r = 5) => Object.values(bot.entities).some(e =>
@@ -362,7 +361,6 @@ export default async function slayDragon(bot, ctx, opts = {}) {
             prog(`phase B: ${alive.length} crystals left unreachable — proceeding to dragon`);
             break;
         }
-        if (bot.health <= 8) { await regenBreak(); continue; }
         if (breathNear(5)) { try { await skills.moveAway(bot, 8); } catch (e) {} continue; }
 
         const c = candidates[0];
@@ -571,7 +569,6 @@ export default async function slayDragon(bot, ctx, opts = {}) {
             continue;
         }
 
-        if (bot.health <= 8) { await regenBreak(); continue; }
         if (breathNear(5)) { try { await skills.moveAway(bot, 8); } catch (e) {} continue; }
         if ((bot.food || 0) < 16 && bot.entity.position.distanceTo(d.position) > 16) await eatUp(16);
 
@@ -583,7 +580,6 @@ export default async function slayDragon(bot, ctx, opts = {}) {
             let swings = 0;
             while (!overBudget() && swings < 40) {
                 if (stop()) return bail('interrupted (perch melee)');
-                if (bot.health <= 8) break;
                 if (fallDanger()) { await fallRescue(); break; }   // takeoff/charge knockback
                 const dd = dragon();
                 if (!dd) break;

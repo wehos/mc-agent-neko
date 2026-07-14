@@ -11,7 +11,7 @@
  *     claimant), 允许局部例外, 不强求全序。支持家族通配 (`kernel:*` / `mode:*`)。
  *  2. LLM 终裁仅冲突时: 矩阵查无此对 → 异步问 agent 配置模型 (prompter.chat_model
  *     单发, 4s 超时); persist:true 的裁决沉淀写回矩阵 = 学习闭环, 同对下次零成本。
- *  3. 生死底线是唯一硬编码地板: claimant vital (oxygen<=8 / hp<=4 且掉血中 / 着火)
+ *  3. 环境生死底线是唯一硬编码地板: claimant vital (oxygen<=8 / 着火 / 岩浆)
  *     秒抢 — 不等 LLM, 也不查矩阵 (设计稿 §3: "地板, 不是阶梯……其余一切走矩阵/LLM"
  *     = vital 根本不进矩阵/LLM 系统)。若矩阵能压地板, 一条坏的 LLM persist 规则就会
  *     把溺水营救永久制度性压死。封顶水牢例外 (drowning 让位 ENTOMBED dig) 不受影响:
@@ -32,7 +32,6 @@
 import fs from 'fs';
 import path from 'path';
 import { withTimeout } from '../../utils/timeout.js';
-import { hpInstinctsEnabled } from './contracts.js';
 
 const ARB_FILE = path.resolve(process.cwd(), 'bots', '_supervisor', 'arbitration.json');
 const PROGRESS_FILE = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
@@ -79,7 +78,7 @@ export function currentOwner(agent) {
 
 // ── 生死地板 ─────────────────────────────────────────────────────────────────
 
-/** 唯一硬编码地板: oxygen<=8 / hp<=4 且掉血中 / 着火。其余一切走矩阵/LLM。 */
+/** 唯一硬编码地板: oxygen<=8 / 着火 / 火或岩浆方块。绝对血量不参与抢体。 */
 export function vitalNow(bot) {
     try {
         // ★2026-07-05 陈旧闩根修 (实录 18:04: 满血白天无威胁, self_preservation 借 vital 地板
@@ -91,9 +90,6 @@ export function vitalNow(bot) {
             const wet = [bot.blockAt(pw), bot.blockAt(pw.offset(0, 1, 0))].some(b => b && /water/.test(b.name || ''));
             if (wet) return true;
         }
-        // ★2026-07-09 用户令 (低血/饥饿全熔断): hp<=4 掉血地板默认熔断 — 低血不再是打断/抢体
-        //   理由, 死了拉倒。环境致命地板 (溺水/着火/岩浆) 保留 — 那是"因环境", 不是"因低血"。
-        if (hpInstinctsEnabled() && (bot.health ?? 20) <= 4 && Date.now() - (bot.lastDamageTime || 0) < 4000) return true;
         if (bot.entity) {
             // ★评审F2: prismarine-entity 没有 onFire 属性(运行时实证) — 着火状态在共享
             // metadata flags 字节的 bit0。方块检查(下一行)只覆盖"站在火/岩浆里"。

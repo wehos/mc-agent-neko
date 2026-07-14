@@ -170,7 +170,7 @@ export function runInstinct(bot, instinct, world, ctx) {
 }
 
 export const MODE_BACKED_REFLEXES = Object.freeze([
-    { name: 'self_preservation', mode: 'self_preservation', role: 'drown/fire/low-hp defense, creeper back-off, night hold (C266 false-cover guard)' },
+    { name: 'self_preservation', mode: 'self_preservation', role: 'drown/fire/threat defense, creeper back-off, night hold (C266 false-cover guard)' },
     { name: 'mobility',          mode: 'mobility',           role: 'FREE/POCKET/ENTOMBED/SWIM/MAROONED state machine; ENTOMBED→dig reflex' },
     { name: 'edge_unstick',      mode: 'edge_unstick',       role: 'step-edge wedge recovery (jump → replan → back-off, C265)' },
     { name: 'self_defense',      mode: 'self_defense',       role: 'melee counter-attack on close hostiles' },

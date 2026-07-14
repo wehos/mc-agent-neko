@@ -44,11 +44,8 @@ export default async function achieveLoop(bot, ctx, goal, maxTries = 40) {
         const sig = invSig();
         if (sig === lastSig) { stale++; if (stale >= 6) { prog(`achieveLoop: no progress for ${stale} tries — giving up on ${target} (have ${have()})`); return false; } }
         else { stale = 0; lastSig = sig; }
-        // If achieve returned without success, it was likely interrupted (flee) or
-        // hit a transient failure. Pause so any in-progress flee + health regen can
-        // settle, then retry. Longer pause if we're hurt (let regen work).
-        const hurt = bot.health < 16;
-        try { await skills.wait(bot, hurt ? 6000 : 2500); } catch (e) {}
+        // If achieve returned without success, pause before retrying a transient failure.
+        try { await skills.wait(bot, 2500); } catch (e) {}
     }
     prog(`achieveLoop: gave up on ${target} after ${maxTries} tries (have ${have()})`);
     log(bot, `achieveLoop done. ${target}=${have()}/${need}`);

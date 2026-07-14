@@ -62,7 +62,6 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
     const yNow = () => Math.floor(bot.entity.position.y);
     // ★2026-07-09 用户令 HP/食物本能熔断: 断路器闸门 (外部监督器直读 process.env, 默认 OFF; ='1' 恢复原样)。
     const _foodOn = () => process.env.MC_FOOD_INSTINCTS === '1';
-    const _hpOn   = () => process.env.MC_HP_INSTINCTS   === '1';
     const scafCount = () => SCAFFOLD.reduce((s, n) => s + (world.getInventoryCounts(bot)[n] || 0), 0);
     const hasPick = () => bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
     const heldIsPick = () => !!(bot.heldItem && /_pickaxe$/.test(bot.heldItem.name));
@@ -124,8 +123,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
     const famineEmergency = () => _foodOn() && bot.food <= 2 && !bot.inventory.items().some(it => it && it.name && FOOD_RE.test(it.name));
     const famineNoPickStoneBreachOk = () => {
         if (!famineEmergency()) return false;
-        // ★2026-07-09 用户令 HP/食物本能熔断: 饥荒破顶的低血下限(hp<8 拒破); HP闸开恢复。
-        if (_hpOn() && (bot.health || 0) < 8) return false;
+        // Threat evidence, not absolute health, decides whether the breach is safe.
         try {
             const a = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'advisory.json'), 'utf8'));
             const ts = Number(a.ts || 0);
@@ -593,11 +591,8 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
     dbg(`ENTER y=${yNow()} target=${targetY} scaffold=${scafCount()} goalY=${typeof (goals.GoalY || goals.GoalYLevel)}`);
     if (surfaceReady()) { dbg('already at open surface'); return true; }
 
-    // FREEZE the interrupting survival modes for the whole climb. At low HP (~5, after a
-    // rough dive) self_preservation FLEES every tick and grabs the pathfinder, which
-    // cancelled surfaceUp's climb goto instantly ("goal was changed before it could be
-    // completed") — the bot then sat at y23 forever. Tick modes fighting us is the real
-    // reason it couldn't surface, not pillarUp. Disable them while we climb; restore after.
+    // Freeze competing movement modes for the whole climb so they cannot replace the
+    // pathfinder goal mid-surfaceUp; restore them afterwards.
     // ★2026-07-07 夜裸解冻 (surface-death-loop 修复 P0-a): 无甲 bot 被顶到夜间地表时, 全冻结
     // self_defense/self_preservation = 站着被 husk/尸壳啃死 (死亡 #8/#12 承重杀手 — 爬升期反射全灭)。
     // 夜(tod 12542-23459)且无甲时, 从 GUARD 摘掉这两个反射, 让打/逃反射能护体; 白天或有甲维持原
@@ -871,23 +866,12 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
         // air y67-69, stone y70, frozen 2h). Allow trapped-enclosed up to the loop's h=4.
         if (h > 3 && !famineEmergency() && !trappedEnclosed) return false;
         const famineBreach = famineNoPickStoneBreachOk();
-        // food8-13 dead-zone trap: the bot is sealed in, hp19, but food<14 blocked the breach and
-        // food>2 missed the famine bypass → frozen forever. When trappedEnclosed, hp>=8 is enough
-        // to break out (escaping the seal beats starving in it).
-        // ★2026-07-09 用户令 HP/食物本能熔断: 破顶的低血/低食联合下限(hp<16||food<14 拒破); 任一闸开恢复(双闸关才熔断)。
-        if (!famineBreach && !trappedEnclosed && (_hpOn() || _foodOn()) && ((bot.health || 0) < 16 || bot.food < 14)) return false;
-        // ★C237: hp<8 + trappedEnclosed was the no-pick TERMINAL FREEZE (live: hp6 food17 sealed
-        // at y66, 0 pick / 0 wood / 209 cobble, spun `TABLE gate no wood` for hours; digReset
-        // exists but nothing dispatched it, and THIS hp<8 floor blocked the only UPWARD escape).
-        // Breaking UP is ZERO fall-risk (stableFloorBelow checked below) + ZERO hazard (water/
+        // A trapped bot must retain an upward exit. The optional food gate applies only when
+        // the bot is not enclosed; absolute health never blocks the breach.
+        if (!famineBreach && !trappedEnclosed && _foodOn() && bot.food < 14) return false;
+        // Breaking UP is zero fall-risk (stableFloorBelow checked below) + zero local hazard (water/
         // lava/fire/cactus/magma guarded below) + enclosed = no mob reaches during the breach, and
-        // surfaceUp freezes the survival modes for the whole climb. The SOLE residual risk is
-        // surfacing INTO darkness, so keep the hp<8 breach DAYTIME-only (day mobs burn). "Find
-        // beats frozen" — escape the seal in daylight rather than rot in it. Night/dusk still HOLD.
-        const breachTod = (() => { try { return bot.time.timeOfDay; } catch (e) { return 6000; } })();
-        const breachIsNight = breachTod >= 13000 && breachTod <= 23000;
-        // ★2026-07-09 用户令 HP/食物本能熔断: 夜间困顶破顶的低血下限(hp<8 拒破); HP闸开恢复。
-        if (trappedEnclosed && _hpOn() && (bot.health || 0) < 8 && breachIsNight) return false;
+        // surfaceUp owns movement for the whole climb. Night remains a separate environment gate.
         if (!stableFloorBelow()) return false;
         const cell = bot.entity.position.floored();
         for (const off of [[0, 0, 0], [0, 1, 0], [0, -1, 0]]) {

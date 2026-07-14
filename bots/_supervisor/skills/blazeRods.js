@@ -314,33 +314,18 @@ export default async function blazeRods(bot, ctx, opts = {}) {
     }
     prog(`fortress found @ ${fortress.position.x},${fortress.position.y},${fortress.position.z}`);
 
-    // ── FARM (b): blaze camp. Shield to offhand, best sword, retreat-on-low-hp. ──
+    // ── FARM (b): blaze camp. Shield to offhand, best sword, threat-aware retreat. ──
     for (const s of SWORDS) { if (has(s)) { await skills.equip(bot, s).catch(() => {}); break; } }
     const shieldItem = bot.inventory.items().find(i => i.name === 'shield');
     if (shieldItem && (!bot.inventory.slots[45] || bot.inventory.slots[45].name !== 'shield')) {
         try { await bot.equip(shieldItem, 'off-hand'); } catch (e) {}
     }
-    const haveShield = () => !!(bot.inventory.slots[45] && bot.inventory.slots[45].name === 'shield');
-
     await goWithTimeout(fortress.position.x, fortress.position.y + 1, fortress.position.z, 3, 60000);
     let stalls = 0;
     while (!targetMet() && !timeUp()) {
         if (bot.interrupt_code || bot.health <= 0) return eyeEq();
         if (!inNether()) { prog('blazeRods: no longer in nether (death mid-farm) — bail'); return eyeEq() > eyeEq0 ? eyeEq() : 0; }   // ★2026-07-05 预审 P1 僵尸模式守卫
         if (bot.food < 12) await skills.eatPreferred(bot);
-        if (bot.health <= 8) {
-            // Retreat + regen under shield; blaze fireballs are shield-blockable.
-            log(bot, `blazeRods: hp=${Math.round(bot.health)} — retreating to regen.`);
-            await skills.moveAway(bot, 14).catch(() => {});
-            try { if (haveShield()) bot.activateItem(true); } catch (e) {}
-            for (let w = 0; w < 20; w++) {
-                if (bot.interrupt_code || bot.health <= 0) break;
-                if (bot.health >= 14) break;
-                await skills.wait(bot, 1000);
-            }
-            try { bot.deactivateItem(); } catch (e) {}
-            continue;
-        }
         const bl = world.getNearestEntityWhere(bot, (e) => (e.name || '') === 'blaze', 32);
         if (!bl) {
             const sps = await world.getNearestBlocksWhereAsync(bot, (b) => b && b.name === 'spawner', 64, 1);

@@ -98,7 +98,6 @@ export default async function verifyMove(bot, ctx, opts = {}) {
         }
 
         if (!allowNight && isNight()) { L('night — daytime-only; skip patrol'); return { ok: false, reason: 'night' }; }
-        if (bot.health < guardHp + 2) { L(`hp=${Math.round(bot.health)} too low — skip patrol`); return { ok: false, reason: 'hp low' }; }
 
         const home = bot.entity.position.clone();
         const startHp = bot.health;
@@ -113,7 +112,7 @@ export default async function verifyMove(bot, ctx, opts = {}) {
         while (deadline ? Date.now() < deadline : lap < laps) {
             lap++;
             for (let i = 0; i < corners.length; i++) {
-                if ((!allowNight && isNight()) || closeHostile() || bot.health < startHp - 5 || bot.health < guardHp) {
+                if ((!allowNight && isNight()) || closeHostile() || bot.health < startHp - 5) {
                     L(`ABORT lap ${lap} leg ${i + 1} (hp=${Math.round(bot.health)} night=${isNight()} hostile=${closeHostile()})`);
                     return { ok: true, aborted: true, totalMoved: +totalMoved.toFixed(0), stalls, endHp: Math.round(bot.health) };
                 }

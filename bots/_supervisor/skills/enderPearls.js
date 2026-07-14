@@ -86,11 +86,6 @@ export default async function enderPearls(bot, ctx, opts = {}) {
     const blacklist = new Set();  // per-dispatch: entity ids that burned their fight cap without dying — stop re-picking them as "nearest"
     while (has('ender_pearl') < pearlTarget && !isDay() && Date.now() - t0 < maxMs) {
         if (bot.interrupt_code || bot.health <= 0) break;
-        if (bot.health <= 8) {                                       // stay in pocket, regen; modes own real emergencies
-            await toPocket();
-            await skills.wait(bot, 4000);
-            continue;
-        }
         if (bot.food < 12) {
             await skills.eatPreferred(bot);                          // shared safe-food helper (never throws)
             await equipSword();                                      // consume left food in hand — restore weapon

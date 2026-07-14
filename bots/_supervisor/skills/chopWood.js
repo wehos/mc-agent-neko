@@ -110,14 +110,10 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
     //   chopWood 照常砍到木或真无树为止, 饿死无所谓。恢复旧行为: MC_FOOD_INSTINCTS=1 重启。
     //   与 contracts.foodInstinctsEnabled 同义 (外挂模块不 import, 直读 env)。
     const _foodInstincts = () => process.env.MC_FOOD_INSTINCTS === '1';
-    // ★2026-07-09 用户令 (低血惰性, 与饥饿惰性同构): 默认低血不 gate/让位/BAIL 任何行为, 死了拉倒。
-    //   纯低血分支统一经此开关短路; 威胁触发的让位 (_hostileNear 等) 不受影响。恢复: MC_HP_INSTINCTS=1。
-    const _hpInstincts = () => process.env.MC_HP_INSTINCTS === '1';
     const _criticalForageAllowed = () => {
         if (!_foodInstincts()) return false;
         const t = bot.time.timeOfDay;
         return !!_opts.allowCriticalForage
-            && (bot.health > 4 || (_opts.criticalForageLocalOnly && bot.health >= 4))
             && bot.food <= 2
             && !_foodHeld()
             && !(t >= 13000 && t <= 23000)
@@ -134,7 +130,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         const safeDay = day && !_hostileNear(16);
         return bot.food <= (safeDay ? 2 : 4);
     };
-    const _lowHpHostileYield = () => _hpInstincts() && bot.health <= 14 && _hostileNear(12) && !_criticalForageAllowed();
+    const _hostileYield = () => _hostileNear(12) && !_criticalForageAllowed();
     const _motion = (event, data = {}) => {
         try {
             const p = bot.entity.position;
@@ -663,25 +659,6 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         }
         {
             const _noPick = !bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
-            const _lowResources = _hpInstincts() && bot.health <= 8;   // 饥饿惰性: 去 food 项; 低血惰性: hp 项过闸
-            if (_noPick && _lowResources && !_trueSurfaceNow()) {
-                const _targetY = Math.max(82, Math.floor(bot.entity.position.y) + 12);
-                _dbg(`digToSurface NOPICK-low-resource → surfaceUp natural-route target=${_targetY}`);
-                try {
-                    await Promise.race([
-                        skills.customSkill ? skills.customSkill(bot, 'surfaceUp', _targetY) : skills.goToSurface(bot),
-                        new Promise((_, rej) => setTimeout(() => rej(new Error('surfaceUp timeout')), 90000)),
-                    ]);
-                } catch (e) {
-                    try { bot.pathfinder.stop(); } catch (_) {}
-                    try { bot.clearControlStates(); } catch (_) {}
-                    _dbg(`surfaceUp natural-route result err=${e.message}`);
-                }
-                if (_trueSurfaceNow()) { _dbg(`digToSurface DONE via surfaceUp y=${Math.floor(bot.entity.position.y)}`); return true; }
-            }
-        }
-        {
-            const _noPick = !bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
             if (_noPick && !_trueSurfaceNow() && Date.now() > (bot._chopNoPickSurfaceUpCooldownUntil || 0)) {
                 const _targetY = Math.max(82, Math.floor(bot.entity.position.y) + 14);
                 bot._chopNoPickSurfaceUpCooldownUntil = Date.now() + 60000;
@@ -709,12 +686,10 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // survive (and only when not dying).
             if (bot.death_abort || bot.health <= 0) { _dbg(`digToSurface ABORT (death) at i=${i} y=${Math.floor(bot.entity.position.y)}`); return false; }
             if (_superseded()) { _dbg(`digToSurface YIELD (superseded gen${_gen}→${bot._chopGen} poisoned=${!!bot._poisoned}) at i=${i}`); return false; }
-            // ★危殆让位 (hp0.6事件: 爬升穿过雷区芯被怪缠上,hp掉到0.6还在一步步往上凿 —
-            // 残血时唯一正业是活下来): hp≤6 → 停止爬升,把控制还给编排层的生存路径。
-            if (_hpInstincts() && bot.health <= 4 && !_criticalForageAllowed()) { _dbg(`digToSurface BAIL (critical hp ${bot.health.toFixed(1)}) at i=${i} — yield to survival`); return false; }   // 6→4 同 chopWood bail线(死水局解锁); 低血惰性: 过闸
-            if (_lowHpHostileYield()) {
-                _motion('chopWood.low_hp_hostile_yield', { where: 'digToSurface', iter: i, y: Math.floor(bot.entity.position.y), hp: Math.round(bot.health || 0), food: bot.food });
-                _dbg(`digToSurface BAIL (hp=${bot.health.toFixed(1)} + hostile near) at i=${i} — yield to survival`);
+            // A nearby hostile owns the body; yield the climb to threat handling.
+            if (_hostileYield()) {
+                _motion('chopWood.hostile_yield', { where: 'digToSurface', iter: i, y: Math.floor(bot.entity.position.y), hp: Math.round(bot.health || 0), food: bot.food });
+                _dbg(`digToSurface BAIL (hostile near) at i=${i} — yield to threat handling`);
                 try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
                 try { bot.clearControlStates(); } catch (e) {}
                 return false;
@@ -1110,7 +1085,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // though the bot is already on open overworld terrain. In that case a hard
             // leash raw-walks it back through cliffs/shafts and recreates the stair-edge
             // stall. FREE + healthy + high means "local tree search", not mine escape.
-            if (bot._mobility && bot._mobility.state === 'FREE' && bot.health >= 10) return true;   // 饥饿惰性: 去 food>=8 项
+            if (bot._mobility && bot._mobility.state === 'FREE') return true;
         } catch (e) {}
         return false;
     };
@@ -1118,7 +1093,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         const freshHandoff = Date.now() < (bot._maroonedWoodHandoffUntil || 0);
         const marooned = !!(bot._mobility && bot._mobility.state === 'MAROONED');
         if (!freshHandoff && !marooned) return false;
-        if ((_hpInstincts() && bot.health <= 6) || _hostileNear(12)) {   // 饥饿惰性: 去 food<=4 项; 低血惰性: hp 项过闸, 敌情项保留
+        if (_hostileNear(12)) {
             _dbg(`MAROONED local harvest skip hp=${bot.health.toFixed(1)} hostile=${_hostileNear(12)}`);
             return false;
         }
@@ -1434,15 +1409,10 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             return total();
         }
         // ★危殆让位 (hp0.6事件: bot 半血都不到还在雷区里推进爬升找树,overseer 的 evac 警报
-        // 发了2分钟没有消费点 — 人类残血绝不继续作业): hp≤6 → 立即归还控制,编排层
-        // (prepNether/missionNether) 持有生存路径(蹲坑/进食/evac/advisory消费)。
-        // bail线 6→4 (hp6/food0 死水局: 保命线锁死回血路径——hp6 不作业就永远 hp6,
-        // 每夜赌命。木头→工具→武器→猎食 才是回血链,hp5-6 的低险作业收益>风险)
-        if (_hpInstincts() && bot.health <= 4 && !_criticalForageAllowed()) { _dbg(`chopWood BAIL (critical hp ${bot.health.toFixed(1)}) at iter${i} — yield to survival`); return total(); }
-        if (_hpInstincts() && bot.health <= 4) { _dbg(`chopWood CRITICAL-FORAGE allowed hp=${bot.health.toFixed(1)} food=${bot.food} hostiles=0 daylight — controlled forage instead of starvation deadlock`); }
-        if (_lowHpHostileYield()) {
-            _motion('chopWood.low_hp_hostile_yield', { where: 'mainLoop', iter: i, logs: total(), target, hp: Math.round(bot.health || 0), food: bot.food });
-            _dbg(`chopWood BAIL (hp=${bot.health.toFixed(1)} + hostile near) at iter${i} — yield to survival`);
+        // A nearby hostile owns the body; yield work to threat handling.
+        if (_hostileYield()) {
+            _motion('chopWood.hostile_yield', { where: 'mainLoop', iter: i, logs: total(), target, hp: Math.round(bot.health || 0), food: bot.food });
+            _dbg(`chopWood BAIL (hostile near) at iter${i} — yield to threat handling`);
             try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
             try { bot.clearControlStates(); } catch (e) {}
             return total();
@@ -2389,7 +2359,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                     let _lastCY = Math.floor(bot.entity.position.y), _flatRounds = 0;
                     const _climbMax = tgt ? 40 : 3;
                     for (let _climb = 0; _climb < _climbMax; _climb++) {
-                    if (bot.death_abort || (_hpInstincts() && bot.health <= 4) || bot.interrupt_code || _needsFoodYield()) {
+                    if (bot.death_abort || bot.interrupt_code || _needsFoodYield()) {
                         if (_needsFoodYield()) _dbg(`pinned-stair LOW-FOOD BAIL food=${bot.food}, no edible — stop climb`);
                         break;
                     }

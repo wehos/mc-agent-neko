@@ -289,9 +289,7 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             if (edibleHeld()) return null;
             const hp = Math.round(bot.health || 0);
             const foodInert = process.env.MC_FOOD_INSTINCTS !== '1';   // 饥饿惰性: 默认不因 food 停矿
-            const hpInert = process.env.MC_HP_INSTINCTS !== '1';       // ★2026-07-09 用户令: 低血惰性 — 默认不因低血停矿, 死了拉倒
             if (!foodInert && bot.food < 8) return `${phase}: low-food buffer spent food=${bot.food} hp=${hp}`;
-            if (!hpInert && hp < 14) return `${phase}: low-hp buffer spent hp=${hp}`;
             if (foodInert || bot.food > 8) return null;
             const t = bot.time.timeOfDay;
             const duskOrNight = t >= 11500 && t <= 23000;

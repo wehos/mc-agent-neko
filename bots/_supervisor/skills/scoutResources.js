@@ -10,7 +10,7 @@
 //   for a village, letting the C328 landmark scanner (modes.js) auto-PERSIST whatever it loads into
 //   range. This skill itself never writes landmarks.json — it only MOVES so the scanner can see.
 //
-// HARD SAFETY (the explore-and-die lesson): defer to the survival layer on night / hp<=6 / a close
+// HARD SAFETY (the explore-and-die lesson): defer on night or a close
 //   actionable hostile. Movement is short hops the planner can solve; the self_preservation reflex
 //   (modes.js) runs throughout goToPosition. Only when WE actively move do we clear a stale MAROONED
 //   flag (same authority-take as forageExplore/migrate) so a dead flag can't silently no-op every hop.
@@ -21,7 +21,7 @@
 // ctx = { log, skills, world, mc, Vec3 }
 // returns { scouted:true, need, treeCost, villageCost, best, pursued, reason? } on REAL progress
 // (net travel / new landmark); { scouted:false, failed:true, reason } on zero-progress runs and on
-// the low-hp / hostile-close defers, so the kernel dispatch-cooldown can trip (kernel contract).
+// hostile-close defers, so the kernel dispatch-cooldown can trip (kernel contract).
 
 import {
     freshOracleSnapshot,
@@ -60,9 +60,6 @@ export default async function scoutResources(bot, ctx, opts = {}) {
     const _stale = () => { try { return !!bot._poisoned; } catch (e) { return false; } };
     if (_stale()) { log_('STALE-BOT — 幽灵在死实例上派发, 立即退出 (ghost-stack fast-exit)'); return { scouted: false, failed: true, reason: 'stale-bot-ghost' }; }
 
-    // ★2026-07-09 用户令 HP/食物本能熔断: 低血本能默认熔断 (MC_HP_INSTINCTS!=='1' → 不因低血让位/中止侦察); 闸开恢复原行为。
-    const _hpOn = () => process.env.MC_HP_INSTINCTS === '1';
-
     const HOP = opts.hop || 8;
     const maxBlocks = opts.maxBlocks || 64;
     // ★2026-07-09 用户令 "从96探起": 开局侦查本地感知太短 (旧 24/32b) → 出生点 30-90b 有树也看不见,
@@ -82,21 +79,16 @@ export default async function scoutResources(bot, ctx, opts = {}) {
         } catch { return false; }
     };
 
-    // ── HARD SURVIVAL GATE: scouting is a healthy-daylight activity; hand night / low-hp / point-blank
-    //    hostile to the survival layer rather than walk out into a deadly window. ──
-    // ★kernel return contract (audit 2026-07-02): the low-hp and hostile-close defers were truthy
+    // ── HARD SAFETY GATE: hand night / point-blank hostile to the threat layer. ──
+    // ★kernel return contract (audit 2026-07-02): hostile-close defers were truthy
     //   ({deferred:true}) — kernel-success, strike counter reset — but NOTHING dethrones the committed
-    //   OPENING_SCOUT in those states: the proposal gate has no hp term, isGoalDone needs BOTH
-    //   lm.wood && lm.village (never true for a bare bot), HOLD@95 needs actionable>0 && hp<10, and
-    //   GET_FOOD's emergency needs food<=4 — so a hp<=6 bot (or one with a sealed/unreachable hostile
-    //   <6b that never engages) re-dispatched this instant no-op every ~2s ALL DAY (same family as the
+    //   OPENING_SCOUT in those states: isGoalDone needs BOTH lm.wood && lm.village; a sealed or
+    //   unreachable hostile <6b that never engages could re-dispatch this instant no-op all day.
     //   craftChain/feedUp/migrate livelocks). failed:true lets 3 strikes trip the kernel's 5-min
     //   dispatch-cooldown, releasing the body to GET_FOOD@88/BOOTSTRAP_KIT@90/combat while the blocker
     //   persists. NIGHT stays a truthy defer BY DESIGN: at night the SCOUT proposal isn't pushed, so
     //   commitGoal's livePri falls to 50 and any night plan @91+ provably dethrones — it cannot loop.
     if (isNight()) { log_('defer: night — shelter, do not scout'); return { scouted: false, deferred: true, reason: 'night' }; }
-    // ★2026-07-09 用户令 HP/食物本能熔断: 低血侦察让位 (pure hp, 无威胁) — HP 闸开才生效; 闸关时不因低血 defer。
-    if (_hpOn() && Math.round(bot.health) <= 6) { log_(`defer: hp=${Math.round(bot.health)}<=6 — too fragile to scout`); return { scouted: false, failed: true, reason: 'low-hp' }; }
     if (closeActionable()) { log_('defer: actionable hostile close — handle threat first'); return { scouted: false, failed: true, reason: 'hostile-close' }; }
 
     const need = opts.need || (bot._world && bot._world.opening && bot._world.opening.need) || 'both';
@@ -303,9 +295,6 @@ export default async function scoutResources(bot, ctx, opts = {}) {
             if (bot.interrupt_code || _stale()) { log_(`interrupted at hop ${hop}${_stale() ? ' (STALE-BOT ghost-exit)' : ''}`); break; }
             if (isNight()) { log_(`night fell at hop ${hop} — abort scout`); break; }
             if (closeActionable()) { log_(`hostile close at hop ${hop} — abort scout`); break; }
-            // ★2026-07-09 用户令 HP/食物本能熔断: 中途低血中止侦察 (pure hp, 无威胁) — HP 闸开才生效; 闸关不中止。
-            if (_hpOn() && Math.round(bot.health) <= 6) { log_(`hp dropped <=6 at hop ${hop} — abort scout`); break; }
-
             // re-sense from new vantage (chunks loaded)
             if (need !== 'village' && treeCost == null) { const t = await findTree(); if (t) { tree = t; treeCost = t.cost; } }
             if (need !== 'wood' && villageCost == null) { const v = knownVillage() || senseVillage(); if (v) { village = v; villageCost = v.cost; } }

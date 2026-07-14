@@ -70,10 +70,7 @@ export default async function prepNether(bot, ctx) {
 
 async function prepNetherInner(bot, ctx) {
     const { skills, world, mc, log, Vec3 } = ctx;
-    // ★2026-07-09 用户令 HP/食物本能熔断: 两个外部熔断器(监督器直读 process.env, 默认关闭=值≠'1'):
-    // 因低血/因饿的本能失效; 置 '1' 恢复原行为。food breaker: MC_FOOD_INSTINCTS==='1'; hp breaker: MC_HP_INSTINCTS==='1'。
     const _foodOn = () => process.env.MC_FOOD_INSTINCTS === '1';
-    const _hpOn   = () => process.env.MC_HP_INSTINCTS   === '1';
     const has = (n) => world.getInventoryCounts(bot)[n] || 0;
     const equipArmor = async () => { if (bot.armorManager) { try { await bot.armorManager.equipAll(); } catch (e) {} } };
     const cancelRequested = () => !!(bot._supervisorCancelAt && Date.now() - bot._supervisorCancelAt < 30000);
@@ -116,10 +113,10 @@ async function prepNetherInner(bot, ctx) {
         // EXPOSED-SURFACE night work for a squishy bot. Once it has armor (leather counts; pairs
         // with the C255 iron fix → iron armor), it may fight/work at night again.
         const armor = Object.keys(c).filter(n => /_(helmet|chestplate|leggings|boots)$/.test(n) && c[n] > 0).length;
-        return sword && shield && armor >= 1 && bot.health >= 10;
+        return sword && shield && armor >= 1;
     };
     // ★C339-C 伪食物假阳性 (实锤 2026-07-02 17:40 live query: 手持 beetroot_seeds×5, "beetroot"子串
-    // 命中 → hasEdible=true → famineBudget/noRegenDeadlock/forage window 全被"有食物"骗关,
+    // 命中 → hasEdible=true → famine/forage window 全被"有食物"骗关,
     // food=0 hp=8 却没有任何饥荒机制敢动 — TABLE gate 6s-wait 永动): 种子/兔皮/兔脚/钓竿/毒土豆
     // 都不是嘴里的粮,排除之。
     const hasEdible = () => bot.inventory.items().some(i =>
@@ -127,9 +124,9 @@ async function prepNetherInner(bot, ctx) {
         /beef|porkchop|chicken|mutton|rabbit|cod|salmon|bread|apple|berries|potato|carrot|melon|cookie|pumpkin_pie|beetroot|mushroom_stew|rabbit_stew|suspicious_stew/i.test(i.name) &&
         i.name !== 'rotten_flesh' &&
         !/_seeds$|_hide$|_foot$|on_a_stick|poisonous_/.test(i.name));
-    const snacklessCritical = () => !hasEdible() && (bot.food <= 8 || bot.health <= 10);
-    const famineBudget = () => !hasEdible() && (bot.food <= 2 || (bot.food <= 6 && bot.health <= 10));
-    const bodyBudgetBunkerHold = () => !hasEdible() && bot.food <= 6 && bot.health <= 8;
+    const snacklessCritical = () => !hasEdible() && bot.food <= 8;
+    const famineBudget = () => !hasEdible() && bot.food <= 6;
+    const bodyBudgetBunkerHold = () => !hasEdible() && bot.food <= 6;
     const coveredAboveNow = () => {
         try {
             for (let dy = 1; dy <= 3; dy++) {
@@ -159,13 +156,13 @@ async function prepNetherInner(bot, ctx) {
         // active or the bot loses its ③ shelter at night. After cutover kernelDriver heartbeats → yield.
         try { return !!(bot._kernelDriverActive && Date.now() - bot._kernelDriverActive < 10000); } catch (e) { return false; }
     };
-    // ★2026-07-09 用户令 HP/食物本能熔断: 黄昏因饿/低血预庇护(snacklessCritical 驱动, 非因怪; 夜庇护走 isNightNow 不受影响); 任一/双闸开恢复。
-    const shouldDuskShelter = () => (_hpOn() || _foodOn()) && !nightOwnedByDecisionLayer() && isDuskNow() && snacklessCritical() && !undergroundSafe() && !canFightNight();
+    // 黄昏低食物预庇护由食物开关控制；夜庇护仍走 isNightNow。
+    const shouldDuskShelter = () => _foodOn() && !nightOwnedByDecisionLayer() && isDuskNow() && snacklessCritical() && !undergroundSafe() && !canFightNight();
     const shouldDayFamineHostileShelter = () => {
         try {
             const securedLowResourceHold = bodyBudgetBunkerHold() && (coveredAboveNow() || containedMobilityNow());
             const threatRadius = securedLowResourceHold ? 10 : 16;
-            const localThreat = noRegenActionableThreats(threatRadius);
+            const localThreat = actionableThreats(threatRadius);
             const advisoryThreat = freshAdvisoryThreat();
             const actionable = advisoryThreat ? advisoryThreat.actionable : localThreat.actionable;
             return famineBudget()
@@ -206,11 +203,10 @@ async function prepNetherInner(bot, ctx) {
             const refresh = () => { c = world.getInventoryCounts(bot); return c; };
             if (Object.keys(c).some(n => /_sword$/.test(n) && c[n] > 0)) return false;
             const hostileCount = hostilesNear(8);
-            const threat = noRegenActionableThreats(8);
+            const threat = actionableThreats(8);
             const daylightSingleSpider = !!opts.allowDaySingleSpider
                 && !isNightNow()
                 && hostileCount === 1
-                && bot.health >= 12
                 && Object.values(bot.entities).some(e =>
                     e && e.position && /spider/i.test(e.name || '')
                     && e.position.distanceTo(bot.entity.position) < 8);
@@ -308,11 +304,10 @@ async function prepNetherInner(bot, ctx) {
         }
         // ★C336 (T-0063, 用户"0063是你的为啥等别人"): COMMIT-TO-FIGHT override — 根治"有剑却被贴脸僵尸
         // 打死". 取证(10:45 combat_log): bot握cobblestone(本skill的夜封)被husk@1.1b磨死hp18→0全程不挥剑.
-        // 真因=canFightNight的hp≥10地板: 交战中hp掉到<10→canFightNight翻false→holeUpAtNight启动封顶, 正好
-        // 在最致命时刻(低血+贴脸)从"打"翻成"封", 开阔地封顶又失败(T-0050/0057无参考面)→husk收尾. 对称于
-        // modes.combatHasPriority(C332): 贴脸非creeper怪(<3.2b)+有剑+hp>6(比canFightNight的10低, 补翻转盲区)
+        // 旧版交战中会从"打"翻成"封", 开阔地封顶又失败(T-0050/0057无参考面)→husk收尾。现在对称于
+        // modes.combatHasPriority(C332): 贴脸非creeper怪(<3.2b)+有剑
         // +非围(<8b内<3只)→别封顶, return让位 modes.self_defense 挥剑收尾(1-2 husk=数秒). 击杀比注定失败的
-        // 贴脸封顶快得多, 且移除威胁后下一拍正常封顶(不抖动). creeper/远程/成群/危血(hp≤6) 仍照常封.
+        // 贴脸封顶快得多, 且移除威胁后下一拍正常封顶(不抖动). creeper/远程/成群仍照常封.
         try {
             const _me = bot.entity.position;
             const _hd = [];
@@ -322,8 +317,8 @@ async function prepNetherInner(bot, ctx) {
             const _ptBlank = _hd.some(d => d < 3.2);
             const _swarmed = _hd.filter(d => d < 8).length >= 3;
             const _hasSword = bot.inventory.items().some(i => /_sword$/.test(i.name));
-            if (_ptBlank && !_swarmed && _hasSword && bot.health > 12) {  // ★hp>6→>12 (45死数据: hp6提交melee→zombie 2下打死;低血封顶/逃胜过送命挥剑)
-                prog(`prepNether: ★C336 commit-to-fight — 贴脸怪<3.2b+有剑+hp${Math.round(bot.health)}>12+非围 → 不封顶,让位self_defense挥剑`);
+            if (_ptBlank && !_swarmed && _hasSword) {
+                prog('prepNether: commit-to-fight — point-blank hostile + sword + not swarmed');
                 return;
             }
         } catch (e) {}
@@ -411,7 +406,7 @@ async function prepNetherInner(bot, ctx) {
                 logged = true;
             }
             if (dayFamineHostileHold && !logged) {
-                const threat10 = noRegenActionableThreats(10);
+                const threat10 = actionableThreats(10);
                 prog(`prepNether: ★DAY famine-hostile shelter — hp=${Math.round(bot.health)} food=${bot.food} hostiles10=${hostilesNear(10)} actionable10=${threat10.actionable} layered10=${threat10.layered} hostiles16=${hostilesNear(16)} secured=${bodyBudgetBunkerHold() && (coveredAboveNow() || containedMobilityNow())}; no exposed freeze`);
                 logged = true;
             }
@@ -474,7 +469,6 @@ async function prepNetherInner(bot, ctx) {
                         bot._nightWetBunkerFails = 0;
                         prog(`prepNether: bunker already covered — skip water relocation and hold y=${Math.floor(bot.entity.position.y)}`);
                         await nightBunkerStaticWeapon();
-                        await noRegenStaticKit('night-bunker-covered');
                         await skills.wait(bot, 6000);
                         continue;
                     }
@@ -504,7 +498,7 @@ async function prepNetherInner(bot, ctx) {
                             const me = bot.entity.position;
                             let ax = me.x - wb.position.x, az = me.z - wb.position.z;
                             const L = Math.hypot(ax, az) || 1; ax /= L; az /= L;
-                            if ((_hpOn() || _foodOn()) && snacklessCritical()) {   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿/低血软化水禁(不搬迁,就地挖/守); 任一/双闸开恢复。
+                            if (_foodOn() && snacklessCritical()) {
                                 prog(`prepNether: bunker water veto softened at food=${bot.food} hp=${Math.round(bot.health)} — no night relocation, dig/hold in place`);
                             } else {
                                 prog(`prepNether: bunker site too close to water (${Math.round(L)}b) — moving 12b inland before digging`);
@@ -515,9 +509,8 @@ async function prepNetherInner(bot, ctx) {
                     const wetDist = await nearestWaterDist(4);
                     if (standingInFluid() || wetDist !== null) {
                         const wetFails = bot._nightWetBunkerFails || 0;
-                        const injuredHold = _hpOn() && bot.health <= 16 && !standingInFluid();   // ★2026-07-09 用户令 HP/食物本能熔断: 低血接受贴水坑(纯HP,无威胁); HP闸开恢复。
                         const repeatedWetFail = wetFails >= 5 && !standingInFluid();
-                        if ((((_hpOn() || _foodOn()) && snacklessCritical()) && !standingInFluid()) || injuredHold || repeatedWetFail) {   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿/低血接受贴水坑; 任一/双闸开恢复。
+                        if (((_foodOn() && snacklessCritical()) && !standingInFluid()) || repeatedWetFail) {
                             bot._nightWetBunkerFails = 0;
                             prog(`prepNether: wet-adjacent bunker accepted (waterDist=${wetDist === null ? 'none' : wetDist.toFixed(1)} hp=${Math.round(bot.health)} fails=${wetFails}) — seal/hold beats night relocation loop`);
                         } else {
@@ -753,7 +746,7 @@ async function prepNetherInner(bot, ctx) {
                     // MAROONED 反射让位(不抢身体中断 digDown). 覆盖 covered-hold/body-budget/dug-in 三分支,每轮
                     // (~1.5s)刷新,12s 过期. 解 prepNether 封顶 ⟷ mobility MAROONED dig 反射互绞(25次封顶失败真根因).
                     try { bot._nightSealingUntil = Date.now() + 12000; } catch (e) {}
-                    const lowResourceNoDigHold = (_hpOn() || _foodOn()) && bodyBudgetBunkerHold();   // ★2026-07-09 用户令 HP/食物本能熔断: 低食+低血跳过挖坑改就地封顶(mixed); 任一/双闸开恢复(双关→照常挖坑掩体)。
+                    const lowResourceNoDigHold = _foodOn() && bodyBudgetBunkerHold();
                     if (coveredAbove()) {
                         prog(`prepNether: bunker already covered — hold position y=${Math.floor(bot.entity.position.y)}, no extra digDown`);
                         await nightBunkerStaticWeapon();
@@ -883,7 +876,6 @@ async function prepNetherInner(bot, ctx) {
                 } catch (e) { dugIn = false; prog(`prepNether: bunker err ${e.message}`); }
             }
             await nightBunkerStaticWeapon();
-            await noRegenStaticKit('night-bunker');
             await skills.wait(bot, 6000);   // idle so self_preservation can dig in / hold the shelter
         }
         if (cancelRequested()) {
@@ -895,7 +887,7 @@ async function prepNetherInner(bot, ctx) {
         // wait them out in the hole (up to 60s, they wander off) instead of walking into one.
         if (!isNightNow() && !bot.interrupt_code) {
             const dawnLingeringHostiles = (r = 10) => {
-                const threat = noRegenActionableThreats(r);
+                const threat = actionableThreats(r);
                 return threat.actionable;
             };
             // ★C261: CAP the cumulative dawn-exit hold. The inner loop waits 60s, but the caller
@@ -915,7 +907,7 @@ async function prepNetherInner(bot, ctx) {
                     const lingering = dawnLingeringHostiles(10);
                     if (lingering === 0) { bot._dawnHoldSince = 0; break; }
                     if (w === 0) {
-                        const threat10 = noRegenActionableThreats(10);
+                        const threat10 = actionableThreats(10);
                         prog(`prepNether: ★dawn-exit hold — ${lingering} actionable mob(s) at the door (raw=${threat10.raw} layered=${threat10.layered}), waiting them out`);
                     }
                     if (w === 0) await nightBunkerStaticWeapon({ allowDaySingleSpider: true, reason: 'DAWN lingering-mob' });
@@ -946,7 +938,7 @@ async function prepNetherInner(bot, ctx) {
     //   门框 (session 实录: -175,64,382 那座门被系统性挖光, mine_motion dig target obsidian@-173~-176/
     //   y64~68/z383 一整座 4x5 框)。用户受不了反复"拆自己的门", 令整条 goals[] 退役, 不再自主凑铁甲/
     //   钻甲/打火石/黑曜石, 也不再为凑装下潜挖矿。保留的只有: 回床 (tryHome@1666, 循环前独立跑) +
-    //   低血遇敌 HOLD 防御 (modes 反射层) + 死亡找回 (corpse run 前导段)。
+    //   现实威胁防御 (modes 反射层) + 死亡找回 (corpse run 前导段)。
     //   ★空 goals[] 契约安全: entryGoalsDone/doneNow 皆真空为 true; GET_BED 派发时 bedNewlySet 让
     //   最终 return 正常返回 true, 纯空转触发内核 3-strike 冷却 (见 :3012 return 契约)。for-of 循环
     //   (:2828) 直接零迭代, 循环内穿插的 keepKit/gear-achieve/obsidian-collect 全不再跑。
@@ -1069,7 +1061,7 @@ async function prepNetherInner(bot, ctx) {
     const isNight = () => { try { const t = bot.time.timeOfDay; return t >= 13000 && t <= 23000; } catch (e) { return false; } };
     const HOSTILE = /zombie|skeleton|creeper|spider|witch|enderman|drowned|husk|stray|phantom|slime|piglin|hoglin|silverfish|cave_spider|pillager|vindicator/i;
     const hostilesNear = (r = 12) => Object.values(bot.entities).filter(e => e && e.position && e.name && HOSTILE.test(e.name) && e.position.distanceTo(bot.entity.position) < r).length;
-    const noRegenActionableThreats = (r = 8) => {
+    const actionableThreats = (r = 8) => {
         const secured = bodyBudgetBunkerHold() && (coveredAboveNow() || containedMobilityNow());
         const me = bot.entity.position;
         let raw = 0, actionable = 0, layered = 0;
@@ -1110,7 +1102,7 @@ async function prepNetherInner(bot, ctx) {
         }
     };
     const tableRecoveryThreat = (r = 12) => {
-        const local = noRegenActionableThreats(r);
+        const local = actionableThreats(r);
         const adv = freshAdvisoryThreat();
         if (adv) return { ...local, ...adv, localActionable: local.actionable, localRaw: local.raw };
         return { ...local, source: 'local' };
@@ -1183,35 +1175,12 @@ async function prepNetherInner(bot, ctx) {
         // 落在 >2 && <14 死区时(normalSafeDay 卡 food≥14、famineVerticalEmergency 卡 food≤2),有铁无木
         // 无台的健康 bot 会在 TABLE gate 空转 3min+(live 实测 food13)。保留 hp≥14(地表战斗安全)/白天/
         // threat=0;手里有吃的就放行(keepFed 同轮先吃,food 会回升),没吃的也要 food≥8 才上,避免饿着爬。
-        const normalSafeDay = undergroundWorksite && daytime && threat.actionable === 0 && (!_hpOn() || bot.health >= 14) && (!_foodOn() || bot.food >= 8 || hasEdible());   // ★2026-07-09 用户令 HP/食物本能熔断: 补木上浮的血/食要求门(威胁前置 threat===0 保留); 对应闸开各自恢复(双关→无威胁即放行上浮补木)。
+        const normalSafeDay = undergroundWorksite && daytime && threat.actionable === 0 && (!_foodOn() || bot.food >= 8 || hasEdible());
         const famineVerticalEmergency = daytime
             && !hasEdible()
             && bot.food <= 2
-            && bot.health >= 8
             && verticalPocket
             && (threat.actionable === 0 || (threat.actionable <= 1 && threatNearest > 5.5));
-        // ★C224: no-regen DEADLOCK breaker (hp 8-13 dead-zone, between C217's hp<8 last-resort and
-        // normalSafeDay's hp≥14). When hurt AND unable to regen (food<18 + no edible in inv), the bot
-        // is in an ABSORBING underground deadlock: hp won't rise without regen, regen won't start
-        // without food≥18, food can't be gained without surfacing to hunt — but normalSafeDay's hp≥14
-        // gate blocks that surface. Sitting tight = frozen forever (live 05:37: hp9 food17 spun the
-        // TABLE gate indefinitely past dawn). At a daytime surface with NO actionable threat (forest
-        // home, mobs burn by day, shield in kit), going up to hunt+chop is the ONLY escape and a
-        // calculated risk worth taking — same "find beats frozen" logic as C217.
-        // ★C264: was gated to verticalPocket ONLY (copy-pasted from famineVerticalEmergency). A bot
-        // in a HORIZONTAL undergroundWorksite at hp 12 with a pick, daytime, zero actionable threat,
-        // no wood/table → safeDay was FALSE for all three branches (normalSafeDay needs hp≥14;
-        // famine/noRegen needed verticalPocket) → surfaceUp NEVER fired → frozen forever (live 06:05:
-        // hp12 food15 y48 horizontal worksite spun the TABLE gate every 9s, process crashed on kicks).
-        // The vertical-shaft restriction is wrong: digging up out of a horizontal worksite is as safe
-        // as out of a 1x1 pocket when it's daytime + no threat + we hold a pick. Allow either site
-        // (tableRecoveryBlocked already guarantees ≥1 is true, so this is the self-extraction crux).
-        const noRegenDeadlock = daytime
-            && !hasEdible()
-            && bot.food < 18
-            && bot.health >= 8 && bot.health < 14
-            && (verticalPocket || undergroundWorksite)
-            && threat.actionable === 0;
         const staleReason = Date.now() < (bot._prepTableRecoveryBlockedUntil || 0)
             ? (bot._prepTableRecoveryBlockedReason || 'achieve table gate')
             : 'no local wood/table/logs';
@@ -1219,9 +1188,8 @@ async function prepNetherInner(bot, ctx) {
             goal: goalName,
             reason: staleReason,
             night: isNightNow() || isDuskNow(),
-            safeDay: normalSafeDay || famineVerticalEmergency || noRegenDeadlock,
-            famineVerticalEmergency: famineVerticalEmergency || noRegenDeadlock,
-            noRegenDeadlock,
+            safeDay: normalSafeDay || famineVerticalEmergency,
+            famineVerticalEmergency,
             threat,
         };
     };
@@ -1273,8 +1241,7 @@ async function prepNetherInner(bot, ctx) {
             // can't recraft pick/table → TABLE gate forever). This is the FORWARD half of the
             // reverse wood path (achieve.js C229 gate refuses to deep-mine the last pick; this
             // restocks wood once surfaced). Gated by optionalWoodSafe (surface+day+no hostile+
-            // hp>14+food ok+reachable tree) — at low hp / night / hostiles it skips silently and
-            // yields to survival (never the dangerous-surface-expedition the risk note warns of).
+            // food ok+reachable tree) — at night / hostiles it skips silently.
             try {
                 if (heldLogs() < 2 && maxHeldPlankStack() < 8) {
                     const woodGate = optionalWoodSafe();
@@ -1316,13 +1283,13 @@ async function prepNetherInner(bot, ctx) {
         const sword = Object.keys(c).some(n => /_sword$/.test(n) && c[n] > 0);
         const shield = (c.shield || 0) > 0;
         const armor = Object.keys(c).filter(n => /_(helmet|chestplate|leggings|boots)$/.test(n) && c[n] > 0).length;
-        return sword && (shield || armor >= 2) && bot.health >= 16;
+        return sword && (shield || armor >= 2);
     };
     const daylightFamineForageWindow = () => {
         try {
             const securedLowResourceHold = bodyBudgetBunkerHold() && (coveredAboveNow() || containedMobilityNow());
             const threatRadius = securedLowResourceHold ? 10 : 16;
-            const threat = noRegenActionableThreats(threatRadius);
+            const threat = actionableThreats(threatRadius);
             return famineBudget()
                 && !isNight()
                 && bot.entity.position.y >= 55
@@ -1345,20 +1312,20 @@ async function prepNetherInner(bot, ctx) {
         const ageS = Math.round((Date.now() - (d.t || 0)) / 1000);
         if (ageS > 270) { try { fs.unlinkSync(DPOS); } catch (e) {} prog(`corpseRun: death ${ageS}s old — gear despawned, skip`); return; }
         if (bot.game && bot.game.dimension && !/overworld/.test(bot.game.dimension)) { try { fs.unlinkSync(DPOS); } catch (e) {} prog('corpseRun: not overworld, skip'); return; }
-        // SAFETY GATE — do NOT walk a freshly-respawned (usually naked, no-armor, low-hp)
+        // SAFETY GATE — do NOT walk a freshly-respawned (usually naked, no-armor)
         // bot back toward its death spot through a night-time mob swarm: that just feeds
         // the death loop (the exact suicide-walk the supervised lock exists to stop). KEEP
         // the death file (don't consume) so a LATER prepNether re-arm can recover once it's
-        // safe — daytime, no nearby hostiles, and not critically hurt. The age check above
+        // safe — daytime and no nearby hostiles. The age check above
         // retires the file naturally once the gear would have despawned anyway.
         // Walk back toward the death spot ONLY when it's clearly safe. A freshly-respawned
         // bot is usually naked/low-armor; sending it toward where mobs just killed it —
         // through ANY nearby swarm, day or night — just re-feeds the death cascade (it
         // killed us again at hp1 in daylight). So defer (keep the death file, retry later)
-        // unless there are NO hostiles near us right now AND we're not hurt. The age check
+        // unless there are NO hostiles near us right now. The age check
         // retires the file once the gear would have despawned anyway.
-        if (hostilesNear(16) > 0 || bot.health < 14) {
-            prog(`corpseRun: UNSAFE (mobs=${hostilesNear(16)} hp=${Math.round(bot.health)} night=${isNight()}) — defer recovery, establish first`);
+        if (hostilesNear(16) > 0) {
+            prog(`corpseRun: UNSAFE (mobs=${hostilesNear(16)} night=${isNight()}) — defer recovery, establish first`);
             return;
         }
         // 夜不捞尸 (the design note said "daytime only" but the code never gated it —
@@ -1503,7 +1470,7 @@ async function prepNetherInner(bot, ctx) {
         const _foodPoor = _foodOn() && bot.food != null && bot.food <= 10 && !hasEdible();   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿去银行取粮(纯食物); 食物闸开恢复。
         const _manifestFood = _mCount(/^(cooked_\w+|bread|apple|baked_potato|beef|porkchop|mutton)$/);
         const _foodTopup = _foodPoor && _manifestFood !== 0 && _bankDistNow <= 16 && _topupFresh;
-        if (haveSword() && haveAnyArmor() && (!_hpOn() || bot.health >= 14) && !_ironTopup && !_foodTopup) { prog('bankRecover: already armed (sword+armor, hp ok) — skip'); return; }   // ★2026-07-09 用户令 HP/食物本能熔断: 低血不再强拉已武装 bot 去银行(纯HP要求门); HP闸开恢复。
+        if (haveSword() && haveAnyArmor() && !_ironTopup && !_foodTopup) { prog('bankRecover: already armed (sword+armor) — skip'); return; }
         if (_ironTopup || _foodTopup) {
             bot._bankIronTopupAt = Date.now();
             prog(`bankRecover: ${_ironTopup ? 'iron' : 'food'} top-up — ${_ironTopup ? `inv iron ${has('iron_ingot')}+${has('raw_iron')}<3, no iron pick` : `food=${bot.food} nothing edible held`}, bank ${Math.round(_bankDistNow)}b away → withdraw`);
@@ -1515,18 +1482,6 @@ async function prepNetherInner(bot, ctx) {
                 prog(`bankRecover: table recovery hold in ${bot._mobility && bot._mobility.state || 'ENC'} — skip bank path; tableInv=${has('crafting_table')} planksMax=${maxHeldPlankStack()} logs=${heldLogs()} actionable12=${tableHold.threat ? tableHold.threat.actionable : 'n/a'}`);
             }
             return;
-        }
-        // No-regen cave budget: bankRecover runs before keepFed(), so without this guard it can
-        // steal the body for a long/destructive cave path and only later discover that hunger
-        // logic would have held in place. With low HP, no normal food, and no regen, recovery
-        // trips are allowed only when the bank is already right beside us.
-        if ((_hpOn() || _foodOn()) && !hasEdible() && bot.health < 14 && bot.food < 18) {   // ★2026-07-09 用户令 HP/食物本能熔断: 无回血限制远行取银行(mixed); 任一/双闸开恢复。
-            const me = bot.entity.position;
-            const bankDist = Math.hypot(me.x - bank.x, me.y - bank.y, me.z - bank.z);
-            if (bankDist > 4.5) {
-                prog(`bankRecover: no-regen trip gate — hp=${Math.round(bot.health)} food=${bot.food} no normal food bankDist=${Math.round(bankDist)}; keepFed/hold before bank path`);
-                return;
-            }
         }
         if (_foodOn() && famineBudget()) {   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿限制去银行(famine 纯食物口径; 内含威胁支路仅在食物闸开时生效); 食物闸开恢复。
             const me = bot.entity.position;
@@ -1662,7 +1617,6 @@ async function prepNetherInner(bot, ctx) {
             } catch (e) { return false; }
         };
         if ((homeSet() && !homeSaturated()) || bot.interrupt_code) return;
-        if (_hpOn() && bot.health < 10) return;                 // ★2026-07-09 用户令 HP/食物本能熔断: 低血不再阻止建床安家(纯HP); HP闸开恢复(原: too hurt to do anything but survive)。
         // By DAY we run setBed even with spiders around — this jungle has no sheep, so setBed
         // bootstraps a bed from SPIDER STRING (4 string=1 wool, 2x2), and spiders ARE the
         // string source. setBed's own guards keep it safe (spider-hunt is day+calm gated).
@@ -1711,10 +1665,6 @@ async function prepNetherInner(bot, ctx) {
         if (bot.interrupt_code || has('torch') >= 12) return;
         if (_foodOn() && famineBudget()) {   // ★2026-07-09 用户令 HP/食物本能熔断: 因饿跳过火把 kit(famine 纯食物); 食物闸开恢复。
             prog(`prepNether: SKIP torch kit — famine body budget food=${bot.food} hp=${Math.round(bot.health)} no edible`);
-            return;
-        }
-        if ((_hpOn() || _foodOn()) && bot.health < 14 && bot.food < 18 && !hasEdible()) {   // ★2026-07-09 用户令 HP/食物本能熔断: 无回血跳过火把 kit(mixed); 任一/双闸开恢复。
-            prog(`prepNether: SKIP torch kit — no-regen body budget food=${bot.food} hp=${Math.round(bot.health)} no normal food; don't chop/craft optional torches`);
             return;
         }
         if (has('coal') < 1 && has('charcoal') < 1) return;
@@ -1774,9 +1724,8 @@ async function prepNetherInner(bot, ctx) {
         if (!openSurfaceNow() && !(critical && bot.entity.position.y >= 55 && !(bot._mobility && bot._mobility.enclosed)))
             return { ok: false, reason: `not true surface y=${Math.floor(bot.entity.position.y)} enclosed=${!!(bot._mobility && bot._mobility.enclosed)}` };
         if (isNightNow()) return { ok: false, reason: 'night' };
-        const hostileBlock = critical ? noRegenActionableThreats(12).actionable : hostilesNear(24);
+        const hostileBlock = critical ? actionableThreats(12).actionable : hostilesNear(24);
         if (hostileBlock > 0) return { ok: false, reason: critical ? `actionable12=${hostileBlock}` : `hostiles24=${hostileBlock}` };
-        if (_hpOn() && bot.health <= (critical ? 8 : 14)) return { ok: false, reason: `hp=${Math.round(bot.health)}` };   // ★2026-07-09 用户令 HP/食物本能熔断: 低血不再阻止可选砍木(纯HP); HP闸开恢复。
         if (_foodOn() && !critical && bot.food <= 14 && !edibleNow()) return { ok: false, reason: `food=${bot.food} no edible held` };   // ★2026-07-09 用户令 HP/食物本能熔断: 低食不再阻止可选砍木(纯食物); 食物闸开恢复。
         return critical ? reachableWoodTarget(16, 8) : reachableWoodTarget();
     };
@@ -1863,488 +1812,13 @@ async function prepNetherInner(bot, ctx) {
             return null;
         }
     };
-    const oakAppleForageSignal = () => {
-        try {
-            if (hasEdible() || !(bot.health <= 8 && bot.food < 18)) return { ok: false, reason: 'not low-hp no-regen' };
-            if (isNightNow()) return { ok: false, reason: 'night' };
-            if (isDuskNow()) return { ok: false, reason: 'dusk' };
-            if (bot.food <= 3 && bot.health <= 8) {
-                const localOak = localCriticalOakSignal();
-                if (localOak.ok) return localOak;
-                return { ok: false, reason: `critical-local-only ${localOak.reason}` };
-            }
-            const tod = (bot.time && bot.time.timeOfDay) || 0;
-            if (tod >= 11000 && tod < 23000) return { ok: false, reason: `late-day tod=${tod}` };
-            const threat10 = noRegenActionableThreats(10);
-            if (threat10.actionable > 0) return { ok: false, reason: `actionable10=${threat10.actionable} hostiles10=${hostilesNear(10)}` };
-            if (bot.game && bot.game.dimension && !/overworld/.test(bot.game.dimension)) return { ok: false, reason: `dimension=${bot.game.dimension}` };
-            const me = bot.entity.position;
-            const dist = (p) => p && typeof p.distanceTo === 'function' ? p.distanceTo(me) : Infinity;
-            const dy = (p) => p ? Math.abs(p.y - me.y) : Infinity;
-            const blocks = world.getNearestBlocks(bot, ['oak_leaves', 'dark_oak_leaves', 'oak_log', 'dark_oak_log'], 14, 32) || [];
-            const oak = blocks
-                .filter(b => b && b.position && dist(b.position) <= 12 && dy(b.position) <= 6)
-                .sort((a, b) => dist(a.position) - dist(b.position))[0];
-            if (!oak) return { ok: false, reason: 'no bounded oak' };
-            const exactDist = dist(oak.position);
-            const exactDy = oak.position.y - me.y;
-            return {
-                ok: true,
-                target: `${oak.name}@${Math.round(exactDist)} dy=${Math.round(exactDy)}`,
-                name: oak.name,
-                dist: exactDist,
-                dy: exactDy,
-                pos: { x: oak.position.x, y: oak.position.y, z: oak.position.z },
-            };
-        } catch (e) {
-            return { ok: false, reason: `oak scan err ${e.message}` };
-        }
-    };
-    const localCriticalOakSignal = () => {
-        try {
-            if (hasEdible() || bot.food > 3 || bot.health > 8) return { ok: false, reason: 'not critical no-regen' };
-            if (isNightNow()) return { ok: false, reason: 'night' };
-            if (isDuskNow()) return { ok: false, reason: 'dusk' };
-            if (bot.game && bot.game.dimension && !/overworld/.test(bot.game.dimension)) return { ok: false, reason: `dimension=${bot.game.dimension}` };
-            const threat10 = noRegenActionableThreats(10);
-            if (threat10.actionable > 0) return { ok: false, reason: `actionable10=${threat10.actionable} hostiles10=${hostilesNear(10)}` };
-            const me = bot.entity.position;
-            const dist = (p) => p && typeof p.distanceTo === 'function' ? p.distanceTo(me) : Infinity;
-            const dy = (p) => p ? Math.abs(p.y - me.y) : Infinity;
-            const blocks = world.getNearestBlocks(bot, ['oak_leaves', 'dark_oak_leaves', 'oak_log', 'dark_oak_log'], 8, 48) || [];
-            const candidates = blocks
-                .filter(b => {
-                    if (!b || !b.position || !b.name) return false;
-                    const d = dist(b.position);
-                    const y = dy(b.position);
-                    if (/_log$/.test(b.name)) return d <= 3.1 && y <= 2.5;
-                    if (/_leaves$/.test(b.name)) return d <= 5.25 && y <= 4.25;
-                    return false;
-                })
-                .sort((a, b) => dist(a.position) - dist(b.position));
-            const oak = candidates[0];
-            if (!oak) return { ok: false, reason: 'no close local oak' };
-            const exactDist = dist(oak.position);
-            const exactDy = oak.position.y - me.y;
-            return {
-                ok: true,
-                target: `${oak.name}@${Math.round(exactDist)} dy=${Math.round(exactDy)}`,
-                name: oak.name,
-                dist: exactDist,
-                dy: exactDy,
-                pos: { x: oak.position.x, y: oak.position.y, z: oak.position.z },
-            };
-        } catch (e) {
-            return { ok: false, reason: `local oak scan err ${e.message}` };
-        }
-    };
     const keepFed = async () => {
-        // 维持线必须≥18 (回血阈值): 旧值14让bot吃到14就停 — 永远差4点回不了血,
-        // 全天挂着hp1-2的慢性病根(磕碰伤一辈子不愈合)。19留1点余量。
-        if (bot.interrupt_code || (bot.food >= 19 && bot.health >= 14)) return true;
-        const f = edibleNow();
-        if (f) { prog(`prepNether: KIT — eating ${f.name} (food=${bot.food})`); try { await skills.consume(bot, f.name); } catch (e) {} return true; }
-        const emergencyJunk = bot.inventory.items().find(i => /rotten_flesh|spider_eye/.test(i.name || ''));
-        if (emergencyJunk && bot.food <= 11 && bot.health <= 8 && !hasEdible()) {
-            prog(`prepNether: emergency food — eating ${emergencyJunk.name} before movement (food=${bot.food} hp=${Math.round(bot.health)})`);
-            try { await skills.consume(bot, emergencyJunk.name); } catch (e) {}
-            try { await skills.wait(bot, 600); } catch (e) {}
-            bot._prepEmergencyJunkAteAt = Date.now();
-            if (bot.food >= 18 || bot.health >= 14 || hasEdible()) return true;
-            prog(`prepNether: emergency food eaten but still no-regen (food=${bot.food} hp=${Math.round(bot.health)}); re-evaluate food route before mining`);
-        }
-        const lowHpNoRegen = bot.health < 14 && bot.food < 18;
-        if (lowHpNoRegen && !hasEdible()) await noRegenStaticKit('keepFed');
-        // ★2026-07-09 用户令 HP/食物本能熔断: 食物闸关 → keepFed 仅保留上方"吃包内食物"(第1类豁免), 直接 return true
-        // 跳过后面全部 觅食派发(feedUp/forage/famine chopWood)、因饿/无回血保持、饥荒兜底与夜间饥饿 hold;
-        // 食物闸开(='1')→ 恢复整块觅食机(与原 `food>=12 && !lowHpNoRegen` 早退字节等价)。
-        if (!_foodOn() || (bot.food >= 12 && !lowHpNoRegen)) return true;        // no food held but enough buffer to continue short prep work
-        // ★C291: the food gate must not block the PICKAXE CRAFT when the bot is pickless but already
-        // HOLDS the materials — the craft is zero-food-cost and IS the bootstrap escape. Live
-        // 2026-06-20 (sibling to C285/C286): food=11 keepFed looped on a futile forest feedUp while
-        // 2 oak_logs + a crafting_table sat ready to become a pickaxe; C285 didn't fire (it requires
-        // 0 wood) and the food<12 gate kept kicking to feedUp → never crafted. So: if pickless and
-        // holding pick-makings (logs/planks + a table or table-path) and not critically hurt, let
-        // prep proceed — the KIT craft (C286-exempt) makes the pick without eating anything.
-        {
-            const noPick = !bot.inventory.items().some(i => /_pickaxe$/.test(i.name || ''));
-            const woodForPick = heldLogs() > 0 || maxHeldPlankStack() >= 3;
-            const tableForPick = has('crafting_table') > 0 || !!world.getNearestBlock(bot, 'crafting_table', 4) || heldLogs() > 0;
-            if (noPick && woodForPick && tableForPick && bot.health >= 8) {
-                if (!bot._lastC291LogAt || Date.now() - bot._lastC291LogAt > 30000) {
-                    bot._lastC291LogAt = Date.now();
-                    prog(`prepNether: ★C291 craft-pick-over-food — pickless + holding pick-makings (logs=${heldLogs()} planksMax=${maxHeldPlankStack()} table=${has('crafting_table')}); proceed to craft pick (zero-food) instead of futile feedUp (food=${bot.food} hp=${Math.round(bot.health)})`);
-                }
-                return true;
-            }
-        }
-        // ★C285 BOOTSTRAP-WOOD escape — the food gate must not hard-stop the ONE escape from a
-        // resource-floor deadlock. Live 2026-06-20 (用户实拍"沙漠发呆十几分钟"): surface, daytime,
-        // food=8 desert (feedUp futile — no animals), 0 logs/planks, no table, no pick, but holding
-        // 6 saplings — keepFed kept hitting "stop prep work" return false (line ~1674), so the
-        // wood→table→pickaxe chain NEVER ran and the bot spun 30min+ (277× "standing down" / 5×
-        // self-pin-kick). This is the documented run-killer. Wood is the path to tools AND to a
-        // sword for real hunting, so when FULLY tool-blocked + holding saplings + non-lethal +
-        // daytime + no actionable threat, chop/grow wood instead of bailing to a hopeless feedUp.
-        // Additive: fires ONLY in this exact deadlock; every keepFed gate below is untouched.
-        // chopWood reaches a tree if one is pathable, else plants+grows a sapling (C279). 60s
-        // cooldown so a failed attempt doesn't hammer. Must be validated in-game at daylight.
-        {
-            const fullyToolBlocked = heldLogs() === 0 && maxHeldPlankStack() === 0
-                && has('crafting_table') === 0 && !world.getNearestBlock(bot, 'crafting_table', 5)
-                && !hasAnyHeldPick();
-            const saplingCt = bot.inventory.items().filter(i => /_sapling$/.test(i.name || '')).reduce((s, i) => s + i.count, 0);
-            const nonLethal = bot.health >= 10 && bot.food >= 6;
-            const escapeReady = !bot._prepBootstrapWoodUntil || Date.now() > bot._prepBootstrapWoodUntil;
-            if (fullyToolBlocked && saplingCt > 0 && nonLethal && !isNightNow() && !isDuskNow()
-                && hostilesNear(12) === 0 && escapeReady) {
-                bot._prepBootstrapWoodUntil = Date.now() + 60000;
-                prog(`prepNether: ★C285 BOOTSTRAP-WOOD escape — fully tool-blocked (0 wood/table/pick) + ${saplingCt} sapling, non-lethal (hp=${Math.round(bot.health)} food=${bot.food}), daytime/no-threat → chopWood (reach tree or grow sapling) instead of futile desert feedUp`);
-                try {
-                    if (!openSurfaceNow()) {
-                        const surfTarget = Math.max(63, Math.floor(bot.entity.position.y) + 6);
-                        await Promise.race([
-                            skills.customSkill(bot, 'surfaceUp', surfTarget),
-                            new Promise((_, rej) => setTimeout(() => rej(new Error('c285-surfaceUp-timeout')), 45000)),
-                        ]);
-                    }
-                    await Promise.race([
-                        skills.customSkill(bot, 'chopWood', 2, { allowCriticalForage: true }),
-                        new Promise((_, rej) => setTimeout(() => rej(new Error('c285-chop-timeout')), 120000)),
-                    ]);
-                } catch (e) {
-                    try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
-                    try { bot.clearControlStates(); } catch (_) {}
-                    prog(`prepNether: C285 bootstrap-wood incomplete: ${e.message}`);
-                }
-                if (heldLogs() > 0 || maxHeldPlankStack() > 0) {
-                    prog(`prepNether: ★C285 got wood (logs=${heldLogs()} planksMax=${maxHeldPlankStack()}) — proceed to table→pickaxe`);
-                    return true;
-                }
-            }
-        }
-        if (isNightNow()) {
-            prog(`prepNether: ★HUNGRY/LOWHP food=${bot.food} hp=${Math.round(bot.health)}, no food held, night — HOLD all work until dawn`);
-            let held = 0;
-            while (isNightNow() && !bot.interrupt_code && (bot.food < 12 || (bot.health < 14 && bot.food < 18)) && !edibleNow()) {
-                if (held > 0 && held % 5 === 0) prog(`prepNether: hungry-night hold ${held * 6}s food=${bot.food} hp=${Math.round(bot.health)}`);
-                try { bot.clearControlStates(); } catch (e) {}
-                try { await skills.wait(bot, 6000); } catch (e) { break; }
-                held++;
-            }
-            if (bot.interrupt_code) return false;
-            if ((bot.food >= 12 && !(bot.health < 14 && bot.food < 18)) || edibleNow()) return true;
-        }
-        if (lowHpNoRegen && !hasEdible()) {
-            const oakSignal = oakAppleForageSignal();
-            const persistedOakBackoff = (() => {
-                const rec = oakSignal.ok ? readOakAppleBackoff() : null;
-                if (!rec || rec.target !== oakSignal.target) return 0;
-                const staleReachBackoff = bot.food <= 3
-                    && oakSignal.dist <= 5.1
-                    && rec.reachable === 0
-                    && rec.nearest
-                    && rec.nearest.dist <= 5.1
-                    && (rec.maxReach == null || rec.maxReach < 5.05);
-                if (staleReachBackoff) {
-                    prog(`prepNether: bounded oak/apple forage ignores stale reach backoff for ${oakSignal.target} nearest=${rec.nearest.name}@${rec.nearest.dist.toFixed(2)} maxReach=${rec.maxReach == null ? 'old' : rec.maxReach} food=${bot.food} hp=${Math.round(bot.health)}`);
-                    return 0;
-                }
-                const occludedRetryBackoff = bot.food <= 3
-                    && oakSignal.dist <= 5.2
-                    && rec.reachable > 0
-                    && rec.broken === 0
-                    && rec.failed > 0
-                    && rec.maxReach >= 5
-                    && rec.nearest
-                    && rec.nearest.dist <= 5.2;
-                if (occludedRetryBackoff) {
-                    const shortUntil = (rec.at || Date.now()) + 30000;
-                    const wait = Math.max(0, shortUntil - Date.now());
-                    if (wait <= 0) prog(`prepNether: bounded oak/apple forage ignores long occlusion backoff for ${oakSignal.target} failed=${rec.failed} opened=${rec.openedWindows || 0}`);
-                    return wait;
-                }
-                const nearLogRetryBackoff = bot.food <= 3
-                    && oakSignal.dist <= 2.5
-                    && rec.reachable === 0
-                    && (rec.maxReach || 0) >= 5
-                    && rec.nearest
-                    && rec.nearest.dist <= 6.5;
-                if (nearLogRetryBackoff) {
-                    const shortUntil = (rec.at || Date.now()) + 45000;
-                    const wait = Math.max(0, shortUntil - Date.now());
-                    if (wait <= 0) prog(`prepNether: bounded oak/apple forage ignores long near-log backoff for ${oakSignal.target} nearest=${rec.nearest.name}@${rec.nearest.dist.toFixed(2)}`);
-                    return wait;
-                }
-                try {
-                    bot._prepOakApplePulseBackoffUntil = Math.max(bot._prepOakApplePulseBackoffUntil || 0, rec.until);
-                    bot._prepOakApplePulseBackoffTarget = rec.target;
-                } catch (e) {}
-                return Math.max(0, rec.until - Date.now());
-            })();
-            let runtimeOakBackoff = Math.max(0, (bot._prepOakApplePulseBackoffUntil || 0) - Date.now());
-            const runtimeBackoffTarget = bot._prepOakApplePulseBackoffTarget || null;
-            if (runtimeOakBackoff > 0 && runtimeBackoffTarget && runtimeBackoffTarget !== oakSignal.target) {
-                prog(`prepNether: bounded oak/apple forage clears runtime backoff target mismatch old=${runtimeBackoffTarget} new=${oakSignal.target}`);
-                bot._prepOakApplePulseBackoffUntil = 0;
-                bot._prepOakApplePulseBackoffTarget = null;
-                runtimeOakBackoff = 0;
-            } else if (runtimeOakBackoff > 0 && !runtimeBackoffTarget && bot.food <= 3 && bot.health <= 8) {
-                prog(`prepNether: bounded oak/apple forage clears unscoped critical runtime backoff for ${oakSignal.target}`);
-                bot._prepOakApplePulseBackoffUntil = 0;
-                runtimeOakBackoff = 0;
-            }
-            const lastSweep = bot._feedUpLastLeafSweep && Date.now() - bot._feedUpLastLeafSweep.at < 10 * 60 * 1000 ? bot._feedUpLastLeafSweep : null;
-            const staleRuntimeReachBackoff = oakSignal.ok
-                && runtimeOakBackoff > 0
-                && bot.food <= 3
-                && oakSignal.dist <= 5.1
-                && lastSweep
-                && lastSweep.reachable === 0
-                && lastSweep.nearest
-                && lastSweep.nearest.dist <= 5.1
-                && (lastSweep.maxReach == null || lastSweep.maxReach < 5.05);
-            if (staleRuntimeReachBackoff) {
-                prog(`prepNether: bounded oak/apple forage clears stale runtime reach backoff for ${oakSignal.target} nearest=${lastSweep.nearest.name}@${lastSweep.nearest.dist.toFixed(2)} maxReach=${lastSweep.maxReach == null ? 'old' : lastSweep.maxReach}`);
-                bot._prepOakApplePulseBackoffUntil = 0;
-                bot._prepOakApplePulseBackoffTarget = null;
-                runtimeOakBackoff = 0;
-            }
-            const nearLogRuntimeRetry = oakSignal.ok
-                && runtimeOakBackoff > 45000
-                && bot.food <= 3
-                && oakSignal.dist <= 2.5
-                && lastSweep
-                && lastSweep.reachable === 0
-                && (lastSweep.maxReach || 0) >= 5
-                && lastSweep.nearest
-                && lastSweep.nearest.dist <= 6.5;
-            if (nearLogRuntimeRetry) {
-                prog(`prepNether: bounded oak/apple forage shortens near-log runtime backoff for ${oakSignal.target} nearest=${lastSweep.nearest.name}@${lastSweep.nearest.dist.toFixed(2)}`);
-                bot._prepOakApplePulseBackoffUntil = Date.now() + 45000;
-                bot._prepOakApplePulseBackoffTarget = oakSignal.target;
-                runtimeOakBackoff = 45000;
-            }
-            const oakPulseBackoff = Math.max(0, runtimeOakBackoff, persistedOakBackoff);
-            if (oakSignal.ok && oakPulseBackoff <= 0) {
-                const foodBeforeOak = bot.food;
-                // ★C271 WOOD-FIRST (新世界 churn 取证: 饿身 hp1 next to oak_log@2 却锁死在 feedUp——徒手追
-                // 逃跑的鸡/扫叶找苹果全失败——而旁边的树干木(=剑→有效狩猎→食物的钥匙)没人砍。优先级倒置:
-                // 食物危机劫持决策,但没武器赢不了食物,武器要的木就在臂展内。无木时先把近处树干砍了(白天+安全
-                // +~5s,几乎免费),解锁工具链。体现用户#1:别被危机锁死,果断拿下能解一切的前置。)
-                const _noWoodHeld = heldLogs() === 0 && maxHeldPlankStack() < 4 && has('crafting_table') < 1;
-                if (_noWoodHeld && oakSignal.dist <= 8 && !isNightNow() && !isDuskNow()) {
-                    prog(`prepNether: ★C271 WOOD-FIRST — wood-less + ${oakSignal.target} in reach; chop trunk before food pulse (unlocks tools→hunt→food) food=${bot.food} hp=${Math.round(bot.health)}`);
-                    try {
-                        await Promise.race([
-                            skills.customSkill(bot, 'chopWood', 2),
-                            new Promise((_, rej) => setTimeout(() => rej(new Error('woodfirst-timeout')), 30000)),
-                        ]);
-                    } catch (e) { try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} prog(`prepNether: C271 wood-first chop incomplete: ${e.message}`); }
-                    if (heldLogs() > 0 || maxHeldPlankStack() >= 4) { prog(`prepNether: ★C271 got wood (logs=${heldLogs()} planksMax=${maxHeldPlankStack()}) — resume to build tools`); return false; }
-                }
-                bot._prepOakApplePulseBackoffUntil = Date.now() + 90000;
-                bot._prepOakApplePulseBackoffTarget = oakSignal.target;
-                prog(`prepNether: bounded oak/apple forage — ${oakSignal.target}; direct feedUp pulse, no surfaceUp blind climb (food=${bot.food} hp=${Math.round(bot.health)})`);
-                try { bot._hungerGateHunt = Date.now(); await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: oak/apple feedUp err ${e.message}`); }
-                const sweep = bot._feedUpLastLeafSweep && Date.now() - bot._feedUpLastLeafSweep.at < 10000 ? bot._feedUpLastLeafSweep : null;
-                if (sweep && (!sweep.reachable || !sweep.broken)) {
-                    const decayKick = !!sweep.decayKick;
-                    const occludedNearLeaf = sweep.reachable > 0
-                        && !sweep.broken
-                        && (sweep.failed || 0) > 0
-                        && (sweep.maxReach || 0) >= 5
-                        && sweep.nearest
-                        && sweep.nearest.dist <= 5.2;
-                    const backoffMs = decayKick ? 45000 : (occludedNearLeaf ? 30000 : (sweep.reachable ? 180000 : 300000));
-                    bot._prepOakApplePulseBackoffUntil = Date.now() + backoffMs;
-                    bot._prepOakApplePulseBackoffTarget = oakSignal.target;
-                    const n = sweep.nearest ? `${sweep.nearest.name}@${Math.round(sweep.nearest.dist)} dy=${Math.round(sweep.nearest.dy)} ${sweep.nearest.x},${sweep.nearest.y},${sweep.nearest.z}` : 'none';
-                    writeOakAppleBackoff({
-                        at: Date.now(),
-                        until: bot._prepOakApplePulseBackoffUntil,
-                        target: oakSignal.target,
-                        reachable: sweep.reachable,
-                        broken: sweep.broken,
-                        failed: sweep.failed || 0,
-                        maxReach: sweep.maxReach,
-                        openedWindows: sweep.openedWindows || 0,
-                        nearest: sweep.nearest || null,
-                        decayKick,
-                    });
-                    prog(`prepNether: bounded oak/apple forage no real leaf action reachable=${sweep.reachable} broken=${sweep.broken} failed=${sweep.failed || 0} opened=${sweep.openedWindows || 0} decayKick=${decayKick} nearest=${n}; oak pulse backoff ${Math.ceil(backoffMs / 1000)}s`);
-                }
-                if (edibleNow() || bot.food > foodBeforeOak || (bot.food >= 18 && bot.health < 14)) return true;
-                prog(`prepNether: bounded oak/apple forage found no edible/improvement (${foodBeforeOak}->${bot.food}); hold body`);
-                bot._prepLowHpNoFoodUntil = Date.now() + 60000;
-                try { bot.clearControlStates(); } catch (e) {}
-                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
-                return false;
-            }
-            if (oakSignal.ok && oakPulseBackoff > 0 && (!bot._lastPrepOakAppleBackoffLogAt || Date.now() - bot._lastPrepOakAppleBackoffLogAt > 30000)) {
-                bot._lastPrepOakAppleBackoffLogAt = Date.now();
-                prog(`prepNether: bounded oak/apple forage backoff ${Math.ceil(oakPulseBackoff / 1000)}s for ${oakSignal.target}`);
-            }
-            if (oakSignal.ok && oakPulseBackoff > 0) {
-                const junkBoosted = Date.now() - (bot._prepEmergencyJunkAteAt || 0) < 180000;
-                const probeReady = Date.now() > (bot._prepBoostedOakClimbUntil || 0);
-                if (junkBoosted && probeReady && bot.food >= 14 && bot.health <= 8 && !isNightNow() && !isDuskNow() && hostilesNear(16) === 0) {
-                    bot._prepBoostedOakClimbUntil = Date.now() + 300000;
-                    const surfTarget = Math.max(63, Math.floor(bot.entity.position.y) + 6);
-                    prog(`prepNether: boosted oak climb probe — ate emergency junk, ${oakSignal.target} still unreachable/backoff; surfaceUp target=${surfTarget} then one feedUp pulse`);
-                    try { await skills.customSkill(bot, 'surfaceUp', surfTarget); } catch (e) { prog(`prepNether: boosted oak climb surfaceUp err ${e.message}`); }
-                    try { bot._hungerGateHunt = Date.now(); await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: boosted oak climb feedUp err ${e.message}`); }
-                    if (edibleNow() || bot.food >= 18 || bot.health >= 14) return true;
-                    prog(`prepNether: boosted oak climb probe found no recovery (food=${bot.food} hp=${Math.round(bot.health)}); resume hold`);
-                    bot._prepLowHpNoFoodUntil = Date.now() + 60000;
-                    try { bot.clearControlStates(); } catch (e) {}
-                    try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
-                    return false;
-                }
-                bot._prepLowHpNoFoodUntil = Date.now() + Math.min(oakPulseBackoff, 30000);
-                try { bot.clearControlStates(); } catch (e) {}
-                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
-                return false;
-            }
-        }
-        const foodSurfaceBackoff = Math.max(0, (bot._prepNoFoodSurfaceBackoffUntil || 0) - Date.now());
-        const moderateSafeUndergroundWork = () => {
-            try {
-                if (openSurfaceNow() || isNightNow() || isDuskNow()) return false;
-                if (bot.food < 8 || bot.health < 14 || edibleNow()) return false;
-                if (!hasAnyHeldPick()) return false;
-                if (!coveredAboveNow() && !containedMobilityNow()) return false;
-                const threat = noRegenActionableThreats(12);
-                return threat.actionable === 0;
-            } catch (e) {
-                return false;
-            }
-        };
-        if (moderateSafeUndergroundWork()) {
-            if (!bot._lastModerateUndergroundNoFoodWorkAt || Date.now() - bot._lastModerateUndergroundNoFoodWorkAt > 30000) {
-                bot._lastModerateUndergroundNoFoodWorkAt = Date.now();
-                prog(`prepNether: HUNGER/LOWHP gate — no surface food signal, but hp=${Math.round(bot.health)} food=${bot.food} calm/enclosed with pick; allow local underground prep only`);
-            }
-            return true;
-        }
-        if (foodSurfaceBackoff > 0 && !openSurfaceNow() && bot.food >= 7) {
-            prog(`prepNether: HUNGER/LOWHP gate — last surface/feedUp found no food; backoff ${Math.ceil(foodSurfaceBackoff / 1000)}s before another cave climb (food=${bot.food} hp=${Math.round(bot.health)})`);
-            try { bot.clearControlStates(); } catch (e) {}
-            try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
-            return false;
-        }
-        if (!openSurfaceNow() && bot.food <= 3 && bot.health <= 8 && !edibleNow()) {
-            const localOak = localCriticalOakSignal();
-            if (localOak.ok) {
-                const foodBeforeLocalOak = bot.food;
-                bot._prepOakApplePulseBackoffUntil = Date.now() + 45000;
-                bot._prepOakApplePulseBackoffTarget = localOak.target;
-                prog(`prepNether: CRITICAL local oak forage — ${localOak.target}; bounded feedUp only, no surfaceUp/no long cave-climb backoff (food=${bot.food} hp=${Math.round(bot.health)})`);
-                try { bot._hungerGateHunt = Date.now(); await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: critical local oak feedUp err ${e.message}`); }
-                const sweep = bot._feedUpLastLeafSweep && Date.now() - bot._feedUpLastLeafSweep.at < 10000 ? bot._feedUpLastLeafSweep : null;
-                if (sweep) {
-                    const decayKick = !!sweep.decayKick;
-                    const backoffMs = decayKick ? 45000 : 60000;
-                    bot._prepOakApplePulseBackoffUntil = Date.now() + backoffMs;
-                    bot._prepOakApplePulseBackoffTarget = localOak.target;
-                    writeOakAppleBackoff({
-                        at: Date.now(),
-                        until: bot._prepOakApplePulseBackoffUntil,
-                        target: localOak.target,
-                        reachable: sweep.reachable,
-                        broken: sweep.broken,
-                        failed: sweep.failed || 0,
-                        maxReach: sweep.maxReach,
-                        openedWindows: sweep.openedWindows || 0,
-                        nearest: sweep.nearest || null,
-                        decayKick,
-                    });
-                    prog(`prepNether: CRITICAL local oak forage sweep reachable=${sweep.reachable} broken=${sweep.broken} failed=${sweep.failed || 0} decayKick=${decayKick}; retry backoff ${Math.ceil(backoffMs / 1000)}s`);
-                }
-                if (edibleNow() || bot.food > foodBeforeLocalOak) return true;
-                prog(`prepNether: CRITICAL local oak forage no edible/improvement (${foodBeforeLocalOak}->${bot.food}); hold body, retry local signal shortly`);
-                bot._prepLowHpNoFoodUntil = Date.now() + 45000;
-                try { bot.clearControlStates(); } catch (e) {}
-                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
-                return false;
-            }
-            prog(`prepNether: CRITICAL no-regen food gate — food=${bot.food} hp=${Math.round(bot.health)} no edible, enclosed/high-pocket; no surfaceUp blind climb, hold for bounded/local forage only`);
-            bot._prepLowHpNoFoodUntil = Date.now() + 60000;
-            bot._prepNoFoodSurfaceBackoffUntil = Date.now() + 90000;
-            try { bot.clearControlStates(); } catch (e) {}
-            try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
-            return false;
-        }
-        if (!openSurfaceNow() && bot.food >= 7) {
-            const signal = foodSignalBeforeSurface();
-            if (!signal.ok) {
-                prog(`prepNether: HUNGER/LOWHP gate — no concrete food signal before cave climb (${signal.reason}); hold instead of surfaceUp (food=${bot.food} hp=${Math.round(bot.health)} y=${Math.round(bot.entity.position.y)})`);
-                bot._prepLowHpNoFoodUntil = Date.now() + 60000;
-                bot._prepNoFoodSurfaceBackoffUntil = Date.now() + 180000;
-                try { bot.clearControlStates(); } catch (e) {}
-                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
-                return false;
-            }
-            prog(`prepNether: food signal before surface climb — ${signal.target}`);
-        }
-        const dryFood = feedUpDryNoFood();
-        if (dryFood) {
-            prog(`prepNether: HUNGER/LOWHP gate — feedUp dry no-food cooldown ${Math.ceil(dryFood.left / 1000)}s reason=${dryFood.reason} prev=${dryFood.food}/${dryFood.hp}; hold instead of retrying feedUp (food=${bot.food} hp=${Math.round(bot.health)})`);
-            bot._prepLowHpNoFoodUntil = Date.now() + Math.min(dryFood.left, 60000);
-            if (!openSurfaceNow() && bot.food >= 7) bot._prepNoFoodSurfaceBackoffUntil = Date.now() + Math.max(dryFood.left, 60000);
-            try { bot.clearControlStates(); } catch (e) {}
-            try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
-            return false;
-        }
-        prog(`prepNether: ★HUNGRY/LOWHP food=${bot.food} hp=${Math.round(bot.health)}, no food held → surfacing to hunt (feedUp)`);
-        try {
-            if (!openSurfaceNow()) {
-                const surfTarget = Math.max(63, Math.floor(bot.entity.position.y) + 8);
-                prog(`prepNether: enclosed/high-pocket food run — surfaceUp target=${surfTarget}`);
-                await skills.customSkill(bot, 'surfaceUp', surfTarget);
-            }
-        } catch (e) { prog(`prepNether: surfaceUp err ${e.message}`); }
-        const foodBeforeHunt = bot.food;
-        try { bot._hungerGateHunt = Date.now(); await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`prepNether: feedUp err ${e.message}`); }
-        prog(`prepNether: hunt done — food=${bot.food} hp=${Math.round(bot.health)}`);
-        // ★C339 死区实锤 2026-07-02 17:21-17:36: hp=8 food=0 地表白天,饥饿damage在easy难度
-        // 到floor后hp永久钉在8 — C285要hp>=10+sapling+0planks,这里原来要hp<=6,7-9之间
-        // 两个逃生口都不开,feedUp又空手 → "stop prep work"→false→5min冷却→永动僵局。
-        // 放宽到hp<=9补上死区(仅famine+零木+feedUp已失败后,chopWood自带威胁处理/树黑名单)。
-        if (bot.food <= 2 && bot.health <= 9 && woodEqNow() < 2) {
-            prog(`prepNether: FAMINE forage — feedUp found no food; trying nearby wood/apples once before holding`);
-            // C228 venture 旗: famineBodyFreeze 在 food=0 且 _currentSkill='prepNether'(不在其
-            // allowlist)时每 tick 清 pathfinder/控制态 — 不举旗斫木寸步难行(17:21 实锤 freeze 日志)。
-            bot._recoveryVentureUntil = Date.now() + 150000;
-            try { await skills.customSkill(bot, 'chopWood', 2, { allowCriticalForage: true }); } catch (e) { prog(`prepNether: famine chopWood err ${e.message}`); }
-            finally { bot._recoveryVentureUntil = 0; }
-        }
-        const edibleAfter = edibleNow();
-        if (edibleAfter) {
-            prog(`prepNether: famine recovery food item ${edibleAfter.name} — eat before resuming`);
-            try { await skills.consume(bot, edibleAfter.name); } catch (e) {}
-        }
-        // ★C339: 饥荒斫木见了木 → 无镐时放行,别再"stop prep work"把刚到手的木头晾着 —
-        // 木→台→石镐全程零食耗(C291同理),famineStaticKit/keepKit接手就地链;
-        // 否则run N拿木、gate拦停,run N+1又因woodEq>=2跳过斫木,自举永远差一步。
-        if (!hasAnyHeldPick() && woodEqNow() >= 4) {
-            prog(`prepNether: ★C339 FAMINE forage got wood (woodEq=${woodEqNow()}) — pickless零食耗就地链放行 (table→pick)`);
-            return true;
-        }
-        if ((bot.food < 12 || (bot.health < 14 && bot.food < 18)) && !edibleNow() && bot.food <= foodBeforeHunt) {
-            prog(`prepNether: HUNGER/LOWHP gate — feedUp found no edible food and food did not improve (${foodBeforeHunt}->${bot.food}, hp=${Math.round(bot.health)}); stop prep work`);
-            bot._prepLowHpNoFoodUntil = Date.now() + 60000;
-            if (bot.food >= 7) bot._prepNoFoodSurfaceBackoffUntil = Date.now() + 180000;
-            try { bot.clearControlStates(); } catch (e) {}
-            try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
-            return false;
-        }
-        if (bot.food <= 2 && !edibleNow()) {
-            prog(`prepNether: FAMINE gate — feedUp found no edible food; stop all prep work at food=${bot.food} hp=${Math.round(bot.health)}`);
-            try { bot.clearControlStates(); } catch (e) {}
-            try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
-            return false;
-        }
+        if (bot.interrupt_code) return false;
+        if (bot.food >= 20) return true;
+        const food = edibleNow();
+        if (!food) return true;
+        prog(`prepNether: eating carried ${food.name} (food=${bot.food})`);
+        try { await skills.consume(bot, food); } catch (e) {}
         return true;
     };
 
@@ -2524,115 +1998,6 @@ async function prepNetherInner(bot, ctx) {
             const c = world.getInventoryCounts(bot);
             return ['wooden_pickaxe', 'stone_pickaxe', 'iron_pickaxe', 'diamond_pickaxe', 'netherite_pickaxe'].reduce((s, n2) => s + (c[n2] || 0), 0);
         }
-    };
-    const noRegenStaticKit = async (reason = 'body-budget') => {
-        if (bot.interrupt_code || hasEdible() || bot.health >= 14 || bot.food >= 18) return false;
-        if (bot._lastNoRegenStaticKitAt && Date.now() - bot._lastNoRegenStaticKitAt < 20000) return false;
-        bot._lastNoRegenStaticKitAt = Date.now();
-
-        const base = bot.entity.position.floored();
-        const foot = bot.blockAt(base);
-        const head = bot.blockAt(base.offset(0, 1, 0));
-        const under = bot.blockAt(base.offset(0, -1, 0));
-        const velY = Math.abs((bot.entity.velocity && bot.entity.velocity.y) || 0);
-        const unsafeFluid = (b) => b && /water|lava/.test(b.name || '');
-        const stable = velY < 0.12 && under && under.boundingBox === 'block' && !unsafeFluid(foot) && !unsafeFluid(head) && !unsafeFluid(under);
-        const hostileCount = hostilesNear(8);
-        const threat = noRegenActionableThreats(8);
-        const tableNear = await world.getNearestBlockAsync(bot, 'crafting_table', 4);
-        let c = world.getInventoryCounts(bot);
-        const count = (n) => c[n] || 0;
-        const planksEqLocal = () => Object.keys(c).filter(k => k.endsWith('_planks')).reduce((s, k) => s + c[k], 0)
-            + Object.keys(c).filter(k => k.endsWith('_log')).reduce((s, k) => s + c[k], 0) * 4;
-        const maxPlankStack = () => Math.max(0, ...Object.keys(c).filter(k => k.endsWith('_planks')).map(k => c[k] || 0));
-        const hasSwordTier = () => Object.keys(c).some(n => /^(stone|iron|diamond|netherite)_sword$/.test(n) && c[n] > 0);
-        const kitReady = () => effectivePicks() >= 1 && (count('crafting_table') > 0 || world.getNearestBlock(bot, 'crafting_table', 4))
-            && count('stick') >= 2 && hasSwordTier();
-        let helped = false;
-
-        if (kitReady()) {
-            if (!bot._lastNoRegenStaticKitReadyLogAt || Date.now() - bot._lastNoRegenStaticKitReadyLogAt > 120000) {
-                bot._lastNoRegenStaticKitReadyLogAt = Date.now();
-                prog(`prepNether: NO-REGEN static kit ready (${reason}) pick=${effectivePicks()} tableNear=${tableNear ? `${tableNear.position.x},${tableNear.position.y},${tableNear.position.z}` : 'yes'} stick=${count('stick')} swordTier=yes`);
-            }
-            return false;
-        }
-
-        const threatNearest = threat.nearest ? `${threat.nearest.name}@${threat.nearest.d.toFixed(1)} dy=${threat.nearest.dy.toFixed(1)}` : 'none';
-        prog(`prepNether: NO-REGEN static kit check (${reason}) pos=${base.x},${base.y},${base.z} foot=${foot ? foot.name : 'null'} head=${head ? head.name : 'null'} under=${under ? under.name : 'null'} stable=${stable} hostiles8=${hostileCount} actionable8=${threat.actionable} layered8=${threat.layered} secured=${threat.secured} nearest=${threatNearest} hp=${Math.round(bot.health)} food=${bot.food} pick=${effectivePicks()} tableInv=${count('crafting_table')} tableNear=${tableNear ? `${tableNear.position.x},${tableNear.position.y},${tableNear.position.z}` : 'none'} cobble=${count('cobblestone')} stick=${count('stick')} planksEq=${planksEqLocal()}`);
-        if (!stable) {
-            prog(`prepNether: NO-REGEN static kit skip — unstable/fluid body, no local crafting movement`);
-            return false;
-        }
-        if (threat.actionable > 0) {
-            prog(`prepNether: NO-REGEN static kit skip — actionable hostile within 8 (${threatNearest}), keep body for defense`);
-            return false;
-        }
-        if (threat.layered > 0) {
-            prog(`prepNether: NO-REGEN static kit — ignoring ${threat.layered}/${threat.raw} layered sealed threat(s) for zero-move local crafting (${threatNearest})`);
-        }
-
-        try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
-        try { bot.clearControlStates(); } catch (e) {}
-
-        const refresh = () => { c = world.getInventoryCounts(bot); return c; };
-        if (maxPlankStack() < 4) {
-            const logName = Object.keys(c).find(k => k.endsWith('_log') && c[k] > 0);
-            if (logName) {
-                const plankName = logName.replace(/_log$/, '_planks');
-                const before = planksEqLocal();
-                try { await skills.craftRecipeLocal(bot, plankName, 1); } catch (e) { prog(`prepNether: NO-REGEN static planks err ${e.message}`); }
-                refresh();
-                helped = helped || planksEqLocal() > before;
-            }
-        }
-
-        if (count('crafting_table') < 1 && !world.getNearestBlock(bot, 'crafting_table', 4) && maxPlankStack() >= 4) {
-            const before = count('crafting_table');
-            try { await skills.craftRecipeLocal(bot, 'crafting_table', 1); } catch (e) { prog(`prepNether: NO-REGEN static table err ${e.message}`); }
-            refresh();
-            helped = helped || count('crafting_table') > before;
-        }
-
-        if (count('stick') < 2 && planksEqLocal() >= 2) {
-            const before = count('stick');
-            try { await skills.craftRecipeLocal(bot, 'stick', 1); } catch (e) { prog(`prepNether: NO-REGEN static stick err ${e.message}`); }
-            refresh();
-            helped = helped || count('stick') > before;
-        }
-
-        if (effectivePicks() < 1 && count('cobblestone') >= 3 && count('stick') >= 2) {
-            const before = count('stone_pickaxe');
-            try { await skills.craftRecipeLocal(bot, 'stone_pickaxe', 1); } catch (e) { prog(`prepNether: NO-REGEN static pick err ${e.message}`); }
-            refresh();
-            if (count('stone_pickaxe') > before) {
-                helped = true;
-                try { await skills.equip(bot, 'stone_pickaxe'); } catch (e) {}
-                prog(`prepNether: NO-REGEN static stone_pickaxe crafted/equipped count=${count('stone_pickaxe')}`);
-            }
-        }
-
-        if (!hasSwordTier() && count('cobblestone') >= 2 && count('stick') >= 1) {
-            const before = count('stone_sword');
-            // ★C299: PLACE the held table first (mirrors the C287 spare-PICKAXE fix). craftRecipeLocal
-            // needs a PLACED table; the pickaxe path got this fix but the sword path never did, so the
-            // bot crafted spare pickaxes yet stayed SWORD-LESS and died defenseless (death #104:
-            // skeleton @0.7b, sword=null armor=0; chronic "48%空手死"). Same place-then-craft as the pick.
-            if (!world.getNearestBlock(bot, 'crafting_table', 4) && count('crafting_table') > 0) {
-                try { await skills.placeBlockNearby(bot, 'crafting_table', 2); } catch (e) { prog(`prepNether: NO-REGEN sword table place err ${e.message}`); }
-                regStation(bot, world, 'crafting_table');   // ★#3 登记 → KIT 顺手收回收
-            }
-            try { await skills.craftRecipeLocal(bot, 'stone_sword', 1); } catch (e) { prog(`prepNether: NO-REGEN static sword err ${e.message}`); }
-            refresh();
-            if (count('stone_sword') > before) {
-                helped = true;
-                try { await skills.equip(bot, 'stone_sword'); } catch (e) {}
-                prog(`prepNether: NO-REGEN static stone_sword crafted/equipped count=${count('stone_sword')}`);
-            }
-        }
-
-        prog(`prepNether: NO-REGEN static kit result helped=${helped} pick=${effectivePicks()} tableInv=${count('crafting_table')} tableNear=${world.getNearestBlock(bot, 'crafting_table', 4) ? 'yes' : 'none'} cobble=${count('cobblestone')} stick=${count('stick')} planksEq=${planksEqLocal()}`);
-        return helped;
     };
     const keepKit = async () => {
         if (bot.interrupt_code) return;
@@ -2894,7 +2259,7 @@ async function prepNetherInner(bot, ctx) {
         // 成功获木 → tableRecoveryBlocked 见 logs>0 自动放行, 原流程继续; 失败 → 如实落回原路径。
         if (!woodFirstTried && has(g.item) < g.count && needsCraftingTable(g.item)
             && planksEqHeld() < 4 && !isNightNow() && !isDuskNow()
-            && (!_foodOn() || !famineBudget()) && (!_hpOn() || bot.health >= 8) && !bot.interrupt_code) {   // ★2026-07-09 用户令 HP/食物本能熔断: 铁段前补木不再被因饿/低血挡(要求门); 对应闸开各自恢复。
+            && (!_foodOn() || !famineBudget()) && !bot.interrupt_code) {
             woodFirstTried = true;
             const underground = bot.entity.position.y < 55;
             prog(`prepNether: ★WOOD-FIRST before ${g.item} — planksEq=${planksEqHeld()}<4 (table floor), daytime → ${underground ? 'surfaceUp then ' : ''}chopWood before the iron segment`);

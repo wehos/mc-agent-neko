@@ -3,32 +3,24 @@
 // The bot keeps respawning at a spawn whose loaded radius has only distant water salmon (no
 // land animals / crops). So it can never sustain itself, degrades, dies, repeats. The only real
 // fix is to WALK OUT to fresh terrain and load chunks until huntable land animals appear — but
-// ONLY from a healthy window (this is suicidal at low hp). It hands the actual kill+eat to the
+// Only from a daylight, threat-free window. It hands the actual kill+eat to the
 // proven `forage` skill once animals are in range.
 //
-// HARD GATE: daylight + hp>=GATE_HP + food>=GATE_FOOD. At low hp/food this returns immediately
-// with a refusal (do NOT explore-and-die — that was the whole lesson). Bounded distance; aborts
-// on a close actionable hostile or an hp drop.
+// HARD GATE: daylight + food>=GATE_FOOD. Bounded distance; aborts on a close actionable hostile.
 //
-// opts: { maxBlocks=160, legBlocks=16, gateHp=14, gateFood=10, abortHp=6 }
-//   abortHp: per-leg hard abort threshold. Default 6 (don't explore-and-die). A last-resort
-//   caller stuck in a no-recovery permanent-freeze may pass abortHp:1 to force a venture out
-//   (frozen-forever is worse than walk-to-find-or-respawn).
+// opts: { maxBlocks=160, legBlocks=16, gateFood=10 }
 
 // ★2026-07-09 用户令 HP/食物本能熔断: 本能开关 (直接读 env, 默认 OFF; 值 '1' 恢复原行为)。
-const _hpOn   = () => process.env.MC_HP_INSTINCTS   === '1';
 const _foodOn = () => process.env.MC_FOOD_INSTINCTS === '1';
 
-// PURE readiness gate — offline-testable. Exploring is only safe when healthy in daylight.
+// PURE readiness gate — offline-testable. Exploring starts in daylight without a close threat.
 function exploreReady(state) {
     const s = state || {};
     if (s.isNight) return { ok: false, reason: 'night — do not explore (mobs); shelter' };
-    // ★2026-07-09 用户令 HP/食物本能熔断: HP 起始门 (太脆弱不敢探索); HP 闸开恢复。
-    if (_hpOn() && s.hp < (s.gateHp ?? 14)) return { ok: false, reason: `hp=${s.hp} < ${s.gateHp ?? 14} — too fragile to explore` };
     // ★2026-07-09 用户令 HP/食物本能熔断: 食物起始门 (太饿走不远); 食物闸开恢复。
     if (_foodOn() && s.food < (s.gateFood ?? 10)) return { ok: false, reason: `food=${s.food} < ${s.gateFood ?? 10} — too low to travel far` };
     if (s.actionableClose) return { ok: false, reason: 'actionable hostile close — handle threat first' };
-    return { ok: true, reason: `healthy daylight (hp=${s.hp} food=${s.food}) — explore for food` };
+    return { ok: true, reason: `safe daylight (food=${s.food}) — explore for food` };
 }
 
 // PURE bearing — head away from the death-zone centroid (where the bot keeps dying), else +x.
@@ -53,7 +45,7 @@ export default async function forageExplore(bot, ctx, opts = {}) {
     // and could only relocate AFTER dying (diedHere). The result: food8 catch-22, starve-in-place. As
     // the food-desert detector, forageExplore is the right owner: a completed daylight search that found
     // NO land animals is the streak++ signal; finding food resets it. migrate reads it + still self-gates
-    // (daylight + hp>=14 + 20min cooldown), so this only ENABLES escape, it doesn't force thrashing.
+    // (daylight + threat/food/cooldown gates), so this only ENABLES escape, it doesn't force thrashing.
     const _bumpDesert = async (found) => {
         try {
             const fs = (await import('fs')).default; const path = (await import('path')).default;
@@ -76,7 +68,7 @@ export default async function forageExplore(bot, ctx, opts = {}) {
         }
     } catch (e) {}
     const maxBlocks = opts.maxBlocks || 160, legBlocks = opts.legBlocks || 16;
-    const gateHp = opts.gateHp ?? 14, gateFood = opts.gateFood ?? 10;
+    const gateFood = opts.gateFood ?? 10;
 
     const isNight = () => { try { const t = bot.time.timeOfDay; return t > 13000 && t < 23000; } catch { return false; } };
     const closeActionable = () => { try { return Object.values(bot.entities || {}).some(e => e && e !== bot.entity && e.position && mc.isHostile(e) && e.position.distanceTo(bot.entity.position) < 8); } catch { return false; } };
@@ -86,7 +78,7 @@ export default async function forageExplore(bot, ctx, opts = {}) {
         return best;
     };
 
-    const ready = exploreReady({ isNight: isNight(), hp: Math.round(bot.health), food: bot.food, actionableClose: closeActionable(), gateHp, gateFood });
+    const ready = exploreReady({ isNight: isNight(), food: bot.food, actionableClose: closeActionable(), gateFood });
     log_(`gate: ${ready.reason}`);
     if (!ready.ok) return { explored: false, reason: ready.reason };
 
@@ -98,12 +90,9 @@ export default async function forageExplore(bot, ctx, opts = {}) {
 
     const legs = Math.ceil(maxBlocks / legBlocks);
     for (let i = 1; i <= legs; i++) {
-        // Re-check safety each leg — abort to survival if night falls / threat / hp drop.
+        // Re-check safety each leg — abort if night falls or a concrete threat appears.
         if (isNight()) { log_(`abort: night fell at leg ${i}`); return { explored: true, found: false, reason: 'night fell — return to shelter' }; }
         if (closeActionable()) { log_(`abort: actionable hostile at leg ${i}`); return { explored: true, found: false, reason: 'hostile close' }; }
-        // ★2026-07-09 用户令 HP/食物本能熔断: 逐段低血中止; HP 闸开恢复。
-        if (_hpOn() && bot.health <= (opts.abortHp ?? 6)) { log_(`abort: hp=${Math.round(bot.health)} <= ${opts.abortHp ?? 6} dropped at leg ${i}`); return { explored: true, found: false, reason: 'hp dropped' }; }
-
         // Found land food in range? Hand off to the proven forage skill to hunt+eat.
         const a = landAnimal();
         if (a && a.d <= 40) {

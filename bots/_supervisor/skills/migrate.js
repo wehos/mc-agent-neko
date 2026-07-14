@@ -7,15 +7,14 @@
 // plant a bed there. forageExplore (maxBlocks~160, bearing reset each leg = circles the desert)
 // is "buy groceries"; migrate is "move house". This encodes that human decision.
 //
-// HARD SAFETY (the explore-and-die lesson — peaceful does NOT stop drowning/lava/falls):
-//   - daylight + hp>=gateHp + food>=gateFood to START; per-leg re-gate (night->prepNether
-//     bunker & resume at dawn; close hostile / hp-drop / food-floor -> break & return).
+// HARD SAFETY (peaceful does NOT stop drowning/lava/falls):
+//   - daylight + food reserve to START; per-leg re-gate on night, close threats and food.
 //   - self_preservation tick reflex (modes.js) runs THROUGHOUT goToPosition: drown/burn/fall/
 //     night-bunker are handled by the body's own instincts; migrate only steers.
 //   - cancellable: breaks on bot.interrupt_code (cancel_skill or a mobility reflex emergency),
 //     mirroring branchMine — NOT by clearing the flag (that would make an 8-min march un-stoppable).
 //
-// opts: { maxBlocks=800, legBlocks=24, gateHp=14, gateFood=12, abortHp=8, legFoodFloor=7,
+// opts: { maxBlocks=800, legBlocks=24, gateFood=12, legFoodFloor=7,
 //         settleScore=14, maxMs=480000, jitterDeg=0, cooldownMin=20, force=false }
 //
 // ctx = { skills, world, mc, Vec3, log }
@@ -36,9 +35,7 @@ const dbg = (s) => { try { fs.appendFileSync(MIGRATELOG, `[${new Date().toISOStr
 const LAND_HUNT = ['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'mooshroom', 'goat'];
 const NIGHT_START = 13000, NIGHT_END = 23000;
 
-// ★2026-07-09 用户令 HP/食物本能熔断: 这两个闸门直读 process.env, 控"因低血/因饿"行为;
-// 任一/双闸开(=== '1')恢复原行为, 默认关(!= '1', 含未设)时相应低血/低饿分支变惰性。
-const _hpOn   = () => process.env.MC_HP_INSTINCTS   === '1';
+// The food-instinct switch controls proactive low-food migration gates.
 const _foodOn = () => process.env.MC_FOOD_INSTINCTS === '1';
 
 // ---------------------------------------------------------------------------
@@ -107,16 +104,15 @@ function migrateBearing(pos, dzone, barrenCentroid, jitterDeg) {
 
 // Decide whether a cross-continent migration is warranted. PURE — takes accumulated signals.
 //   signals: { oceanStreak, noAnimalStreak, foodDeathsClustered, insideDeathZone,
-//              hp, food, isNight, actionableClose, msSinceLastMigrate, cooldownMs,
-//              gateHp, gateFood, force }
+//              food, isNight, actionableClose, msSinceLastMigrate, cooldownMs,
+//              gateFood, force }
 // Returns {go, reason}.
 function shouldMigrate(signals) {
     const s = signals || {};
     if (s.force) return { go: true, reason: 'force=true (manual / last-resort)' };
     if (s.isNight) return { go: false, reason: 'night — do not start a long march (bunker)' };
     if (s.actionableClose) return { go: false, reason: 'actionable hostile close — handle threat first' };
-    // ★2026-07-09 用户令 HP/食物本能熔断: 低血/低饿 no-go start-gate; 任一闸开恢复。
-    if (_hpOn() && s.hp < (s.gateHp ?? 14)) return { go: false, reason: `hp=${s.hp} < ${s.gateHp ?? 14} — too fragile to migrate` };
+    // Proactive food gate; absolute health is intentionally absent.
     if (_foodOn() && s.food < (s.gateFood ?? 12)) return { go: false, reason: `food=${s.food} < ${s.gateFood ?? 12} — too low for a long march` };
     if ((s.msSinceLastMigrate ?? Infinity) < (s.cooldownMs ?? 1200000))
         return { go: false, reason: `migrated ${Math.round((s.msSinceLastMigrate || 0) / 60000)}min ago < cooldown — give the new area a chance` };
@@ -135,7 +131,7 @@ function shouldMigrate(signals) {
     const bootstrapStuck = !!s.bootstrapStuck;
     if (!desert && !diedHere && !bootstrapStuck)
         return { go: false, reason: `no unlivable evidence (oceanStreak=${s.oceanStreak} noAnimalStreak=${s.noAnimalStreak} currentOcean=${s.currentOcean} diedHere=${diedHere} bootstrapStuck=${bootstrapStuck}) — let forageExplore try first` };
-    return { go: true, reason: `unlivable: desert=${desert}(ocean=${s.currentOcean} streak=${s.oceanStreak}/${s.noAnimalStreak}) diedHere=${diedHere} bootstrapStuck=${bootstrapStuck}(noTree) hp=${s.hp} food=${s.food} — relocate cross-continent` };
+    return { go: true, reason: `unlivable: desert=${desert}(ocean=${s.currentOcean} streak=${s.oceanStreak}/${s.noAnimalStreak}) diedHere=${diedHere} bootstrapStuck=${bootstrapStuck}(noTree) food=${s.food} — relocate cross-continent` };
 }
 
 // ---------------------------------------------------------------------------
@@ -174,13 +170,10 @@ export default async function migrate(bot, ctx, opts = {}) {
 
     const maxBlocks = opts.maxBlocks || 800;
     const legBlocks = opts.legBlocks || 24;
-    const gateHp = opts.gateHp ?? 14, gateFood = opts.gateFood ?? 6;
+    const gateFood = opts.gateFood ?? 6;
     // legFoodFloor=1: a human hungry in a FOOD DESERT does NOT sit and starve — staying =
     // guaranteed starvation, leaving = a chance at food. So commit to the march even hungry.
-    // SAFETY is abortHp (=8), which is difficulty-robust: on easy, starvation floors hp at 10
-    // (>8) so the full journey proceeds; on normal/hard, food→0 drops hp past 8 → abortHp aborts
-    // BEFORE a starvation death. Opportunistic forage still tops up en route when food is found.
-    const abortHp = opts.abortHp ?? 8, legFoodFloor = opts.legFoodFloor ?? 1;
+    const legFoodFloor = opts.legFoodFloor ?? 1;
     const settleScore = opts.settleScore ?? 14;
     const maxMs = opts.maxMs ?? 480000;
 
@@ -280,11 +273,11 @@ export default async function migrate(bot, ctx, opts = {}) {
     const decision = shouldMigrate({
         oceanStreak: mstate.oceanStreak, noAnimalStreak: mstate.noAnimalStreak, currentOcean,
         foodDeathsClustered, insideDeathZone, bootstrapStuck,
-        hp: Math.round(bot.health), food: bot.food,
+        food: bot.food,
         isNight: isNight(), actionableClose: closeActionable(),
         msSinceLastMigrate: Date.now() - (mstate.lastMigrateAt || 0),
         cooldownMs: (opts.cooldownMin ?? 20) * 60000,
-        gateHp, gateFood, force: opts.force === true,
+        gateFood, force: opts.force === true,
     });
     log_(`gate: ${decision.reason}`);
     // ★kernel return contract (live 2026-07-02 04:0x: 12+ MIGRATE re-commits with the bot
@@ -381,8 +374,7 @@ export default async function migrate(bot, ctx, opts = {}) {
             continue;
         }
         if (closeCreeper()) { abort = `creeper point-blank at leg ${leg} — yield to defense/EVAC`; break; }   // C263: only an unavoidable creeper aborts; other mobs handled by reflex (interrupt_code) or walked past
-        // ★2026-07-09 用户令 HP/食物本能熔断: 低血中止行军; HP 闸开恢复。
-        if (_hpOn() && Math.round(bot.health) <= abortHp) { abort = `hp=${Math.round(bot.health)} <= ${abortHp} at leg ${leg}`; break; }
+        // Absolute health never aborts a migration; night, food, threats, and damage remain bounded.
         // ★2026-07-09 用户令 HP/食物本能熔断: 低饿 forage 补给+中止行军整块; 食物闸开恢复。
         if (_foodOn() && bot.food < legFoodFloor && !edibleHeld()) {
             // Top up before marching the last food away (forage budget lesson). One bounded try.
@@ -423,7 +415,7 @@ export default async function migrate(bot, ctx, opts = {}) {
         let legAdv = 0;
         for (let h = 0; h * HOP < legBlocks; h++) {
             if (bot.interrupt_code || Date.now() - t0 > maxMs) break;
-            if (isNight() || closeCreeper() || (_hpOn() && Math.round(bot.health) <= abortHp)) break;   // C263: bail to outer gates (creeper-only, not every nearby mob) ★2026-07-09 用户令 HP/食物本能熔断: 低血中止 hop 仅 HP 闸开;夜/苦力怕不变。
+            if (isNight() || closeCreeper()) break;
             const hx = Math.round(bot.entity.position.x + cur.x * HOP);
             const hz = Math.round(bot.entity.position.z + cur.z * HOP);
             const hb = bot.entity.position.clone();

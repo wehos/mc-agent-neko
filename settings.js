@@ -3,8 +3,7 @@ const settings = {
     "host": "localhost", // or "localhost", "your.ip.address.here"
     // ★2026-07-06 session#5 (用户 11:05 裁定): 专用服务器时代结束 — 回连用户自开的客户端 LAN
     // 世界「新的世界」, 端口 55916 显式钉死 (用户在场肉眼监督, 不再 -1 扫描/不再 25565)。
-    // 注意: LAN 世界无 RCON (oracle-daemon 已在 watchdog 停用), keepInventory 未验真前
-    // surviveNow 求死分支自动禁用 (keepinv.json 已归档)。
+    // 注意: LAN 世界无 RCON (oracle-daemon 已在 watchdog 停用); keepInventory 仅作死亡/跑坟语义观测。
     "port": 55916,
     "auth": "offline", // or "microsoft"
     "player_username": "", // real in-game name of the human owner the bot follows/serves. empty = auto-detect LAN host / single-player owner at runtime

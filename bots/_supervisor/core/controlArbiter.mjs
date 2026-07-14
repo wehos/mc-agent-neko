@@ -8,8 +8,7 @@
 //
 // SAFETY: only the ESCAPE action is wired live so far, because escapePlan carries its own
 // travel-budget + cellSafety guards and has broken a real livelock before. WORK-stall (the
-// current food-desert / over-gated case) is logged but NOT auto-driven yet — driving "go mine
-// unarmored at low hp" needs a safe sealed-staircase miner first. We do not flip a risky action
+// current food-desert / over-gated case) is logged but NOT auto-driven yet. We do not flip a risky action
 // live just to look busy; an unfixed stall is logged honestly rather than poked recklessly.
 //
 // Run:  node bots/_supervisor/core/controlArbiter.mjs           (SHADOW — default, no control)
@@ -40,8 +39,7 @@ function actionFor(mode, wm) {
         case 'FORAGE':  // reserved — forage v2 budget-gated; wire once a forage MODE exists
             return null;
         case 'WORK':
-            // Driving WORK = mine/gather. Unsafe to auto-drive at low hp unarmored without a
-            // sealed-staircase miner. Logged, not driven. (next build)
+            // Driving WORK = mine/gather. Logged, not driven. (next build)
             return null;
         default:
             return null;  // DEFEND/FLEE/EAT/SHELTER handled by tick reflexes + sticky skill for now

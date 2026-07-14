@@ -2207,8 +2207,7 @@ export async function pickupNearbyItems(bot, distance = 8) {
             return it && it.name ? it.name : '';
         } catch (e) { return ''; }
     };
-    // ★2026-07-09 用户令: 双闸全 OFF 时不因低血/饥饿改变拾取行为 (不再只捡食物/贴身近物); 任一闸开恢复。
-    const faminePickup = () => (process.env.MC_FOOD_INSTINCTS === '1' || process.env.MC_HP_INSTINCTS === '1') && (bot.food <= 2 || (bot.food <= 3 && bot.health <= 8));
+    const faminePickup = () => process.env.MC_FOOD_INSTINCTS === '1' && bot.food <= 2;
     const miningPickup = () => {
         const skill = bot._currentSkill || '';
         const mob = bot._mobility || {};
@@ -3608,7 +3607,10 @@ export async function consume(bot, itemName="") {
 
 async function _consumeOnce(bot, itemName="") {
     let item, name;
-    if (itemName) {
+    if (itemName && typeof itemName === 'object') {
+        item = itemName;
+        name = item.name;
+    } else if (itemName) {
         item = bot.inventory.findInventoryItem(itemName);
         name = itemName;
     }
@@ -3616,7 +3618,7 @@ async function _consumeOnce(bot, itemName="") {
         log(bot, `You do not have any ${name} to eat.`);
         return false;
     }
-    const equipRes = await tickConfirm.equipConfirmed(bot, item.name, 'hand');
+    const equipRes = await tickConfirm.equipConfirmed(bot, item, 'hand');
     if (!equipRes.ok) {
         log(bot, `Failed to equip ${item.name} to consume: ${equipRes.reason}.`);
         return false;
@@ -4212,8 +4214,7 @@ function randomUnstickSkipMode(bot, goalInfo = null) {
             i && i.name &&
             /beef|porkchop|chicken|mutton|rabbit|cod|salmon|bread|apple|berries|potato|carrot|melon|cookie|pumpkin_pie|beetroot|mushroom_stew|rabbit_stew|suspicious_stew/i.test(i.name) &&
             i.name !== 'rotten_flesh');
-        // ★2026-07-09 用户令: 双闸全 OFF 时不因低血限制取物目标; 任一闸开恢复。
-        if ((process.env.MC_HP_INSTINCTS === '1' || process.env.MC_FOOD_INSTINCTS === '1') && isItemGoal && bot && bot.health <= 8 && bot.food < 18 && !normalFood) return 'lowhp-item-pickup';
+        if (process.env.MC_FOOD_INSTINCTS === '1' && isItemGoal && bot && bot.food <= 3 && !normalFood) return 'famine-item-pickup';
     } catch (e) {}
     return null;
 }

@@ -4,7 +4,7 @@
 //                 hit-and-retreat only if it's already point-blank.
 //   • skeleton -> close the gap with the shield RAISED (blocks arrows), then strike.
 //   • witch    -> RUSH with shield DOWN (splash potions ignore shields; raising one
-//                 halves move speed) + stop-loss: hp<10 → sprint out to >20b.
+//                 halves move speed).
 //   • zombie/spider/other -> approach and melee, shield up between swings.
 //   • enderman -> disengage (don't provoke; looking at it aggroes — just move off).
 // Invoked via: {"skill":"shieldFight",[range]}  ctx = { skills, world, mc, Vec3, log }
@@ -15,8 +15,7 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
     // ★2026-07-03 验尸修 (02:12/02:13 zombie 1v1 死, combat_log 实锤全程 held=empty):
     // 装剑原来只在技能入口做一次 — 开打瞬间撞上手部竞争 (auto_eat consume 收尾/残留合成窗口,
     // progress 02:12:24.630Z "Failed to equip stone_sword (tick_race)" 实锤) 就整场 14s+
-    // 赤手空拳: 拳头 1dmg 杀不动僵尸, 反被磨到 hp<7 → self_pres 保命逃(红线,正确) → 走路
-    // 跑不过僵尸 → 死于 mode:self_preservation。改为战斗循环内每拍重申武器在手:
+    // 赤手空拳: 拳头 1dmg 杀不动僵尸。改为战斗循环内每拍重申武器在手:
     // 没握武器就先关掉残留窗口(卡死的合成界面会让 hotbar 换手静默失效)再装, 一次竞争最多丢一刀。
     const WEAPONS = ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'wooden_sword', 'netherite_axe', 'diamond_axe', 'iron_axe'];
     const armed = () => !!(bot.heldItem && WEAPONS.includes(bot.heldItem.name));
@@ -71,7 +70,7 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
     // wall — break and release the body so mobility's dig-out + the kernel's GET_FOOD take over.
     // Reachable skeletons die (HP drops → reset) or get replaced (new target → reset); melee mobs are
     // untouched (kind !== 'ranged'). Falls back to distance-stall when HP isn't exposed.
-    let rangedSince = 0, rangedId = null, rangedHp0 = null, prevD = Infinity, stalls = 0, fledWitch = false;
+    let rangedSince = 0, rangedId = null, rangedHp0 = null, prevD = Infinity, stalls = 0;
     while ((e = enemy()) && Date.now() - startT < maxMs) {
         if (bot.interrupt_code) break;
         const kind = kindOf(e);
@@ -79,26 +78,11 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
         if (kind !== 'enderman') await ensureWeapon();   // 每拍重申 — 见上方验尸注释
         // ★WITCH (2026-07-02 16:15-16:19Z 三连死, 同一只 id 349335): 盾挡不住喷溅药水的
         // 范围效果, 举盾走路还减速50% → 旧 melee 分支半速蹭近被风筝 (d 全程 1.8~5.4 震荡
-        // 47s 无输出, 女巫瞬回II把偶尔一刀全洗回来), 毒tick 1dmg/1.25s 磨穿血线; hp<=6
-        // break 后 mode 层 pointBlank 例外又立刻 re-engage → ENGAGE/DISENGAGE 空转至死。
-        // 新打法: (a) 血线止损 hp<10 → sprint 拉到 >20b (女巫索敌16b不远追), 等毒效过掉,
-        // flee 加 8s race 上界保 10s stop 预算 (仿 C347); (b) 贴脸压制: 全程不举盾保机动,
+        // 47s 无输出, 女巫瞬回II把偶尔一刀全洗回来), 毒tick持续磨血。
+        // 新打法: 贴脸压制，全程不举盾保机动,
         // d>3 全速关距离, 贴身按剑冷却连打 (女巫换喝回血药有硬直窗口, 持续 dps 压得过瞬回)。
         if (kind === 'witch') {
             lower();
-            if (bot.health < 10) {
-                log(bot, `shieldFight: witch stop-loss (hp=${Math.round(bot.health)} d=${d.toFixed(1)}) — sprint out of throw range, let potions wear off.`);
-                try { bot.setControlState('sprint', true); } catch (_) {}
-                try {
-                    await Promise.race([
-                        skills.moveAwayFromEntity(bot, e, 24),
-                        new Promise((_, rej) => setTimeout(() => rej(new Error('witch-flee-timeout')), 8000)),
-                    ]);
-                } catch (_) { try { bot.pathfinder.stop(); } catch (e2) {} }
-                try { bot.setControlState('sprint', false); } catch (_) {}
-                fledWitch = true;   // don't walk back for drops — the witch is standing on them
-                break;
-            }
             try { await bot.lookAt(e.position.offset(0, (e.height || 1.9) * 0.85, 0)); } catch (_) {}
             if (d > 3) {
                 try { bot.setControlState('sprint', true); await skills.goToPosition(bot, e.position.x, e.position.y, e.position.z, 2); } catch (_) {}
@@ -108,10 +92,6 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
             }
             continue;
         }
-        // ★2026-07-07 命令战斗覆盖 (用户令): 外部指令死战时(bot._commandedFightUntil), 把 hp≤6 自断
-        //   下调到硬地板 hp≤4 — 顶着 hp<7 恐惧继续打, 但仍在 hp≤4 交还身体让 vitalNow/self_preservation 逃(硬地板不可越)。
-        const _cmdFight = !!(bot._commandedFightUntil && Date.now() < bot._commandedFightUntil);
-        if (bot.health <= (_cmdFight ? 4 : 6)) break; // critical — let self_preservation flee/seal
         // ★石棺扩展 (2026-07-03 00:19 实锤 @99,10,204: 困 1x1 石棺, 洞外 spider@d=4.1 —
         // melee 不在此检测里 → shield-rush goToPosition noPath 秒回 → 空转 ×150/s 直到
         // maxMs, self_defense 又立刻 re-engage = mobility/脱困永饿死): 同一"打不动就放手"
@@ -212,7 +192,7 @@ export default async function shieldFight(bot, ctx, range = 14, maxMs = 14000) {
     // Grab the spoils (skeletons drop bows + arrows, which feed our ranged combat;
     // also bones/etc). This is how the bot bootstraps a bow without a supply chain.
     // (Skipped after a witch stop-loss flee — walking back to the drops = walking back into throw range.)
-    if (!fledWitch) { try { await skills.pickupNearbyItems(bot); } catch (e) {} }
+    try { await skills.pickupNearbyItems(bot); } catch (e) {}
     log(bot, `shieldFight done. hp=${Math.round(bot.health)} bow=${has('bow')} arrows=${has('arrow')}`);
     return true;
 }
