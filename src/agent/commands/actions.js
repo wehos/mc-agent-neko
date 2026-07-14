@@ -417,7 +417,7 @@ export const actionsList = [
     },
     {
         name: '!collectBlocks',
-        description: 'Collect the nearest blocks of a given type.',
+        description: 'Collect the nearest blocks of a given type. For ores, even num=1 exhausts the whole connected vein (including temporarily occluded tail blocks). For a general request like "mine coal/iron/diamonds", use !mineOres instead so mining continues to a useful stockpile.',
         params: {
             'type': { type: 'BlockName', description: 'The block type to collect.' },
             'num': { type: 'int', description: 'The number of blocks to collect.', domain: [1, Number.MAX_SAFE_INTEGER] }
@@ -431,7 +431,7 @@ export const actionsList = [
     //   走 customSkill(=run_skill 同一入口), 由 runAsAction 纳入 ActionManager, admin 回合独占期内运行。
     {
         name: '!mineOres',
-        description: 'Mine a target ore to a healthy STOCKPILE — automatically descends to the correct depth band, tunnels, and collects until it has a useful buffer (NOT just one). ALWAYS prefer this over !collectBlocks for "mine iron/coal/gold/copper/diamonds": !collectBlocks only grabs a fixed count and will not go find the ore underground.',
+        description: 'Mine a target ore to a healthy STOCKPILE (default gain target: 8) — automatically descends to the correct depth band, tunnels, exhausts connected veins, and keeps searching after the first drop. ALWAYS prefer this over !collectBlocks for general "mine iron/coal/gold/copper/diamonds" requests.',
         params: {
             'ore': { type: 'string', description: 'one of: iron, coal, gold, copper, diamonds' }
         },
