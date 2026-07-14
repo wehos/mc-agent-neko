@@ -7,6 +7,8 @@ import { unclimbVines } from './vine_unstick.js';
 import {
     applyUndergroundWaterAvoidance,
     createUndergroundWaterGuard,
+    findNearbyDryStandPositions,
+    isBotInWater,
 } from './navigation_policy.js';
 import settings from "../../../settings.js";
 import path from 'path';
@@ -4129,7 +4131,7 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
     
     const stuckCheckPromise = new Promise((_, reject) => {
         stuckCheckInterval = setInterval(() => {
-            if (audit.waterGuard && audit.waterGuard.enabled) {
+            if (audit.waterGuard) {
                 const waterState = audit.waterGuard.observe();
                 if (waterState === 'armed') {
                     try { audit.armWaterAvoidance(); } catch (e) {
@@ -4267,7 +4269,7 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
     }
 }
 
-export async function goToGoal(bot, goal) {
+export async function goToGoal(bot, goal, navigationOptions = {}) {
     /**
      * Navigate to the given goal with adaptive stuck recovery.
      * Strategy:
@@ -4284,7 +4286,46 @@ export async function goToGoal(bot, goal) {
     bot._lastPathGoalInfo = goalInfo;
     bot._lastPathGoalAt = Date.now();
     motionAudit(bot, 'path.begin', { seq: navSeq, goal: goalInfo });
-    const waterGuard = createUndergroundWaterGuard(bot);
+    const waterGuard = createUndergroundWaterGuard(bot, {
+        disabled: navigationOptions.skipUndergroundWaterGuard === true,
+    });
+
+    // A mining navigation that is ALREADY wet must recover to a real dry stand
+    // cell before pursuing its mining goal. Sending the original goal through
+    // water can instantly succeed (GoalNear already satisfied) or swim deeper,
+    // leaving the skill active while drowning. Use a bounded composite of dry
+    // air columns and a non-destructive recovery route, then restart the
+    // original goal from dry ground so the normal hard veto is active.
+    if (waterGuard.startedInWater && !navigationOptions.skipInitialWaterRecovery) {
+        const dryPositions = findNearbyDryStandPositions(bot);
+        if (dryPositions.length === 0) {
+            const noExit = new Error('Underground mining navigation found no nearby dry water exit');
+            noExit.name = 'UndergroundMiningNoDryExit';
+            motionAudit(bot, 'path.water_recovery.none', { seq: navSeq, goal: goalInfo });
+            throw noExit;
+        }
+        const dryGoal = new pf.goals.GoalCompositeAny(
+            dryPositions.map(p => new pf.goals.GoalBlock(p.x, p.y, p.z))
+        );
+        motionAudit(bot, 'path.water_recovery.begin', {
+            seq: navSeq,
+            candidates: dryPositions.length,
+            goal: goalInfo,
+        });
+        await goToGoal(bot, dryGoal, {
+            skipUndergroundWaterGuard: true,
+            skipInitialWaterRecovery: true,
+            nonDestructiveOnly: true,
+        });
+        if (isBotInWater(bot)) {
+            const stillWet = new Error('Underground mining water recovery did not reach dry ground');
+            stillWet.name = 'UndergroundMiningStillInWater';
+            motionAudit(bot, 'path.water_recovery.end', { seq: navSeq, ok: false, goal: goalInfo });
+            throw stillWet;
+        }
+        motionAudit(bot, 'path.water_recovery.end', { seq: navSeq, ok: true, goal: goalInfo });
+        return goToGoal(bot, goal, navigationOptions);
+    }
 
     // ★MAROONED gate at the COMMON pathfinding entry (打转终极机理: 只给 goToPosition
     // 加门漏掉了 moveAway/moveAwayFromEntity/avoidEnemies — 它们直接走 goToGoal。
@@ -4463,7 +4504,7 @@ export async function goToGoal(bot, goal) {
     const _usable = (s) => s === 'success' || s === 'partial';
     const nonDestructivePath = await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout);
     let _destructivePath = null;
-    if (nonDestructivePath.status !== 'success') {
+    if (nonDestructivePath.status !== 'success' && !navigationOptions.nonDestructiveOnly) {
         _destructivePath = await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout);
     }
     // pick: nd-success > d-success > nd-partial > d-partial
@@ -4549,6 +4590,8 @@ export async function goToGoal(bot, goal) {
                 // The initial recovery route reached dry ground. Its remaining
                 // nodes may still cross water, so cancel and replan immediately
                 // now that both movement sets carry the hard water veto.
+                currentMovements = destructiveMovements;
+                isDestructive = true;
                 continue;
             }
 
@@ -4567,6 +4610,10 @@ export async function goToGoal(bot, goal) {
             if (result.stuckDetected) {
                 // Phase 1: Non-destructive stuck → switch to destructive
                 if (!isDestructive) {
+                    if (navigationOptions.nonDestructiveOnly) {
+                        motionAudit(bot, 'path.recovery_stuck', { seq: navSeq, goal: goalInfo });
+                        break;
+                    }
                     // ★不因"泡在水里晃不动"就切破坏式乱挖 (2026-07-08 用户实拍"移动中莫名其妙挖土", S1 的水域facet):
                     // 站在水里被浮力晃住 → 3s 内挪不出 1.5b → 触发 PhaseStuck → 老逻辑立刻切 destructive(canDig)
                     // 朝目标挖泥开路 = "莫名其妙挖土"。水里晃不动是【游泳假象】不是【墙】, 挖土解决不了。改: 脚/头
@@ -4623,6 +4670,10 @@ export async function goToGoal(bot, goal) {
             }
 
             // Non-stuck failure (path blocked, etc.) - try unstick anyway
+            if (navigationOptions.nonDestructiveOnly) {
+                motionAudit(bot, 'path.recovery_failed', { seq: navSeq, goal: goalInfo });
+                break;
+            }
             if (unstickAttempts < maxUnstickAttempts) {
                 unstickAttempts++;
                 const stepped = await stepEdgeAssist(bot, {

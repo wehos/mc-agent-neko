@@ -61,17 +61,27 @@ export function isBotInWater(bot) {
  * allowed only until the bot first reaches dry ground; from that point onward
  * the same navigation call treats any water contact as a new unsafe entry.
  */
-export function createUndergroundWaterGuard(bot) {
-    const enabled = shouldAvoidUndergroundWater(bot);
+export function createUndergroundWaterGuard(bot, { disabled = false } = {}) {
+    let enabled = !disabled && shouldAvoidUndergroundWater(bot);
     let armed = enabled && !isBotInWater(bot);
     const startedInWater = enabled && !armed;
     return {
-        enabled,
+        get enabled() { return enabled; },
         startedInWater,
         get armed() { return armed; },
         observe() {
-            if (!enabled) return 'disabled';
+            if (disabled) return 'disabled';
             const inWater = isBotInWater(bot);
+            // A mining route can begin above the aquifer cutoff and descend
+            // below it in one goto. Activate at the first underground sample;
+            // water already present at that transition is a new unsafe entry,
+            // not an initial-water recovery exemption.
+            if (!enabled) {
+                if (!shouldAvoidUndergroundWater(bot)) return 'disabled';
+                enabled = true;
+                armed = true;
+                return inWater ? 'entered' : 'armed';
+            }
             if (!armed) {
                 if (inWater) return 'initial-water';
                 armed = true;
@@ -80,4 +90,34 @@ export function createUndergroundWaterGuard(bot) {
             return inWater ? 'entered' : 'dry';
         },
     };
+}
+
+/** Return nearby air columns with dry, solid footing for water recovery. */
+export function findNearbyDryStandPositions(bot, distance = 12, count = 256) {
+    let candidates = [];
+    try {
+        candidates = bot.findBlocks({
+            matching: (block) => block && block.name === 'air',
+            maxDistance: distance,
+            count,
+        }) || [];
+    } catch (e) { return []; }
+
+    const fluid = /^(?:flowing_)?(?:water|lava)$/;
+    const passableDry = (block) => block
+        && block.boundingBox === 'empty'
+        && !fluid.test(block.name || '');
+    const solidDry = (block) => block
+        && block.boundingBox === 'block'
+        && !fluid.test(block.name || '');
+    const out = candidates.filter((position) => {
+        try {
+            return passableDry(bot.blockAt(position))
+                && passableDry(bot.blockAt(position.offset(0, 1, 0)))
+                && solidDry(bot.blockAt(position.offset(0, -1, 0)));
+        } catch (e) { return false; }
+    });
+    try { out.sort((a, b) => bot.entity.position.distanceTo(a) - bot.entity.position.distanceTo(b)); }
+    catch (e) { /* preserve findBlocks order */ }
+    return out;
 }

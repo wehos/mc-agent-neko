@@ -8,6 +8,7 @@ import Vec3 from 'vec3';
 import {
     applyUndergroundWaterAvoidance,
     createUndergroundWaterGuard,
+    findNearbyDryStandPositions,
     isBotInWater,
     shouldAvoidUndergroundWater,
 } from '../src/agent/library/navigation_policy.js';
@@ -73,6 +74,41 @@ console.log('Test 4: an initial-water recovery arms after reaching dry ground');
     check('dry travel remains allowed after arming', guard.observe() === 'dry');
     foot = 'water';
     check('later water contact is a new entry', guard.observe() === 'entered');
+}
+
+console.log('Test 5: a route crossing below Y55 activates the guard');
+{
+    const bot = makeBot({ y: 60 });
+    const guard = createUndergroundWaterGuard(bot);
+    check('guard begins disabled above cutoff', !guard.enabled && guard.observe() === 'disabled');
+    bot.entity.position.y = 54;
+    check('dry descent arms the guard', guard.observe() === 'armed' && guard.enabled && guard.armed);
+}
+{
+    const bot = makeBot({ y: 60 });
+    let foot = 'air';
+    bot.blockAt = (p) => Math.floor(p.y) === Math.floor(bot.entity.position.y) ? { name: foot } : { name: 'air' };
+    const guard = createUndergroundWaterGuard(bot);
+    bot.entity.position.y = 54;
+    foot = 'water';
+    check('wet descent is rejected as a new entry', guard.observe() === 'entered');
+}
+
+console.log('Test 6: water recovery only targets dry standable columns');
+{
+    const bot = makeBot();
+    const good = new Vec3(2, 48, 0);
+    const wetHead = new Vec3(3, 48, 0);
+    const noFloor = new Vec3(4, 48, 0);
+    bot.findBlocks = () => [noFloor, wetHead, good];
+    bot.blockAt = (p) => {
+        if (p.x === wetHead.x && p.y === wetHead.y + 1) return { name: 'water', boundingBox: 'empty' };
+        if (p.x === noFloor.x && p.y === noFloor.y - 1) return { name: 'air', boundingBox: 'empty' };
+        if (p.y === 47) return { name: 'stone', boundingBox: 'block' };
+        return { name: 'air', boundingBox: 'empty' };
+    };
+    const positions = findNearbyDryStandPositions(bot);
+    check('only the dry column with solid footing remains', positions.length === 1 && positions[0] === good);
 }
 
 if (failures) {
