@@ -10,7 +10,8 @@
 //
 // opts: { steps=40, heading=null (auto), targetY=45 }
 
-const ORE = /(iron_ore|deepslate_iron_ore|coal_ore|deepslate_coal_ore|copper_ore|gold_ore|diamond_ore|deepslate_diamond_ore|redstone_ore|lapis_ore)/;
+import { collectExposedOresDuringDescent } from './descentOreSweep.js';
+
 // ★C311 (T-0048): WATER was missing here — only lava was guarded. mineDown dug a staircase
 // straight into an aquifer at depth (y35) and the bot drowned (#112), while its siblings
 // branchMine (BAD_FLUID=/lava|water/) and digDown (_WL incl. water) both stop on water.
@@ -578,20 +579,6 @@ export default async function mineDown(bot, ctx, opts = {}) {
             // change (the -22,82,10 pin family). breakBlockAt returns strict true only when a block
             // was actually removed, so count only those.
             dug += [r1, r2, r3].filter(v => v === true).length;
-            // opportunistic ore around the dug column (one ring)
-            for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, 1, 0]]) {
-                const ox = fx + dx, oy = cy + dy, oz = fz + dz;
-                const b = bn(ox, oy, oz);
-                if (!(b && ORE.test(b.name))) continue;
-                // ★C311 (T-0048): don't pop an ore that's plugging a fluid pocket — breaking it
-                // releases lava/water into the stair (#113 lava: deep ore-ring with no fluid check).
-                let oreFluidAdj = false;
-                for (const [ex, ey, ez] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]) {
-                    if (/lava|water/.test(nm(bn(ox + ex, oy + ey, oz + ez)))) { oreFluidAdj = true; break; }
-                }
-                if (oreFluidAdj) continue;
-                try { await skills.breakBlockAt(bot, ox, oy, oz); ore++; } catch (e) {}
-            }
         } catch (e) { abort = `dig threw: ${e && e.message || e}`; break; }
 
         // Walk forward; the bot falls 1 block into the cleared step. Low-level (no pathfinder).
@@ -603,6 +590,17 @@ export default async function mineDown(bot, ctx, opts = {}) {
         } finally { try { bot.setControlState('forward', false); } catch (e) {} }
 
         const np = bot.entity.position;
+        const stepDescended = (cur.y - np.y) > 0.5;
+        const stepMovedHoriz = Math.hypot(np.x - cur.x, np.z - cur.z) > 0.5;
+        if (stepDescended || stepMovedHoriz) {
+            try {
+                const swept = await collectExposedOresDuringDescent(bot, ctx);
+                if (swept.mined > 0) {
+                    ore += swept.mined;
+                    log_(`顺手采矿 ${swept.family} x${swept.mined} (${swept.elapsedMs}ms)`);
+                }
+            } catch (e) { log_(`顺手采矿跳过: ${e && e.message || e}`); }
+        }
         if (i < 3) log_(`DIAG step${i} afterWalk pos=${np.x.toFixed(2)},${np.y.toFixed(2)},${np.z.toFixed(2)} (moved dx=${(np.x - cur.x).toFixed(2)} dy=${(np.y - cur.y).toFixed(2)} dz=${(np.z - cur.z).toFixed(2)})`);
         if (i % 5 === 0) log_(`step ${i + 1} pos=${Math.round(np.x)},${Math.round(np.y)},${Math.round(np.z)} dug=${dug} ore=${ore} hp=${Math.round(bot.health)} food=${bot.food}`);
         // ★FIX no-advance guard: the OLD test compared np.x to the cell INDEX with a <0.3 band,
@@ -611,8 +609,6 @@ export default async function mineDown(bot, ctx, opts = {}) {
         // OR moves >0.5 horizontally. Neither = wedged this step. Abort after 2 wedged steps so a
         // genuinely-stuck mineDown returns an honest "no descent" fast (→ higher layer can relocate)
         // instead of grinding 120 no-op digs in place.
-        const stepDescended = (cur.y - np.y) > 0.5;
-        const stepMovedHoriz = Math.hypot(np.x - cur.x, np.z - cur.z) > 0.5;
         if (!stepDescended && !stepMovedHoriz) noProg++; else noProg = 0;
         if (noProg >= 2) {
             // ★P2-8: 楔死不再立刻放弃 — 先走幽灵格恢复链 (re-dig/blacklist/sidestep 换向), 只有

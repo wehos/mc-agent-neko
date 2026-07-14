@@ -46,6 +46,40 @@ function readJsonCached(path, ttlMs) {
     return v;
 }
 
+// Oracle files are larger and are refreshed by independent daemons. Never put their
+// disk IO on the websocket/modes event loop: return the last immutable snapshot now,
+// refresh it in the background, and fail closed until the first async read completes.
+const _jsonAsyncReadCache = new Map(); // path -> { t, v, pending }
+function readJsonCachedNonBlocking(path, ttlMs) {
+    const now = Date.now();
+    let c = _jsonAsyncReadCache.get(path);
+    if (!c) { c = { t: 0, v: null, pending: null }; _jsonAsyncReadCache.set(path, c); }
+    if (!c.pending && (now - c.t) >= ttlMs) {
+        c.pending = fs.promises.readFile(path, 'utf8')
+            .then((raw) => {
+                if (raw && raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+                c.v = JSON.parse(raw);
+            })
+            .catch(() => { c.v = null; })
+            .finally(() => { c.t = Date.now(); c.pending = null; });
+    }
+    return c.v;
+}
+
+function oracleSnapshotUsable(snapshot, worldState, ttlMs) {
+    try {
+        if (!snapshot || !Number.isFinite(snapshot.ts)) return false;
+        const expiresAt = Number.isFinite(snapshot.expiresAt) ? snapshot.expiresAt : snapshot.ts + ttlMs;
+        if (Date.now() >= expiresAt) return false;
+        if (worldState && worldState.region) {
+            if (!snapshot.worldRegion) return false; // legacy/unscoped cache: never trust across world switches
+            const norm = (v) => String(v || '').replace(/\\/g, '/').toLowerCase();
+            if (norm(worldState.region) !== norm(snapshot.worldRegion)) return false;
+        }
+        return true;
+    } catch (e) { return false; }
+}
+
 async function say(agent, message) {
     agent.bot.modes.behavior_log += message + '\n';
     if (agent.shut_up || !settings.narrate_behavior) return;
@@ -6778,43 +6812,21 @@ const modes_list = [
                 // ── ★ORACLE (2026-07-05 用户授权信息级全图挂): oracle-daemon.mjs 经 RCON 只读
                 //    /locate 滚动写 oracle.json (当前维度最近 village/ruined_portal/fortress/bastion
                 //    + 静态 seed/stronghold)。这里挂成 bot._world.oracle 一等字段, 提案层/技能层
-                //    统一消费 (fresh=daemon 90s 内有写; 陈旧数据保留但标记, 消费方自行决定信任度)。
-                //    读盘 10s 节流, BOM-safe (memory: BOM→silent JSON.parse kill), 永不抛出。
-                let _oracle = null;
-                try {
-                    if (!this._oracleCache || (now - (this._oracleCacheAt || 0)) > 10000) {
-                        let raw = fs.readFileSync('bots/_supervisor/oracle.json', 'utf8');
-                        if (raw && raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
-                        this._oracleCache = JSON.parse(raw);
-                        this._oracleCacheAt = now;
-                    }
-                    const oc = this._oracleCache;
-                    if (oc && oc.ts) _oracle = Object.assign({}, oc, { fresh: (now - oc.ts) < 90000 });
-                } catch (e) { /* oracle.json 缺失/坏 → oracle=null, 全链降级为无全知模式 */ }
+                //    统一消费。严格 fail-closed: 过 TTL/跨世界快照直接丢弃；文件 IO 在后台 promise
+                //    中刷新，world-model/WS tick 永不做同步磁盘读取。
+                const _oracleWorld = readJsonCachedNonBlocking('bots/_supervisor/world-id.json', 5000);
+                const _oraclePending = readJsonCachedNonBlocking('bots/_supervisor/oracle-world-pending.json', 1000);
+                const _oracleBlocked = !!(_oraclePending && Number.isFinite(_oraclePending.expiresAt) && now < _oraclePending.expiresAt);
+                const _oracleRaw = readJsonCachedNonBlocking('bots/_supervisor/oracle.json', 10000);
+                const _oracle = !_oracleBlocked && oracleSnapshotUsable(_oracleRaw, _oracleWorld, 90000)
+                    ? Object.assign({}, _oracleRaw, { fresh: true }) : null;
                 // ── ★FARM 锚点 (2026-07-05 用户四连问: 农场坐标持久化): wheatFarm 写 farm.json,
                 //    这里挂 w.farm 供提案层熟期巡逻 (种子播完=0 时收获巡逻分支的依据)。──
-                let _farm = null;
-                try {
-                    if (!this._farmCache || (now - (this._farmCacheAt || 0)) > 10000) {
-                        let rawF = fs.readFileSync('bots/_supervisor/farm.json', 'utf8');
-                        if (rawF && rawF.charCodeAt(0) === 0xFEFF) rawF = rawF.slice(1);
-                        this._farmCache = JSON.parse(rawF);
-                        this._farmCacheAt = now;
-                    }
-                    _farm = this._farmCache || null;
-                } catch (e) { /* farm.json 未建 → null */ }
+                const _farm = readJsonCachedNonBlocking('bots/_supervisor/farm.json', 10000);
                 // ── ★ORE ORACLE (2026-07-05 用户令2: 全图挂锁定最近钻石): ore-oracle.mjs 离线扫
                 //    region 文件 → oracle-ores.json → 挂 w.oracleOres, mineDiamonds 直奔坐标。──
-                let _oracleOres = null;
-                try {
-                    if (!this._oreCache || (now - (this._oreCacheAt || 0)) > 15000) {
-                        let rawO = fs.readFileSync('bots/_supervisor/oracle-ores.json', 'utf8');
-                        if (rawO && rawO.charCodeAt(0) === 0xFEFF) rawO = rawO.slice(1);
-                        this._oreCache = JSON.parse(rawO);
-                        this._oreCacheAt = now;
-                    }
-                    _oracleOres = this._oreCache || null;
-                } catch (e) { /* 未建 → null */ }
+                const _oreRaw = readJsonCachedNonBlocking('bots/_supervisor/oracle-ores.json', 5000);
+                const _oracleOres = !_oracleBlocked && oracleSnapshotUsable(_oreRaw, _oracleWorld, 120000) ? _oreRaw : null;
                 bot._world = {
                     ts: now,
                     time: { tod, phase, isDay: !isNight && !isDusk },

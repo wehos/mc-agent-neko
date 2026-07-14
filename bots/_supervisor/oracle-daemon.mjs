@@ -7,10 +7,12 @@ import net from 'net';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { ORACLE_DATA_TTL_MS, atomicWriteJson, readJson, worldIdForRegion } from './oracle_shared.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const VITALS = path.join(DIR, 'vitals.json');
 const OUT = path.join(DIR, 'oracle.json');
+const WORLD_STATE = path.join(DIR, 'world-id.json');
 const LOG = path.join(DIR, 'oracle-daemon.log');
 const HOST = process.env.RCON_HOST || '127.0.0.1';
 const PORT = parseInt(process.env.RCON_PORT || '25575', 10);
@@ -78,6 +80,8 @@ const QUERIES = {
 let staticData = null;      // {seed, stronghold} — 启动时查一次
 let lastQueryPos = null;    // {dim,x,z} 上次实际发查询的位置
 let lastNearest = {};       // 上次查询结果 (bot 没大动时沿用)
+let activeWorldId = null;
+let activeWorldRegion = null;
 
 async function initStatic() {
     const seedRaw = await rcon('seed');
@@ -89,9 +93,21 @@ async function initStatic() {
 }
 
 async function cycle() {
-    let vit = null;
-    try { vit = JSON.parse(fs.readFileSync(VITALS, 'utf8')); } catch (e) { return; }
+    const vit = await readJson(VITALS, null);
     if (!vit || !Number.isFinite(vit.x)) return;
+    const worldState = await readJson(WORLD_STATE, null);
+    const nextRegion = worldState && worldState.region || null;
+    const nextWorldId = nextRegion ? worldIdForRegion(nextRegion) : null;
+    if (nextWorldId && nextWorldId !== activeWorldId) {
+        // New-world boundary: never carry static seed/stronghold or nearest results across it.
+        activeWorldId = nextWorldId;
+        activeWorldRegion = nextRegion;
+        staticData = null;
+        lastQueryPos = null;
+        lastNearest = {};
+        try { await fs.promises.rm(OUT, { force: true }); } catch (e) {}
+        log(`world generation changed -> ${activeWorldId}; oracle cache reset`);
+    }
     const dim = String(vit.dim || 'overworld').replace('minecraft:', '');
     const qs = QUERIES[dim] || {};
     if (!staticData) await initStatic();
@@ -118,18 +134,21 @@ async function cycle() {
             if (v) v.dist = Math.round(Math.hypot(v.x - vit.x, v.z - vit.z));
         }
     }
+    const ts = Date.now();
     const out = {
-        ts: Date.now(),
+        ts,
+        expiresAt: ts + Math.min(ORACLE_DATA_TTL_MS, 90000),
+        worldId: activeWorldId,
+        worldRegion: activeWorldRegion,
         dim,
         botPos: { x: Math.round(vit.x), y: Math.round(vit.y), z: Math.round(vit.z) },
         nearest: lastNearest,
         static: staticData || {},
         _comment: 'oracle-daemon 滚动全知情报. 只读来源(/seed /locate). bot._world.oracle 消费.',
     };
-    try { fs.writeFileSync(OUT, JSON.stringify(out)); } catch (e) {}
+    try { await atomicWriteJson(OUT, out); } catch (e) {}
 }
 
 log(`oracle-daemon started (pid ${process.pid}, rcon ${HOST}:${PORT})`);
-await initStatic().catch((e) => log('static init failed: ' + e.message));
 await cycle().catch((e) => log('cycle failed: ' + e.message));
 setInterval(() => { cycle().catch((e) => log('cycle failed: ' + e.message)); }, POLL_MS);

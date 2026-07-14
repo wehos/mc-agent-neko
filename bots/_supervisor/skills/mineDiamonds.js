@@ -8,6 +8,16 @@
 // Descent is WATER-AWARE (see below): seals side aquifers as it goes so the shaft
 // never floods, and dodges water/lava in the downward path. Invoked: {"skill":"mineDiamonds",[3]}
 // ctx = { skills, world, mc, Vec3, log }
+import {
+    arrivedAtOracleTarget,
+    freshOracleSnapshot,
+    liveOracleTargetState,
+    loadClearedTargets,
+    markOracleTargetCleared,
+    targetCleared,
+} from './oracleGuard.js';
+import { collectExposedOresDuringDescent } from './descentOreSweep.js';
+
 const OPEN = new Set(['air', 'cave_air', 'void_air', 'water', 'flowing_water', 'lava', 'flowing_lava']);
 const WATER = new Set(['water', 'flowing_water']);
 const LAVA = new Set(['lava', 'flowing_lava']);
@@ -23,6 +33,18 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     const dia = () => has('diamond');
     const blk = (c) => bot.blockAt(c);
     const isOpen = (c) => { const b = blk(c); return !b || OPEN.has(b.name); };
+    const firstOracleSnapshot = bot._world && bot._world.oracleOres;
+    const clearedTargets = await loadClearedTargets(firstOracleSnapshot && firstOracleSnapshot.worldId);
+    const isCleared = (target) => targetCleared(target, 'diamonds', clearedTargets);
+    const quarantine = async (target, reason) => {
+        const snapshot = bot._world && bot._world.oracleOres;
+        if (!target || !freshOracleSnapshot(snapshot)) return false;
+        await markOracleTargetCleared(snapshot, 'diamonds', target, reason);
+        const now = Date.now();
+        clearedTargets.push({ ore: 'diamonds', x: target.x, y: target.y, z: target.z, r: 12, ts: now, expiresAt: now + 20 * 60 * 1000, worldId: snapshot.worldId });
+        log(bot, `⛏️ ORACLE quarantine diamond@${target.x},${target.y},${target.z} reason=${reason}`);
+        return true;
+    };
     const filler = () => FILLER.find(b => has(b) > 0);
 
     if (bot.armorManager) try { await bot.armorManager.equipAll(); } catch (e) {}
@@ -172,9 +194,10 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     let oracleDia = null;
     try {
         const oo = bot._world && bot._world.oracleOres;
-        if (oo && Array.isArray(oo.diamonds) && oo.diamonds.length && Date.now() - (oo.ts || 0) < 600000) {
+        if (freshOracleSnapshot(oo) && Array.isArray(oo.diamonds) && oo.diamonds.length) {
             const p0 = bot.entity.position;
-            const tgt = oo.diamonds[0];
+            const tgt = oo.diamonds.find((candidate) => candidate && !isCleared(candidate));
+            if (!tgt) throw new Error('no non-quarantined oracle diamond target');
             const dxz = Math.hypot(tgt.x - p0.x, tgt.z - p0.z);
             if (dxz < 250) {
                 oracleDia = tgt;
@@ -253,6 +276,10 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
                 const fb = blk(floor);
                 if (fb && OPEN.has(fb.name)) { const f = filler(); if (f) { await skills.placeBlock(bot, f, floor.x, floor.y, floor.z, 'bottom', true).catch(() => {}); } }
                 await skills.goToPosition(bot, p.x + dx, p.y, p.z + dz, 0).catch(() => {});
+                try {
+                    const swept = await collectExposedOresDuringDescent(bot, ctx);
+                    if (swept.mined > 0) log(bot, `⛏️ 侧移顺手采矿 ${swept.family} x${swept.mined}`);
+                } catch (e) {}
             }
             return true;
         }
@@ -338,10 +365,24 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
         if (!ok || Math.floor(bot.entity.position.y) >= feetY) {
             if (!(await tunnelAside())) { await skills.moveAway(bot, 2).catch(() => {}); }
             if (Math.floor(bot.entity.position.y) >= feetY && ++stalls > 6) break;
-        } else { stalls = 0; }
+        } else {
+            stalls = 0;
+            try {
+                const swept = await collectExposedOresDuringDescent(bot, ctx);
+                if (swept.mined > 0) log(bot, `⛏️ 下潜顺手采矿 ${swept.family} x${swept.mined}`);
+            } catch (e) {}
+        }
     }
     await lightUp();
     log(bot, `at y=${yNow()}, water-aware descent done, x-ray mining (modes handle survival)...`);
+    if (oracleDia && arrivedAtOracleTarget(bot, oracleDia)) {
+        const state = liveOracleTargetState(bot, Vec3, oracleDia, 'diamonds');
+        if (state === 'absent') {
+            await quarantine(oracleDia, 'arrival-live-block-mismatch');
+            oracleDia = null;
+            try { bot._diamondRoute = null; } catch (e) {}
+        }
+    }
 
     // ── ★2026-07-06 E 直线矿透 ([[spec-pickaxe-stockpile-redesign]]): oracle 有目标且"全知前瞻"确认无坠落/
     //   无挖穿液体/无空穴/无怪时, 朝钻石直线快挖(替代盲挖 branchMine)。blockAt 读已加载区块=权威无陈旧,
@@ -408,9 +449,9 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     const freshOracleDia = () => {
         try {
             const oo = bot._world && bot._world.oracleOres;
-            if (!(oo && Array.isArray(oo.diamonds) && oo.diamonds.length && Date.now() - (oo.ts || 0) < 600000)) return null;
+            if (!(freshOracleSnapshot(oo) && Array.isArray(oo.diamonds) && oo.diamonds.length)) return null;
             const p0 = bot.entity.position;
-            const t = oo.diamonds[0];
+            const t = oo.diamonds.find((candidate) => candidate && !isCleared(candidate));
             return (t && Number.isFinite(t.x) && Math.hypot(t.x - p0.x, t.z - p0.z) < 250) ? t : null;
         } catch (e) { return null; }
     };
@@ -450,7 +491,14 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
         if ((banked + dia()) >= count) break;
         if (dia() === before) {
             // nothing in x-ray range — ★E 直线矿透: oracle 有新鲜目标且前瞻安全 → 朝它直线快挖; 否则盲挖 branchMine 暴露新面
-            const ot = freshOracleDia();
+            let ot = freshOracleDia();
+            if (ot && arrivedAtOracleTarget(bot, ot)) {
+                const state = liveOracleTargetState(bot, Vec3, ot, 'diamonds');
+                if (state === 'absent') {
+                    await quarantine(ot, 'zero-gain-live-block-mismatch');
+                    ot = null;
+                }
+            }
             let straightDug = 0;
             if (ot) { try { straightDug = await straightMineToward(ot, 20); } catch (e) { straightDug = 0; } }
             if (straightDug > 0) { log(bot, `⛏️ 直线矿透 +${straightDug} 步 → oracle @${ot.x},${ot.y},${ot.z} (前瞻安全)`); }

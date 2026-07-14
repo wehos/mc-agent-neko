@@ -12,6 +12,13 @@
 // Invoked via: {"skill":"wheatFarm", [{"breadTarget": 4}]}  ctx = { skills, world, mc, Vec3, log }
 import fs from 'fs';
 import path from 'path';
+import {
+    freshOracleSnapshot,
+    liveOracleTargetState,
+    loadClearedTargets,
+    markOracleTargetCleared,
+    targetCleared,
+} from './oracleGuard.js';
 const PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
 const prog = (s) => { try { fs.appendFileSync(PROG, `[${new Date().toISOString()}] ${s}\n`); } catch (e) {} };
 
@@ -143,8 +150,11 @@ export default async function wheatFarm(bot, ctx, opts = {}) {
                 //   ore-oracle 已扫地表水(y58-70), 走最近水源再立田 (黑曜石桶浇同源受益)。
                 try {
                     const oo = bot._world && bot._world.oracleOres;
-                    const w0 = oo && Array.isArray(oo.water) && oo.water[0];
-                    if (w0 && Date.now() - (oo.ts || 0) < 600000) {
+                    const cleared = freshOracleSnapshot(oo) ? await loadClearedTargets(oo.worldId) : [];
+                    const w0 = freshOracleSnapshot(oo) && Array.isArray(oo.water)
+                        ? oo.water.find((candidate) => candidate && !targetCleared(candidate, 'water', cleared))
+                        : null;
+                    if (w0) {
                         const wd = Math.hypot(w0.x - bot.entity.position.x, w0.z - bot.entity.position.z);
                         if (wd < 300 && !bot.interrupt_code) {   // 220→300: 出生点重生后到水 233b (麦田=死亡循环唯一结构解, 值得走)
                             prog(`wheatFarm: 24b 无水 → oracle 水源 @${w0.x},${w0.y},${w0.z} (${Math.round(wd)}b) 走过去立田`);
@@ -153,6 +163,10 @@ export default async function wheatFarm(bot, ctx, opts = {}) {
                                 new Promise((_, rej) => setTimeout(() => rej(new Error('water-walk-timeout')), 90000)),
                             ]).catch(() => { try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} });
                             water = findByName(['water'], 24, 12);
+                            if (!water.length && liveOracleTargetState(bot, Vec3, w0, 'water', 24) === 'absent') {
+                                await markOracleTargetCleared(oo, 'water', w0, 'live-target-absent');
+                                prog(`wheatFarm: oracle 水源已不存在 @${w0.x},${w0.y},${w0.z} → quarantine`);
+                            }
                         }
                     }
                 } catch (e) {}

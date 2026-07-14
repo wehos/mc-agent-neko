@@ -81,7 +81,9 @@ if (MODE === 'clear') {
         'bank_ghost.json',     // bank bookkeeping
         'spawn_pos.json',      // world spawn cache
         'world_model.json',    // agent live world model (rebuilt each tick)
+        'oracle.json',         // structure oracle output (old-world /locate coordinates)
         'oracle-ores.json',    // ore-oracle output (rewritten next scan)
+        'oracle-world-pending.json', // cold-start/world-transition fail-closed sentinel
         'ore-cleared.json',    // phantom-ore cleared list (old-world coords)
         'stations.json',       // ★2026-07-08 用户令 #3: 工作台/熔炉注册点 — 跨世界残留 (实测 39 条散布 ±250b/多世界),
                                //   prepNether "prefer station" 会拽 bot 去追一个不在本世界的地下台 → 摔坑/左右横跳。

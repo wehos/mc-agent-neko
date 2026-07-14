@@ -432,12 +432,13 @@ function isFamineStall(w) {
     const v = w.vitals || {};
     return !lethalEnvThreat(w) && (v.food || 0) <= 2 && (v.hp || 20) < 10 && !v.canRegen;
 }
-// ★2026-07-06 oracle 制导采矿: ore-oracle 的最近矿坐标 (新鲜 <10min 且平距 <250 才可用;
+// ★2026-07-06 oracle 制导采矿: ore-oracle 的最近矿坐标 (严格按发布 expiresAt/默认2min TTL;
 //   缺失/陈旧 → null, 调用方回退盲挖)。key ∈ {iron, coal, diamonds}。
 function oracleOreTarget(w, key, yMax = Infinity) {
     try {
         const oo = w && w.oracleOres;
-        if (!(oo && Array.isArray(oo[key]) && oo[key].length && Date.now() - (oo.ts || 0) < 600000)) return null;
+        const expiresAt = oo && (Number.isFinite(oo.expiresAt) ? oo.expiresAt : (oo.ts || 0) + 120000);
+        if (!(oo && Array.isArray(oo[key]) && oo[key].length && Date.now() < expiresAt)) return null;
         // yMax: 夜挖只要地下带目标 (山面矿=夜间地表裸采) — 列表按距排序, 取首个达标者
         const c0 = oo[key].find(c => c && c.y <= yMax);
         if (!c0) return null;

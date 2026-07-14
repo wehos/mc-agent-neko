@@ -398,6 +398,7 @@ class WSMessageServer {
                     type: 'vitals', ts: Date.now(),
                     x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z),
                     dim: (bot.game && bot.game.dimension) || '?',
+                    version: bot.version || null, // ore-oracle decodes Anvil palettes with the live protocol version
                     hp: Math.round(bot.health ?? -1), food: (bot.food ?? -1),
                     tod: (bot.time && bot.time.timeOfDay) ?? -1,
                     hostiles,

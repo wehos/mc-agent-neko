@@ -6,39 +6,20 @@
 // 返回契约: 增量>0 → {ore,gained}; 零增量 → false (interrupt 解卷时 kernel 不罚)。
 import fs from 'fs';
 import path from 'path';
+import {
+    arrivedAtOracleTarget,
+    freshOracleSnapshot,
+    liveOracleTargetState,
+    loadClearedTargets,
+    markOracleTargetCleared,
+    oracleFamily,
+    targetCleared,
+} from './oracleGuard.js';
+import { collectLiveOreBlock } from './descentOreSweep.js';
 
 const PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
 function prog(line) {
-    try { fs.appendFileSync(PROG, `[${new Date().toISOString()}] [mineOres] ${line}\n`); } catch (e) {}
-}
-
-// ★幻影铁活锁修 (oracle-phantom-iron-activelock, 2026-07-06): mineOres 走到 oracle 坐标后
-//   collectBlock 扫 64b live 零命中 = 该邻域磁盘 region 落后于 LAN live 世界 (autosave 重排
-//   .mca 偏移表致 stale/幻影读)。把邻域中心落盘 ore-cleared.json → 本技能 oracleList 与
-//   ore-oracle.mjs 出表都过滤该中心 r 内候选, 不再把 bot 反复导向已证实为空的鬼坐标。
-//   仅 iron/coal, 仅"已到场且 collectBlock 同源 64b 扫零"才标 → 结构上不可能误杀真矿。
-const CLEARED = path.resolve(process.cwd(), 'bots', '_supervisor', 'ore-cleared.json');
-const CLEARED_TTL_MS = 2 * 3600 * 1000;
-function loadClearedCenters() {
-    try {
-        const j = JSON.parse(fs.readFileSync(CLEARED, 'utf8'));
-        const cutoff = Date.now() - CLEARED_TTL_MS;
-        return ((j && j.cleared) || []).filter(c => c && (c.ts || 0) > cutoff);
-    } catch (e) { return []; }
-}
-function appendCleared(center) {
-    try {
-        let j = { ts: 0, cleared: [] };
-        try { const r = JSON.parse(fs.readFileSync(CLEARED, 'utf8')); if (r && Array.isArray(r.cleared)) j = r; } catch (e) {}
-        if (!j.cleared.some(c => c && c.ore === center.ore
-            && Math.hypot((c.x || 0) - center.x, (c.z || 0) - center.z) < 6 && Math.abs((c.y || 0) - center.y) < 6)) {
-            j.cleared.push(center);
-        }
-        const cutoff = Date.now() - CLEARED_TTL_MS;
-        j.cleared = j.cleared.filter(c => c && (c.ts || 0) > cutoff).slice(-200);
-        j.ts = Date.now();
-        fs.writeFileSync(CLEARED, JSON.stringify(j));
-    } catch (e) {}
+    fs.promises.appendFile(PROG, `[${new Date().toISOString()}] [mineOres] ${line}\n`).catch(() => {});
 }
 
 // 掉落物口径: 矿石块可能被 silk/直采差异影响, 但本栈无 silk — raw_x/coal 即掉落
@@ -49,7 +30,7 @@ const PICK_FOR = { iron: /(stone|iron|diamond|netherite)_pickaxe$/, gold: /(iron
 const COLLECT_KEY = { iron: 'iron', coal: 'coal', gold: 'gold', copper: 'copper', diamonds: 'diamond' };
 
 export default async function mineOres(bot, ctx, opts = {}) {
-    const { skills, world } = ctx;
+    const { skills, world, Vec3 } = ctx;
     const ore = String((opts && opts.ore) || 'iron');
     const count = Number(opts && opts.count) > 0 ? Number(opts.count) : 8;
     const maxMs = Number(opts && opts.maxMs) > 0 ? Number(opts.maxMs) : 300000;
@@ -58,6 +39,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
     const dropRe = DROP_OF[ore] || new RegExp(`^raw_${ore}$`);
     const pickRe = PICK_FOR[ore] || /_pickaxe$/;
     const collectKey = COLLECT_KEY[ore] || ore;
+    const family = oracleFamily(ore);
     const cnt = () => {
         try {
             const c = world.getInventoryCounts(bot);
@@ -98,20 +80,52 @@ export default async function mineOres(bot, ctx, opts = {}) {
             return !!(f && f.length);
         } catch (e) { return true; }
     };
-    // 幻影中心集 = 本 process 内已标(bot._orePhantom) + 落盘累积(ore-cleared.json), 供 oracleList 过滤
-    const phantomCenters = (() => {
-        const out = Array.isArray(bot._orePhantom) ? bot._orePhantom.slice() : [];
-        for (const c of loadClearedCenters()) out.push(c);
-        return out;
-    })();
-    const isPhantom = (c) => phantomCenters.some(p => p && p.ore === ore
-        && Math.hypot((p.x || 0) - c.x, (p.y || 0) - c.y, (p.z || 0) - c.z) <= (p.r || 48));
+    const initialSnapshot = bot._world && bot._world.oracleOres;
+    const phantomCenters = await loadClearedTargets(initialSnapshot && initialSnapshot.worldId);
+    const isPhantom = (candidate) => targetCleared(candidate, family, phantomCenters);
+    const quarantine = async (candidate, reason) => {
+        const snapshot = bot._world && bot._world.oracleOres;
+        if (!candidate || !freshOracleSnapshot(snapshot)) return false;
+        await markOracleTargetCleared(snapshot, family, candidate, reason);
+        const now = Date.now();
+        phantomCenters.push({ ore: family, x: candidate.x, y: candidate.y, z: candidate.z, r: 12, ts: now, expiresAt: now + 20 * 60 * 1000, worldId: snapshot.worldId });
+        prog(`ORACLE quarantine ${family}@${candidate.x},${candidate.y},${candidate.z} reason=${reason}`);
+        return true;
+    };
+    const liveOreCandidates = (radius = 8, limit = 4) => {
+        try {
+            if (!oreIds.length) return [];
+            return (bot.findBlocks({ point: bot.entity.position, matching: oreIds, maxDistance: radius, count: limit }) || [])
+                .map((position) => { try { return bot.blockAt(position); } catch (e) { return null; } })
+                .filter((block) => block && block.position);
+        } catch (e) { return []; }
+    };
+    const harvestLiveFirst = async () => {
+        const liveDeadline = Date.now() + 10000;
+        for (const block of liveOreCandidates()) {
+            const remaining = liveDeadline - Date.now();
+            if (remaining <= 0) break;
+            const result = await collectLiveOreBlock(bot, ctx, block, {
+                expectedFamily: family,
+                approach: true,
+                maxApproachDistance: 10,
+                maxBlocks: 8,
+                budgetMs: Math.min(4500, remaining),
+            });
+            if (result.mined > 0) {
+                prog(`LIVE-FIRST ${family}@${block.position.x},${block.position.y},${block.position.z} mined=${result.mined} (${result.elapsedMs}ms) — oracle bypassed`);
+                return result;
+            }
+        }
+        return null;
+    };
 
     // ★死亡热图避区 (deaths 58-61 四死同窝实录, chopWood/achieve 同款口径): 末 50 死亡记录
     //   16 格内 ≥3 死 = 雷区, oracle 候选整体过滤 — 22k 铁不差雷区里那几颗。
-    const deathZones = (() => {
+    const deathZones = await (async () => {
         try {
-            const lines = fs.readFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'death_log.jsonl'), 'utf8').trim().split('\n').slice(-50);
+            const raw = await fs.promises.readFile(path.resolve(process.cwd(), 'bots', '_supervisor', 'death_log.jsonl'), 'utf8');
+            const lines = raw.trim().split('\n').slice(-50);
             return lines.map(ln => { try { const r = JSON.parse(ln); return (typeof r.x === 'number') ? { x: r.x, y: r.y, z: r.z } : null; } catch (e) { return null; } }).filter(Boolean);
         } catch (e) { return []; }
     })();
@@ -129,7 +143,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
     const oracleList = () => {
         try {
             const oo = bot._world && bot._world.oracleOres;
-            if (!(oo && Date.now() - (oo.ts || 0) < 600000)) return [];
+            if (!freshOracleSnapshot(oo)) return [];
             // ★2026-07-08 深带优先 (oracle-surface-hop-churn 治本): iron 的 top-24 `iron` 列表是"山面表层铁"
             //   (y53-58 崖面露头), bot 在高台够不着 → 换点蹦跶。深带 `ironDeep` (y48-49) 是密封下潜 vein-follow
             //   的正主。故 iron 一律优先 ironDeep, 无论白天/夜挖; 仅 ironDeep 缺失/被雷区+幻影过滤空时才回退表层
@@ -141,12 +155,12 @@ export default async function mineOres(bot, ctx, opts = {}) {
                 if (deep.length) return deep;
                 return filt(oo.iron);
             }
-            return filt(oo[ore]);
+            return filt(oo[family]);
         } catch (e) {}
         return [];
     };
     const list0 = oracleList();
-    const tgt = (() => {
+    let tgt = (() => {
         const c0 = list0[0];
         if (!c0) return null;
         const p0 = bot.entity.position;
@@ -159,7 +173,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
     //   (≤FACE_R) 已有本类矿, 直接进采集环就地 vein-follow, 绝不为了 oracle 坐标掉头走开 —— 那正是
     //   run2(START -95,51 贴着 iron_ore@-94,53,175 d3=2.7) 却 march 去 -120,48 撞 self_defense 浮出
     //   y68 丢铁的病根。见 [[mineores-surface-hop-churn]] / [[diamond-never-reached-blocker-stack]]。
-    const FACE_R = 6;
+    const FACE_R = 8;
     const faceOreNear = () => liveOreNear(FACE_R);
     if (faceOreNear()) prog(`脸上有${ore}(≤${FACE_R}b) — 跳过 oracle march/下潜, 就地 vein-follow (不为 oracle 坐标掉头)`);
 
@@ -185,6 +199,17 @@ export default async function mineOres(bot, ctx, opts = {}) {
         if (bot.entity.position.y - band > 6 && !bot.interrupt_code && deadline - Date.now() > 60000) {
             prog(`无 oracle 目标 — 盲挖回退: mineDown 下潜 y${band}`);
             try { await skills.customSkill(bot, 'mineDown', { targetY: band }); } catch (e) {}
+        }
+    }
+
+    // Do not let a disk-only coordinate drive mining once the target cell is live.
+    // A definitive non-ore at the exact 3D coordinate quarantines that point for every
+    // ore family (including gold/diamonds); unloaded/too-far remains unknown and is not punished.
+    if (tgt && arrivedAtOracleTarget(bot, tgt)) {
+        const state = liveOracleTargetState(bot, Vec3, tgt, family);
+        if (state === 'absent') {
+            await quarantine(tgt, 'arrival-live-block-mismatch');
+            tgt = null;
         }
     }
 
@@ -237,26 +262,28 @@ export default async function mineOres(bot, ctx, opts = {}) {
         }
         const before = cnt();
         const rT0 = Date.now();
+        // Loaded live blocks are authoritative and outrank every save-oracle target.
+        // This path also bypasses historical death-zone/spawner heuristics: current
+        // hostiles, fluid adjacency, LOS, reach, and tool harvestability remain hard gates.
+        const liveResult = await harvestLiveFirst();
+        if (liveResult && cnt() > before) {
+            bot._svnOreZeroRounds = 0;
+            continue;
+        }
         try { await skills.collectBlock(bot, collectKey, Math.max(1, Math.min(4, count - (cnt() - g0)))); }
         catch (e) { prog(`r${rounds}: collectBlock 异常 ${(e && e.message) || e}`); }
         if (cnt() > before) { bot._svnOreZeroRounds = 0; continue; }
         // 死57前实录: 13 轮 7 秒空转(collectBlock 秒败被吞) — 连续 3 轮零增量且轮耗 <5s
         // = 系统性失败(目标不可达/被挖空/镐门), 提前收工省镐, 让 3-strike 正常记账。
         bot._svnOreZeroRounds = (bot._svnOreZeroRounds || 0) + 1;
-        // ★幻影铁活锁修: 本轮零增 + collectBlock 同源 64b live 零命中 → 该邻域是磁盘幻影(非被墙的
-        //   H2 reach 失败, 那种 liveOreNear 会 true)。记邻域中心拉黑本session + 落盘, 使本 run 后续
-        //   与下一 run 的 oracleList 都跳过 → tgt 落空转盲挖真采, 不在同撮鬼坐标反复 hop。
-        if ((ore === 'iron' || ore === 'coal') && !liveOreNear(64)) {
-            const here = bot.entity.position;
-            const arrived = tgt && Math.hypot(tgt.x - here.x, tgt.z - here.z) <= 12;
-            const nearOracle = oracleList().some(c => Math.hypot(c.x - here.x, c.z - here.z) <= 48);
-            if (arrived || nearOracle) {
-                const center = { ore, x: Math.round(here.x), y: Math.round(here.y), z: Math.round(here.z), r: 48, ts: Date.now() };
-                bot._orePhantom = bot._orePhantom || [];
-                if (!bot._orePhantom.some(p => p.ore === ore && Math.hypot(p.x - center.x, p.z - center.z) < 6 && Math.abs(p.y - center.y) < 6)) bot._orePhantom.push(center);
-                phantomCenters.push(center);
-                appendCleared(center);
-                prog(`r${rounds}: 幻影${ore}邻域 (collectBlock 64b live 零命中 @${center.x},${center.y},${center.z}) — 拉黑 48b 本session + 转盲挖真采`);
+        // Zero gain alone is not proof of a ghost: the ore may be vertically distant,
+        // occluded, or its chunk may not be loaded. Quarantine only an exact, nearby,
+        // authoritative live-cell mismatch; never use the old 2D "arrived" heuristic.
+        if (tgt && arrivedAtOracleTarget(bot, tgt)) {
+            const state = liveOracleTargetState(bot, Vec3, tgt, family);
+            if (state === 'absent') {
+                await quarantine(tgt, 'zero-gain-live-block-mismatch');
+                tgt = null;
             }
         }
         if (bot._svnOreZeroRounds >= 3 && Date.now() - rT0 < 5000) {

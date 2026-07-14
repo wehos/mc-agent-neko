@@ -44,12 +44,17 @@ watchdog.stop
 
 # overseer source — re-include from the broad `bots/**/` rule (line 8) which excludes the
 # whole bots/_supervisor/ parent dir. Three-part negate: un-ignore the dir, re-ignore its
-# contents (keep runtime artifacts out), then whitelist only the two source .mjs.
+# contents (keep runtime artifacts out), then whitelist maintained source/test files.
 !bots/_supervisor/
 bots/_supervisor/*
 !bots/_supervisor/bb-readers.mjs
 !bots/_supervisor/overseer-snapshot.mjs
 !bots/_supervisor/bot-medic.mjs
+!bots/_supervisor/oracle_shared.mjs
+!bots/_supervisor/ore-oracle-worker.mjs
+!bots/_supervisor/test/
+bots/_supervisor/test/*
+!bots/_supervisor/test/*.test.mjs
 
 # hot-load skills are SOURCE, not runtime junk — world_model 提案端硬接线技能名(死契约),
 # 丢文件 = customSkill 找不到 → 3-strike → 5min 冷却的永久空转风暴。历史上 skills/*.js 全靠

@@ -23,6 +23,14 @@
 // (net travel / new landmark); { scouted:false, failed:true, reason } on zero-progress runs and on
 // the low-hp / hostile-close defers, so the kernel dispatch-cooldown can trip (kernel contract).
 
+import {
+    freshOracleSnapshot,
+    liveOracleTargetState,
+    loadClearedTargets,
+    markOracleTargetCleared,
+    targetCleared,
+} from './oracleGuard.js';
+
 const LOG_TYPES = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
 const VILLAGE_BLOCKS = ['bell', 'hay_block', 'farmland', 'composter'];
 const NIGHT_START = 13000, NIGHT_END = 23000;
@@ -223,31 +231,42 @@ export default async function scoutResources(bot, ctx, opts = {}) {
     //    (它在海岸出生点常年贴海磨蹭)。灯塔可能数百格远 → 一次 goToPosition 走 partial, 下一拍续走,
     //    净位移即算 kernel 进度; 真够不到(孤岛)则 movedNet<12 → failed → cooldown → MIGRATE 逃生 (正解)。
     if (!pursued) {
-        const oracleNearest = (arr) => {
+        const oo = bot._world && bot._world.oracleOres;
+        const oracleSnapshot = freshOracleSnapshot(oo) ? oo : null;
+        const clearedTargets = oracleSnapshot ? await loadClearedTargets(oracleSnapshot.worldId) : [];
+        const oracleNearest = (arr, family) => {
             try {
                 if (!Array.isArray(arr) || !arr.length) return null;
                 const p = bot.entity.position;
                 let bestC = null, bd = Infinity;
                 for (const c of arr) {
                     if (!c || !Number.isFinite(c.x)) continue;
+                    if (targetCleared(c, family, clearedTargets)) continue;
                     const d = Math.hypot(c.x - p.x, c.z - p.z);
                     if (d < bd) { bd = d; bestC = c; }
                 }
                 return bestC ? { x: bestC.x, y: bestC.y, z: bestC.z, cost: +bd.toFixed(1) } : null;
             } catch (e) { return null; }
         };
-        const oo = bot._world && bot._world.oracleOres;
-        const oTree = (need !== 'village') ? oracleNearest(oo && oo.wood) : null;
-        const oVillage = (need !== 'wood') ? oracleNearest(oo && oo.village) : null;
+        const oTree = (need !== 'village') ? oracleNearest(oracleSnapshot && oracleSnapshot.wood, 'wood') : null;
+        const oVillage = (need !== 'wood') ? oracleNearest(oracleSnapshot && oracleSnapshot.village, 'village') : null;
         const oPick = chooseTarget(need, oTree ? oTree.cost : null, oVillage ? oVillage.cost : null);
         if (oPick === 'wood') {
             pursued = 'oracle-wood'; best = oTree; treeCost = oTree.cost;
             log_(`oracle beacon → wood root @${oTree.x},${oTree.y},${oTree.z} (${oTree.cost}b, 超本地感知 → 定向寻路)`);
             await goTo(oTree, 'oracle-wood');
+            if (liveOracleTargetState(bot, Vec3, oTree, 'wood', 24) === 'absent') {
+                await markOracleTargetCleared(oracleSnapshot, 'wood', oTree, 'live-target-absent');
+                log_(`oracle wood root absent @${oTree.x},${oTree.y},${oTree.z} → quarantine`);
+            }
         } else if (oPick === 'village') {
             pursued = 'oracle-village'; best = oVillage; villageCost = oVillage.cost;
             log_(`oracle beacon → village @${oVillage.x},${oVillage.y},${oVillage.z} (${oVillage.cost}b → 定向寻路)`);
             await goTo(oVillage, 'oracle-village');
+            if (liveOracleTargetState(bot, Vec3, oVillage, 'village', 24) === 'absent') {
+                await markOracleTargetCleared(oracleSnapshot, 'village', oVillage, 'live-target-absent');
+                log_(`oracle village marker absent @${oVillage.x},${oVillage.y},${oVillage.z} → quarantine`);
+            }
         }
     }
 
