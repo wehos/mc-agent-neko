@@ -6,8 +6,7 @@ import Vec3 from 'vec3';
 import { unclimbVines } from './vine_unstick.js';
 import {
     applyUndergroundWaterAvoidance,
-    isBotInWater,
-    shouldAvoidUndergroundWater,
+    createUndergroundWaterGuard,
 } from './navigation_policy.js';
 import settings from "../../../settings.js";
 import path from 'path';
@@ -4130,12 +4129,27 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
     
     const stuckCheckPromise = new Promise((_, reject) => {
         stuckCheckInterval = setInterval(() => {
-            if (audit.abortOnWaterEntry && isBotInWater(bot)) {
-                const waterError = new Error('Underground mining path entered water');
-                waterError.name = 'UndergroundMiningWaterEntry';
-                clearInterval(stuckCheckInterval);
-                reject(waterError);
-                return;
+            if (audit.waterGuard && audit.waterGuard.enabled) {
+                const waterState = audit.waterGuard.observe();
+                if (waterState === 'armed') {
+                    try { audit.armWaterAvoidance(); } catch (e) {
+                        clearInterval(stuckCheckInterval);
+                        reject(e);
+                        return;
+                    }
+                    const armedError = new Error('Underground mining water guard armed after dry exit');
+                    armedError.name = 'UndergroundMiningWaterPolicyArmed';
+                    clearInterval(stuckCheckInterval);
+                    reject(armedError);
+                    return;
+                }
+                if (waterState === 'entered') {
+                    const waterError = new Error('Underground mining path entered water');
+                    waterError.name = 'UndergroundMiningWaterEntry';
+                    clearInterval(stuckCheckInterval);
+                    reject(waterError);
+                    return;
+                }
             }
             if (bot.interrupt_code) {
                 clearInterval(stuckCheckInterval);
@@ -4191,6 +4205,16 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
     } catch (err) {
         clearInterval(stuckCheckInterval);
         bot.pathfinder.setGoal(null);
+        if (err && err.name === 'UndergroundMiningWaterPolicyArmed') {
+            try { bot.clearControlStates(); } catch (e) { /* best-effort policy replan */ }
+            motionAudit(bot, 'path.water_policy_armed', {
+                seq: audit.seq,
+                phase: audit.phase,
+                ms: Date.now() - phaseStartedAt,
+                goal: audit.goal,
+            });
+            return { success: false, stuckDetected: false, waterPolicyArmed: true };
+        }
         if (err && err.name === 'UndergroundMiningWaterEntry') {
             try { bot.clearControlStates(); } catch (e) { /* best-effort emergency stop */ }
             motionAudit(bot, 'path.water_entry_abort', {
@@ -4260,8 +4284,7 @@ export async function goToGoal(bot, goal) {
     bot._lastPathGoalInfo = goalInfo;
     bot._lastPathGoalAt = Date.now();
     motionAudit(bot, 'path.begin', { seq: navSeq, goal: goalInfo });
-    const avoidUndergroundWater = shouldAvoidUndergroundWater(bot);
-    const startedInWater = avoidUndergroundWater && isBotInWater(bot);
+    const waterGuard = createUndergroundWaterGuard(bot);
 
     // ★MAROONED gate at the COMMON pathfinding entry (打转终极机理: 只给 goToPosition
     // 加门漏掉了 moveAway/moveAwayFromEntity/avoidEnemies — 它们直接走 goToGoal。
@@ -4343,15 +4366,21 @@ export async function goToGoal(bot, goal) {
     // merely an expensive route, because a low ceiling can turn one path step
     // into a drowning trap. Make water a hard A* veto for mining only. Keep the
     // existing liquid entries so a route that starts in water can still model a
-    // dry exit; the runtime guard below only aborts a NEW water entry.
-    if (avoidUndergroundWater) {
+    // dry exit; once it reaches dry ground the runtime guard arms this policy,
+    // cancels the recovery path, and replans with the hard veto in place.
+    const armWaterAvoidance = () => {
         const getBlockId = (name) => mc.getBlockId(name);
         applyUndergroundWaterAvoidance(nonDestructiveMovements, bot, getBlockId);
         applyUndergroundWaterAvoidance(destructiveMovements, bot, getBlockId);
+    };
+    if (waterGuard.enabled && waterGuard.armed) {
+        armWaterAvoidance();
+    }
+    if (waterGuard.enabled) {
         motionAudit(bot, 'path.water_policy', {
             seq: navSeq,
-            mode: 'hard-avoid',
-            startedInWater,
+            mode: waterGuard.armed ? 'hard-avoid' : 'initial-water-recovery',
+            startedInWater: waterGuard.startedInWater,
             skill: bot._currentSkill || null,
             y: +bot.entity.position.y.toFixed(2),
             goal: goalInfo,
@@ -4511,9 +4540,17 @@ export async function goToGoal(bot, goal) {
                     seq: navSeq,
                     phase: isDestructive ? 'destructive' : 'non-destructive',
                     goal: goalInfo,
-                    abortOnWaterEntry: avoidUndergroundWater && !startedInWater,
+                    waterGuard,
+                    armWaterAvoidance,
                 }
             );
+
+            if (result.waterPolicyArmed) {
+                // The initial recovery route reached dry ground. Its remaining
+                // nodes may still cross water, so cancel and replan immediately
+                // now that both movement sets carry the hard water veto.
+                continue;
+            }
 
             if (result.success) {
                 clearInterval(doorCheckInterval);

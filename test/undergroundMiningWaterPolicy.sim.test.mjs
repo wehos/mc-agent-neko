@@ -7,6 +7,7 @@ import process from 'node:process';
 import Vec3 from 'vec3';
 import {
     applyUndergroundWaterAvoidance,
+    createUndergroundWaterGuard,
     isBotInWater,
     shouldAvoidUndergroundWater,
 } from '../src/agent/library/navigation_policy.js';
@@ -37,11 +38,13 @@ function check(name, condition) {
 console.log('Test 1: underground mining hard-vetoes water');
 for (const skill of ['mineOres', 'mineDiamonds', 'branchMine', 'mineDown']) {
     const bot = makeBot({ skill, y: 48 });
-    const movements = { blocksToAvoid: new Set() };
+    const movements = { blocksToAvoid: new Set(), blocksCantBreak: new Set() };
     check(`${skill} activates policy`, shouldAvoidUndergroundWater(bot));
     check(`${skill} applies policy`, applyUndergroundWaterAvoidance(movements, bot, n => ids[n]));
     check(`${skill} avoids still water`, movements.blocksToAvoid.has(WATER));
     check(`${skill} avoids flowing water`, movements.blocksToAvoid.has(FLOWING_WATER));
+    check(`${skill} cannot break still water`, movements.blocksCantBreak.has(WATER));
+    check(`${skill} cannot break flowing water`, movements.blocksCantBreak.has(FLOWING_WATER));
 }
 
 console.log('Test 2: surface travel and recovery remain water-capable');
@@ -56,6 +59,21 @@ console.log('Test 3: runtime water-entry sensor checks feet and head');
 check('dry body is not in water', !isBotInWater(makeBot()));
 check('water at feet is detected', isBotInWater(makeBot({ foot: 'water' })));
 check('flowing water at head is detected', isBotInWater(makeBot({ head: 'flowing_water' })));
+
+console.log('Test 4: an initial-water recovery arms after reaching dry ground');
+{
+    let foot = 'water';
+    const bot = makeBot({ foot });
+    bot.blockAt = (p) => Math.floor(p.y) === 48 ? { name: foot } : { name: 'air' };
+    const guard = createUndergroundWaterGuard(bot);
+    check('guard records an initial-water start', guard.startedInWater && !guard.armed);
+    check('initial water remains recovery-only', guard.observe() === 'initial-water');
+    foot = 'air';
+    check('first dry observation arms the guard', guard.observe() === 'armed' && guard.armed);
+    check('dry travel remains allowed after arming', guard.observe() === 'dry');
+    foot = 'water';
+    check('later water contact is a new entry', guard.observe() === 'entered');
+}
 
 if (failures) {
     console.log(`FAILED: ${failures} assertion(s)`);
