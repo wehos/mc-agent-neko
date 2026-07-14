@@ -1424,12 +1424,13 @@ async function tunnelToOre(bot, oreBlock, { maxSteps = 30, budgetMs = 25000, max
                 floorSolid: solidAt(plan.floor),
                 fluidInCorridor,
                 fluidWouldEnter,
-                unbreakable: unbreakable || otherOreAhead,
+                unbreakable,
                 visited: visited.has(_key(plan.nf)),
+                targetAhead,
+                otherOreAhead,
             });
             return {
                 ...safety,
-                reason: otherOreAhead ? 'other-ore-ahead' : safety.reason,
                 targetAhead,
                 score: Math.abs(orePos.x - plan.nf.x) + Math.abs(orePos.y - plan.nf.y) + Math.abs(orePos.z - plan.nf.z),
                 plan,

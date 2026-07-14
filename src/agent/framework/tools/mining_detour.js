@@ -13,12 +13,15 @@ export function corridorSafety({
     fluidWouldEnter = false,
     unbreakable = false,
     visited = false,
+    targetAhead = false,
+    otherOreAhead = false,
 } = {}) {
     if (visited) return { safe: false, reason: 'visited' };
     if (fluidInCorridor) return { safe: false, reason: 'fluid-in-corridor' };
     if (fluidWouldEnter) return { safe: false, reason: 'fluid-would-enter' };
     if (!floorSolid) return { safe: false, reason: 'no-floor' };
     if (unbreakable) return { safe: false, reason: 'unbreakable' };
+    if (otherOreAhead && !targetAhead) return { safe: false, reason: 'other-ore-ahead' };
     return { safe: true, reason: 'ok' };
 }
 

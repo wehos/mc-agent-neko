@@ -18,6 +18,9 @@ check('water/lava in corridor is unsafe', corridorSafety({ floorSolid: true, flu
 check('opening a fluid face is unsafe', corridorSafety({ floorSolid: true, fluidWouldEnter: true }).reason === 'fluid-would-enter');
 check('cave/ravine drop is unsafe', corridorSafety({ floorSolid: false }).reason === 'no-floor');
 check('visited cell is not selected again', corridorSafety({ floorSolid: true, visited: true }).reason === 'visited');
+check('another ore alone blocks corridor carving', corridorSafety({ floorSolid: true, otherOreAhead: true }).reason === 'other-ore-ahead');
+check('target ore wins when another vein block shares corridor', corridorSafety({ floorSolid: true, targetAhead: true, otherOreAhead: true }).safe === true);
+check('target plus another ore does not bypass fluid safety', corridorSafety({ floorSolid: true, fluidWouldEnter: true, targetAhead: true, otherOreAhead: true }).reason === 'fluid-would-enter');
 
 console.log('orderedMiningDetours:');
 const turns = orderedMiningDetours(1, 0);
