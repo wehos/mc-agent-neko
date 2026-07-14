@@ -54,6 +54,21 @@ test('startup cleanup trims pre-existing runtime logs off the main thread', asyn
   });
 });
 
+test('runtime cleanup never truncates the inbox control queue', async () => {
+  await inTempDir(async (dir) => {
+    const logs = path.join(dir, 'bots', '_supervisor');
+    await fs.mkdir(logs, { recursive: true });
+    const inboxBytes = 2 * 1024 * 1024;
+    await fs.writeFile(path.join(logs, 'inbox.jsonl'), Buffer.alloc(inboxBytes, 113));
+    await fs.writeFile(path.join(logs, 'mine_motion.jsonl'), Buffer.alloc(2 * 1024 * 1024, 120));
+    await runTelemetryChild(dir, `await new Promise(r => setTimeout(r, 600));`, { MC_TELEMETRY_FILE_MAX_MB: '1' });
+    const inbox = await fs.stat(path.join(logs, 'inbox.jsonl'));
+    const telemetry = await fs.stat(path.join(logs, 'mine_motion.jsonl'));
+    assert.equal(inbox.size, inboxBytes);
+    assert.ok(telemetry.size <= 1024 * 1024, `expected telemetry <=1MiB, got ${telemetry.size}`);
+  });
+});
+
 test('runtime log budget includes rotated and old-world generations', async () => {
   await inTempDir(async (dir) => {
     const logs = path.join(dir, 'bots', '_supervisor');

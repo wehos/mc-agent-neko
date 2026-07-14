@@ -10,8 +10,9 @@ const enabled = workerData.enabled;
 const totalBudget = workerData.totalBudget;
 const perFileBudget = workerData.perFileBudget;
 const allowed = new Set(workerData.allowed);
-const runtimePattern = /\.(?:jsonl|log|txt)(?:\..+)?$/i;
+const managed = new Set(workerData.managed);
 const isArchived = (name) => /\.(?:jsonl|log|txt)\./i.test(name);
+const isManaged = (name) => [...managed].some((base) => name === base || name.startsWith(`${base}.`));
 let queue = Promise.resolve();
 
 async function statOrNull (file) {
@@ -37,7 +38,9 @@ async function runtimeFiles () {
   const names = await fs.readdir(directory);
   const entries = [];
   for (const name of names) {
-    if (!runtimePattern.test(name)) continue;
+    // Control/state files such as inbox.jsonl must never be truncated by log
+    // retention. Only explicitly managed runtime logs and their rotations count.
+    if (!isManaged(name)) continue;
     const file = path.join(directory, name);
     const stat = await statOrNull(file);
     if (stat?.isFile()) entries.push({ name, file, size: stat.size, mtimeMs: stat.mtimeMs });

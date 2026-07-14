@@ -101,6 +101,27 @@ test('block-state property predicates select the correct worker-side state', asy
   assert.equal(blocks[0].position.x, 5);
 });
 
+test('live-only predicates can reject a nearer candidate without hiding a farther match', async () => {
+  const stone = data.blocksByName.stone.defaultState;
+  const bot = fakeBotWith([
+    { x: 1, y: 0, z: 0, state: stone },
+    { x: 6, y: 4, z: 0, state: stone }
+  ]);
+  const blocks = await findBlocksOffThread(bot, {
+    matching: (block) => block.name === 'stone' && block.position?.y >= 4,
+    maxDistance: 16,
+    count: 1
+  });
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].position.toString(), '(6, 4, 0)');
+  const directBlocks = await findBlocksOffThread(bot, {
+    matching: (block) => block.name === 'stone' && block.position.y >= 4,
+    maxDistance: 16,
+    count: 1
+  });
+  assert.equal(directBlocks[0].position.toString(), '(6, 4, 0)');
+});
+
 test('worker bounds retained matches to the requested count', async (t) => {
   const worker = new Worker(new URL('../src/utils/block_scan_worker.cjs', import.meta.url));
   t.after(() => worker.terminate());

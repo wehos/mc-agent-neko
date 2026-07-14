@@ -68,6 +68,7 @@ function scanSection (job, raw) {
   const section = Chunk.section.fromJson(raw.json);
   const wanted = job.wanted;
   const radius2 = job.radius * job.radius;
+  const positions = job.streamCandidates ? [] : null;
 
   for (let y = 0; y < 16; y++) {
     const wy = raw.y + y;
@@ -82,10 +83,12 @@ function scanSection (job, raw) {
         const d2 = dx * dx + dy * dy + dz * dz;
         if (d2 > radius2) continue;
         if (!wanted.has(sectionStateId(section, { x, y, z }))) continue;
-        retainNearest(job, { x: wx, y: wy, z: wz, d2 });
+        if (positions) positions.push({ x: wx, y: wy, z: wz });
+        else retainNearest(job, { x: wx, y: wy, z: wz, d2 });
       }
     }
   }
+  return positions;
 }
 
 parentPort.on('message', (message) => {
@@ -98,6 +101,7 @@ parentPort.on('message', (message) => {
         radius: message.radius,
         count: Math.max(1, Math.floor(message.count)),
         wanted: new Set(message.stateIds),
+        streamCandidates: message.streamCandidates === true,
         matches: [],
         peakRetained: 0
       });
@@ -109,8 +113,12 @@ parentPort.on('message', (message) => {
     if (!job) throw new Error(`Unknown block scan job ${jobId}`);
 
     if (type === 'batch') {
-      for (const section of message.sections) scanSection(job, section);
-      parentPort.postMessage({ type: 'ack', jobId, batchId: message.batchId });
+      const positions = job.streamCandidates ? [] : null;
+      for (const section of message.sections) {
+        const sectionPositions = scanSection(job, section);
+        if (positions && sectionPositions) positions.push(...sectionPositions);
+      }
+      parentPort.postMessage({ type: 'ack', jobId, batchId: message.batchId, positions });
       return;
     }
 

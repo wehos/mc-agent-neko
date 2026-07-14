@@ -10,6 +10,13 @@ const TELEMETRY_FILES = [
   'mine_dbg.log',
   'framework-shadow.log'
 ];
+const RUNTIME_LOG_FILES = [
+  ...TELEMETRY_FILES,
+  'events.log',
+  'vitals.jsonl',
+  'death_log.jsonl',
+  'disconnects.jsonl'
+];
 
 const enabled = /^(?:1|true|yes)$/i.test(process.env.MC_TELEMETRY || '');
 // 64 MiB leaves comfortable room below the user's 100 MB distribution/runtime
@@ -23,7 +30,8 @@ const telemetryWorker = new Worker(new URL('./telemetry_worker.cjs', import.meta
     enabled,
     totalBudget,
     perFileBudget,
-    allowed: TELEMETRY_FILES
+    allowed: TELEMETRY_FILES,
+    managed: RUNTIME_LOG_FILES
   }
 });
 telemetryWorker.unref();

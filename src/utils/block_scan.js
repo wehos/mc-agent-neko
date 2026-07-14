@@ -95,7 +95,7 @@ async function sendAndWait (message, bot) {
   const batchId = nextBatchId++;
   const promise = waitFor(`batch:${batchId}`, SCAN_TIMEOUT_MS, () => bot?._disposed === true);
   getWorker().postMessage({ ...message, batchId });
-  await promise;
+  return await promise;
 }
 
 function throwIfDisposed (bot) {
@@ -116,15 +116,17 @@ function statesForTypes (bot, typeIds) {
 }
 
 function matchingStateIds (bot, matching) {
-  if (typeof matching === 'number') return statesForTypes(bot, [matching]);
-  if (Array.isArray(matching)) return statesForTypes(bot, matching.filter(Number.isFinite));
+  if (typeof matching === 'number') return { stateIds: statesForTypes(bot, [matching]), requiresLivePredicate: false };
+  if (Array.isArray(matching)) return { stateIds: statesForTypes(bot, matching.filter(Number.isFinite)), requiresLivePredicate: false };
   if (typeof matching !== 'function') throw new TypeError('Block scan matching must be a block id, id array, or predicate');
 
   const states = [];
+  let requiresLivePredicate = false;
   for (const block of Object.values(bot.registry?.blocksByName || {})) {
     const min = Number.isFinite(block.minStateId) ? block.minStateId : block.id;
     const max = Number.isFinite(block.maxStateId) ? block.maxStateId : min;
     for (let state = min; state <= max; state++) {
+      let readLiveOnlyData = false;
       try {
         // Mineflayer exposes the legacy metadata value as the state offset for
         // levelled blocks (water/lava). Reconstruct block-state properties with
@@ -141,11 +143,36 @@ function matchingStateIds (bot, matching) {
             : (property.values ? property.values[raw] : raw);
           stateData = Math.floor(stateData / property.num_values);
         }
-        if (matching({ ...block, type: block.id, metadata, getProperties: () => properties })) states.push(state);
-      } catch { /* predicate is not compatible with a registry-only block */ }
+        const registryBlock = { ...block, type: block.id, metadata, getProperties: () => properties };
+        const probe = new Proxy(registryBlock, {
+          get: (target, property, receiver) => {
+            if (Object.prototype.hasOwnProperty.call(target, property)) return Reflect.get(target, property, receiver);
+            readLiveOnlyData = true;
+            return undefined;
+          },
+          has: (target, property) => {
+            if (Object.prototype.hasOwnProperty.call(target, property)) return true;
+            readLiveOnlyData = true;
+            return false;
+          },
+          getOwnPropertyDescriptor: (target, property) => {
+            const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+            if (!descriptor) readLiveOnlyData = true;
+            return descriptor;
+          }
+        });
+        const matched = Boolean(matching(probe));
+        if (matched || readLiveOnlyData) states.push(state);
+      } catch {
+        // Accessing position or another live Block-only member often throws on
+        // the registry probe. Keep that state as a broad worker candidate and
+        // run the real predicate against live blocks in bounded main-thread slices.
+        if (readLiveOnlyData) states.push(state);
+      }
+      if (readLiveOnlyData) requiresLivePredicate = true;
     }
   }
-  return states;
+  return { stateIds: states, requiresLivePredicate };
 }
 
 function columnIntersects (chunkX, chunkZ, center, radius) {
@@ -160,26 +187,78 @@ function yieldImmediate () {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+function compareLiveMatches (a, b) {
+  return a.d2 - b.d2 || a.position.y - b.position.y || a.position.z - b.position.z || a.position.x - b.position.x;
+}
+
+function retainNearestLiveMatch (matches, candidate, count) {
+  if (matches.length < count) {
+    matches.push(candidate);
+    let index = matches.length - 1;
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (compareLiveMatches(matches[parent], matches[index]) >= 0) break;
+      [matches[parent], matches[index]] = [matches[index], matches[parent]];
+      index = parent;
+    }
+    return;
+  }
+  if (compareLiveMatches(candidate, matches[0]) >= 0) return;
+  matches[0] = candidate;
+  let index = 0;
+  while (true) {
+    const left = index * 2 + 1;
+    const right = left + 1;
+    let worst = index;
+    if (left < matches.length && compareLiveMatches(matches[left], matches[worst]) > 0) worst = left;
+    if (right < matches.length && compareLiveMatches(matches[right], matches[worst]) > 0) worst = right;
+    if (worst === index) return;
+    [matches[index], matches[worst]] = [matches[worst], matches[index]];
+    index = worst;
+  }
+}
+
+async function filterLiveCandidates (bot, positions, matching, center, count, matches) {
+  let sliceStarted = performance.now();
+  for (const position of positions) {
+    throwIfDisposed(bot);
+    const block = bot.blockAt(new Vec3(position.x, position.y, position.z));
+    if (block && matching(block)) {
+      const dx = position.x - center.x;
+      const dy = position.y - center.y;
+      const dz = position.z - center.z;
+      retainNearestLiveMatch(matches, { block, position, d2: dx * dx + dy * dy + dz * dz }, count);
+    }
+    if (performance.now() - sliceStarted >= SNAPSHOT_SLICE_MS) {
+      await yieldImmediate();
+      throwIfDisposed(bot);
+      sliceStarted = performance.now();
+    }
+  }
+}
+
 async function scanOnce (bot, options) {
   if (!bot?.world?.getColumns || !bot?.entity?.position || bot._disposed) return [];
   const rawCenter = options.point || bot.entity.position;
   const center = { x: Math.floor(rawCenter.x), y: Math.floor(rawCenter.y), z: Math.floor(rawCenter.z) };
   const radius = Math.max(0, Number(options.maxDistance) || 0);
   const count = Math.max(1, Number(options.count) || 1);
-  const stateIds = matchingStateIds(bot, options.matching);
+  const { stateIds, requiresLivePredicate } = matchingStateIds(bot, options.matching);
   if (!stateIds.length) return [];
 
   const jobId = nextJobId++;
   const activeWorker = getWorker();
   activeWorker.ref();
   let batch = [];
+  const liveMatches = [];
+  const batchSize = requiresLivePredicate ? 1 : SECTIONS_PER_BATCH;
   let sliceStarted = performance.now();
   try {
     throwIfDisposed(bot);
     await sendAndWait({
       type: 'start', jobId, version: bot.version,
       center: { x: center.x, y: center.y, z: center.z },
-      radius, count, stateIds
+      radius, count, stateIds, streamCandidates: requiresLivePredicate
     }, bot);
     for (const entry of bot.world.getColumns()) {
       throwIfDisposed(bot);
@@ -198,8 +277,11 @@ async function scanOnce (bot, options) {
         const json = section.toJson();
         throwIfDisposed(bot);
         batch.push({ x: chunkX * 16, y, z: chunkZ * 16, json });
-        if (batch.length >= SECTIONS_PER_BATCH) {
-          await sendAndWait({ type: 'batch', jobId, sections: batch }, bot);
+        if (batch.length >= batchSize) {
+          const reply = await sendAndWait({ type: 'batch', jobId, sections: batch }, bot);
+          if (requiresLivePredicate) {
+            await filterLiveCandidates(bot, reply.positions || [], options.matching, center, count, liveMatches);
+          }
           batch = [];
         }
         if (performance.now() - sliceStarted >= SNAPSHOT_SLICE_MS) {
@@ -209,12 +291,20 @@ async function scanOnce (bot, options) {
         }
       }
     }
-    if (batch.length) await sendAndWait({ type: 'batch', jobId, sections: batch }, bot);
+    if (batch.length) {
+      const reply = await sendAndWait({ type: 'batch', jobId, sections: batch }, bot);
+      if (requiresLivePredicate) {
+        await filterLiveCandidates(bot, reply.positions || [], options.matching, center, count, liveMatches);
+      }
+    }
     throwIfDisposed(bot);
     const resultPromise = waitFor(`job:${jobId}`, SCAN_TIMEOUT_MS, () => bot?._disposed === true);
     activeWorker.postMessage({ type: 'finish', jobId });
     const result = await resultPromise;
     throwIfDisposed(bot);
+    if (requiresLivePredicate) {
+      return liveMatches.sort(compareLiveMatches).map((candidate) => candidate.block);
+    }
     const blocks = [];
     for (const position of result.positions) {
       throwIfDisposed(bot);
