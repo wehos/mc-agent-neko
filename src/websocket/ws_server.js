@@ -1,4 +1,5 @@
 import { WebSocketServer } from 'ws';
+import fs from 'fs';
 import { serverProxy } from '../agent/mindserver_proxy.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -408,6 +409,10 @@ class WSMessageServer {
                     armor,                                                   // ★C314-A worn armor pieces (none = defenseless → swarm death risk)
                     mob: ((bot._mobility && bot._mobility.state) || '?') + (bot._mobility && bot._mobility.enclosed ? '/ENC' : ''),   // mobility state machine (FREE/POCKET/ENTOMBED/SWIM[/ENC=封闭地穴])
                     pinKicks: bot._persistentPinKicks || 0,   // ★reflex_watchdog escalation: N (>3) = bot is in a PERSISTENT pin the forced-interrupt kick can't break — supervisor should dispatch a relocating recovery (forageExplore/escapePlan). 0 = not pinned / kick still working.
+                    // ★2026-07-14 admin 独占标志 (用户令: admin 要求的炼铁/待命是合法站桩): watchdog 的
+                    //   STUCK-ZONE 位置锚是累积的, 长炉次/待命会被 10min cancel / 25min 硬重启误杀 —
+                    //   cmd=1 时 watchdog 保护性 re-anchor (对应 watchdog.ps1 $adminCmdHold)。
+                    cmd: (bot._extIntentUntil && Date.now() < bot._extIntentUntil) ? 1 : 0,
                     inv,
                 });
             } catch (e) { /* telemetry must never hurt the agent */ }
@@ -598,6 +603,19 @@ class WSMessageServer {
     }
 
     cancelSkill(reason) {
+        // ★2026-07-14 用户令 (admin 任务不被别的命令打断): supervisor 侧的自动 cancel (watchdog
+        //   STUCK-ZONE 10min 站桩判定等) 在 admin 独占窗口内一律拒绝 — admin 要求的炼铁/原地待命
+        //   本来就是合法站桩, 不是卡死。admin 自己撤销/改令走 'task' 注入路 (auto-preempt), 不经此门;
+        //   窗口随任务结束清零 (handleMessage finally / mission end), 真卡死时续期停止 → 窗口 ≤5min
+        //   内过期, watchdog cancel 恢复效力; 25min STUCK-ZONE 硬重启是进程级, 不走这里, 终极兜底不变。
+        try {
+            const _b = this.agent && this.agent.bot;
+            if (_b && _b._extIntentUntil && Date.now() < _b._extIntentUntil) {
+                console.log(`[ws] cancel_skill REFUSED (admin-exclusive window active): ${reason}`);
+                this.broadcast({ type: 'cancel_result', ok: false, error: 'admin-exclusive active — an on-command task holds the body; refusing supervisor cancel', reason });
+                return;
+            }
+        } catch (e) {}
         if (!this._interruptRunning(reason)) {
             this.broadcast({ type: 'cancel_result', ok: false, error: 'no agent online', reason });
             return;
@@ -623,11 +641,38 @@ class WSMessageServer {
         return !(this._skillRunning || (this.agent && this.agent.supervised_skill));
     }
 
+    // sticky_skill.json 里登记的保活技能名 (BOM-safe 读, 读不到就当不是)。
+    _isStickySkill(name) {
+        try {
+            const raw = fs.readFileSync('bots/_supervisor/sticky_skill.json', 'utf8').replace(/^﻿/, '');
+            const sticky = JSON.parse(raw);
+            return !!(sticky && sticky.skill === name);
+        } catch (e) { return false; }
+    }
+
     async runSkill(skillName, args) {
         if (!this.agent || !this.agent.bot) {
             this.broadcast({ type: 'skill_result', skill: skillName, ok: false, error: 'no agent online' });
             return;
         }
+        // ★2026-07-14 (用户令: admin 任务不被别的命令打断 — in-game 实锤 20:03:48): bridge 每收到
+        //   一个 skill_result 就 8s 后重挂 sticky (kernelDriver), 而下方 AUTO-PREEMPT 把它当"外部
+        //   指令最高优先"→ 刚起跑的 admin/直派技能被自动保活反杀 (`run_skill kernelDriver 抢占
+        //   smeltSafe`), admin mission 也被它饿死。sticky 保活不是外部命令: 身体被占 或 admin 独占
+        //   窗口新鲜时, 一律 busy 拒绝 (bridge 对 busy 前缀转 30s 慢心跳重试, 前台技能结束后的
+        //   skill_result 也会再触发重挂 — 自主照常恢复, 不会 dead-idle)。真人/监工手动直派的
+        //   非 sticky 技能不受影响, 保留 auto-preempt。
+        try {
+            const _busyNow = this._skillRunning || this.agent.supervised_skill;
+            const _b = this.agent.bot;
+            const _adminFresh = _b && _b._extIntentUntil && Date.now() < _b._extIntentUntil;
+            if ((_busyNow || _adminFresh) && this._isStickySkill(skillName)) {
+                const who = this._skillRunningName || this.agent.supervised_skill || 'admin-exclusive window';
+                console.log(`🛠️ run_skill ${skillName} (sticky re-arm) — busy 拒绝, '${who}' 占用中`);
+                this.broadcast({ type: 'skill_result', skill: skillName, ok: false, error: `busy: ${who} running (sticky re-arm rejected)` });
+                return;
+            }
+        } catch (e) {}
         // RE-ENTRY GUARD: never run two supervised skills at once. The bridge re-arms a
         // sticky skill on every (re)connect, so a WS blip can fire a SECOND achieveLoop
         // while one is already running — two loops then fight over the SAME bot.pathfinder,
@@ -753,6 +798,46 @@ class WSMessageServer {
         this.onTaskCompleted({ status, message, score: null, reason: `mission ${status}`, task_id: id, mission_end: true });
         this.currentTask = null;
         this.currentTaskId = null;
+    }
+    // ★2026-07-14 节流回执: AdminMission 无视重复指令时, 用一帧轻量 task_finished(status='duplicate')
+    //   给插件收尾该 task_id (静默丢帧会让插件挂到自身超时, 反而诱发更多重发)。刻意不走 onTaskCompleted:
+    //   ① mission_end 去重戳会误压制 5s 内正在跑任务的真实尾帧; ② 不带 inventory、不动
+    //   currentTask/currentTaskId —— 正在跑的任务仍拥有它们。'duplicate' 不在插件已知状态词表
+    //   (ok/failed/superseded/interrupted), 按文档约定未知词当"非成功"处理, message 才是主信号。
+    // ★2026-07-14 节流: 是否真有 legacy WS 任务在飞 (injectMessage 注入且尚未完成)。断线/死亡/cleanKill
+    //   的 legacy 'interrupted' 帧只在此门为真时才发 —— 无任务时的断线重连风暴曾以 ~10s 一帧向对话 LLM
+    //   轰炸 "任务中断" (0714 实录: server 维护中 115 连发)。mission 路径不经此门 (isActive 分支自理)。
+    hasInflightTask() {
+        return !!(this.currentTask && !this.taskCompleted);
+    }
+    ackDuplicateTask(taskId, message) {
+        try {
+            const payload = {
+                type: 'task_finished',
+                status: 'duplicate',
+                message: String(message || '重复指令已忽略。'),
+                score: null,
+                timestamp: Date.now(),
+            };
+            if (typeof taskId === 'string' && taskId) payload.task_id = taskId;
+            this.broadcastTaskCompletion(payload);
+        } catch (e) { console.error('ackDuplicateTask failed:', e && e.message || e); }
+    }
+    // ★2026-07-14 用户令: 游戏内玩家的自然语言聊天(非指令) → 转发给 ws 外部 admin llm。agent 端已按
+    //   MC_INGAME_CHAT_FLUSH_MS(默认3s)节流聚合成 batch; 这里广播一帧, admin llm 侧监听 type:'ingame_chat'。
+    forwardIngameChat(batch) {
+        try {
+            if (!Array.isArray(batch) || !batch.length) return;
+            const lines = batch.map(m => `<${m.player}> ${m.text}`).join('\n');
+            this.broadcast({
+                type: 'ingame_chat',
+                ts: Date.now(),
+                hint: '以下是 Minecraft 游戏内玩家发送的实时聊天(自然语言, 非系统消息/非指令)。可据此对话或酌情下发 task。',
+                count: batch.length,
+                messages: batch,
+                text: lines,
+            });
+        } catch (e) { console.error('forwardIngameChat failed:', e && e.message || e); }
     }
 
     injectMessage(message, taskId) {

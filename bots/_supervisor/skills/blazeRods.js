@@ -70,7 +70,7 @@ export default async function blazeRods(bot, ctx, opts = {}) {
     //    is always a valid (and nearer) exit — trust it and re-persist; the saved anchor is
     //    only the fallback for mid-farm re-dispatches deep in the fortress, out of scan range. ──
     {
-        const pb0 = world.getNearestBlock(bot, 'nether_portal', 32);
+        const pb0 = await world.getNearestBlockAsync(bot, 'nether_portal', 64);
         if (pb0) {
             const a = { x: pb0.position.x, y: pb0.position.y, z: pb0.position.z };
             const old = bot._netherPortalNether;
@@ -159,7 +159,8 @@ export default async function blazeRods(bot, ctx, opts = {}) {
     const relightPortal = async () => {
         if (has('flint_and_steel') < 1) return null;
         let cands = [];
-        try { cands = bot.findBlocks({ matching: (b) => b && b.name === 'obsidian', maxDistance: 24, count: 48 }) || []; }
+        await new Promise(r => setImmediate(r));
+        try { cands = bot.findBlocks({ matching: (b) => b && b.name === 'obsidian', maxDistance: 64, count: 48 }) || []; }
         catch (e) { return null; }
         // Frame-bottom candidates: obsidian with the 3-tall former interior (now air, maybe
         // residual fire from the fireball) directly above. Filters out random obsidian floor.
@@ -175,7 +176,7 @@ export default async function blazeRods(bot, ctx, opts = {}) {
             try { await bot.lookAt(b.position.offset(0.5, 1, 0.5), true); } catch (e) {}
             try { await bot.activateBlock(b); } catch (e) {}
             await skills.wait(bot, 1500);
-            const relit = world.getNearestBlock(bot, 'nether_portal', 8);
+            const relit = await world.getNearestBlockAsync(bot, 'nether_portal', 8);
             if (relit) {
                 prog(`re-lit extinguished portal @ ${relit.position.x},${relit.position.y},${relit.position.z} (flint_and_steel on the surviving frame)`);
                 return { x: relit.position.x, y: relit.position.y, z: relit.position.z };
@@ -191,7 +192,7 @@ export default async function blazeRods(bot, ctx, opts = {}) {
             || (bot._endgame && bot._endgame.netherPortalNether)
             || skills.egRead(bot).netherPortalNether || null;
         if (!target || typeof target.x !== 'number') {
-            const pb2 = world.getNearestBlock(bot, 'nether_portal', 64);
+            const pb2 = await world.getNearestBlockAsync(bot, 'nether_portal', 64);
             target = pb2 ? { x: pb2.position.x, y: pb2.position.y, z: pb2.position.z } : null;
         }
         if (!target) {
@@ -225,13 +226,13 @@ export default async function blazeRods(bot, ctx, opts = {}) {
         }
 
         // Stand INTO the portal block and poll for the swap (realNetherPortal enterPortal idiom).
-        let pb = world.getNearestBlock(bot, 'nether_portal', 16);
+        let pb = await world.getNearestBlockAsync(bot, 'nether_portal', 16);
         if (!pb) {
             // Ghast-broken portal at the anchor: the portal BLOCKS are gone but the frame
             // survives — re-light with the flint_and_steel we carry; the full rebuild
             // (obsidian x10 we usually don't have) is strictly the last resort.
             const rebuilt = (await relightPortal()) || (await rebuildPortal());
-            if (rebuilt) { bot._netherPortalNether = rebuilt; skills.egPatch(bot, { netherPortalNether: rebuilt }); pb = world.getNearestBlock(bot, 'nether_portal', 16); }
+            if (rebuilt) { bot._netherPortalNether = rebuilt; skills.egPatch(bot, { netherPortalNether: rebuilt }); pb = await world.getNearestBlockAsync(bot, 'nether_portal', 16); }
         }
         if (!pb) { log(bot, 'blazeRods: arrived at anchor but no portal block (and no re-light/rebuild) — abort.'); return false; }
         try { await skills.goToPosition(bot, pb.position.x, pb.position.y, pb.position.z, 1); } catch (e) {}
@@ -265,7 +266,7 @@ export default async function blazeRods(bot, ctx, opts = {}) {
     if (!bot._netherExplore) {
         bot._netherExplore = { origin: { x: Math.floor(bot.entity.position.x), z: Math.floor(bot.entity.position.z) }, dirIdx: 0, leg: 0 };
     }
-    const findFortress = () => bot.findBlock({ matching: (b) => b && b.name === 'nether_bricks', maxDistance: 64 });
+    const findFortress = async () => { const bs = await world.getNearestBlocksWhereAsync(bot, (b) => b && b.name === 'nether_bricks', 64, 1); return (bs && bs.length) ? bs[0] : null; };
     // ★2026-07-05 oracle 接缝 (daemon 维度修复后 nearest.fortress 首次可用): 有新鲜堡垒坐标
     // → 直线分段行军替代盲螺旋; 连续 3 腿走不通(熔岩海)则本轮退回螺旋换向。
     const oracleFortress = () => {
@@ -275,7 +276,7 @@ export default async function blazeRods(bot, ctx, opts = {}) {
             return (f && Number.isFinite(f.x)) ? f : null;
         } catch (e) { return null; }
     };
-    let fortress = findFortress();
+    let fortress = await findFortress();
     while (!fortress && !timeUp()) {
         if (bot.interrupt_code || bot.health <= 0) return eyeEq();
         // ★2026-07-05 预审 P1: 下界死亡重生回主世界后技能变僵尸 — 主世界扫 nether_bricks +
@@ -301,7 +302,7 @@ export default async function blazeRods(bot, ctx, opts = {}) {
             if (ok) st.leg++;
             else st.dirIdx = (st.dirIdx + 1) % 4;                        // change heading, never grind one wall
         }
-        fortress = findFortress();
+        fortress = await findFortress();
     }
     if (!fortress) {
         log(bot, `blazeRods: no fortress within budget (explored ${bot._netherExplore.leg} legs from ${bot._netherExplore.origin.x},${bot._netherExplore.origin.z}).`);
@@ -343,7 +344,8 @@ export default async function blazeRods(bot, ctx, opts = {}) {
         }
         const bl = world.getNearestEntityWhere(bot, (e) => (e.name || '') === 'blaze', 32);
         if (!bl) {
-            const sp = bot.findBlock({ matching: (b) => b && b.name === 'spawner', maxDistance: 48 });
+            const sps = await world.getNearestBlocksWhereAsync(bot, (b) => b && b.name === 'spawner', 64, 1);
+            const sp = (sps && sps.length) ? sps[0] : null;
             if (sp) {
                 await goWithTimeout(sp.position.x, sp.position.y, sp.position.z, 4, 30000);
                 // CAMP, don't churn: blaze spawner cycles are 10-40s, and once we're within

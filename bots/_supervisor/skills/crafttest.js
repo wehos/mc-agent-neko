@@ -24,7 +24,7 @@ export default async function crafttest(bot, ctx, item = 'chest') {
     try { await skills.craftRecipe(bot, item, 1); }
     catch (e) { prog(`CT craftRecipe threw: ${e.message}`); }
     await skills.wait(bot, 400);
-    const nearTable = world.getNearestBlock(bot, 'crafting_table', 16);
+    const nearTable = await world.getNearestBlockAsync(bot, 'crafting_table', 16);
     prog(`CT RESULT ${item}: ${before}->${cnt(item)} | oak_planks ${planksBefore}->${cnt('oak_planks')} | nearTable=${nearTable ? `${nearTable.position.x},${nearTable.position.y},${nearTable.position.z}` : 'none'}`);
     dump('after');
     return cnt(item) > before;

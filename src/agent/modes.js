@@ -1115,6 +1115,20 @@ const modes_list = [
                     }
                 }
             } catch (e) {}
+            // ★2026-07-13 行军回退 (用户实观 "行军途中被打随机方向逃"): _lastPathGoalInfo 只在 skills.goToGoal
+            //   寻路时写, raw-traverse/march/内部前进都不写 → 行军途中挨打 goalPt 常为空 → 旧代码直接落
+            //   safeFleeTarget(离怪最远, 随怪抖动)=随机。这里回退到 heading_tracker 记的"挨打前真实行进方向"
+            //   (≤4s), 投射一个 24 格远点当伪目标 → 继续朝原方向冲。此赋值在 for 循环外只算一次 = 入口快照,
+            //   不被逃跑自身位移污染。仍受下方 towardThreat 守卫: 该方向正对近处威胁(迎面遇怪)才改逃离,
+            //   怪在身后(行军被追的最常见形态)则照冲原向 → 正是用户要的"继续朝目标, 不乱窜"。
+            if (!goalPt) {
+                try {
+                    if (bot._recentMoveDir && Date.now() - (bot._recentMoveDirAt || 0) < 4000) {
+                        const me0 = bot.entity.position, md = bot._recentMoveDir;
+                        goalPt = { x: me0.x + md.x * 24, y: me0.y, z: me0.z + md.z * 24 };
+                    }
+                } catch (e) {}
+            }
             // 消费本模式激活自身的 interrupt 一次 (与 kite 同纪律), 之后一旦有 NEW interrupt (死亡/停止) 立即退出;
             // 绝不在循环内 reset interrupt_code (否则顶掉 executor 的 stop → "refused stop 10s" 被看门狗杀进程)。
             try { bot.interrupt_code = false; } catch (e) {}
@@ -1878,7 +1892,7 @@ const modes_list = [
                             // the water back so we keep the bucket for next time.
                             await new Promise(r => setTimeout(r, 1800));
                             try {
-                                const src = world.getNearestBlock(bot, 'water', 4);
+                                const src = await world.getNearestBlockAsync(bot, 'water', 4);
                                 if (src) { await bot.lookAt(src.position.offset(0.5, 0.5, 0.5), true); bot.activateItem(); }
                             } catch (e) {}
                         });
@@ -2447,7 +2461,7 @@ const modes_list = [
                             if (success) say(agent, 'Placed some water, ahhhh that\'s better!');
                             return;
                         }
-                        let nearestWater = world.getNearestBlock(bot, 'water', 20);
+                        let nearestWater = await world.getNearestBlockAsync(bot, 'water', 64);   // ★B定点20→64+async(0714)
                         if (nearestWater) {
                             const pos = nearestWater.position;
                             let success = await skills.goToPosition(bot, pos.x, pos.y, pos.z, 0.2);
@@ -3757,6 +3771,38 @@ const modes_list = [
                     }
                 });
             }
+        }
+    },
+    {
+        name: 'heading_tracker',
+        description: 'Pure observer: record recent horizontal travel heading so flee can keep charging toward the original goal.',
+        interrupts: [],
+        on: true,
+        active: false,
+        always: true,   // pure observer: must tick even while a sticky skill / march is executing
+        // ★2026-07-13 (用户实观 "行军途中被打却随机方向逃"): sprintFlee 的"朝原目标逃"原本只认
+        //   bot._lastPathGoalInfo — 那只在 skills.goToGoal 主动寻路时才写。但很多行军是 land-bias
+        //   raw-traverse / migrate march / skill 内部 setControlState 前进, 不写它 → 挨打瞬间 goalPt=null
+        //   → 落 safeFleeTarget(纯离怪最远, 随怪每拍抖动)=看起来随机。这里每 tick 记录"真实行进方向"
+        //   (~0.5s 净水平位移, 阈值滤掉原地微动/knockback), sprintFlee 无寻路目标时回退到它继续朝原向冲。
+        _trail: [],
+        update: function (agent) {
+            try {
+                const bot = agent.bot;
+                const p = bot && bot.entity && bot.entity.position;
+                if (!p) return;
+                const now = Date.now();
+                this._trail.push({ x: p.x, z: p.z, t: now });
+                while (this._trail.length && now - this._trail[0].t > 1200) this._trail.shift();
+                const old = this._trail.find(q => now - q.t >= 500);
+                if (!old) return;
+                const dx = p.x - old.x, dz = p.z - old.z;
+                const d = Math.hypot(dx, dz);
+                if (d >= 0.6) {   // 显著行进才更新(≈>1.2格/s); 微动/knockback 抖动被滤掉, 保留最后一次真行进方向
+                    bot._recentMoveDir = { x: dx / d, z: dz / d };
+                    bot._recentMoveDirAt = now;
+                }
+            } catch (e) {}
         }
     },
     {
@@ -5168,7 +5214,7 @@ const modes_list = [
                         try {
                             const logIds = Object.values(bot.registry.blocksByName)
                                 .filter(b => /_log$/.test(b.name)).map(b => b.id);
-                            const hits = bot.findBlocks({ matching: logIds, maxDistance: 64, count: 8 });
+                            await new Promise(r => setImmediate(r)); const hits = bot.findBlocks({ matching: logIds, maxDistance: 64, count: 8 });   // ★findBlocks(palette)+setImmediate让路(0714)
                             const reachable = (hits || []).filter(p => Math.abs(p.y - me0.y) <= 6)
                                 .sort((a, b) => me0.distanceTo(a) - me0.distanceTo(b));
                             if (reachable.length) {
@@ -5685,6 +5731,44 @@ const modes_list = [
                             const err = new Error(`xray dig blocked: ${block.name} occluded at ${_xd.toFixed(1)}b`);
                             write('dig.end', { seq, ok: false, ms: Date.now() - startedAt, target: blockObj(block), error: err.message, env: envSnap() });
                             throw err;
+                        }
+                    }
+                }
+                // ★2026-07-14 PICK-TIER ORE GATE (用户: "偶发性用石镐挖钻石"): 破坏矿石(_ore/ancient_debris)时,
+                //   手上的镐必须能【真正采下】它 —— 石镐挖钻矿/金矿/红石矿会把方块敲碎且零掉落 = 纯浪费。这是
+                //   bot.dig 总闸的 BACKSTOP: 技能层(skills.js breakBlockAt 干净 return false / safeDig 返回
+                //   'wrong-tool' / mineDown 矿环显式 continue)已把挖矿路径就地拦下, 这里只兜住【不走技能层清洁闸】
+                //   的路径 —— 寻路器 canDig 顺手拆矿、LLM newAction 直调 bot.dig、以及各生存/脱困反射(fleeMove/
+                //   edge_unstick/step-edge/entombed guardedDig 等直调 bot.dig 的点)。用 block.canHarvest(镐id) 做
+                //   权威判据(免 nether_gold_ore 之类名字正则误伤)。手上镐采不下 → 先尝试换库存里够品级的镐(治
+                //   "拥有铁镐却握着石镐挖钻"); 换不出(真没铁镐+)→ throw 拒挖(调用方按挖矿失败换目标/绕路, 矿留到
+                //   拿到好镐再采)。★真困豁免: ENTOMBED/SEALED/enclosed-无出口/planned-breach 时脱困优先(与
+                //   ensurePickForDig 徒手脱困同款判据), 放行破矿保命 —— 绝不因护矿把 bot 封死(anti-石棺)。
+                if (block && block.position && /_ore$|ancient_debris/.test(block.name || '')
+                    && bot.game && bot.game.gameMode !== 'creative') {
+                    const _canH = (id) => { try { return !!block.canHarvest(id); } catch (e) { return true; } };
+                    if (!_canH(bot.heldItem ? bot.heldItem.type : null)) {
+                        // 手上镐采不下 → 换库存里能采下的镐(够品级里剩余耐久最低的先用, 护高级镐)
+                        try {
+                            const _rem = (it) => { const m = it.maxDurability || 0, u = (typeof it.durabilityUsed === 'number') ? it.durabilityUsed : 0; return m > 0 ? (m - u) : Infinity; };
+                            const _cap = bot.inventory.items()
+                                .filter(it => /_pickaxe$/.test(it.name || '') && _canH(it.type))
+                                .sort((a, b) => _rem(a) - _rem(b))[0];
+                            if (_cap) { await originalEquip(_cap, 'hand'); await new Promise(r => setTimeout(r, 60)); }
+                        } catch (e) {}
+                        if (!_canH(bot.heldItem ? bot.heldItem.type : null)) {
+                            // 全仓库无镐能采 → 除非真困, 否则拒挖(保矿不浪费)
+                            const _mbO = bot._mobility || {};
+                            const _trapO = /ENTOMBED|SEALED/.test(_mbO.state || '')
+                                || (!!_mbO.enclosed && (!_mbO.exits || _mbO.exits.length === 0))
+                                || (Date.now() < (bot._plannedNoPickStoneUntil || 0));
+                            if (!_trapO) {
+                                try { fs.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★PICKTIER-BLOCK dig ${block.name}@${block.position.x},${block.position.y},${block.position.z} held=${bot.heldItem ? bot.heldItem.name : 'empty'} — 无够品级镐可采, 拒挖(保矿不浪费)\n`); } catch (e) {}
+                                const err = new Error(`pick-tier dig blocked: ${block.name} not harvestable by any owned pickaxe`);
+                                write('dig.end', { seq, ok: false, ms: Date.now() - startedAt, target: blockObj(block), error: err.message, env: envSnap() });
+                                throw err;
+                            }
+                            write('dig.oretier_exemption', { seq, target: blockObj(block), mobility: _mbO.state || '', enclosed: !!_mbO.enclosed });
                         }
                     }
                 }
@@ -6237,7 +6321,7 @@ const modes_list = [
                 let counts = {}; try { counts = world.getInventoryCounts(bot); } catch (e) {}
                 const planksMax = Math.max(0, ...Object.keys(counts).filter(k => k.endsWith('_planks')).map(k => counts[k] || 0));
                 const logs = Object.keys(counts).filter(k => k.endsWith('_log')).reduce((s, k) => s + (counts[k] || 0), 0);
-                let tableNear = false; try { tableNear = !!world.getNearestBlock(bot, 'crafting_table', 4); } catch (e) {}
+                let tableNear = false; try { tableNear = !!(await world.getNearestBlockAsync(bot, 'crafting_table', 4)); } catch (e) {}
                 const hasTablePath = (counts['crafting_table'] || 0) > 0 || tableNear || planksMax >= 4 || logs > 0;
                 const cobble = counts['cobblestone'] || 0;
                 const torches = counts['torch'] || 0;
@@ -6511,24 +6595,24 @@ const modes_list = [
                                 // → 全扫最重), 其余便宜项拼组。跨 findBlocks 组内也不叠(每组≤1 个 findBlocks)。
                                 switch (gi) {
                                   case 0: // bed (最贵: maxDist48 count16 稀有)
-                                    if (_ids.bed) try { for (const bp of bot.findBlocks({ matching: _ids.bed, maxDistance: 48, count: 16 })) reg('bed', bp.x, bp.y, bp.z); } catch (e) {}
+                                    if (_ids.bed) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.bed, maxDistance: 64, count: 16 })) reg('bed', bp.x, bp.y, bp.z); } catch (e) {}   // ★B定点64:findBlocks(palette快扫)+setImmediate让路(0714;≤64 getNearestBlocksWhereAsync无yield且谓词慢,此最优)
                                     break;
                                   case 1: // craft/furnace/bell (maxDist48 count8) + villager 实体(便宜)
                                     try { for (const e of Object.values(bot.entities || {})) { if (e && /villager/.test(e.name || '') && e.position) reg('village', e.position.x, e.position.y, e.position.z); } } catch (e) {}
-                                    if (_ids.craft) try { for (const bp of bot.findBlocks({ matching: _ids.craft, maxDistance: 48, count: 8 })) { const bn = bot.blockAt(bp); reg(bn && bn.name === 'bell' ? 'village' : ((bn && bn.name) || 'craft'), bp.x, bp.y, bp.z); } } catch (e) {}
+                                    if (_ids.craft) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.craft, maxDistance: 64, count: 8 })) { const bn = bot.blockAt(bp); reg(bn && bn.name === 'bell' ? 'village' : ((bn && bn.name) || 'craft'), bp.x, bp.y, bp.z); } } catch (e) {}   // ★B定点64:findBlocks+setImmediate让路(0714)
                                     break;
                                   case 2: // wood(maxDist32 count8) — ★C328 记住最近树做 bootstrap
-                                    if (_ids.wood) try { for (const bp of bot.findBlocks({ matching: _ids.wood, maxDistance: 32, count: 8 })) reg('wood', bp.x, bp.y, bp.z); } catch (e) {}
+                                    if (_ids.wood) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.wood, maxDistance: 128, count: 8 })) reg('wood', bp.x, bp.y, bp.z); } catch (e) {}   // ★C资源型128:findBlocks(palette)+setImmediate让路(0714)
                                     break;
                                   case 3: // crops/farmland(maxDist32 count8) — 村庄食物
-                                    if (_ids.crops) try { for (const bp of bot.findBlocks({ matching: _ids.crops, maxDistance: 32, count: 8 })) reg('crops', bp.x, bp.y, bp.z); } catch (e) {}
+                                    if (_ids.crops) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.crops, maxDistance: 128, count: 8 })) reg('crops', bp.x, bp.y, bp.z); } catch (e) {}   // ★C资源型128:findBlocks+setImmediate让路(0714)
                                     break;
                                   case 4: // chest/barrel(maxDist48 count8 稀有 → 较贵) + 动物实体(便宜)
-                                    if (_ids.chest) try { for (const bp of bot.findBlocks({ matching: _ids.chest, maxDistance: 48, count: 8 })) reg('chest', bp.x, bp.y, bp.z); } catch (e) {}
+                                    if (_ids.chest) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.chest, maxDistance: 64, count: 8 })) reg('chest', bp.x, bp.y, bp.z); } catch (e) {}   // ★B定点64:findBlocks+setImmediate让路(0714)
                                     try { for (const e of Object.values(bot.entities || {})) { if (e && /^(cow|pig|sheep|chicken|mooshroom)$/.test(e.name || '') && e.position) reg('animal', e.position.x, e.position.y, e.position.z, (e.name || '')); } } catch (e) {}
                                     break;
                                   case 5: // ore(maxDist16 count12 便宜) + 流浪商人(便宜) — ★task-queue Phase B 机会源
-                                    if (_ids.ore) try { for (const bp of bot.findBlocks({ matching: _ids.ore, maxDistance: 16, count: 12 })) { const bn = bot.blockAt(bp); reg('ore', bp.x, bp.y, bp.z, /diamond/.test((bn && bn.name) || '') ? 'diamond' : 'iron'); } } catch (e) {}
+                                    if (_ids.ore) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.ore, maxDistance: 16, count: 12 })) { const bn = bot.blockAt(bp); reg('ore', bp.x, bp.y, bp.z, /diamond/.test((bn && bn.name) || '') ? 'diamond' : 'iron'); } } catch (e) {}   // ★机会源16b:findBlocks+setImmediate让路(0714)
                                     try { for (const e of Object.values(bot.entities || {})) { if (e && /^(wandering_trader|trader_llama)$/.test(e.name || '') && e.position) reg('trader', e.position.x, e.position.y, e.position.z, e.name); } } catch (e) {}
                                     break;
                                 }
@@ -7108,7 +7192,7 @@ const modes_list = [
             if ((makeIron || stone >= 3) && (c.stick || 0) >= 2) {
                 const planks = Object.entries(c).reduce((s, [n, v]) => s + (n.endsWith('_planks') ? v : 0), 0);
                 const logs = Object.entries(c).reduce((s, [n, v]) => s + (/_log$/.test(n) ? v : 0), 0);
-                let tableNearby = false; try { tableNearby = !!world.getNearestBlock(bot, 'crafting_table', 4); } catch (e) {}
+                let tableNearby = false; try { tableNearby = !!(await world.getNearestBlockAsync(bot, 'crafting_table', 4)); } catch (e) {}
                 // ★T-0012/T-0088 (tier-wood relapse smoking gun, 06-25): a stone pickaxe needs a 3x3 grid
                 // (a crafting table). With NO carried/nearby table AND <4 planks + 0 logs, this craft CANNOT
                 // succeed — but the old code still emitted "crafting a spare" then silently swallowed the

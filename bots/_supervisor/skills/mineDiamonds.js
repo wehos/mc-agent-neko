@@ -486,11 +486,25 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
             return gained > 0 ? (dia() || gained) : false;
         }
         await lightUp();
+        // 水平采矿优先使用已加载世界的实际方块：只让 collectBlock 处理同层、臂展内的
+        // 近矿，避免它为了远处矿点再凿对角楼梯。没有近矿时才参考 oracle 水平推进。
+        const DIA_ORE = ['diamond_ore', 'deepslate_diamond_ore'];
+        const nearDia = (() => {
+            try {
+                const p = bot.entity.position;
+                return (world.getNearestBlocks(bot, DIA_ORE, 20, 8) || []).some(b => b && b.position
+                    && Math.abs(b.position.y - p.y) <= 2
+                    && Math.hypot(b.position.x - p.x, b.position.z - p.z) <= 6);
+            } catch (e) { return false; }
+        })();
         const before = dia();
-        await skills.collectBlock(bot, 'diamond', count).catch(e => log(bot, `collect diamond err: ${e.message}`));
+        if (nearDia) {
+            await skills.collectBlock(bot, 'diamond', Math.min(count, 6)).catch(e => log(bot, `collect diamond err: ${e.message}`));
+        }
         if ((banked + dia()) >= count) break;
         if (dia() === before) {
-            // nothing in x-ray range — ★E 直线矿透: oracle 有新鲜目标且前瞻安全 → 朝它直线快挖; 否则盲挖 branchMine 暴露新面
+            // 近处 live 扫描没有收获时才参考 oracle；到达目标附近后再读取 live block，
+            // 已不存在的存档目标立即隔离，绝不继续朝幽灵方块挖。
             let ot = freshOracleDia();
             if (ot && arrivedAtOracleTarget(bot, ot)) {
                 const state = liveOracleTargetState(bot, Vec3, ot, 'diamonds');
@@ -499,11 +513,11 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
                     ot = null;
                 }
             }
-            let straightDug = 0;
-            if (ot) { try { straightDug = await straightMineToward(ot, 20); } catch (e) { straightDug = 0; } }
-            if (straightDug > 0) { log(bot, `⛏️ 直线矿透 +${straightDug} 步 → oracle @${ot.x},${ot.y},${ot.z} (前瞻安全)`); }
+            let advanced = 0;
+            if (ot) { try { advanced = await straightMineToward(ot, 20); } catch (e) { advanced = 0; } }
+            if (advanced > 0) { log(bot, `⛏️ 直线矿透 +${advanced} 步 → oracle @${ot.x},${ot.y},${ot.z} (水平直挖)`); }
             else {
-                try { await skills.customSkill(bot, 'branchMine', 16); }
+                try { await skills.customSkill(bot, 'branchMine', 16); }   // 平隧道扫矿, 恒 y, 不凿对角楼梯
                 catch (e) { try { await skills.digDown(bot, 6); } catch (e2) {} }
             }
         }

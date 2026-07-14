@@ -45,6 +45,13 @@ export default async function smeltSafe(bot, ctx, item, num = 1) {
     // credits partial smelts (total < num) that smeltItem itself mislabels as false.
     const inputBefore = world.getInventoryCounts(bot)[item] || 0;
     const ok = await skills.smeltItem(bot, item, num);
+    // ★2026-07-14 (评审实锤): 被打断的派发不按库存差记进度 — 打断且炉窗已丢时 smeltItem 不强收
+    //   炉内残料, "料进了炉"≠"炼出了锭", delta 会把它记成 consumed>0 → 假成功喂内核重置 3-strike。
+    //   打断一律如实报 false (kernel 正确计一次失败; 料在炉里丢不了, 下次同炉复用时收回)。
+    if (bot.interrupt_code) {
+        log(bot, `smeltSafe: dispatch interrupted — not crediting progress (ok=${ok}).`);
+        return false;
+    }
     const consumed = inputBefore - (world.getInventoryCounts(bot)[item] || 0);
     log(bot, `smeltSafe(${item} x${num}) done. consumed=${consumed} inv=${JSON.stringify(world.getInventoryCounts(bot))}`);
     if (ok !== true && consumed <= 0) {

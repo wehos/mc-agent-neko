@@ -62,7 +62,7 @@ export default async function setBed(bot, ctx) {
             try {
                 for (const ln of ['oak_log', 'birch_log', 'spruce_log', 'jungle_log']) {
                     const bdef = bot.registry.blocksByName[ln];
-                    if (bdef) logsPos.push(...(bot.findBlocks({ matching: bdef.id, maxDistance: 64, count: 40 }) || []));
+                    if (bdef) logsPos.push(...((await world.getNearestBlocksAsync(bot, ln, 64, 40)) || []).map(b => b.position));
                 }
             } catch (e) {}
             // ★C322-A (T-0059, 用户实证 lake-edge 死循环 deaths 0→1→2): 旧选址只 -deathsNear*10+trees,
@@ -70,7 +70,7 @@ export default async function setBed(bot, ctx) {
             // 候选 6b 内有水重罚 -100,绝不在湖/河边安家。findBlocks 只覆盖加载区,远候选水探不到=尽力而为,
             // 但近湖边候选(已加载)必被否,把床推向干地→溺水+封顶失败两大死因从根消除。
             let waterPos = [];
-            try { const wdef = bot.registry.blocksByName['water']; if (wdef) waterPos = bot.findBlocks({ matching: wdef.id, maxDistance: 64, count: 300 }) || []; } catch (e) {}
+            try { const wdef = bot.registry.blocksByName['water']; if (wdef) waterPos = ((await world.getNearestBlocksAsync(bot, 'water', 64, 300)) || []).map(b => b.position); } catch (e) {}
             let best = null, bestScore = -1e9;
             for (const [cx, cz] of cands) {
                 const dn = deathsNear(cx, cz, 24);
@@ -106,7 +106,7 @@ export default async function setBed(bot, ctx) {
     // ★现床直用 (activate 失败返 false 的下一轮: 床已放在世界里、不在背包 — 不查现床会又去
     // 猎羊做第二张床)。12b 内已有任意床 → 跳过获取/放置, 直接走激活锚定。
     let preBed = null;
-    try { preBed = bot.findBlock({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 12 }); } catch (e) {}
+    try { const _pb = await world.getNearestBlocksWhereAsync(bot, (b) => b && /_bed$/.test(b.name || ''), 12, 1); preBed = (_pb && _pb.length) ? _pb[0] : null; } catch (e) {}
     if (preBed) prog(`setBed: 12b 内已有现床 @${preBed.position.x},${preBed.position.y},${preBed.position.z} — 跳过获取/放置, 直接激活锚定`);
 
     // ---- 1. ACQUIRE A BED -------------------------------------------------------------

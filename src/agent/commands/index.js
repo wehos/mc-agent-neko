@@ -284,5 +284,13 @@ export function getCommandDocs(agent) {
             }
         }
     }
+    // Append the CUSTOM SKILLS catalog so the model sees, alongside the !runSkill command
+    // above, exactly which skill names it may pass to it (a code-context variant also feeds
+    // $CODE_DOCS for !newAction). Skipped when !runSkill itself is blocked/blacklisted —
+    // otherwise every prompt would keep instructing a command that no longer exists.
+    // Wrapped — a missing prompter/skill_libary must never break command docs.
+    if (commandMap['!runSkill'] && !agent.blocked_actions.includes('!runSkill')) {
+        try { docs += agent.prompter.skill_libary.getCustomSkillManifest('command'); } catch (e) {}
+    }
     return docs + '*\n';
 }

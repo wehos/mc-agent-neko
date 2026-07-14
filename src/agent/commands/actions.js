@@ -61,6 +61,103 @@ function runAsAction (actionFn, resume = false, timeout = -1) {
     return wrappedAction;
 }
 
+// ★!runSkill arg decoding — turns the flat arg string the chat parser can carry (it cannot
+//   carry JSON: no inner quotes allowed) into the argv for customSkill, VALIDATED against the
+//   skill's catalog entry ({sig, params, paramNames, takesObject, trailingObject, hasRest}
+//   from skill_library). Returns { argv, note? } on success or { error } — an error means the
+//   call was NOT dispatched (dispatching a known-mis-bound call just burns the exclusive
+//   action slot on a silent NaN no-op; reviewers confirmed live cases).
+//   Encodings:
+//     ""              → no args
+//     key=val;key=val → keys map onto the signature's named slots (works for positional and
+//                       options-object skills alike); ',' also accepted as a pair separator
+//                       (the #1 observed mis-encoding); unmatched keys ride in the trailing
+//                       opts={} param when the signature has one; if ALL keys are unknown and
+//                       the first param is required (no default), the keys are passed as an
+//                       object-shaped first argument (e.g. achieve's goal accepts {item,count})
+//     v1,v2           → positional values in order; interior empty slots become undefined so
+//                       the skill's own default applies (no left-shift); trailing empties drop
+export function decodeRunSkillArgs(entry, raw) {   // exported for tests
+    // Coerce one token: number, true/false (any case), null/undefined, else trimmed string.
+    const cast = (s) => {
+        const v = String(s).trim();
+        if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
+        if (/^true$/i.test(v)) return true;
+        if (/^false$/i.test(v)) return false;
+        if (/^null$/i.test(v)) return null;
+        if (/^undefined$/i.test(v)) return undefined;
+        return v;
+    };
+    if (raw === '') return { argv: [] };
+    const sigKnown = entry.sig != null;
+    if (sigKnown && entry.sig === '') {
+        // No-arg skill given args: run it anyway (the intent — run this skill — is clear),
+        // but say so; silently ignoring taught the model its args "worked".
+        return { argv: [], note: `Note: '${entry.name}' takes no args — ignored "${raw}".` };
+    }
+
+    if (raw.includes('=')) {
+        // named mode — key=val pairs, ';' or ',' separated
+        const kvs = [];
+        const bare = [];
+        for (const seg of raw.split(/[;,]/)) {
+            const t = seg.trim();
+            if (!t) continue;
+            const i = t.indexOf('=');          // split on the FIRST '=' (values may contain '=')
+            if (i <= 0) { bare.push(t); continue; }
+            kvs.push([t.slice(0, i).trim(), cast(t.slice(i + 1))]);
+        }
+        if (bare.length) {
+            return { error: `Bad args for '${entry.name}': segment(s) without key= — ${bare.join(' | ')}. `
+                + `Write EVERY arg as key=val, e.g. !runSkill("${entry.name}", "${entry.paramNames?.[0] || 'key'}=..."). `
+                + `Signature: ${entry.name}(${entry.sig ?? 'unknown'}). Nothing was run.` };
+        }
+        const toObj = () => { const o = {}; for (const [k, v] of kvs) o[k] = v; return o; };
+        if (!sigKnown)
+            return { argv: [toObj()], note: `Note: '${entry.name}' signature is unknown — passed your keys as one options object.` };
+        if (entry.takesObject)
+            return { argv: [toObj()] };
+        // Positional/mixed signature: map keys onto named slots.
+        const slots = new Array(entry.paramNames.length).fill(undefined);
+        const extras = {};
+        let extraCount = 0;
+        for (const [k, v] of kvs) {
+            const idx = entry.paramNames.indexOf(k);
+            if (idx >= 0) slots[idx] = v;
+            else { extras[k] = v; extraCount++; }
+        }
+        if (extraCount) {
+            if (entry.trailingObject && slots[slots.length - 1] === undefined) {
+                slots[slots.length - 1] = extras;   // extra keys ride in the trailing opts={}
+            } else if (extraCount === kvs.length && entry.params.length && !entry.params[0].includes('=')) {
+                // ALL keys unknown + first param required: object-shaped first argument.
+                return { argv: [extras], note: `Note: passed your keys as one object to '${entry.paramNames[0]}' — they match none of (${entry.sig}).` };
+            } else {
+                return { error: `Unknown key(s) for '${entry.name}': ${Object.keys(extras).join(', ')}. `
+                    + `Valid params: ${entry.paramNames.join(', ')}. Signature: ${entry.name}(${entry.sig}). Nothing was run.` };
+            }
+        }
+        while (slots.length && slots[slots.length - 1] === undefined) slots.pop();   // let defaults apply
+        return { argv: slots };
+    }
+
+    // positional mode
+    if (sigKnown && entry.takesObject) {
+        return { error: `'${entry.name}' takes a single options object — use key=val, e.g. `
+            + `!runSkill("${entry.name}", "key=value"). Signature: ${entry.name}(${entry.sig}). Nothing was run.` };
+    }
+    const parts = raw.split(',').map(s => s.trim());
+    while (parts.length && parts[parts.length - 1] === '') parts.pop();
+    let values = parts.map(p => (p === '' ? undefined : cast(p)));
+    let note;
+    if (sigKnown && !entry.hasRest && values.length > entry.paramNames.length) {
+        const extra = values.slice(entry.paramNames.length);
+        values = values.slice(0, entry.paramNames.length);
+        note = `Note: dropped extra positional value(s) ${extra.map(v => String(v)).join(', ')} — '${entry.name}' takes (${entry.sig}).`;
+    }
+    return { argv: values, note };
+}
+
 export const actionsList = [
     {
         name: '!newAction',
@@ -309,7 +406,7 @@ export const actionsList = [
     },
     {
         name: '!discard',
-        description: 'Discard the given item from the inventory.',
+        description: 'Discard the given item from the inventory for good (tosses it into nearby low ground or a freshly dug pit so it cannot be picked back up).',
         params: {
             'item_name': { type: 'ItemName', description: 'The name of the item to discard.' },
             'num': { type: 'int', description: 'The number of items to discard.', domain: [1, Number.MAX_SAFE_INTEGER] }
@@ -372,11 +469,11 @@ export const actionsList = [
         name: '!smeltIron',
         description: 'Smelt raw iron into iron ingots at a furnace (places/uses a furnace + fuel automatically). Use after mining iron, or when told to smelt iron.',
         params: {
-            'num': { type: 'int', description: 'how many raw_iron to smelt', domain: [1, 128] }
+            'num': { type: 'int', description: 'how many raw_iron to smelt', domain: [1, 128, '[]'] }
         },
         perform: runAsAction(async (agent, num) => {
             await skills.customSkill(agent.bot, 'smeltSafe', 'raw_iron', Math.max(1, parseInt(num) || 1));
-        }, false, 10)
+        }, false, 30) // ★2026-07-14: 等炼完 (10s/件, 128 件≈22min) — 10min 超时会把长炉次拦腰打断
     },
     {
         name: '!digDownTo',
@@ -385,8 +482,52 @@ export const actionsList = [
             'y': { type: 'int', description: 'target Y level to reach', domain: [-63, 320] }
         },
         perform: runAsAction(async (agent, y) => {
-            await skills.customSkill(agent.bot, 'mineDown', { targetY: parseInt(y) });
+            await skills.customSkill(agent.bot, 'mineDown', { targetY: parseInt(y), shaft: true });   // ★直井: 命令语义即 "dig straight down", 修名实不符(旧实现走对角楼梯)
         }, false, 10)
+    },
+    // ★2026-07-13 generic entry into the CUSTOM SKILLS catalog. The named commands above
+    //   (!mineOres/!getWood/…) only cover a handful of skills; most tested procedures
+    //   (realNetherPortal/branchMine/bankGear/setBed/slayDragon/…) had no one-liner and the
+    //   model had to hand-roll them inside !newAction. !runSkill reaches ANY allowlisted skill
+    //   in one line. Design points (post-review 2026-07-14):
+    //   • name/args are validated BEFORE agent.actions.runAction — an unknown name or a
+    //     known-wrong-shape call returns a corrective message WITHOUT interrupting whatever
+    //     action is in flight (validating inside the action fn made every typo a free !stop).
+    //   • key=val args are MAPPED onto the signature's named slots (skill_library provides
+    //     params/paramNames), so "targetY=-54" works on positional skills, and extra keys ride
+    //     in a trailing opts={} param (mixed sigs like chopWood(count, opts) are expressible).
+    //     Undecodable calls are REJECTED with the correct form — never dispatched mis-bound.
+    //   • 30-min timeout: still a hang-stop backstop, but roomy enough for the long-horizon
+    //     skills the catalog steers to (slayDragon/realNetherPortal/setupEndPortal) — 10min
+    //     cut those off mid-run while the discouraged !newAction path ran unlimited.
+    {
+        name: '!runSkill',
+        description: 'Run one of the tested CUSTOM SKILLS from the CUSTOM SKILLS catalog (the catalog lists names, signatures, and the args encoding). STRONGLY prefer this over !newAction whenever the catalog has the skill. args: "" if the skill takes none; otherwise prefer "key=val;key=val" matching the signature\'s param names. No JSON, no quotes inside args.',
+        params: {
+            'name': { type: 'string', description: 'exact skill name from the CUSTOM SKILLS catalog, e.g. "realNetherPortal", "mineOres", "branchMine".' },
+            'args': { type: 'string', description: 'encoded arguments per the catalog\'s encoding rules. Use "" for a skill that takes no args.' }
+        },
+        perform: async function (agent, name, args) {
+            name = String(name).trim();
+            const lib = agent.prompter?.skill_libary;
+            if (!lib) return 'Skill catalog unavailable (agent still starting?). Try again.';
+            const entry = lib.getRunnableSkillEntry(name);
+            if (!entry) {
+                const names = [...lib.getRunnableSkillNames()].sort().join(', ');
+                return `Unknown or non-runnable skill '${name}'. Available: ${names}`;
+            }
+            // The parser already stripped the outer quotes, so `args` is the raw inner string.
+            const decoded = decodeRunSkillArgs(entry, String(args == null ? '' : args).trim());
+            if (decoded.error) return decoded.error;   // reject before touching the ActionManager
+
+            const actionFn = async () => {
+                await skills.customSkill(agent.bot, name, ...decoded.argv);
+            };
+            const code_return = await agent.actions.runAction('action:runSkill', actionFn, { timeout: 30 });
+            if (code_return.interrupted && !code_return.timedout)
+                return;
+            return (decoded.note ? decoded.note + '\n' : '') + code_return.message;
+        }
     },
     {
         name: '!goSleep',
@@ -423,16 +564,14 @@ export const actionsList = [
         description: 'Smelt the given item the given number of times.',
         params: {
             'item_name': { type: 'ItemName', description: 'The name of the input item to smelt.' },
-            'num': { type: 'int', description: 'The number of times to smelt the item.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'num': { type: 'int', description: 'The number of times to smelt the item.', domain: [1, 128, '[]'] } // ≤128: 匹配 30min 动作超时 (10s/件) — 再大会被超时拦腰打断
         },
+        // ★2026-07-14: 摘掉上游遗留的"炼完成功就 cleanKill 重启刷新背包" — 本 fork 的炉后背包
+        //   没有失同步问题 (kernel 常年跑 smeltSafe→smeltItem 同一条炉路从不重启), 而重启会把
+        //   admin 回合/内核状态全部炸掉, 正是"炼完铁人就没了"的一种来源。
         perform: runAsAction(async (agent, item_name, num) => {
-            let success = await skills.smeltItem(agent.bot, item_name, num);
-            if (success) {
-                setTimeout(() => {
-                    agent.cleanKill('Safely restarting to update inventory.');
-                }, 500);
-            }
-        })
+            await skills.smeltItem(agent.bot, item_name, num);
+        }, false, 30)
     },
     {
         name: '!clearFurnace',
@@ -482,11 +621,23 @@ export const actionsList = [
     },
     {
         name: '!stay',
-        description: 'Stay in the current location no matter what. Pauses all modes.',
+        description: 'Stay in the current location no matter what, pausing ALL modes including self-preservation. For a normal "wait here N seconds" request prefer !standby.',
         params: {'type': { type: 'int', description: 'The number of seconds to stay. -1 for forever.', domain: [-1, Number.MAX_SAFE_INTEGER] }},
         perform: runAsAction(async (agent, seconds) => {
             await skills.stay(agent.bot, seconds);
         })
+    },
+    // ★2026-07-14 用户令: admin 主动要求"原地待命 N 秒"的专用指令。跟 !stay 的区别: 保命反射
+    //   (self_preservation/self_defense/auto_eat) 不关, 只暂停游荡类本能; 待命全程续期 admin 独占
+    //   窗口 (skills.standby 内 renewAdminHold), kernel/自主派发不来抢 — 新 admin 指令照常能取消。
+    //   上限 1200s = 停在 watchdog 25min STUCK-ZONE 硬重启之下; timeout 25min 只作挂死兜底。
+    {
+        name: '!standby',
+        description: 'Hold your current position and wait in place for the given number of seconds, doing nothing else. Use when the admin tells you to wait / hold position / stand by (原地待命). Life-critical self-defense stays active; wandering behaviors pause. Max 1200s per call (re-issue for longer); a new admin command cancels the hold.',
+        params: {'seconds': { type: 'int', description: 'how many seconds to stand by (max 1200)', domain: [1, 1200, '[]'] }},
+        perform: runAsAction(async (agent, seconds) => {
+            await skills.standby(agent.bot, seconds);
+        }, false, 25)
     },
     {
         name: '!setMode',

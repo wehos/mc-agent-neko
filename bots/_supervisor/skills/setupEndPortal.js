@@ -349,7 +349,8 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
         for (let pass = 0; pass < 6 && budget(); pass++) {
             passesDone = pass + 1;
             if (stop()) return progressed ? { phase: 'search', interrupted: true } : false;
-            const f = bot.findBlock({ matching: (b) => b && b.name === 'end_portal_frame', maxDistance: 100 });
+            const _f = await world.getNearestBlocksWhereAsync(bot, (b) => b && b.name === 'end_portal_frame', 100, 1);
+            const f = (_f && _f.length) ? _f[0] : null;
             if (f) {
                 sawEvidence = true;
                 // ★RE-FIND ≠ PROGRESS (kernel-return audit 2026-07-02): after the unfillable-
@@ -367,7 +368,8 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
                 log(bot, `End portal frames found at ${f.position.x},${f.position.y},${f.position.z}!`);
                 break;
             }
-            const sb = bot.findBlock({ matching: (b) => b && STONE_BRICK_RE.test(b.name || ''), maxDistance: 64 });
+            const _sb = await world.getNearestBlocksWhereAsync(bot, (b) => b && STONE_BRICK_RE.test(b.name || ''), 64, 1);
+            const sb = (_sb && _sb.length) ? _sb[0] : null;
             if (sb) sawEvidence = true; // any masonry sighting = real stronghold, not a phantom mark
             if (sb && (!lastSb || sb.position.distanceTo(lastSb) > 8)) {
                 lastSb = sb.position.clone();
@@ -434,7 +436,8 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
         if (stop()) return { phase: 'activate', interrupted: true };
 
         // Kill the silverfish spawner first — filling frames in a swarm is a death loop.
-        const sp = bot.findBlock({ matching: (b) => b && b.name === 'spawner', maxDistance: 12 });
+        const _sp = await world.getNearestBlocksWhereAsync(bot, (b) => b && b.name === 'spawner', 12, 1);
+        const sp = (_sp && _sp.length) ? _sp[0] : null;
         if (sp) {
             prog(`breaking spawner at ${sp.position.x},${sp.position.y},${sp.position.z}`);
             try { await skills.breakBlockAt(bot, sp.position.x, sp.position.y, sp.position.z); } catch (e) {}
@@ -497,7 +500,8 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
         // Verify: all 12 filled, or (authoritative) end_portal blocks appeared.
         frames = scanFrames();
         const emptyLeft = emptyFrames(frames).length;
-        const portalBlock = bot.findBlock({ matching: (b) => b && b.name === 'end_portal', maxDistance: 16 });
+        const _portalBlock = await world.getNearestBlocksWhereAsync(bot, (b) => b && b.name === 'end_portal', 16, 1);
+        const portalBlock = (_portalBlock && _portalBlock.length) ? _portalBlock[0] : null;
         if ((frames.length >= 12 && emptyLeft === 0) || portalBlock) {
             bot._epfNoFill = null; // frames done — clear the unfillable-frame strikes
             egPatch({ endPortalReady: true, framesEmpty: 0 });
@@ -544,7 +548,8 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
             if (gr === 'water' || gr === 'vitals') return false; // ocean route / survival bail → kernel cooldown
             if (gr !== 'arrived') return progressed ? { phase: 'enter', approach: gr } : false;
         }
-        const pb = bot.findBlock({ matching: (b) => b && b.name === 'end_portal', maxDistance: 16 });
+        const _pb = await world.getNearestBlocksWhereAsync(bot, (b) => b && b.name === 'end_portal', 16, 1);
+        const pb = (_pb && _pb.length) ? _pb[0] : null;
         if (!pb) { prog('endPortalReady but no end_portal block within 16 — repositioning next dispatch'); return progressed ? { phase: 'enter', portalNotSeen: true } : false; }
         prog(`stepping into the End portal at ${pb.position.x},${pb.position.y},${pb.position.z}`);
         try { await skills.goToPosition(bot, pb.position.x, pb.position.y + 1, pb.position.z, 1); } catch (e) {}

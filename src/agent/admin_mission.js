@@ -43,6 +43,17 @@ export class AdminMission {
         this._lastBanner = { text: '', at: 0 }; // anti-reflexive self-chat guard
         this._lastProgressCheckAt = 0;
         this._lastProgressSig = '';
+        // ★2026-07-14 节流 (用户令, 当日二版): 只防"打断执行中任务", 不防重跑 —— ①RUNNING 同文无视;
+        //   ②RUNNING 且 ws 来源非同文 → agent LLM 判官判同一意图则无视; ③无任务在跑一律放行 (哪怕与
+        //   上一轮完全相同), 无状态、不排队、不记历史指纹。被无视的回"收到"帧, 不打断当前任务。
+        this._dupKey = '';                                        // 正被保护的 RUNNING 任务指纹 (计数键)
+        this._dupCount = 0;                                       // 该任务累计吞掉的重复消息数 (回执 nag 用)
+        this._dupBannerAt = 0;
+        this._judgeCache = { mKey: '', nKey: '', verdict: '' };   // (任务,消息) 判官缓存 — 同一对刷屏只烧一次 LLM
+        this._submitChain = Promise.resolve();                    // submit 到达序串行链 (判官 await 不乱序); drive 不入链
+        this._judgeEnabled = process.env.MC_ADMIN_DUP_LLM !== '0';
+        const jt = parseInt(process.env.MC_ADMIN_DUP_LLM_TIMEOUT_MS, 10);
+        this._judgeTimeoutMs = (Number.isFinite(jt) && jt > 0) ? jt : 8000;
 
         const ms = parseInt(process.env.MC_ADMIN_MISSION_MAX_MS, 10);
         this._maxMs = (Number.isFinite(ms) && ms > 0) ? ms : 1800000;   // 30 min default
@@ -79,22 +90,54 @@ export class AdminMission {
     }
 
     // ── entry: a new admin command ─────────────────────────────────────────────
-    // No lock: the mission handoff (_handoff) is synchronous/atomic on the JS thread, and the long
-    // drive runs UNLOCKED so a LATER submit can preempt a mid-drive mission instead of queueing.
+    // Submits are SERIALIZED through _submitChain — the async LLM intent-judge would otherwise let
+    // two racing frames interleave/judge against a stale mission. The chain covers only the CHEAP
+    // phase (throttle + synchronous handoff); the long drive runs OUTSIDE it, so a LATER submit can
+    // still preempt a mid-drive mission instead of queueing behind its initial turn.
+    // Chain-jam watchdog: a single stuck link (e.g. a bare !endGoal turn whose handleMessage never
+    // resolves) must not brick every future admin command — after 120s the chain moves on and the
+    // stuck submit keeps running detached. Safe: the only unbounded await in _submit is the
+    // lifecycle branch, which never installs a mission, so a detached link can't stomp a newer one.
     submit(input) {
-        try { return this._submit(input || {}); }
-        catch (e) { console.error('[adminMission] submit error:', e && e.message || e); }
+        const link = () => {
+            let timer = null;
+            const guard = new Promise(resolve => {
+                timer = setTimeout(() => {
+                    console.error('[adminMission] submit-chain watchdog: link stuck >120s, releasing chain');
+                    resolve();
+                }, 120000);
+            });
+            const run = Promise.resolve()
+                .then(() => this._submit(input || {}))
+                .catch(e => console.error('[adminMission] submit error:', e && e.message || e))
+                .finally(() => { if (timer) clearTimeout(timer); });
+            return Promise.race([run, guard]);
+        };
+        this._submitChain = this._submitChain.then(link);
+        return this._submitChain;
     }
 
     async _submit({ text, taskId, origin }) {
         try {
             text = String(text == null ? '' : text).replace(/\s+$/,'').trim();
-            if (!text) return;
+            if (!text) {
+                // ★2026-07-14 契约补齐: 空/纯空白 ws task 仍带 task_id — 回执一帧, 否则插件挂到自身 task_timeout
+                //   再重发 (对齐 _registerDrop 建立的"绝不静默丢 ws task_id"契约)。chat 来源无 task_id, 无需回执。
+                if (origin === 'ws' && typeof taskId === 'string' && taskId) {
+                    try { wsServer.ackDuplicateTask(taskId, '收到，但指令为空，已忽略。'); } catch (e) {}
+                }
+                return;
+            }
             // Bare lifecycle command typed by admin → drive the FSM via its perform() hook, no new mission.
             if (/^!(endGoal|cannotComplete|goal)\b/i.test(text)) {
                 this.turnManaged = true;
                 try { await this.agent.handleMessage('admin', text); }
                 finally { this.turnManaged = false; }
+                // ★2026-07-14 契约补齐: 裸生命周期命令的尾帧带的是被结束 mission 的 task_id, 不是本 ws 帧的 —
+                //   给本帧的 task_id 单独回执, 免插件把它挂到 task_timeout (对齐"绝不静默丢 ws task_id"契约)。
+                if (origin === 'ws' && typeof taskId === 'string' && taskId) {
+                    try { wsServer.ackDuplicateTask(taskId, '收到，生命周期指令已执行。'); } catch (e) {}
+                }
                 return;
             }
             // Anti-reflexive guard: never spawn a mission from the bot's own leaked banner/status chat.
@@ -102,10 +145,26 @@ export class AdminMission {
                 console.log(`[adminMission] ignored reflexive self-chat: ${text.slice(0, 60)}`);
                 return;
             }
-            // Synchronous handoff installs the new mission (superseding any old one atomically), then
-            // the UNLOCKED drive runs the long phase so a later submit can preempt it mid-flight.
+            // ★2026-07-14 节流 (用户令, 当日二版): 只拦"会打断执行中任务"的重复, 空闲时一律放行。
+            //   ① RUNNING 且同文 → 无视 (旧行为是硬 supersede: 撕掉执行中的任务从头再来, 0714 炼铜
+            //      实录里插件端 task_timeout 一到就重发, 长任务永远跑不完);
+            //   ② RUNNING 且 ws 来源非同文 → agent LLM 判官判"同一意图/会产生相同动作" (换措辞重发、
+            //      催促、问进度全算), SAME → 无视不打断。判官超时/出错/关闭(MC_ADMIN_DUP_LLM=0) 一律
+            //      按 DIFFERENT 放行 supersede, 绝不拦真指令。游戏内 chat 不走判官: 真人换措辞 = 有意
+            //      强制重跑, 必须放行 (同文仍被 ① 拦)。
+            //   ③ 不在 RUNNING (空闲/刚结束) → 不节流, 与上一轮同文也正常执行 —— 无状态、不排队、
+            //      不记历史指纹 (旧版"结束后 TTL 内同文无视"按用户令拆除)。
+            //   被无视的都回 task_finished(status='duplicate') "收到"帧 (静默丢帧会让插件挂到自身
+            //   超时, 反而催它重发), 游戏内出 🔁 banner (10s 内不重复刷)。
+            if (this._throttleExact(text, taskId, origin)) return;
+            // ★2026-07-14 用户令: in-game chat 任务执行期间, 静默拒绝 ws 侧新 admin LLM 请求 + 回执当前任务
+            //   (游戏内玩家指令神圣 = 独占, 不被 ws 侧自主 LLM 打断)。排在 supersede 前。
+            if (this._rejectWsDuringChat(text, taskId, origin)) return;
+            if (await this._throttleSameIntent(text, taskId, origin)) return;
+            // Synchronous handoff installs the new mission (superseding any old one atomically); the
+            // UNLOCKED drive runs outside the submit chain so a later submit can preempt it mid-flight.
             const mine = this._handoff({ text, taskId: (typeof taskId === 'string' && taskId) ? taskId : null, origin: origin || 'ws' });
-            await this._drive(mine);
+            this._drive(mine).catch(e => console.error('[adminMission] drive error:', e && e.message || e));
         } catch (e) {
             console.error('[adminMission] submit error:', e && e.message || e);
         }
@@ -122,10 +181,135 @@ export class AdminMission {
             }
             if (this.mission && this.mission.text && text === this.mission.text && this.state === RUNNING
                 && now - this.mission.startedAt < 5000) return true;
-            // our own emitted chat: banners (🎯/✅/🔄/⚠️/⏱/⛔), NL status (🤖/🎯[按指令]), mirror (◀), inv (📦)
-            if (/^(🎯|✅|🔄|⚠️|⏱|⛔|🤖|◀|📦)/.test(text)) return true;
+            // our own emitted chat: banners (🎯/✅/🔄/⚠️/⏱/⛔/🔁), NL status (🤖/🎯[按指令]), mirror (◀/▶), inv (📦)
+            if (/^(🎯|✅|🔄|⚠️|⏱|⛔|🤖|◀|▶|📦|🔁)/.test(text)) return true;
         } catch (e) {}
         return false;
+    }
+
+    // ── duplicate-command throttle (★2026-07-14 用户令, 当日二版) ────────────────────────────────
+    _normText(s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); }
+
+    // ① 精确判同: RUNNING 且 whitespace-normalize 后与执行中任务同文 → 丢弃。返回 true = 丢弃。
+    _throttleExact(text, taskId, origin) {
+        try {
+            if (this.state !== RUNNING || !this.mission) return false;
+            const mKey = this._normText(this.mission.text);
+            if (this._normText(text) !== mKey) return false;
+            const sec = Math.max(1, Math.round((Date.now() - this.mission.startedAt) / 1000));
+            this._registerDrop(mKey, text, taskId, origin,
+                `收到。相同指令已在执行中（已运行${sec}秒），继续当前任务、不重新开始；完成或失败会另行报告，请勿重发。`);
+            return true;
+        } catch (e) {
+            return false;   // 节流器自身出错绝不拦真指令
+        }
+    }
+
+    // ★2026-07-14 用户令: in-game chat 任务执行期间, ws 侧新 admin LLM 请求一律静默拒绝(不 supersede),
+    //   并经 _registerDrop → wsServer.ackDuplicateTask 回执告知 ws 当前正在执行的任务。
+    //   真人游戏内 chat 换指令(origin==='chat')不受此门, 仍可打断自己的 chat 任务。
+    //   放在 _throttleSameIntent 之前: chat 任务保护优先于 LLM 判官 — 省判官调用, 且在 _handoff supersede 前拦截。
+    _rejectWsDuringChat(text, taskId, origin) {
+        try {
+            if (origin !== 'ws') return false;
+            if (this.state !== RUNNING || !this.mission || this.mission.origin !== 'chat') return false;
+            const sec = Math.max(1, Math.round((Date.now() - this.mission.startedAt) / 1000));
+            let act = '';
+            try {
+                const b = this._bot();
+                act = String((b && b._currentSkill) || (this.agent.actions && this.agent.actions.currentActionLabel) || '')
+                    .replace(/\s+/g, ' ').trim().slice(0, 120);
+            } catch (e) {}
+            this._registerDrop(this._normText(this.mission.text), text, taskId, origin,
+                `机器人正在执行玩家在游戏内下达的指令「${this.mission.text}」（已运行${sec}秒${act ? `，当前动作：${act}` : ''}），此为独占任务，暂不接受新的管理指令，请等待其完成或失败报告。`);
+            return true;
+        } catch (e) {
+            return false;   // 门自身出错绝不误拦真指令
+        }
+    }
+
+    // ② 语义判同 (仅 ws 来源): RUNNING 中收到非同文消息 → agent LLM 判官判是否同一意图。返回 true = 丢弃。
+    //   判官 await 期间 submit 链保证没有并发提交; 任务若在此期间自然结束/换代 → 无"执行中"可保护 → 放行。
+    async _throttleSameIntent(text, taskId, origin) {
+        try {
+            if (!this._judgeEnabled || origin === 'chat') return false;
+            if (this.state !== RUNNING || !this.mission) return false;
+            const m0 = this.mission;
+            const mKey = this._normText(m0.text);
+            const nKey = this._normText(text);
+            let verdict;
+            if (this._judgeCache.mKey === mKey && this._judgeCache.nKey === nKey) {
+                verdict = this._judgeCache.verdict;   // 同一对刷屏只烧一次 LLM
+            } else {
+                verdict = await this._judgeSameIntent(m0, text);
+                this._judgeCache = { mKey, nKey, verdict };
+            }
+            if (this.state !== RUNNING || this.mission !== m0) return false;   // 用户令③: 没在跑就放行
+            if (verdict !== 'SAME') return false;
+            const sec = Math.max(1, Math.round((Date.now() - m0.startedAt) / 1000));
+            this._registerDrop(mKey, text, taskId, origin,
+                `收到。该消息与正在执行的任务是同一件事（已运行${sec}秒），继续当前任务、不打断；完成或失败会另行报告，请勿重发。`);
+            return true;
+        } catch (e) {
+            return false;   // 节流器自身出错绝不拦真指令
+        }
+    }
+
+    // 判官: 问 agent LLM 新消息 B 与执行中任务 A 是否同一意图 (含"执行 B 会产生与当前相同的动作")。
+    // 拿不准/超时/出错一律 DIFFERENT (fail-open) — 宁可多打断一次, 不吞真指令 (admin 意志绝对)。
+    async _judgeSameIntent(m0, newText) {
+        const sec = Math.max(1, Math.round((Date.now() - m0.startedAt) / 1000));
+        let act = '';
+        try {
+            const b = this._bot();
+            act = String((b && b._currentSkill) || (this.agent.actions && this.agent.actions.currentActionLabel) || '')
+                .replace(/\s+/g, ' ').trim().slice(0, 120);
+        } catch (e) {}
+        const prompt = '你是Minecraft机器人的任务去重判定器。机器人正在执行管理员任务A，此刻又收到新消息B。\n'
+            + `任务A（执行中，已运行${sec}秒）：${m0.text}\n`
+            + (act ? `机器人当前正在执行的动作：${act}\n` : '')
+            + `新消息B：${String(newText == null ? '' : newText)}\n`
+            + '判定规则：如果B与A是同一个任务（换了措辞的重发、催促、询问进度，或执行B会产生与当前完全相同的动作），回答 SAME。'
+            + '如果B是实质不同的新任务、或明确要求停止/更改当前行为，回答 DIFFERENT。拿不准时回答 DIFFERENT。\n'
+            + '只回答一个单词：SAME 或 DIFFERENT。';
+        let timer = null;
+        try {
+            const res = await Promise.race([
+                this.agent.prompter.chat_model.sendRequest([], prompt),
+                new Promise(resolve => { timer = setTimeout(() => resolve('__JUDGE_TIMEOUT__'), this._judgeTimeoutMs); }),
+            ]);
+            if (res === '__JUDGE_TIMEOUT__') {
+                console.log(`[adminMission] intent-judge timeout(${this._judgeTimeoutMs}ms) → DIFFERENT (fail-open)`);
+                return 'DIFFERENT';
+            }
+            let out = String(res == null ? '' : res);
+            if (out.includes('</think>')) out = out.split('</think>').pop();   // reasoning 模型剥壳 (对齐 promptConvo)
+            const up = out.toUpperCase();
+            const verdict = (/\bSAME\b/.test(up) && !/\bDIFFERENT\b/.test(up)) ? 'SAME' : 'DIFFERENT';
+            console.log(`[adminMission] intent-judge=${verdict} raw="${out.trim().slice(0, 60)}" B="${String(newText).slice(0, 60)}"`);
+            return verdict;
+        } catch (e) {
+            console.log('[adminMission] intent-judge error → DIFFERENT (fail-open):', e && e.message || e);
+            return 'DIFFERENT';
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    }
+
+    // 丢弃簿记: 计数按被保护的 RUNNING 任务 (missionKey) 记 — 刷屏方换措辞也累计; 回执 + 🔁 banner。
+    _registerDrop(missionKey, droppedText, taskId, origin, why) {
+        this._dupCount = (this._dupKey === missionKey) ? this._dupCount + 1 : 1;
+        this._dupKey = missionKey;
+        console.log(`[adminMission] throttled duplicate #${this._dupCount} (${origin || 'ws'}) task_id=${taskId || '-'}: ${this._normText(droppedText).slice(0, 80)}`);
+        const now = Date.now();
+        if (now - this._dupBannerAt > 10000) {
+            this._dupBannerAt = now;
+            this._emitBanner('🔁 ' + why);
+        }
+        if (origin !== 'chat') {
+            const nag = this._dupCount >= 3 ? `（已连续忽略${this._dupCount}条重复消息，请停止重发，等待完成报告即可。）` : '';
+            try { wsServer.ackDuplicateTask(taskId, why + nag); } catch (e) {}
+        }
     }
 
     // ── install a mission (SYNCHRONOUS handoff — no await anywhere; atomic on the JS thread) ───────
@@ -149,6 +333,9 @@ export class AdminMission {
 
         this.mission = mine;
         this.state = RUNNING;
+        // 新任务上位 → 上一任务的重复计数/判官缓存全部作废 (节流是无状态的, 只保护"正在执行的这一个")。
+        this._dupKey = ''; this._dupCount = 0;
+        this._judgeCache = { mKey: '', nKey: '', verdict: '' };
         this._syncMirror();
         try { const b = this._bot(); if (b) b._extIntentUntil = now + MISSION_EXTINTENT_MS; } catch (e) {}
         try { wsServer.beginMissionTask(mine.text, mine.taskId, mine.origin); } catch (e) {}
@@ -255,7 +442,11 @@ export class AdminMission {
             + `respond with !cannotComplete("short reason"). Otherwise issue the next command to make progress. Respond:`;
         let used = false;
         try { used = await this.agent.handleMessage('system', adjudicate, 1); } catch (e) {}
-        if (this.state !== RUNNING) return;   // !endGoal / !cannotComplete already ended it
+        // !endGoal/!cannotComplete already ended it — OR a supersede swapped in a NEW mission during the
+        // await (this.mission !== m). Re-check identity like _throttleSameIntent(l.235)/_drive(l.354) do,
+        // else the stale-captured m's branches fire on the wrong mission (end the brand-new task as
+        // 'no-progress', or self_prompter.start the OLD goal onto the live loop). ★2026-07-14 review.
+        if (this.state !== RUNNING || this.mission !== m) return;
         if (used) {
             // A command ran → keep going.
             try { this.agent.self_prompter.owner = this; this.agent.self_prompter.start(m.prompt || m.text); } catch (e) {}
@@ -318,6 +509,9 @@ export class AdminMission {
             }
         } catch (e) { console.error('[adminMission] finishMission error:', e && e.message || e); }
         console.log(`[adminMission] END ${reason}${detail ? ' (' + detail + ')' : ''} task_id=${m && m.taskId || '-'}`);
+
+        // ★2026-07-14 节流 (当日二版): 刻意【不】记结束任务的指纹 —— 用户令③: 没有执行中任务时,
+        //   哪怕与上一轮同文也正常执行 (无状态节流只保护 RUNNING 中的任务, 不防重跑)。
 
         this.mission = null;
         this.state = IDLE;

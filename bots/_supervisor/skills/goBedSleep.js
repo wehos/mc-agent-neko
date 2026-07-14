@@ -83,7 +83,8 @@ export default async function goBedSleep(bot, ctx) {
                 for (const cell of [foot, head]) { const b = bot.blockAt(cell); if (b && b.name !== 'air' && b.name !== 'cave_air') { try { await bot.dig(b); } catch (e) {} } }
                 await skills.placeBlock(bot, it.name, foot.x, foot.y, foot.z, 'bottom', true);
             } catch (e) { continue; }
-            const placedB = bot.findBlock({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 4 });
+            const _pbd = await world.getNearestBlocksWhereAsync(bot, (b) => b && /_bed$/.test(b.name || ''), 4, 1);
+            const placedB = (_pbd && _pbd.length) ? _pbd[0] : null;
             if (placedB) { log(bot, `goBedSleep: 背包床就地放置 @${placedB.position.x},${placedB.position.y},${placedB.position.z} — 不再 false 交给 nightShelter.`); regBedLandmark(placedB.position); return placedB; }
         }
         return null;
@@ -96,7 +97,8 @@ export default async function goBedSleep(bot, ctx) {
     const bail = (msg) => { log(bot, msg + (placedThisRun ? ' (但本次已放床+登记 landmark = 有进度, 返 truthy)' : '')); return placedThisRun ? { placed: true, slept: false } : false; };
     let tgt = null;
     try { const lm = bot._world && bot._world.landmarks; if (lm && lm.bed && Number.isFinite(lm.bed.x)) tgt = lm.bed; } catch (e) {}
-    let bedBlock = bot.findBlock({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 8 });
+    const _bb0 = await world.getNearestBlocksWhereAsync(bot, (b) => b && /_bed$/.test(b.name || ''), 64, 1);   // ★B定点8→64(0714): 睡觉实时搜床(与goToBed一致); landmark记忆坐标仍先goToPosition过去
+    let bedBlock = (_bb0 && _bb0.length) ? _bb0[0] : null;
     if (!bedBlock && tgt) {
         // Walk toward the landmark (bounded — a bed 2.5b away was being ignored all night;
         // one long-ish walk is still cheaper than a night of kiting).
@@ -105,7 +107,8 @@ export default async function goBedSleep(bot, ctx) {
         // self_preservation kept interrupting the walk. Say so; the kernel's interrupt-unwind
         // settle (not a strike) is what keeps this from cooling the kind down.
         if (bot.interrupt_code || bot.health <= 0) { log(bot, `goBedSleep: ${bot.health <= 0 ? 'died' : 'reflex interrupt'} mid-walk to bed landmark — yielding.`); return false; }
-        bedBlock = bot.findBlock({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 8 });
+        const _bb1 = await world.getNearestBlocksWhereAsync(bot, (b) => b && /_bed$/.test(b.name || ''), 8, 1);
+        bedBlock = (_bb1 && _bb1.length) ? _bb1[0] : null;
     }
     if (!bedBlock) {
         // ★stale-landmark hygiene (2026-07-02 12:52Z live: bot STANDING at the remembered bed

@@ -54,7 +54,7 @@ export default async function gatherObsidian(bot, ctx, opts = {}) {
         if (has('flint') < 1) {
             for (let digs = 0; digs < 20 && has('flint') < 1; digs++) {
                 if (stop() || timeUp()) break;
-                const g = world.getNearestBlock(bot, 'gravel', 32);
+                const g = await world.getNearestBlockAsync(bot, 'gravel', 64);
                 if (!g) break;
                 await skills.breakBlockAt(bot, g.position.x, g.position.y, g.position.z).catch(() => {});
                 await skills.pickupNearbyItems(bot).catch(() => {});
@@ -84,7 +84,7 @@ export default async function gatherObsidian(bot, ctx, opts = {}) {
         // → 派发点无水 = 3-strike 冷却原地死循环。改: 与 useToolOn 的 64 格对齐 + 三段
         // 有界 moveAway 迁移 (岩浆分支同款)。
         for (let wtry = 0; wtry < 3 && has('water_bucket') < 1 && !stop() && !timeUp(); wtry++) {
-            const w0 = world.getNearestBlock(bot, 'water', 64);
+            const w0 = await world.getNearestBlockAsync(bot, 'water', 64);
             if (w0) {
                 await skills.goToPosition(bot, w0.position.x, w0.position.y + 1, w0.position.z, 2).catch(() => {});
                 await skills.useToolOn(bot, 'bucket', 'water').catch(() => {});
@@ -100,9 +100,10 @@ export default async function gatherObsidian(bot, ctx, opts = {}) {
 
     // ── STEP C: lava→obsidian convert + mine loop. ──
     const lavaSides = (v) => { let n = 0; for (const [dx, dz] of SIDES) { if (isLavaB(bot.blockAt(v.offset(dx, 0, dz)))) n++; } return n; };
-    const nearestLavaSource = () => {
-        const bs = world.getNearestBlocksWhere(bot, (b) => b && b.name === 'lava' && b.metadata === 0, 48, 1);
-        return (bs && bs.length) ? bs[0] : world.getNearestBlock(bot, 'lava', 48);
+    const nearestLavaSource = async () => {
+        // ★(0714) 岩浆源(黑曜石农场料源) — 异步化(getNearestBlocksWhereAsync/getNearestBlockAsync)防 ws 阻塞;唯一调用点在下方 async while 循环 (await)
+        const bs = await world.getNearestBlocksWhereAsync(bot, (b) => b && b.name === 'lava' && b.metadata === 0, 64, 1);
+        return (bs && bs.length) ? bs[0] : await world.getNearestBlockAsync(bot, 'lava', 64);
     };
     // Solid standing spot near the pool EDGE: 2 open cells above, ≤1 lava side (never
     // stand on a block bordering lava on 2+ sides), 1-4 blocks flat from the source.
@@ -164,7 +165,7 @@ export default async function gatherObsidian(bot, ctx, opts = {}) {
     };
     const rescoop = async () => {
         if (has('water_bucket') >= 1 || has('bucket') < 1) return;
-        const ws = world.getNearestBlocksWhere(bot, (b) => b && b.name === 'water' && b.metadata === 0, 8, 1);
+        const ws = await world.getNearestBlocksWhereAsync(bot, (b) => b && b.name === 'water' && b.metadata === 0, 8, 1);
         const src = (ws && ws.length) ? ws[0] : null;
         if (!src) return;
         await skills.goToPosition(bot, src.position.x, src.position.y, src.position.z, 2).catch(() => {});
@@ -179,7 +180,7 @@ export default async function gatherObsidian(bot, ctx, opts = {}) {
     while (has('obsidian') < target && !timeUp()) {
         if (stop()) break;                                                   // interrupt/death — return progress below
         if (!hasDiamondPick()) { log(bot, 'gatherObsidian: diamond pick gone mid-run — stop mining.'); break; }
-        const lv = nearestLavaSource();
+        const lv = await nearestLavaSource();
         if (!lv) {
             stalls++;
             if (stalls > 2) { log(bot, `gatherObsidian: no lava within 48 after relocating — abort (+${minedThisRun()} obsidian this run; cooldown only if zero).`); return progressOrFalse(); }

@@ -31,8 +31,8 @@ export default async function boatCross(bot, ctx, params = {}) {
     const isWater = (b) => b && (b.name === 'water' || b.name === 'flowing_water');
     const wet = isWater(bot.blockAt(p)) || isWater(bot.blockAt(p.offset(0, -1, 0))) || world.getNearestBlock(bot, 'water', 4);
     if (!wet) {
-        const w = world.getNearestBlock(bot, 'water', 24);
-        if (!w) { log(bot, 'boatCross: no water within 24b — nothing to cross'); return false; }
+        const w = await world.getNearestBlockAsync(bot, 'water', 64);
+        if (!w) { log(bot, 'boatCross: no water within 64b — nothing to cross'); return false; }
         try { await skills.goToPosition(bot, w.position.x, w.position.y + 1, w.position.z, 2); } catch (e) { log(bot, `boatCross: walk-to-water err ${e.message}`); }
         if (bot.interrupt_code) return false;
     }

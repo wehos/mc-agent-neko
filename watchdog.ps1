@@ -476,7 +476,14 @@ while ($true) {
                         $killBoxLowFoodHold = (("" + $vit.skill) -eq 'missionNether' -and [int]$vit.food -le 6 -and [double]$vit.hp -ge 10 -and -not $normalFood -and $mobContained -and $progTailText -match 'KILL-BOX gated: low-food pocket recovery' -and (($advFresh -and $advActionable -eq 0) -or [int]$vit.hostiles -eq 0))
                         $tableRecoveryHold = (("" + $vit.skill) -eq 'missionNether' -and [double]$vit.hp -ge 14 -and [int]$vit.food -ge 14 -and [int]$vit.hostiles -eq 0 -and $progTailText -match 'TABLE gate for|TABLE recovery for')
                     } catch {}
-                    if ($nightHold -or $noRegenHold -or $sealedBodyBudgetHold -or $lowFoodNightShelterHold -or $killBoxLowFoodHold -or $tableRecoveryHold) {
+                    # ★2026-07-14 admin 独占 hold (用户令: admin 要求的炼铁等炼完/原地待命 N 秒是合法站桩):
+                    #   vitals.cmd=1 = agent 正在跑 admin 指令 (bot._extIntentUntil 新鲜, ws_server 每 15s 广播)。
+                    #   位置锚是累积的 — 不加此 hold, 先炼铁后待命这类连续站桩会被 25min 硬重启拦腰打断。
+                    #   真卡死时续期停止 → 窗口 ≤5min 过期 → cmd 归 0 → 锚从头计 25min, 终极兜底只是延后不是拿掉;
+                    #   mission 自带 deadline, 到点 end → 窗口清零, 同样回到正常猎杀。
+                    $adminCmdHold = $false
+                    try { $adminCmdHold = ([int]$vit.cmd -eq 1) } catch {}
+                    if ($adminCmdHold -or $nightHold -or $noRegenHold -or $sealedBodyBudgetHold -or $lowFoodNightShelterHold -or $killBoxLowFoodHold -or $tableRecoveryHold) {
                         # Legit sheltering / no-regen stand-down is intentionally stationary;
                         # don't convert it into a cancel/restart event. Re-anchor so the 25min
                         # restart path is also suppressed while the protected hold remains fresh.

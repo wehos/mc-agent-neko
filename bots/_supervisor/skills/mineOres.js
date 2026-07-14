@@ -32,6 +32,8 @@ const COLLECT_KEY = { iron: 'iron', coal: 'coal', gold: 'gold', copper: 'copper'
 export default async function mineOres(bot, ctx, opts = {}) {
     const { skills, world, Vec3 } = ctx;
     const ore = String((opts && opts.ore) || 'iron');
+    // ★2026-07-14 挖钻石(diamonds)走竖直直井下潜(shaft, 不梯式); 其他矿(浅层铁/煤等)保留楼梯。传给下方三处 mineDown。
+    const wantShaft = /^diamond/.test(ore);
     const count = Number(opts && opts.count) > 0 ? Number(opts.count) : 8;
     const maxMs = Number(opts && opts.maxMs) > 0 ? Number(opts.maxMs) : 300000;
     const yMax = Number.isFinite(opts && opts.yMax) ? opts.yMax : Infinity;   // 夜挖只收地下带目标
@@ -76,6 +78,8 @@ export default async function mineOres(bot, ctx, opts = {}) {
     const liveOreNear = (radius) => {
         try {
             if (!oreIds.length) return true;
+            // TODO(0714): 待异步化, 同步扫穿风险, 保持同步 —— liveOreNear 为 sync 谓词, 被 faceOreNear()
+            //   (mineOres:164/166 sync boolean 上下文) 调用, 转 async 会破坏 async 传播返回 Promise; radius 保持 64。
             const f = bot.findBlocks({ point: bot.entity.position, matching: oreIds, maxDistance: radius, count: 1 });
             return !!(f && f.length);
         } catch (e) { return true; }
@@ -189,7 +193,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
         // 预算余量 <60s 不再开潜 (评审: 嵌套 mineDown 自带多分钟循环, deadline 只兜 collect 环)
         if (bot.entity.position.y - tgt.y > 6 && !bot.interrupt_code && !bot.death_abort
             && deadline - Date.now() > 60000) {
-            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(tgt.y - 1, -58) }); } catch (e) {}
+            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(tgt.y - 1, -58), shaft: wantShaft }); } catch (e) {}
         }
     } else if (!faceOreNear()) {
         // ★评审 P2: 无可用 oracle 目标(缺失/陈旧/真距超闸)时不能在地表平采 —
@@ -198,7 +202,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
         const band = ore === 'coal' ? 40 : (ore === 'diamonds' ? -52 : 14);
         if (bot.entity.position.y - band > 6 && !bot.interrupt_code && deadline - Date.now() > 60000) {
             prog(`无 oracle 目标 — 盲挖回退: mineDown 下潜 y${band}`);
-            try { await skills.customSkill(bot, 'mineDown', { targetY: band }); } catch (e) {}
+            try { await skills.customSkill(bot, 'mineDown', { targetY: band, shaft: wantShaft }); } catch (e) {}
         }
     }
 
@@ -247,14 +251,28 @@ export default async function mineOres(bot, ctx, opts = {}) {
             let tossed = 0;
             try {
                 const haveOf = (n) => bot.inventory.items().reduce((s, i) => s + (i.name === n ? i.count : 0), 0);
-                for (const it of bot.inventory.items()) {
-                    if (emptyN() >= 3) break;
-                    const cap = CAPS[it.name];
-                    if (cap == null) continue;
-                    const have = haveOf(it.name);
-                    if (have <= cap) continue;
-                    const drop = Math.min(it.count, have - cap);
-                    try { await bot.toss(it.type, null, drop); tossed += drop; } catch (e) {}
+                // ★2026-07-14 坑弃: 裸 toss 扔脚底 2s 后被服务器原样捡回 = 清囊白干 (tossed=890 empty
+                // 却不涨的实录根因)。改为一次性攒 plan → smartDiscard 单坑批量入弃+验证; 热重载窗口
+                // 老 skills.js 没有该函数 → 退回逐件裸 toss。
+                const plan = [];
+                for (const name of Object.keys(CAPS)) {
+                    const have = haveOf(name);
+                    if (have > CAPS[name]) plan.push({ name, num: have - CAPS[name] });
+                }
+                if (plan.length && typeof skills.smartDiscard === 'function') {
+                    const pre = plan.reduce((s, p) => s + haveOf(p.name), 0);
+                    await skills.smartDiscard(bot, plan);
+                    tossed = pre - plan.reduce((s, p) => s + haveOf(p.name), 0);
+                } else {
+                    for (const it of bot.inventory.items()) {
+                        if (emptyN() >= 3) break;
+                        const cap = CAPS[it.name];
+                        if (cap == null) continue;
+                        const have = haveOf(it.name);
+                        if (have <= cap) continue;
+                        const drop = Math.min(it.count, have - cap);
+                        try { await bot.toss(it.type, null, drop); tossed += drop; } catch (e) {}
+                    }
                 }
             } catch (e) {}
             prog(`r${rounds}: 清囊 tossed=${tossed} → empty=${emptyN()}`);
@@ -309,7 +327,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
         if (bandY != null && bot.entity.position.y - bandY > 8 && !bot.interrupt_code && !bot.death_abort
             && deadline - Date.now() > 60000) {
             prog(`r${rounds}: 仍高悬矿带上方 (y=${Math.floor(bot.entity.position.y)} bandY=${bandY}) — 零收获=够不着, 密封下潜切脉 (不横向蹦表层)`);
-            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(bandY - 2, -58) }); } catch (e) {}
+            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(bandY - 2, -58), shaft: wantShaft }); } catch (e) {}
             continue;
         }
         const nxt = list.length ? list[rounds % list.length] : null;

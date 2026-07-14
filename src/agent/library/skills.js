@@ -296,7 +296,7 @@ export async function craftRecipe(bot, itemName, num=1) {
         if(!recipes || recipes.length === 0) break placeTable; //Don't bother going to the table if we don't have the required resources.
 
         // Look for crafting table
-        craftingTable = world.getNearestBlock(bot, 'crafting_table', craftingTableRange);
+        craftingTable = await world.getNearestBlockAsync(bot, 'crafting_table', 64);   // ★B定点16→64(0714): 找现有台走过去用(下方308"刚放的台"仍用craftingTableRange紧邻,别扩)
         if (craftingTable === null){
 
             // Try to place crafting table
@@ -305,7 +305,7 @@ export async function craftRecipe(bot, itemName, num=1) {
                 let pos = world.getNearestFreeSpace(bot, 1, 6);
                 if (pos) {   // ★getNearestFreeSpace 可能返回 null(窄坑全封死) — 别对 undefined 取 .x 抛 TypeError
                     await placeBlock(bot, 'crafting_table', pos.x, pos.y, pos.z);
-                    craftingTable = world.getNearestBlock(bot, 'crafting_table', craftingTableRange);
+                    craftingTable = await world.getNearestBlockAsync(bot, 'crafting_table', craftingTableRange);
                     if (craftingTable) {
                         recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, craftingTable);
                         placedTable = true;
@@ -451,7 +451,7 @@ export async function craftRecipeLocal(bot, itemName, num=1) {
             const tblAfter = world.getInventoryCounts(bot)['crafting_table'] || 0;
             if (craftingTable && tblAfter < tblBefore) { placedTableFromCarry = true; placedTablePos = craftingTable.position; }
         } else {
-            const near = world.getNearestBlock(bot, 'crafting_table', 4);
+            const near = await world.getNearestBlockAsync(bot, 'crafting_table', 4);
             if (near && bot.entity.position.distanceTo(near.position) <= 4.5) craftingTable = near;
         }
         if (!craftingTable) {
@@ -516,7 +516,7 @@ export async function craftRecipeLocal(bot, itemName, num=1) {
 }
 
 async function placeCraftingTableWithinReach(bot) {
-    let existing = world.getNearestBlock(bot, 'crafting_table', 3);
+    let existing = await world.getNearestBlockAsync(bot, 'crafting_table', 3);
     if (existing && bot.entity.position.distanceTo(existing.position) <= 4.5) return existing;
 
     const empty = new Set(['air', 'cave_air', 'void_air', 'grass', 'short_grass', 'tall_grass', 'snow', 'dead_bush', 'fern']);
@@ -639,6 +639,34 @@ export async function wait(bot, milliseconds) {
     return true;
 }
 
+// ★2026-07-14 admin 独占窗口续期 (用户令: admin 要求的长任务 — 炼铁/待命 — 不被别的命令打断):
+// _extIntentUntil 由 handleMessage 在 admin 回合开头一次性给 5min 兜底 (agent.js:919), 长炉次/
+// 长待命会跑穿这个窗口 → kernel._survivalTick 解冻、机会主义反射解冻 → 抢身体打断任务。这里在
+// 任务主循环里每拍向后续期: 只在窗口【已开且新鲜】时延长 (Math.max 只延不缩), 窗口没开 (kernel
+// 自主派发的同名技能) 绝不凭空开 — admin 语义只能由 admin 回合建立; 回合结束 handleMessage 的
+// finally 照旧清零, 不会泄漏。
+function renewAdminHold(bot, ms = 20000) {
+    try {
+        if (bot._extIntentUntil && Date.now() < bot._extIntentUntil)
+            bot._extIntentUntil = Math.max(bot._extIntentUntil, Date.now() + ms);
+    } catch (e) {}
+}
+
+// ★2026-07-14: mineflayer openBlock 无超时 — 够不到/服务器丢 interact 时 `once('windowOpen')`
+// 永久 pending, 会把调用方(smeltItem 等待循环)钉死: interrupt/stale/deadline 检查全部失效,
+// stop() 15s 拉不停 → 强制放行+重连 (评审实锤)。race 一个计时器: 超时返 null 让调用方下一拍
+// 重试; 迟到的窗口静默关掉不留孤儿。
+function openFurnaceTimed(bot, block, ms = 6000) {
+    return new Promise((resolve) => {
+        let done = false;
+        const t = setTimeout(() => { if (!done) { done = true; resolve(null); } }, ms);
+        bot.openFurnace(block).then(w => {
+            if (done) { try { bot.closeWindow(w); } catch (e) {} return; }
+            done = true; clearTimeout(t); resolve(w);
+        }).catch(() => { if (!done) { done = true; clearTimeout(t); resolve(null); } });
+    });
+}
+
 export async function smeltItem(bot, itemName, num=1) {
     /**
      * Puts 1 coal in furnace and smelts the given item name, waits until the furnace runs out of fuel or input items.
@@ -659,14 +687,14 @@ export async function smeltItem(bot, itemName, num=1) {
     let placedFurnace = false;
     let furnaceBlock = undefined;
     const furnaceRange = 16;
-    furnaceBlock = world.getNearestBlock(bot, 'furnace', furnaceRange);
+    furnaceBlock = await world.getNearestBlockAsync(bot, 'furnace', 64);   // ★B定点16→64(0714): 找现有炉走过去用(697"刚放的炉"仍用furnaceRange紧邻)
     if (!furnaceBlock){
         // Try to place furnace
         let hasFurnace = world.getInventoryCounts(bot)['furnace'] > 0;
         if (hasFurnace) {
             let pos = world.getNearestFreeSpace(bot, 1, furnaceRange);
             await placeBlock(bot, 'furnace', pos.x, pos.y, pos.z);
-            furnaceBlock = world.getNearestBlock(bot, 'furnace', furnaceRange);
+            furnaceBlock = await world.getNearestBlockAsync(bot, 'furnace', furnaceRange);
             placedFurnace = true;
         }
     }
@@ -678,10 +706,18 @@ export async function smeltItem(bot, itemName, num=1) {
         await goToNearestBlock(bot, 'furnace', 4, furnaceRange);
     }
     bot.modes.pause('unstuck');
+    // ★2026-07-14: 挪身体的机会主义本能会把炉窗挤关/把 bot 拽走 (torch 挪一格、捡物飘走) —
+    //   炼铁全程站桩, 先暂停它们 (idle 时 modes.unPauseAll 自动恢复); 保命反射不动。
+    for (const m of ['torch_placing', 'item_collecting', 'hunting', 'elbow_room', 'edge_unstick'])
+        try { bot.modes.pause(m); } catch (e) {}
     await bot.lookAt(furnaceBlock.position);
 
     console.log('smelting...');
-    const furnace = await bot.openFurnace(furnaceBlock);
+    const furnace = await openFurnaceTimed(bot, furnaceBlock, 8000);
+    if (!furnace) {
+        log(bot, `Could not open the furnace (out of reach or the server ignored the interact).`);
+        return false;
+    }
     // check if the furnace is already smelting something
     let input_item = furnace.inputItem();
     if (input_item && input_item.type !== mc.getItemId(itemName) && input_item.count > 0) {
@@ -702,6 +738,9 @@ export async function smeltItem(bot, itemName, num=1) {
     }
 
     // fuel the furnace
+    // ★2026-07-14: 槽位只有一组 (64) 容量 — 燃料/输入都改成"先投一组, 循环里续投"
+    //   (旧代码 num>64 时一次 putInput 直接抛 'destination full', 动作秒炸)。
+    let fuelType = null, fuelNeeded = 0, fuelDeposited = 0;
     if (!furnace.fuelItem()) {
         let fuel = mc.getSmeltingFuel(bot);
         if (!fuel) {
@@ -712,50 +751,133 @@ export async function smeltItem(bot, itemName, num=1) {
         }
         log(bot, `Using ${fuel.name} as fuel.`);
 
-        const put_fuel = Math.ceil(num / mc.getFuelSmeltOutput(fuel.name));
+        fuelNeeded = Math.ceil(num / mc.getFuelSmeltOutput(fuel.name));
 
-        if (fuel.count < put_fuel) {
-            log(bot, `You don't have enough ${fuel.name} to smelt ${num} ${itemName}; you need ${put_fuel}.`);
+        if (fuel.count < fuelNeeded) {
+            log(bot, `You don't have enough ${fuel.name} to smelt ${num} ${itemName}; you need ${fuelNeeded}.`);
             if (placedFurnace)
                 await collectBlock(bot, 'furnace', 1);
             return false;
         }
-        await furnace.putFuel(fuel.type, null, put_fuel);
-        log(bot, `Added ${put_fuel} ${mc.getItemName(fuel.type)} to furnace fuel.`);
-        console.log(`Added ${put_fuel} ${mc.getItemName(fuel.type)} to furnace fuel.`)
+        fuelType = fuel.type;
+        fuelDeposited = Math.min(fuelNeeded, 64);
+        await furnace.putFuel(fuelType, null, fuelDeposited);
+        log(bot, `Added ${fuelDeposited} ${mc.getItemName(fuelType)} to furnace fuel.`);
+        console.log(`Added ${fuelDeposited} ${mc.getItemName(fuelType)} to furnace fuel.`)
     }
-    // put the items in the furnace
-    await furnace.putInput(mc.getItemId(itemName), null, num);
-    // wait for the items to smelt
+    // put the items in the furnace (first batch; the wait loop tops the slot up)
+    let deposited = Math.min(num, 64);
+    await furnace.putInput(mc.getItemId(itemName), null, deposited);
+    // ★2026-07-14 用户令 (炼铁必须等炼完, 且不被别的命令打断): 旧等待段 "11s 没收到产出就 break" —
+    //   一件要烧整 10s, 服务器慢一拍/炉窗被微移挤关, 就在投料后立刻放弃 → 拿回输入、收炉跑路
+    //   (用户实拍的"投完煤和生铁任务自动结束")。重写 (全程 await 轮询, 不同步阻塞不掉线):
+    //   • 进度 = 收到产出 或 炉内输入数下降 (一件烧完才移出输入槽) — 30s 无进度才判炉死,
+    //     另有 10s/件+60s 的总时限兜底 (燃料中途烧干也能体面收场);
+    //   • 炉窗被挤关 (击退/微移) → 找回炉子重开继续收, 不再把"窗关"当"炼完";
+    //   • admin 驱动的炉次每拍 renewAdminHold 续期独占窗口 → kernel/非致命反射全程让位,
+    //     超过 5min 兜底的长炉次也不会中途被抢身体;
+    //   • 真被打断 (保命反射 / admin 撤销) → 留炉在烧、不拿回输入、不拆炉 (东西在炉里丢不了,
+    //     回头 !clearFurnace 能收) — 打断者立刻要身体, 不做收尾动作。
     let total = 0;
     let smelted_item = null;
-    await new Promise(resolve => setTimeout(resolve, 200));
-    let last_collected = Date.now();
+    let fur = furnace;
+    let furnaceOpen = true;
+    fur.once('close', () => { furnaceOpen = false; });
+    let lastInputCount = (fur.inputItem() && fur.inputItem().count) || deposited;
+    let lastProgress = Date.now();
+    const STALE_MS = 30000;
+    const deadline = Date.now() + num * 10000 + 60000;
+    let interrupted = false;
     while (total < num) {
         await new Promise(resolve => setTimeout(resolve, 1000));
-        if (furnace.outputItem()) {
-            smelted_item = await furnace.takeOutput();
-            if (smelted_item) {
-                total += smelted_item.count;
-                last_collected = Date.now();
+        if (bot.interrupt_code) { interrupted = true; break; }
+        renewAdminHold(bot);
+        try {
+            if (!fur || !furnaceOpen) {
+                const fb = bot.blockAt(furnaceBlock.position);
+                if (!fb || !fb.name.includes('furnace')) {
+                    log(bot, `The furnace is gone.`);
+                    break;
+                }
+                // 回【这口炉】的坐标 — goToNearestBlock 会走向"最近的"炉 (smeltSafe 满地登记炉,
+                // 可能是另一口), 人在别的炉旁对原炉发 interact 会被服务器无声丢弃 (评审实锤)。
+                if (bot.entity.position.distanceTo(furnaceBlock.position) > 4)
+                    await goToPosition(bot, furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 2);
+                if (bot.entity.position.distanceTo(furnaceBlock.position) > 4.5)
+                    throw new Error('still out of reach after walking back');   // → catch → 下一拍重试, stale 计时器兜底
+                fur = await openFurnaceTimed(bot, fb, 6000);
+                if (!fur)
+                    throw new Error('reopen timed out');   // → catch → 下一拍重试
+                furnaceOpen = true;
+                fur.once('close', () => { furnaceOpen = false; });
             }
+            if (fur.outputItem()) {
+                smelted_item = await fur.takeOutput();
+                if (smelted_item) {
+                    total += smelted_item.count;
+                    lastProgress = Date.now();
+                }
+            }
+            let inCount = (fur.inputItem() && fur.inputItem().count) || 0;
+            if (inCount < lastInputCount) {
+                lastInputCount = inCount;
+                lastProgress = Date.now();
+            }
+            // 分批续投: 输入槽空出位置且总量还没投完就补一批 (num>64 的唯一可行路径)
+            if (deposited < num && inCount < 64) {
+                const add = Math.min(64 - inCount, num - deposited);
+                await fur.putInput(mc.getItemId(itemName), null, add);
+                deposited += add;
+                inCount += add;
+                lastInputCount = inCount;
+            }
+            // 燃料续投: 首批只装得下一组; 槽烧空且还欠着就补
+            if (fuelType !== null && fuelDeposited < fuelNeeded && !fur.fuelItem()) {
+                const addF = Math.min(64, fuelNeeded - fuelDeposited);
+                await fur.putFuel(fuelType, null, addF);
+                fuelDeposited += addF;
+            }
+            if (inCount === 0 && deposited >= num && !fur.outputItem() && total > 0)
+                break; // 全部投完+烧完+产出收干 — 到头了 (即使服务器吞了几件也别干等)
+        } catch (err) {
+            // 窗口中途失效 (移动/击退挤关) — 置空下一拍重开, 不当致命错
+            console.log(`smeltItem furnace window hiccup: ${err.message}`);
+            fur = null;
+            furnaceOpen = false;
         }
-        if (Date.now() - last_collected > 11000) {
-            break; // if nothing has been collected in 11 seconds, stop
+        if (Date.now() - lastProgress > STALE_MS) {
+            log(bot, `Furnace made no progress for ${STALE_MS / 1000}s, giving up.`);
+            break;
         }
-        if (bot.interrupt_code) {
+        if (Date.now() > deadline) {
+            log(bot, `Smelting overran its time budget, giving up.`);
             break;
         }
     }
+    if (interrupted) {
+        // 被打断 (保命反射/admin 撤销): 窗口还开着就【快速】拿回输入+燃料 (窗口内点两下, ≲1s,
+        // 在 stop() 的 15s 脉冲窗口内) — smeltSafe 的 input-delta 进度契约依赖"没炼完的料会拿
+        // 回来"(评审实锤: 留料在炉 = 假成功喂内核)。窗口已丢就留炉在烧 (炉里丢不了, !clearFurnace
+        // 可收), 不为收尾跟打断者抢身体。
+        try {
+            if (fur && furnaceOpen) {
+                if (fur.inputItem()) await fur.takeInput();
+                if (fur.fuelItem()) await fur.takeFuel();
+            }
+        } catch (e) {}
+        try { await bot.closeWindow(fur || furnace); } catch (e) {}
+        log(bot, `Smelting interrupted after collecting ${total}/${num} ${itemName}.`);
+        return total >= num;
+    }
     // take all remaining in input/fuel slots
-    if (furnace.inputItem()) {
-        await furnace.takeInput();
-    }
-    if (furnace.fuelItem()) {
-        await furnace.takeFuel();
-    }
+    try {
+        if (fur && furnaceOpen) {
+            if (fur.inputItem()) await fur.takeInput();
+            if (fur.fuelItem()) await fur.takeFuel();
+        }
+    } catch (e) { console.log(`smeltItem cleanup hiccup: ${e.message}`); }
 
-    await bot.closeWindow(furnace);
+    try { await bot.closeWindow(fur || furnace); } catch (e) {}
 
     if (placedFurnace) {
         await collectBlock(bot, 'furnace', 1);
@@ -780,7 +902,7 @@ export async function clearNearestFurnace(bot) {
      * @example
      * await skills.clearNearestFurnace(bot);
      **/
-    let furnaceBlock = world.getNearestBlock(bot, 'furnace', 32);
+    let furnaceBlock = await world.getNearestBlockAsync(bot, 'furnace', 64);   // ★B定点32→64(0714)
     if (!furnaceBlock) {
         log(bot, `No furnace nearby to clear.`);
         return false;
@@ -1191,6 +1313,16 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
             }
         }
         if (equip) await equipForDig(bot, cur);
+        // ★2026-07-14 ORE-WASTE GUARD (mirror of breakBlockAt; 用户: "偶发性用石镐挖钻石"): safeDig has no
+        // canHarvest gate, and equipForDig downgrades to the best-by-speed pick (a stone pick) when no iron+ is
+        // owned. Breaking an ORE the held pick can't harvest drops NOTHING — refuse. This protects the vein
+        // flood-fill harvestConnectedVein: if the iron pick snaps mid-diamond-vein, the remaining vein blocks
+        // would otherwise be ground to dust with the stone fallback. Return 'wrong-tool' so callers skip+exclude
+        // (handled exactly like 'occluded'/'fluidguard') and the ore survives for a proper-pick pass. Non-ore
+        // corridor/escape stone stays ungated (bare-hand tunnelling of undroppable stone is legitimate).
+        if (/_ore$|ancient_debris/.test(cur.name || '') && bot.game && bot.game.gameMode !== 'creative') {
+            try { if (!cur.canHarvest(bot.heldItem ? bot.heldItem.type : null)) return 'wrong-tool'; } catch (e) {}
+        }
         // ★Shorter timeout for normal blocks: a mineral/block we CAN'T actually break (wedged in
         // a corner / behind rock whose face we can't reach — the "对着夹角拼命空挥" the user keeps
         // seeing) gets abandoned in ~8s instead of flailing the full 15s. 8s safely covers every
@@ -1592,7 +1724,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
         let _spawners = [];
         try {
             const _spId = mc.getBlockId('spawner');
-            if (_spId != null) _spawners = bot.findBlocks({ matching: _spId, maxDistance: 48, count: 4 }) || [];
+            if (_spId != null) { await new Promise(r => setImmediate(r)); _spawners = bot.findBlocks({ matching: _spId, maxDistance: 128, count: 8 }) || []; }   // ★SPECIAL(0714): 48→128 覆盖新128采集半径(否则48-128b刷怪笼漏检破坏C304-S)+让路
         } catch (e) { _spawners = []; }
         const _nearSpawner = (p) => _spawners.some(s => Math.hypot(s.x - p.x, s.y - p.y, s.z - p.z) < 10);
 
@@ -1617,7 +1749,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
             // ① 廉价类型快扫(候选取 max(64, want*8), 给 ② 的过滤留足冗余; 稀有目标时上限自然收敛)。
             let _cands = [];
             if (_ids.length) {
-                try { _cands = bot.findBlocks({ matching: _ids, maxDistance: 64, count: Math.max(64, _want * 8) }) || []; } catch (e) { _cands = []; }
+                try { await new Promise(r => setImmediate(r)); _cands = bot.findBlocks({ matching: _ids, maxDistance: 128, count: Math.max(64, _want * 8) }) || []; } catch (e) { _cands = []; }   // ★C资源型(0714): 64→128+让路(collectBlock主扫描,禁同步阻塞ws)
             }
             // ② 对候选(已按距排序)跑昂贵谓词, 收满 want 即停 — safeToBreak 只在少量候选上求值。
             for (const _pos of _cands) {
@@ -1654,7 +1786,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
             //   reach→dig, 与手写 newAction 等价), 省掉 LLM 兜底。死区/刷怪笼/exclude/工具仍守。
             let _raw = null;
             for (const n of blocktypes) {
-                try { const b = world.getNearestBlock(bot, n, 8); if (b && b.position) { _raw = b; break; } } catch (e) {}
+                try { const b = await world.getNearestBlockAsync(bot, n, 8); if (b && b.position) { _raw = b; break; } } catch (e) {}
             }
             if (_raw && collected < num) {
                 const _p = _raw.position;
@@ -2202,6 +2334,18 @@ export async function breakBlockAt(bot, x, y, z) {
             // mining keeps its own canHarvest gate in collectBlock — this only frees breakBlockAt
             // (navigation/escape digging).
             if (!block.canHarvest(itemId)) {
+                // ★2026-07-14 ORE-WASTE GUARD (用户: "偶发性用石镐挖钻石"): the relaxed <9s "escape digging"
+                // allowance below breaks wrong-tool blocks so a pickless bot can tunnel out of its own cobble
+                // bunker — but it must NEVER destroy an ORE. Breaking diamond/emerald/gold/redstone ore with a
+                // sub-iron pick (or iron/lapis/copper with a sub-stone one) drops NOTHING = the resource is gone
+                // forever. Every incidental-ore path funnels through here (mineDown's opportunistic ore-ring +
+                // staircase, digDown, digReset, prepNether, escapePlan), so refusing ore here seals them all at
+                // once. Return false CLEANLY (no throw) → callers wedge/skip gracefully with no abort-spin. You
+                // are never trapped inside solid ore, so escape digging of stone/dirt/cobble is unaffected.
+                if (/_ore$|ancient_debris/.test(block.name || '')) {
+                    log(bot, `⛏️ Refusing wrong-tool break of ${block.name} with ${bot.heldItem ? bot.heldItem.name : 'hand'} — would destroy the ore (no drop). Skipping; needs a higher-tier pickaxe.`);
+                    return false;
+                }
                 let digMs = Infinity;
                 try { digMs = block.digTime(itemId, false, false, false); } catch (e) { digMs = 0; }
                 if (!Number.isFinite(digMs) || digMs > 9000) {
@@ -2854,10 +2998,9 @@ export async function discard(bot, itemName, num=-1) {
 export async function discardAway(bot, itemName, num=-1, opts={}) {
     /**
      * Dedicated "throw this away" skill: walk a short distance from the current spot,
-     * drop the item there, then return — without the bot immediately noticing its own
-     * fresh drop and walking back to pick it up (discard()'s self-toss tag prevents that;
-     * this also protects the walk back to start_loc, which previously passed right next
-     * to the drop and triggered the item_collecting instinct on the way).
+     * then PIT-discard (smartDiscard) there — the drop ends up ≥1 block below feet in a
+     * low spot / dug pocket, so neither the item_collecting instinct (self-toss tag) nor
+     * the SERVER's automatic pickup sphere can bring it back.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {string} itemName, the item or block name to discard.
      * @param {number} num, the number of items to discard. Defaults to -1, which discards all items.
@@ -2873,11 +3016,339 @@ export async function discardAway(bot, itemName, num=-1, opts={}) {
     if (distance > 0) {
         try { await moveAway(bot, distance); } catch (e) {}
     }
-    const discarded = await discard(bot, itemName, num);
+    // avoidPos steers the pit cell OFF the walk-back bearing, so the return path never
+    // crosses the hole we just filled with trash. (smartDiscard signature is (bot, items, opts):
+    // the count rides INSIDE the items entry — passing num as a 3rd positional silently made it
+    // the opts arg and discarded EVERYTHING.)
+    const discarded = await smartDiscard(bot, { name: itemName, num: num === undefined ? -1 : num },
+        { avoidPos: returnToStart && distance > 0 ? start_loc : null });
     if (returnToStart && distance > 0) {
         try { await goToPosition(bot, start_loc.x, start_loc.y, start_loc.z, 0); } catch (e) {}
     }
     return discarded;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// ★smartDiscard — 坑弃引擎 v3 (2026-07-14, 用户: "扔脚底原地再捡起来"; v2 被对抗评审否掉核心机制).
+// 关键物理事实 (评审核实, MC 1.21.1): 玩家扔物初速仅 0.3 格/tick 沿视线方向, 陡角朝下扔 → 水平
+// 分量趋近零 → 物体落回【自己脚下】。所以"站坑边朝坑底扔"物理上根本进不去坑, 落脚下 2s pickup-delay
+// 一过被服务器原样吸回 = 就是要修的 bug。_selfDiscarded 标只挡 CLIENT 追捡, 挡不住 SERVER 自动拾取
+// (玩家盒水平膨胀 1.0 / 垂直 [脚下-0.5, 头顶+0.5])。
+// ── v3 机制 = 扔投精度无关的【走进坑再扔】: ──
+//   1. 4 个正方向邻格里找/挖一个"能走进去、站低正好 1 格"的坑 (脚落 standY-1, 满立方地板在 standY-2,
+//      两格净空); 平地挖 1 块, 封闭井道挖 2-3 块开侧袋, 已有 1 深坑则 0 挖。严格白名单(绝不挖矿/箱/台),
+//      挖前查四邻无液体防灌。
+//   2. 机器人【走进坑】站到 standY-1, 低头朝正下方扔 → 物体落脚边坑底 (四壁 1x1 兜住, 扔投方向无关)。
+//   3. 机器人【爬出来】回 standY (爬 1 格台阶 = 寻路最平凡操作)。物体停 standY-1, 机器人在 standY:
+//      物体顶 standY-0.75 < 拾取盒底 standY-0.5 → 在垂直窗口之外, 服务器不再吸回。
+//   4. verify 用【投前/投后/等后】三次库存快照的真实增量记账 (不靠扔计数), 只在没爬出来致反弹时重试一次;
+//      诚实报告 (投不动/进不去/反弹 全如实 false)。
+// 标记只贴给"弃置名单里的物品 或 落在坑格附近的挖渣", 不再无差别贴 4 格内一切 (评审: 会误杀顺手打的
+// 怪的铁掉落 6 分钟)。无可用坑(液体环/挖不动/被封死) → 诚实兜底: 就地扔+走远+复核, 决不假报成功。
+// ═══════════════════════════════════════════════════════════════════════════════════════
+const DISCARD_TERRAIN_RE = /^(dirt|grass_block|coarse_dirt|rooted_dirt|podzol|mycelium|mud|packed_mud|clay|sand|red_sand|gravel|snow_block|moss_block|stone|cobblestone|mossy_cobblestone|deepslate|cobbled_deepslate|andesite|diorite|granite|tuff|calcite|dripstone_block|sandstone|red_sandstone|smooth_sandstone|netherrack|soul_sand|soul_soil|basalt|smooth_basalt|blackstone|end_stone|[a-z_]*terracotta)$/;
+const DISCARD_LIQUID_RE = /^(water|lava|flowing_water|flowing_lava|bubble_column)$/;
+// boundingBox 'block' 但不是满高标准立方 / 是基建的方块: 绝不当坑地板(站不平)、绝不当坑壁去挖。
+const DISCARD_NONCUBE_RE = /fence|_wall$|_slab$|stairs$|_pane$|_bars$|chain$|_door$|_gate$|carpet$|_snow$|snow_layer|candle|_head$|_skull$|_sign$|_banner$|crafting_table|^chest$|trapped_chest|ender_chest|furnace|barrel|hopper|shulker_box|_bed$|anvil|cauldron|composter|beehive|bee_nest|lectern|grindstone|smithing_table|loom|stonecutter|enchanting_table|brewing_stand|conduit|beacon|spawner|dragon_egg|_ore$|ancient_debris|scaffolding|dirt_path|farmland|_leaves$|pointed_dripstone|amethyst/;
+
+function _isFullCube(b) {
+    return !!b && b.boundingBox === 'block' && !DISCARD_LIQUID_RE.test(b.name || '') && !DISCARD_NONCUBE_RE.test(b.name || '');
+}
+
+// cheapest dig time for a block with the best tool currently carried (no equip side-effects)
+function _bestDigMs(bot, block) {
+    let best = Infinity;
+    try { best = block.digTime(null, false, false, false); } catch (e) {}
+    try {
+        for (const it of bot.inventory.items()) {
+            try { const t = block.digTime(it.type, false, false, false); if (t < best) best = t; } catch (e) {}
+        }
+    } catch (e) {}
+    return best;
+}
+
+async function _interruptibleWait(bot, ms) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+        if (bot.interrupt_code) return false;
+        await new Promise(r => setTimeout(r, 100));
+    }
+    return true;
+}
+
+// Survey ONE cardinal neighbour for a STEP-IN pit: a cell the bot can walk into and stand
+// exactly one block lower (feet at standY-1), 2-block headroom, solid full-cube floor at
+// standY-2. Returns {cx,cz,floorY,standAtY,digs[]} or null. digs = the solids among
+// {standY+1, standY, standY-1} that must be broken to open the pocket + entry headroom; each
+// must be whitelisted diggable terrain (never ore/infra) — else the whole candidate is rejected.
+function _surveyStepIn(bot, cx, cz, standY) {
+    const at = (y) => { try { return bot.blockAt(Vec3(cx, y, cz)); } catch (e) { return null; } };
+    const isLiquid = (b) => !!b && DISCARD_LIQUID_RE.test(b.name || '');
+    const b_up = at(standY + 1), b_head = at(standY), b_stand = at(standY - 1), b_floor = at(standY - 2);
+    if (!b_up || !b_head || !b_stand || !b_floor) return null;                 // unloaded — don't trust the column
+    if (isLiquid(b_up) || isLiquid(b_head) || isLiquid(b_stand)) return null;  // liquid inside the pocket
+    if (!_isFullCube(b_floor)) return null;                                    // need a flat solid cube to stand on
+    const digs = [];
+    for (const [y, b] of [[standY + 1, b_up], [standY, b_head], [standY - 1, b_stand]]) {
+        if (b.boundingBox === 'block') {                                       // solid → must dig to open the pocket
+            if (!DISCARD_TERRAIN_RE.test(b.name || '')) return null;           // ore/log/infra — not diggable-as-trash
+            if (!Number.isFinite(_bestDigMs(bot, b)) || _bestDigMs(bot, b) > 3500) return null;
+            digs.push(y);
+        }
+    }
+    return { cx, cz, floorY: standY - 2, standAtY: standY - 1, digs };
+}
+
+// any liquid in the 4 horizontal neighbours of (cx,y,cz)? — digging next to a water/lava source
+// floods the fresh pocket, floating the tossed items back into the pickup window.
+function _liquidBeside(bot, cx, y, cz) {
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        try { const b = bot.blockAt(Vec3(cx + dx, y, cz + dz)); if (b && DISCARD_LIQUID_RE.test(b.name || '')) return true; } catch (e) {}
+    }
+    return false;
+}
+
+export async function smartDiscard(bot, items, opts = {}) {
+    /**
+     * Throw items away FOR GOOD by dropping them at the bottom of a step-in pit (existing or
+     * freshly dug 1 block below the bot), so the SERVER's auto-pickup sphere can't re-collect
+     * them. Throw-direction independent: the bot stands IN the pit and drops at its own feet.
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {string|{name,num}|Array} items, one item name, one {name,num} entry, or a batch
+     *   array — a batch shares ONE pit and ONE verify pass (use this from loops).
+     * @param {{avoidPos?, verify?: boolean, maxDigs?: number}} opts — avoidPos: keep the pit off
+     *   this bearing (the caller's walk-back direction); verify (default true): wait out the 2s
+     *   pickup delay, recount from real inventory deltas, retry once if anything rebounded;
+     *   maxDigs (default 3): max blocks to break to open a pit (0 = only reuse existing 1-deep
+     *   holes, 1 = flat-ground dig, 2-3 = enclosed side-pocket).
+     * @returns {Promise<boolean>} true iff everything requested left the inventory and (when
+     *   verify is on) stayed out.
+     * @example
+     * await skills.smartDiscard(bot, [{name:'cobblestone', num:200}, 'gravel']);
+     **/
+    const { avoidPos = null, verify = true, maxDigs = 3 } = opts;
+    // normalize + MERGE same-name entries (callers pass one entry per stack), so counts/verify
+    // are per-name and duplicates can't mask a rebound.
+    const byName = new Map();
+    for (const raw of (Array.isArray(items) ? items : [items])) {
+        const e = typeof raw === 'string' ? { name: raw, num: -1 } : (raw && raw.name ? { name: raw.name, num: raw.num == null ? -1 : raw.num } : null);
+        if (!e) continue;
+        const prev = byName.get(e.name);
+        if (!prev) byName.set(e.name, { name: e.name, num: e.num });
+        else prev.num = (prev.num === -1 || e.num === -1) ? -1 : prev.num + e.num;
+    }
+    const entries = [...byName.values()];
+    if (!entries.length) return false;
+    const invCount = (name) => { try { return bot.inventory.items().filter(i => i.name === name).reduce((s, i) => s + i.count, 0); } catch (e) { return 0; } };
+    const live = entries.filter(e => invCount(e.name) > 0);
+    if (!live.length) {
+        log(bot, `You do not have any ${entries.map(e => e.name).join(', ')} to discard.`);
+        return false;
+    }
+    const discardNames = new Set(live.map(e => e.name));
+
+    // Toss `want` of one item straight where the bot currently looks; measures the REAL amount
+    // removed via inventory delta (immune to bot.toss's ★C299 hotbar "Can't find X in slots"
+    // throw), and never over-discards past `want`.
+    const tossCount = async (name, want) => {
+        const start = invCount(name);
+        const target = want === -1 ? 0 : Math.max(0, start - want);
+        let guard = 0, stalls = 0;
+        while (invCount(name) > target && guard++ < 128) {
+            if (bot.interrupt_code) break;
+            const remaining = invCount(name) - target;
+            const stack = bot.inventory.items().find(i => i.name === name);
+            if (!stack) break;
+            const n = Math.min(stack.count, remaining);
+            const before = invCount(name);
+            try {
+                if (n >= stack.count) await bot.tossStack(stack);
+                else await bot.toss(stack.type, null, n);
+            } catch (err) {
+                // hotbar-range partial throw: fall back to a whole-stack toss ONLY if that stays
+                // within `want` (never over-discard — pit drops are unrecoverable); else give up.
+                if (stack.count <= remaining) { try { await bot.tossStack(stack); } catch (e2) { break; } }
+                else { log(bot, `smartDiscard: can't partial-toss ${name} from a hotbar slot without over-discarding — leaving ${remaining}.`); break; }
+            }
+            await new Promise(r => setTimeout(r, 120));
+            if (invCount(name) >= before) { if (++stalls >= 3) break; } else stalls = 0;
+        }
+        return start - invCount(name);
+    };
+
+    // ── choose a step-in pit among the 4 CARDINAL neighbours (diagonals corner-catch on entry)
+    const feet0 = bot.entity.position.floored();
+    const standY = feet0.y, bx = feet0.x, bz = feet0.z;
+    const originY = bot.entity.position.y;   // REAL feet y (may be non-integer on a slab origin) — step-out target
+    let avoidDir = null;
+    if (avoidPos) {
+        const adx = avoidPos.x - bot.entity.position.x, adz = avoidPos.z - bot.entity.position.z;
+        const m = Math.hypot(adx, adz);
+        if (m > 0.5) avoidDir = [adx / m, adz / m];
+    }
+    const cands = [];
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const cx = bx + dx, cz = bz + dz;
+        const s = _surveyStepIn(bot, cx, cz, standY);
+        if (!s) continue;
+        if (s.digs.length > maxDigs) continue;
+        if (s.digs.some(y => _liquidBeside(bot, cx, y, cz))) continue;          // flood guard
+        let score = 10 - s.digs.length * 3;
+        if (avoidDir && (dx * avoidDir[0] + dz * avoidDir[1]) > 0.5) score -= 8; // off the walk-back bearing
+        cands.push({ dx, dz, cx, cz, digs: s.digs, standAtY: s.standAtY, floorY: s.floorY, score });
+    }
+    cands.sort((a, b) => b.score - a.score);
+
+    // tag only items we're discarding, or drops landing near the chosen pit cell (dug terrain) —
+    // NOT every spawn near the bot (that mis-tags a killed mob's loot for 6 minutes).
+    let pitCell = null;
+    const registry = bot._selfDiscarded || (bot._selfDiscarded = {});
+    const onSpawn = (entity) => {
+        if (!entity || entity.name !== 'item' || !bot.entity || !entity.position) return;
+        if (entity.position.distanceTo(bot.entity.position) > 5) return;
+        const nearPit = pitCell && Math.abs(entity.position.x - (pitCell.x + 0.5)) < 1.4 && Math.abs(entity.position.z - (pitCell.z + 0.5)) < 1.4;
+        let named = false;
+        // getDroppedItem() may be null/throw on the spawn tick before metadata lands — the nearPit
+        // clause already covers our own pit drops; this is only a bonus for named matches.
+        try { const it = entity.getDroppedItem && entity.getDroppedItem(); named = !!(it && discardNames.has(it.name)); } catch (e) {}
+        if (nearPit || named) registry[entity.id] = Date.now() + SELF_DISCARD_TTL;
+    };
+    bot.on('entitySpawn', onSpawn);
+
+    // honest fallback when no step-in pit is reachable: toss where we stand, walk well away so the
+    // 2s delay expires out of pickup range, then RECOUNT and report the truth (never fake success).
+    const fallbackDiscard = async () => {
+        log(bot, `smartDiscard: no step-in pit among the 4 neighbours — honest walk-away toss + recount.`);
+        const pre = {}; for (const e of live) pre[e.name] = invCount(e.name);
+        try { await moveAway(bot, 6); } catch (e) {}
+        for (const e of live) { if (bot.interrupt_code) break; await tossCount(e.name, e.num); }
+        try { await moveAway(bot, 6); } catch (e) {}
+        if (!verify) return true;
+        if (!(await _interruptibleWait(bot, 2600))) { log(bot, `smartDiscard: interrupted before walk-away verify — UNVERIFIED.`); return false; }
+        let back = 0, gone = 0;
+        for (const e of live) { const now = invCount(e.name); gone += Math.max(0, pre[e.name] - now); }
+        // rebound = items that are back vs the low-water mark isn't tracked here (we walked away),
+        // so report success only if the requested amount actually left and stayed gone.
+        for (const e of live) { const now = invCount(e.name); const want = e.num === -1 ? pre[e.name] : Math.min(e.num, pre[e.name]); if (pre[e.name] - now < want) back += want - (pre[e.name] - now); }
+        if (back === 0) { log(bot, `smartDiscard: ✅ walk-away discarded ${gone} item(s) — none returned.`); return true; }
+        log(bot, `smartDiscard: ✖ walk-away left ${back} item(s) unrelieved (re-collected or un-tossable).`); return false;
+    };
+
+    try {
+        if (!cands.length) return await fallbackDiscard();
+
+        // ── open the pit at the best candidate (guarded digs; re-check knockback each break)
+        let pit = null;
+        for (const c of cands.slice(0, 3)) {
+            if (bot.interrupt_code) return false;
+            pitCell = { x: c.cx, z: c.cz };
+            let ok = true;
+            for (const y of c.digs) {
+                // knockback guard: if the bot got shoved onto the candidate column, don't dig its own floor
+                const p = bot.entity.position;
+                if (Math.floor(p.x) === c.cx && Math.floor(p.z) === c.cz) { ok = false; break; }
+                let b = null; try { b = bot.blockAt(Vec3(c.cx, y, c.cz)); } catch (e) {}
+                if (!b || b.boundingBox !== 'block') continue;                          // already open
+                if (!DISCARD_TERRAIN_RE.test(b.name || '') || _liquidBeside(bot, c.cx, y, c.cz)) { ok = false; break; }
+                let broke = false;
+                try { broke = await breakBlockAt(bot, c.cx, y, c.cz); } catch (e) { broke = false; }
+                if (!broke) { ok = false; break; }
+            }
+            if (!ok) continue;
+            const after = _surveyStepIn(bot, c.cx, c.cz, standY);                       // confirm it's now a clean 1-deep pocket
+            if (after && after.digs.length === 0) { pit = { x: c.cx, z: c.cz, dx: c.dx, dz: c.dz, standAtY: after.standAtY, floorY: after.floorY }; break; }
+        }
+        if (!pit) return await fallbackDiscard();
+        pitCell = { x: pit.x, z: pit.z };
+
+        // move helpers. In-game validation (2026-07-14) showed the raw 'forward' step-in only
+        // *sometimes* landed the bot in the pit (moved≈0.1 → tossed at feet dy=0 → re-collected,
+        // honestly reported ✖). Pathfinder is the reliable primitive for a precise 1-block down/up
+        // move, so lead with a GoalBlock and keep raw-control as the fallback.
+        const inCell = (cx, cz, y) => { const p = bot.entity.position; return Math.floor(p.x) === cx && Math.floor(p.z) === cz && Math.abs(p.y - y) < 0.5; };
+        const faceCell = async (cx, cz) => { try { await bot.lookAt(Vec3(cx + 0.5, bot.entity.position.y + 1.62, cz + 0.5), true); } catch (e) {} };
+        // goToGoal sets its OWN conservative movements internally (a 1-block down/up is a plain walk
+        // move — no dig/place needed to reach an already-open adjacent pit), so we just race it against
+        // a timeout and cancel the goal if it doesn't land in time.
+        const pathTo = async (gx, gy, gz, ms) => {
+            try { await Promise.race([goToGoal(bot, new pf.goals.GoalBlock(gx, gy, gz)), new Promise(r => setTimeout(r, ms))]); } catch (e) {}
+            try { bot.pathfinder.setGoal(null); } catch (e) {}
+        };
+        const rawWalk = async (cx, cz, targetY, ms, jump) => {
+            await faceCell(cx, cz);
+            const end = Date.now() + ms;
+            try {
+                bot.setControlState('sprint', false); bot.setControlState('forward', true); if (jump) bot.setControlState('jump', true);
+                while (Date.now() < end && !bot.interrupt_code) { await new Promise(r => setTimeout(r, 60)); if (inCell(cx, cz, targetY)) break; }
+            } catch (e) {} finally { try { bot.setControlState('forward', false); bot.setControlState('jump', false); } catch (e) {} }
+        };
+        const stepInto = async () => {
+            if (bot.interrupt_code) return false;
+            await pathTo(pit.x, pit.standAtY, pit.z, 3000);
+            if (inCell(pit.x, pit.z, pit.standAtY)) return true;
+            await rawWalk(pit.x, pit.z, pit.standAtY, 1600, false);   // pathfinder missed → raw fallback
+            return inCell(pit.x, pit.z, pit.standAtY);
+        };
+        // step-out target y = the REAL origin feet y (not floored standY) so a slab/partial origin
+        // floor doesn't false-negative the climb-back check. The tossed pile at the bot's feet is
+        // protected only by the 2s (2000ms) thrower pickup delay, so the bot MUST clear the pit fast.
+        const stepOut = async () => {
+            await pathTo(bx, standY, bz, 2500);
+            if (inCell(bx, bz, originY)) return true;
+            await rawWalk(bx, bz, originY, 1500, true);              // pathfinder missed → raw jump fallback
+            return inCell(bx, bz, originY);
+        };
+
+        const pitDesc = `pit @(${pit.x},${pit.standAtY},${pit.z})`;
+        if (bot.interrupt_code) return false;
+        if (!(await stepInto())) { log(bot, `smartDiscard: couldn't step into ${pitDesc} — honest fallback.`); return await fallbackDiscard(); }
+
+        // ── snapshot the baseline AFTER entering (captures any dug-block pickup). `want` is fixed
+        // ONCE from this baseline; success is measured as ONE metric — net items removed and STAYED
+        // removed (= preToss - inventory-after-the-2s-wait) ≥ want — which folds "couldn't toss" and
+        // "came back" into the same number and can't false-pass or false-fail a finite-num request.
+        const preToss = {}, want = {};
+        for (const e of live) { preToss[e.name] = invCount(e.name); want[e.name] = e.num === -1 ? preToss[e.name] : Math.min(e.num, preToss[e.name]); }
+        const removedNet = (name) => preToss[name] - invCount(name);
+        try { await bot.lookAt(Vec3(bot.entity.position.x, bot.entity.position.y - 1, bot.entity.position.z), true); } catch (e) {}
+        for (const e of live) { if (bot.interrupt_code) break; await tossCount(e.name, want[e.name]); }
+        // exit IMMEDIATELY — no dwell sleep; every ms here is ms the bot stands on the tossed pile
+        // inside the 2s pickup window. (Accounting reads live invCount, so no settle-sleep is needed.)
+        const stepped = await stepOut();               // climb the 1-block step home (within the 2s grace)
+        if (!stepped) log(bot, `smartDiscard: ⚠ didn't confirm step-out of ${pitDesc}; verify will judge.`);
+
+        if (!verify) {
+            let t = 0; for (const e of live) t += removedNet(e.name);
+            log(bot, `smartDiscard: tossed ${t} item(s) into ${pitDesc} (unverified).`);
+            return t > 0;
+        }
+
+        // ── verify past the 2s thrower delay; ONE retry (re-enter, top up the deficit) if short
+        const shortfall = () => { let s = 0; for (const e of live) s += Math.max(0, want[e.name] - removedNet(e.name)); return s; };
+        const waited = await _interruptibleWait(bot, 2600);
+        if (!waited) { log(bot, `smartDiscard: interrupted before verify — ${pitDesc}, UNVERIFIED.`); return false; }
+        let short = shortfall();
+        if (short > 0 && !bot.interrupt_code) {
+            // deficit = something rebounded (incomplete exit) or a hotbar-partial couldn't toss —
+            // re-enter the SAME pit, top up exactly the remaining deficit, climb out, re-verify ONCE.
+            log(bot, `smartDiscard: ⚠ ${short} item(s) short (rebound / partial) — re-dropping into ${pitDesc}.`);
+            if (await stepInto()) {
+                try { await bot.lookAt(Vec3(bot.entity.position.x, bot.entity.position.y - 1, bot.entity.position.z), true); } catch (e) {}
+                for (const e of live) { const deficit = want[e.name] - removedNet(e.name); if (deficit > 0 && !bot.interrupt_code) await tossCount(e.name, deficit); }
+                await stepOut();
+                if (!(await _interruptibleWait(bot, 2600))) { log(bot, `smartDiscard: interrupted before retry verify — ${pitDesc}, UNVERIFIED.`); return false; }
+            }
+            short = shortfall();
+        }
+        let tossedTotal = 0; for (const e of live) tossedTotal += removedNet(e.name);
+        if (short === 0) log(bot, `smartDiscard: ✅ discarded ${tossedTotal} item(s) into ${pitDesc} — nothing re-collected.`);
+        else log(bot, `smartDiscard: ✖ ${pitDesc} — ${short} item(s) NOT relieved (untossable or re-collected).`);
+        return short === 0;
+    } finally {
+        try { bot.setControlState('forward', false); bot.setControlState('jump', false); bot.setControlState('back', false); } catch (e) {}
+        bot.off('entitySpawn', onSpawn);
+        pruneSelfDiscarded(bot);
+    }
 }
 
 export async function putInChest(bot, itemName, num=-1) {
@@ -2890,7 +3361,7 @@ export async function putInChest(bot, itemName, num=-1) {
      * @example
      * await skills.putInChest(bot, "oak_log");
      **/
-    let chest = world.getNearestBlock(bot, 'chest', 32);
+    let chest = await world.getNearestBlockAsync(bot, 'chest', 64);   // ★B定点32→64(0714)
     if (!chest) {
         log(bot, `Could not find a chest nearby.`);
         return false;
@@ -2919,7 +3390,7 @@ export async function takeFromChest(bot, itemName, num=-1) {
      * @example
      * await skills.takeFromChest(bot, "oak_log");
      * **/
-    let chest = world.getNearestBlock(bot, 'chest', 32);
+    let chest = await world.getNearestBlockAsync(bot, 'chest', 64);   // ★B定点32→64(0714)
     if (!chest) {
         log(bot, `Could not find a chest nearby.`);
         return false;
@@ -2963,7 +3434,7 @@ export async function viewChest(bot) {
      * @example
      * await skills.viewChest(bot);
      * **/
-    let chest = world.getNearestBlock(bot, 'chest', 32);
+    let chest = await world.getNearestBlockAsync(bot, 'chest', 64);   // ★B定点32→64(0714)
     if (!chest) {
         log(bot, `Could not find a chest nearby.`);
         return false;
@@ -4294,10 +4765,10 @@ export async function goToNearestBlock(bot, blockType,  min_distance=2, range=64
             }
             block = blocks[0];
         } else {
-            let blocks = world.getNearestBlocksWhere(bot, block => block.name === blockType && block.metadata === 0, range, 1);
+            let blocks = await world.getNearestBlocksWhereAsync(bot, block => block.name === blockType && block.metadata === 0, range, 1);
             if (blocks.length === 0) {
                 log(bot, `Could not find any source ${blockType} in ${range} blocks, looking for uncollectable flowing instead...`);
-                blocks = world.getNearestBlocksWhere(bot, block => block.name === blockType, range, 1);
+                blocks = await world.getNearestBlocksWhereAsync(bot, block => block.name === blockType, range, 1);
             }
             block = blocks[0];
         }
@@ -4306,7 +4777,7 @@ export async function goToNearestBlock(bot, blockType,  min_distance=2, range=64
         if (useAsync) {
             block = await world.getNearestBlockAsync(bot, blockType, range);
         } else {
-            block = world.getNearestBlock(bot, blockType, range);
+            block = await world.getNearestBlockAsync(bot, blockType, range);
         }
     }
     if (!block) {
@@ -4570,6 +5041,47 @@ export async function stay(bot, seconds=30) {
     return true;
 }
 
+export async function standby(bot, seconds=60) {
+    /**
+     * Hold the current position and wait for the given number of seconds (admin 待命).
+     * Unlike stay(), the life-critical reflexes (self_preservation / self_defense / auto_eat /
+     * mobility escape) stay armed — only the wander-y opportunistic modes are paused.
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {number} seconds, how long to hold position (1-1200).
+     * @returns {Promise<boolean>} true if the full time elapsed, false if interrupted.
+     * @example
+     * await skills.standby(bot, 120);
+     **/
+    // ★2026-07-14 用户令 (admin 主动要求原地待命 N 秒): 站桩不游荡 — 暂停会挪身体的机会主义
+    //   本能 (idle 时 modes.unPauseAll 自动恢复); 保命反射全程在线 (跟 stay() 的"全暂停"区别开,
+    //   待命不该待成活靶子); 每拍 renewAdminHold 续期 admin 独占窗口 → kernel/非致命反射全程
+    //   让位, 超过 5min 兜底窗口的长待命也不被抢身体。新的 admin 指令照常能打断 (admin 意志绝对)。
+    //   上限 1200s (20min): watchdog 的 STUCK-ZONE 25min 硬重启是终极防冻死兜底, 待命必须停在它
+    //   之下 — 更久的待命让 admin 到点重发, 别拿掉真卡死的最后一张网。
+    seconds = Math.max(1, Math.min(1200, Math.floor(Number(seconds) || 60)));
+    for (const m of ['unstuck', 'cowardice', 'hunting', 'item_collecting', 'torch_placing', 'elbow_room', 'edge_unstick', 'idle_staring'])
+        try { bot.modes.pause(m); } catch (e) {}
+    try { bot.pathfinder.stop(); } catch (e) {}
+    try { bot.pathfinder.setGoal(null); } catch (e) {}
+    try { bot.clearControlStates(); } catch (e) {}
+    const started = Date.now();
+    const until = started + seconds * 1000;
+    log(bot, `Standing by in place for ${seconds}s.`);
+    while (Date.now() < until) {
+        if (bot.interrupt_code) {
+            // 保命反射/新指令抢走了身体 — 待命不自动续 (resume 机制会在 idle 反复重放, 有 standby
+            // 永动风险)。把剩余秒数报给 LLM, 想继续等就精确重发。
+            const remain = Math.max(1, Math.round((until - Date.now()) / 1000));
+            log(bot, `Standby interrupted after ${Math.round((Date.now() - started) / 1000)}s (of ${seconds}s). Re-issue !standby(${remain}) to continue the hold.`);
+            return false;
+        }
+        renewAdminHold(bot);
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    log(bot, `Stood by for ${seconds} seconds as requested.`);
+    return true;
+}
+
 export async function useDoor(bot, door_pos=null) {
     /**
      * Use the door at the given position.
@@ -4583,7 +5095,7 @@ export async function useDoor(bot, door_pos=null) {
     if (!door_pos) {
         for (let door_type of ['oak_door', 'spruce_door', 'birch_door', 'jungle_door', 'acacia_door', 'dark_oak_door',
                                'mangrove_door', 'cherry_door', 'bamboo_door', 'crimson_door', 'warped_door']) {
-            door_pos = world.getNearestBlock(bot, door_type, 16).position;
+            door_pos = (await world.getNearestBlockAsync(bot, door_type, 64)).position;   // ★B定点16→64(0714)
             if (door_pos) break;
         }
     } else {
@@ -4633,7 +5145,7 @@ export async function goToBed(bot) {
         matching: (block) => {
             return block.name.includes('bed');
         },
-        maxDistance: 32,
+        maxDistance: 64,   // ★B定点32→64(0714)
         count: 1
     });
     if (beds.length === 0) {
@@ -4744,7 +5256,7 @@ export async function activateNearestBlock(bot, type) {
      * @example
      * await skills.activateNearestBlock(bot, "lever");
      * **/
-    let block = world.getNearestBlock(bot, type, 16);
+    let block = await world.getNearestBlockAsync(bot, type, 64);   // ★B定点16→64(0714)
     if (!block) {
         log(bot, `Could not find any ${type} to activate.`);
         return false;
@@ -5466,7 +5978,7 @@ export async function useToolOn(bot, toolName, targetName) {
         if (targetName === 'water' || targetName === 'lava') {
             // we want to get liquid source blocks, not flowing blocks
             // so search for blocks with metadata 0 (not flowing)
-            let blocks = world.getNearestBlocksWhere(bot, block => block.name === targetName && block.metadata === 0, 64, 1);
+            let blocks = await world.getNearestBlocksWhereAsync(bot, block => block.name === targetName && block.metadata === 0, 64, 1);
             if (blocks.length === 0) {
                 log(bot, `Could not find any source ${targetName}.`);
                 return false;
@@ -5474,7 +5986,7 @@ export async function useToolOn(bot, toolName, targetName) {
             block = blocks[0];
         }
         else {
-            block = world.getNearestBlock(bot, targetName, 64);
+            block = await world.getNearestBlockAsync(bot, targetName, 64);
         }
         if (!block) {
             log(bot, `Could not find any ${targetName}.`);

@@ -138,7 +138,7 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             if (Date.now() - _spCache.t > 5000) {
                 _spCache.t = Date.now();
                 const spDef = bot.registry && bot.registry.blocksByName && bot.registry.blocksByName.spawner;
-                _spCache.v = spDef ? (bot.findBlocks({ matching: spDef.id, maxDistance: 48, count: 4 }) || []) : [];
+                _spCache.v = spDef ? (bot.findBlocks({ matching: spDef.id, maxDistance: 64, count: 4 }) || []) : [];
             }
             return _spCache.v.some(s => Math.hypot(s.x - p.x, s.y - p.y, s.z - p.z) < 10);
         } catch (e) { return false; }
@@ -530,7 +530,7 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             // misses most of the iron the tunnel walks PAST, so mineNearby found "0 ores" and the bot
             // tunnelled straight on by exposed iron → mining-yield≈0. Restore the intended 16-block
             // reach (count 24, plenty for a dense seam) so each step actually harvests the band.
-            const ores = world.getNearestBlocks(bot, ORES, 16, 24)
+            const ores = (await world.getNearestBlocksAsync(bot, ORES, 16, 24))
                 .filter(b => b && ORES.includes(b.name) && !skipped.has(`${b.position.x},${b.position.y},${b.position.z}`))
                 .filter(b => process.env.MC_FOOD_INSTINCTS !== '1' || !(bot.food <= 8 && !edibleHeld()) || isIronOre(b.name))   // 饥饿惰性: 默认不因 food 只挑铁
                 .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position));
@@ -831,9 +831,9 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
             // y≤55, 让下潜到钻石层的整个下段(而非只在最底)都优先啃顺路的铁, 喂"边挖边补镐"的料。
             // wantIron 无铁时仍回退全 ORES(761), 不会因偏好铁而放着别的矿不挖; C305-B 臂展守卫防隔墙。
             const wantIron = Math.floor(bot.entity.position.y) <= 55;
-            const scan = world.getNearestBlocks(bot, wantIron ? IRON_ORES : ORES, 16, 24) || [];
+            const scan = (await world.getNearestBlocksAsync(bot, wantIron ? IRON_ORES : ORES, 16, 24)) || [];
             let pool = scan.filter(b => b && (wantIron ? IRON_ORES : ORES).includes(b.name));
-            if (wantIron && pool.length === 0) pool = (world.getNearestBlocks(bot, ORES, 16, 24) || []).filter(b => b && ORES.includes(b.name));
+            if (wantIron && pool.length === 0) pool = ((await world.getNearestBlocksAsync(bot, ORES, 16, 24)) || []).filter(b => b && ORES.includes(b.name));
             // nearest-first; pick the first that passes the reach gate so we head at real ore.
             pool.sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position));
             for (const ob of pool.slice(0, 6)) {

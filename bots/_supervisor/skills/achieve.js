@@ -233,7 +233,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
         // every time (placeTable only crafts when we don't already hold one).
         try {
             for (const st of ['crafting_table', 'furnace']) {
-                const nb = world.getNearestBlock(bot, st, 4);
+                const nb = await world.getNearestBlockAsync(bot, st, 4);
                 if (nb) {
                     const nbPos = nb.position;
                     await skills.collectBlock(bot, st, 1).catch(() => {});

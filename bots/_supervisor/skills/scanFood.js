@@ -4,7 +4,7 @@
 // Logs nearest huntable animals and edible blocks within range. Moves nothing.
 
 export default async function scanFood(bot, ctx) {
-    const { log, mc, Vec3 } = ctx;
+    const { log, mc, Vec3, world } = ctx;
     const p = bot.entity.position;
     const HUNT = ['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'mooshroom', 'horse', 'goat', 'salmon', 'cod'];
     const FOODBLOCK = ['wheat', 'carrots', 'potatoes', 'beetroots', 'sweet_berry_bush', 'melon', 'pumpkin', 'cave_vines', 'cave_vines_plant'];
@@ -26,8 +26,8 @@ export default async function scanFood(bot, ctx) {
         for (const bn of FOODBLOCK) {
             const id = mc.getBlockId(bn);
             if (id == null) continue;
-            const ps = bot.findBlocks({ matching: id, maxDistance: 48, count: 3 });
-            for (const bp of ps) foundBlocks.push({ name: bn, d: +p.distanceTo(bp).toFixed(1), x: bp.x, y: bp.y, z: bp.z });
+            const ps = (await world.getNearestBlocksAsync(bot, [bn], 128, 3)) || [];
+            for (const b of ps) foundBlocks.push({ name: bn, d: +p.distanceTo(b.position).toFixed(1), x: b.position.x, y: b.position.y, z: b.position.z });
         }
     } catch (e) {}
     foundBlocks.sort((a, b) => a.d - b.d);

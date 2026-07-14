@@ -870,7 +870,9 @@ export default async function missionNether(bot, ctx) {
                     try {
                         const _ids = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log']
                             .map(n => bot.registry && bot.registry.blocksByName[n] ? bot.registry.blocksByName[n].id : null).filter(x => x != null);
-                        if (_ids.length) _logsNear = (bot.findBlocks({ matching: _ids, maxDistance: 48, count: 1 }) || []).length;
+                        // 0714: 半径 48→128 (资源可达门), findBlocks 大扫描前让路防同步阻塞 ws
+                        await new Promise(r => setImmediate(r));
+                        if (_ids.length) _logsNear = (await world.getNearestBlocksWhereAsync(bot, b => b && _ids.includes(b.type), 128, 1) || []).length;
                     } catch (e) {}
                     _bootstrapWoodless = _noWoodInv && _logsNear === 0;
                 }
@@ -1070,7 +1072,7 @@ export default async function missionNether(bot, ctx) {
                 log(bot, 'I made it to the Nether!');
             }
             try {
-                const rack = world.getNearestBlock(bot, 'netherrack', 6);
+                const rack = await world.getNearestBlockAsync(bot, 'netherrack', 6);
                 if (rack && has('netherrack') < 64) await skills.collectBlock(bot, 'netherrack', 1);
             } catch (e) {}
             await wait(20000);

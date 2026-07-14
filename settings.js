@@ -34,6 +34,10 @@ const settings = {
     "load_memory": false, // load memory from previous session
     "init_message": "", // sends to all on spawn
     "only_chat_with": ["admin"], // users that the bots listen to and send general messages to. if empty it will chat publicly
+    // ★2026-07-14 用户令: 游戏内 chat 指令前缀 + 白名单 (根治 admin 指令风暴)。带 chat_command_prefix 或
+    //   ! 开头 = 指令 (adminMission 高优先级); 其余真人聊天节流聚合转发外部 admin llm。前缀设空 = 关闭前缀门。
+    "chat_command_prefix": "/neko", // 指令前缀; "" = 关闭 (回旧行为: 所有真人消息都当指令)
+    "chat_whitelist": [],           // 允许其消息被处理的玩家名单; [] = 所有真人玩家
 
     "speak": false,
     // allows all bots to speak through text-to-speech. 
