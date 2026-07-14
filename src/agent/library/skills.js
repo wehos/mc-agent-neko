@@ -9,6 +9,7 @@ import path from 'path';
 import { pathToFileURL } from 'url';
 import { safeToDigBlock } from '../framework/tools/lava_guard.js';   // 岩浆/水裁判 (试装 into safeDig)
 import { corridorSafety, orderedMiningDetours, selectMiningDetour } from '../framework/tools/mining_detour.js';
+import { STALL_INTENT, beginStallIntent, touchStallIntent, endStallIntent, recoveryDisplacement } from '../stall_recovery.js';
 import { appendTelemetry } from '../../utils/telemetry.js';
 
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
@@ -5079,28 +5080,40 @@ export async function moveAway(bot, distance) {
      * @example
      * await skills.moveAway(bot, 8);
      **/
-    const pos = bot.entity.position;
-    let goal = new pf.goals.GoalNear(pos.x, pos.y, pos.z, distance);
-    let inverted_goal = new pf.goals.GoalInvert(goal);
-    bot.pathfinder.setMovements(new pf.Movements(bot));
+    const pos = bot.entity.position.clone();
+    const intent = beginStallIntent(bot, STALL_INTENT.MOVE, 'skills.moveAway', { timeoutMs: 70000 });
+    try {
+        let goal = new pf.goals.GoalNear(pos.x, pos.y, pos.z, distance);
+        let inverted_goal = new pf.goals.GoalInvert(goal);
+        bot.pathfinder.setMovements(new pf.Movements(bot));
 
-    if (bot.modes.isOn('cheat')) {
-        const move = new pf.Movements(bot);
-        const path = await bot.pathfinder.getPathTo(move, inverted_goal, 10000);
-        let last_move = path.path[path.path.length-1];
-        if (last_move) {
-            let x = Math.floor(last_move.x);
-            let y = Math.floor(last_move.y);
-            let z = Math.floor(last_move.z);
-            bot.chat('/tp @s ' + x + ' ' + y + ' ' + z);
-            return true;
+        if (bot.modes.isOn('cheat')) {
+            const move = new pf.Movements(bot);
+            const path = await bot.pathfinder.getPathTo(move, inverted_goal, 10000);
+            let last_move = path.path[path.path.length-1];
+            if (last_move) {
+                let x = Math.floor(last_move.x);
+                let y = Math.floor(last_move.y);
+                let z = Math.floor(last_move.z);
+                bot.chat('/tp @s ' + x + ' ' + y + ' ' + z);
+                return true;
+            }
         }
-    }
 
-    await goToGoal(bot, inverted_goal);
-    let new_pos = bot.entity.position;
-    log(bot, `Moved away from ${pos.floored()} to ${new_pos.floored()}.`);
-    return true;
+        await goToGoal(bot, inverted_goal);
+        const newPos = bot.entity.position.clone();
+        const moved = recoveryDisplacement(pos, newPos);
+        const required = Math.min(1.5, Math.max(0.5, distance * 0.75));
+        touchStallIntent(bot, intent, `moved:${moved.toFixed(2)}`);
+        if (moved < required) {
+            log(bot, `Could not move away from ${pos.floored()} (advanced only ${moved.toFixed(1)} blocks).`);
+            return false;
+        }
+        log(bot, `Moved away from ${pos.floored()} to ${newPos.floored()} (${moved.toFixed(1)} blocks).`);
+        return true;
+    } finally {
+        endStallIntent(bot, intent);
+    }
 }
 
 export async function moveAwayFromEntity(bot, entity, distance=16) {
@@ -5629,78 +5642,213 @@ function stringifyItem(bot, item) {
     return text;
 }
 
-export async function digDown(bot, distance = 10) {
+const SHAFT_FLUIDS = new Set(['water', 'flowing_water', 'lava', 'flowing_lava']);
+const SHAFT_PROTECTED_RE = /bedrock|barrier|spawner|chest|barrel|furnace|crafting_table|bed$|portal|end_gateway|command_block|structure_block/;
+
+function shaftBlockSafeToOpen(block) {
+    if (!block || block.name === 'air' || block.name === 'cave_air' || block.name === 'void_air') return true;
+    if (SHAFT_FLUIDS.has(block.name) || SHAFT_PROTECTED_RE.test(block.name || '')) return false;
+    return block.boundingBox === 'block';
+}
+
+/**
+ * Rank two-block lateral pockets that keep the dangerous shaft floor intact.
+ * Directions with solid floors, no adjacent fluid and fewer blocks to break win;
+ * when hostiles are visible we prefer tunnelling away from their horizontal bearing.
+ */
+export function planShaftDetours(bot, options = {}) {
+    const length = Math.max(1, Math.min(3, options.length ?? 2));
+    const start = bot.blockAt(bot.entity.position)?.position || bot.entity.position.floored();
+    let threat = null;
+    try {
+        threat = Object.values(bot.entities || {})
+            .filter(entity => entity && entity !== bot.entity && entity.position && mc.isHostile(entity))
+            .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0] || null;
+    } catch (e) { /* entity snapshots may change while being scanned */ }
+    const threatDx = threat ? threat.position.x - bot.entity.position.x : 0;
+    const threatDz = threat ? threat.position.z - bot.entity.position.z : 0;
+    const threatLen = Math.hypot(threatDx, threatDz) || 1;
+
+    const candidates = [];
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const cells = [];
+        let valid = true;
+        let breaks = 0;
+        for (let step = 1; step <= length && valid; step++) {
+            const feetPos = start.offset(dx * step, 0, dz * step);
+            const headPos = feetPos.offset(0, 1, 0);
+            const floor = bot.blockAt(feetPos.offset(0, -1, 0));
+            const feet = bot.blockAt(feetPos);
+            const head = bot.blockAt(headPos);
+            if (!floor || floor.boundingBox !== 'block' || SHAFT_FLUIDS.has(floor.name)
+                || !shaftBlockSafeToOpen(feet) || !shaftBlockSafeToOpen(head)) {
+                valid = false;
+                break;
+            }
+            const fluidBeside = [feetPos, headPos].some(pos =>
+                [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]
+                    .some(([ox, oy, oz]) => SHAFT_FLUIDS.has(bot.blockAt(pos.offset(ox, oy, oz))?.name)));
+            if (fluidBeside) {
+                valid = false;
+                break;
+            }
+            if (feet?.boundingBox === 'block') breaks++;
+            if (head?.boundingBox === 'block') breaks++;
+            cells.push({ feetPos, headPos });
+        }
+        if (!valid || cells.length !== length) continue;
+        const towardThreat = threat ? (dx * threatDx + dz * threatDz) / threatLen : 0;
+        candidates.push({ dx, dz, cells, breaks, threat: threat?.name || null, score: -breaks - towardThreat * 4 });
+    }
+    return candidates.sort((a, b) => b.score - a.score);
+}
+
+export async function createSafeShaftDetour(bot, options = {}) {
+    const start = bot.entity.position.clone();
+    const intent = beginStallIntent(bot, STALL_INTENT.MOVE, 'digDown:shaft-detour', { timeoutMs: 8000 });
+    const dig = options.dig || (block => breakBlockAt(bot, block.position.x, block.position.y, block.position.z));
+    try {
+        const candidates = planShaftDetours(bot, options);
+        for (const candidate of candidates) {
+            if (bot.interrupt_code) break;
+            let opened = true;
+            for (const cell of candidate.cells) {
+                // Head first: never walk under a one-block ceiling and take suffocation damage.
+                for (const position of [cell.headPos, cell.feetPos]) {
+                    const block = bot.blockAt(position);
+                    if (!block || block.boundingBox !== 'block') continue;
+                    const ok = await dig(block);
+                    if (ok === false) { opened = false; break; }
+                    touchStallIntent(bot, intent, `opened:${position.x},${position.y},${position.z}`);
+                }
+                if (!opened) break;
+            }
+            if (!opened) continue;
+
+            if (options.step) {
+                await options.step(candidate);
+            } else {
+                const target = candidate.cells[candidate.cells.length - 1].feetPos;
+                try {
+                    await bot.lookAt(new Vec3(target.x + 0.5, target.y + 0.8, target.z + 0.5), true);
+                    bot.setControlState('forward', true);
+                    const deadline = Date.now() + 1800;
+                    while (!bot.interrupt_code && Date.now() < deadline
+                        && Math.hypot(bot.entity.position.x - start.x, bot.entity.position.z - start.z) < 1.1) {
+                        await new Promise(resolve => setTimeout(resolve, 80));
+                    }
+                } finally {
+                    try { bot.setControlState('forward', false); } catch (e) { /* bot disconnected during recovery */ }
+                }
+            }
+            const moved = Math.hypot(bot.entity.position.x - start.x, bot.entity.position.z - start.z);
+            touchStallIntent(bot, intent, `sidestep:${moved.toFixed(2)}`);
+            if (moved >= 0.75) {
+                return { moved: true, distance: moved, dx: candidate.dx, dz: candidate.dz, threat: candidate.threat };
+            }
+        }
+        return { moved: false, distance: Math.hypot(bot.entity.position.x - start.x, bot.entity.position.z - start.z) };
+    } finally {
+        try { bot.setControlState('forward', false); } catch (e) { /* bot disconnected during recovery */ }
+        endStallIntent(bot, intent);
+    }
+}
+
+export async function digDown(bot, distance = 10, options = {}) {
     /**
-     * Digs down a specified distance. Will stop if it reaches lava, water, or a fall of >=4 blocks below the bot.
+     * Digs down a specified distance. A fluid or dangerous drop keeps the shaft
+     * floor sealed and triggers a bounded lateral safety-pocket detour.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {int} distance, distance to dig down.
+     * @param {object} options, injectable recovery hooks for simulations.
      * @returns {Promise<boolean>} true if successfully dug all the way down.
      * @example
      * await skills.digDown(bot, 10);
      **/
 
+    const requestedDistance = distance;
+    const detourFromHazard = options.detour || createSafeShaftDetour;
     const startY = Math.floor(bot.entity.position.y);
-    if (distance > 2 && startY <= 16) {
-        log(bot, `Refusing blind multi-block digDown at y=${startY}; use a staircase or branch mine instead.`);
-        return false;
-    }
-    if (distance > 2 && startY <= 32) {
-        log(bot, `Clamping blind digDown from ${distance} to 2 at y=${startY}.`);
-        distance = 2;
-    }
-
-    let start_block_pos = bot.blockAt(bot.entity.position).position;
-    for (let i = 1; i <= distance; i++) {
-        const targetBlock = bot.blockAt(start_block_pos.offset(0, -i, 0));
-        let belowBlock = bot.blockAt(start_block_pos.offset(0, -i-1, 0));
-
-        if (!targetBlock || !belowBlock) {
-            log(bot, `Dug down ${i-1} blocks, but reached the end of the world.`);
-            return true;
+    const intent = beginStallIntent(bot, STALL_INTENT.DIG, 'skills.digDown', { timeoutMs: 20000 });
+    let dugBlocks = 0;
+    const finish = (ok, reason, extra = {}) => {
+        const outcome = { ok, reason, dug: dugBlocks, requested: requestedDistance, startY, endY: Math.floor(bot.entity.position.y), at: Date.now(), ...extra };
+        bot._lastDigDownOutcome = outcome;
+        touchStallIntent(bot, intent, `${reason}:${dugBlocks}`);
+        return ok;
+    };
+    try {
+        if (distance > 2 && startY <= 16) {
+            log(bot, `Refusing blind multi-block digDown at y=${startY}; use a staircase or branch mine instead.`);
+            return finish(false, 'too-deep-for-blind-shaft');
+        }
+        if (distance > 2 && startY <= 32) {
+            log(bot, `Clamping blind digDown from ${distance} to 2 at y=${startY}.`);
+            distance = 2;
         }
 
-        // Check for lava/water in target, below, AND the 4 HORIZONTAL neighbours + block above.
-        // An aquifer floods the shaft from the SIDE (the old check only looked straight down) —
-        // that's the recurring y~45 underground drowning that掉装备→ignites the death spiral.
-        // Include flowing_water/flowing_lava (aquifers flow). Stop BEFORE breaking into the pocket.
-        const _WL = new Set(['water', 'flowing_water', 'lava', 'flowing_lava']);
-        const _around = [targetBlock, belowBlock,
-            bot.blockAt(targetBlock.position.offset(1, 0, 0)), bot.blockAt(targetBlock.position.offset(-1, 0, 0)),
-            bot.blockAt(targetBlock.position.offset(0, 0, 1)), bot.blockAt(targetBlock.position.offset(0, 0, -1)),
-            bot.blockAt(targetBlock.position.offset(0, 1, 0))];
-        if (_around.some(b => b && _WL.has(b.name))) {
-            log(bot, `Dug down ${i - 1} blocks, stopping — water/lava adjacent (don't flood the shaft).`);
-            return false;
-        }
+        let start_block_pos = bot.blockAt(bot.entity.position).position;
+        for (let i = 1; i <= distance; i++) {
+            const targetBlock = bot.blockAt(start_block_pos.offset(0, -i, 0));
+            let belowBlock = bot.blockAt(start_block_pos.offset(0, -i-1, 0));
 
-        const MAX_FALL_BLOCKS = 2;
-        let num_fall_blocks = 0;
-        for (let j = 0; j <= MAX_FALL_BLOCKS; j++) {
-            if (!belowBlock || (belowBlock.name !== 'air' && belowBlock.name !== 'cave_air')) {
-                break;
+            if (!targetBlock || !belowBlock) {
+                log(bot, `Dug down ${i-1} blocks, but reached the end of the world.`);
+                return finish(true, 'world-end');
             }
-            num_fall_blocks++;
-            belowBlock = bot.blockAt(belowBlock.position.offset(0, -1, 0));
-        }
-        if (num_fall_blocks > MAX_FALL_BLOCKS) {
-            log(bot, `Dug down ${i-1} blocks, but reached a drop below the next block.`);
-            return false;
-        }
 
-        if (targetBlock.name === 'air' || targetBlock.name === 'cave_air') {
-            log(bot, 'Skipping air block');
-            console.log(targetBlock.position);
-            continue;
-        }
+            // Check for lava/water in target, below, AND the 4 HORIZONTAL neighbours + block above.
+            // An aquifer floods the shaft from the SIDE (the old check only looked straight down) —
+            // that's the recurring y~45 underground drowning that掉装备→ignites the death spiral.
+            // Include flowing_water/flowing_lava (aquifers flow). Stop BEFORE breaking into the pocket.
+            const _around = [targetBlock, belowBlock,
+                bot.blockAt(targetBlock.position.offset(1, 0, 0)), bot.blockAt(targetBlock.position.offset(-1, 0, 0)),
+                bot.blockAt(targetBlock.position.offset(0, 0, 1)), bot.blockAt(targetBlock.position.offset(0, 0, -1)),
+                bot.blockAt(targetBlock.position.offset(0, 1, 0))];
+            if (_around.some(b => b && SHAFT_FLUIDS.has(b.name))) {
+                const detour = bot.interrupt_code ? { moved: false, interrupted: true } : await detourFromHazard(bot);
+                log(bot, detour.moved
+                    ? `Dug down ${dugBlocks} blocks, stopping before water/lava; kept the shaft sealed and moved ${detour.distance.toFixed(1)} blocks into a dry lateral pocket.`
+                    : `Dug down ${dugBlocks} blocks, stopping — water/lava adjacent and no safe lateral pocket was reachable.`);
+                return finish(false, 'adjacent-fluid', { detour });
+            }
 
-        let dug = await breakBlockAt(bot, targetBlock.position.x, targetBlock.position.y, targetBlock.position.z);
-        if (!dug) {
-            log(bot, 'Failed to dig block at position:' + targetBlock.position);
-            return false;
+            const MAX_FALL_BLOCKS = 2;
+            let num_fall_blocks = 0;
+            for (let j = 0; j <= MAX_FALL_BLOCKS; j++) {
+                if (!belowBlock || (belowBlock.name !== 'air' && belowBlock.name !== 'cave_air')) {
+                    break;
+                }
+                num_fall_blocks++;
+                belowBlock = bot.blockAt(belowBlock.position.offset(0, -1, 0));
+            }
+            if (num_fall_blocks > MAX_FALL_BLOCKS) {
+                const detour = bot.interrupt_code ? { moved: false, interrupted: true } : await detourFromHazard(bot);
+                log(bot, detour.moved
+                    ? `Dug down ${dugBlocks} blocks and detected a dangerous drop; left the floor sealed and moved ${detour.distance.toFixed(1)} blocks into a lateral safety pocket.`
+                    : `Dug down ${dugBlocks} blocks, but reached a dangerous drop and could not open a safe lateral pocket.`);
+                return finish(false, 'dangerous-drop', { fallBlocks: num_fall_blocks, detour });
+            }
+
+            if (targetBlock.name === 'air' || targetBlock.name === 'cave_air') {
+                log(bot, 'Skipping air block');
+                console.log(targetBlock.position);
+                continue;
+            }
+
+            let dug = await breakBlockAt(bot, targetBlock.position.x, targetBlock.position.y, targetBlock.position.z);
+            if (!dug) {
+                log(bot, 'Failed to dig block at position:' + targetBlock.position);
+                return finish(false, 'dig-failed', { block: targetBlock.name, position: targetBlock.position });
+            }
+            dugBlocks++;
+            touchStallIntent(bot, intent, `dug:${dugBlocks}`);
         }
+        log(bot, `Dug down ${distance} blocks.`);
+        return finish(true, 'completed');
+    } finally {
+        endStallIntent(bot, intent);
     }
-    log(bot, `Dug down ${distance} blocks.`);
-    return true;
 }
 
 export async function digOneCapOne(bot) {
