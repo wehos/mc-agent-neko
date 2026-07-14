@@ -8,7 +8,7 @@
 //
 // Run:  node test/pillarup.sim.test.mjs
 import Vec3 from 'vec3';
-import { pillarUp } from '../src/agent/library/skills.js';
+import { isPlankBlock, pillarUp, placeBlockUnderFeet } from '../src/agent/library/skills.js';
 
 const key = (v) => `${Math.floor(v.x)},${Math.floor(v.y)},${Math.floor(v.z)}`;
 const SOLID = (name) => ({ name, boundingBox: 'block' });
@@ -162,12 +162,38 @@ async function scenarioE() {
     check('still reports true (it climbed)', ret === true, `ret=${ret}`);
 }
 
+// ── Scenario F: planks-only inventory → pillar refuses without consuming ──────
+async function scenarioF() {
+    console.log('\n=== Scenario F: planks only → refuse under-foot filler ===');
+    const bot = makeBot({ start: new Vec3(0.5, 64, 0.5), floorY: 63, blocks: { oak_planks: 12 } });
+    let placeCalls = 0;
+    const ret = await pillarUp(bot, 66, {
+        placeUnder: async () => { placeCalls++; return true; },
+        sleep: makeSimSleep(bot),
+    });
+    check('returned false (no permitted scaffold)', ret === false, `ret=${ret}`);
+    check('never called the placement primitive', placeCalls === 0, `calls=${placeCalls}`);
+    check('kept all oak planks', bot._items[0].count === 12, `oak_planks=${bot._items[0].count}`);
+    check('recognized bamboo planks too', isPlankBlock('bamboo_planks') === true);
+}
+
+// ── Scenario G: direct primitive call cannot bypass the policy ────────────────
+async function scenarioG() {
+    console.log('\n=== Scenario G: direct under-foot oak_planks call → hard reject ===');
+    const bot = makeBot({ start: new Vec3(0.5, 64, 0.5), floorY: 63, blocks: { oak_planks: 1 } });
+    const ret = await placeBlockUnderFeet(bot, 'oak_planks');
+    check('direct under-foot placement returned false', ret === false, `ret=${ret}`);
+    check('direct call kept the plank', bot._items[0].count === 1, `oak_planks=${bot._items[0].count}`);
+}
+
 (async () => {
     await scenarioA();
     await scenarioB();
     await scenarioC();
     await scenarioD();
     await scenarioE();
+    await scenarioF();
+    await scenarioG();
     console.log(`\n${failures === 0 ? '✅ ALL CHECKS PASSED' : `❌ ${failures} CHECK(S) FAILED`}`);
     process.exit(failures === 0 ? 0 : 1);
 })();
