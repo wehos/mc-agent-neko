@@ -23,11 +23,10 @@
 | **完成 DONE** | LLM 发 `!endGoal` | `ok` |
 | **覆盖 OVERRIDE** | 新 admin 指令进来（`submit` 串行化） | 旧任务 → `superseded`，随即起新任务 |
 | **不可完成 IMPOSSIBLE** | LLM 发 `!cannotComplete(reason)`；或连续无进展仲裁后放弃；或超时；或死亡超预算 | `failed`（消息带原因） |
-| **求生/死亡 SURVIVAL** | modes 反射 `stopLoop`（瞬时）/ kernel 危急强派 surviveNow / `bot.on('death')` | **任务不结束**，自动恢复；仅死亡超预算才发一帧 `interrupted` |
+| **环境/威胁/死亡 SURVIVAL** | 溺水、着火、岩浆、坠落、现实敌对威胁反射 / `bot.on('death')` | **任务不结束**，自动恢复；仅死亡超预算才发一帧 `interrupted` |
 
-- **求生优先永远赢**：硬地板 `vitalNow`（溺水/着火/岩浆/hp≤4）与 kernel `hp≤6/food≤2` 危急强派
-  **完全独立于任务、恒生效**。任务期间只是把 kernel 的**让位地板抬到 hp>11/food>7**（关掉
-  7-11血/3-7粮 的"死区"，见下），从不收窄硬地板。
+- **环境与现实威胁优先**：`vitalNow`（溺水/着火/岩浆）及当前伤害、可达敌对生物等事实驱动反射
+  独立于任务。绝对血量不会抢身体、强派任务或改变任务让位；唯一例外是使用背包已有食物/治疗药水回血。
 - **死亡**是"带预算的求生打断"：默认容忍 3 次死亡（就地重生后继续奔目标），超预算才中止；
   重生时**抑制 sticky_skill 复派**（否则一个无关的旧 grind 会抢身体把任务饿死 —— 红队最危险的发现）。
 
@@ -39,7 +38,7 @@
 | `MC_ADMIN_MISSION_DEATH_BUDGET` | `3` | 容忍的死亡次数；`0` = 死亡即中止 |
 
 `_extIntentUntil` 仍是**有界滚动 5min 崩溃兜底**：只在 self_prompter 真·ACTIVE 时（非 PAUSED）由
-`adminMission.tick` 续戳；控制器若异常挂掉没走 `end()`，kernel 5min 内自动恢复完整自主 + 灰区求生。
+`adminMission.tick` 续戳；控制器若异常挂掉没走 `end()`，kernel 5min 内自动恢复正常任务派发。
 
 ## task_finished 状态词表（⚠️ 外部插件依赖）
 本仓库侧现在会发 `ok` / `failed` / `superseded` / `interrupted` 四态（旧路径只有 `ok`/`interrupted`）。
@@ -50,10 +49,10 @@
 ## 命令（喂给 mini-LLM）
 - `!endGoal` —— **完成**信号（任务活跃时结束任务；否则退回旧 self-prompt 停止语义）。
 - `!cannotComplete("reason")` —— **不可完成**信号（新增）；仅在真·做不到时用（无树可砍、拿不到必需工具），
-  别拿它当"慢/难"的借口。`neko.json` 提示词已教会模型跨回合坚持目标、并在低血粮时自己吃/避险。
+  别拿它当"慢/难"的借口。`neko.json` 提示词已教会模型跨回合坚持目标；背包内回血和现实威胁反射由运行时处理。
 
 ## 撤销
-`MC_ADMIN_MISSION=0` 重启即回退到旧一次性 admin 行为、kernel 6/2 地板、死亡即发 interrupted 帧
+`MC_ADMIN_MISSION=0` 重启即回退到旧一次性 admin 行为，死亡即发 interrupted 帧
 （逐字节不变）。控制器文件与命令留着无害（未激活）。
 
 ## 涉及文件
@@ -66,7 +65,7 @@
 - [`src/agent/self_prompter.js`](../src/agent/self_prompter.js) —— `owner` 钩子、supervised 期泊车不计罚、
   `MAX_NO_COMMAND` 走 `owner.onNoProgress()` 仲裁。
 - [`src/agent/commands/actions.js`](../src/agent/commands/actions.js) —— `!endGoal`/`!cannotComplete`/`!goal` 守卫。
-- [`src/agent/framework/kernel.js`](../src/agent/framework/kernel.js) —— 任务期让位地板抬高 + 危急解卷阀放宽 60s 门。
+- [`src/agent/framework/kernel.js`](../src/agent/framework/kernel.js) —— 任务期独占和普通派发仲裁。
 - [`neko.json`](../neko.json) —— 持续目标 / `!endGoal` / `!cannotComplete` / 自我保命 提示。
 
 ## 上线注意

@@ -34,7 +34,7 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
     //
     //   When disabled, mode 'seal' places NO blocks: it stops moving and falls straight to the
     //   PHASE 2 hold loop (stand in place, eat if hungry, bail on any hit/hostile so the always-on
-    //   self-defense reflex + surviveNow's RELOCATE/DEATH take over). keepInventory is ON, so a
+    //   self-defense and concrete-threat reflexes take over). keepInventory is ON, so an
     //   death here is cheap. This is the accepted tradeoff for never rebuilding the broken box.
     //   NOTE the decision layer (modes.js computeNightPlan) still emits SEAL_FORT on purpose — see
     //   that comment: SEAL_FORT@91 must keep out-ranking daytime BOOTSTRAP_KIT@90 (so a pickless
@@ -99,7 +99,7 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
         //   ★前置: 【仅有镐】才走挖三填一 (§7.3: 无镐徒手挖软土会自埋树底→wood 死锁; 无镐 = 直接裸 hold);
         //   ① 就地试挖三填一(digOneCapOne, 自带 gravity/aquifer/y≤16 守卫);
         //   ② 就地不成 → ≤15格由近及远扫"可挖三填一的地面"(软土 / 石系, 排重力柱) relocate 过去再挖(用户令 2026-07-08: 半径 5→15);
-        //   ③ 无镐 / 扫不到(石台孤岛/含水层遍布)→ 老实 no-op hold(物理下限, 交 surviveNow/死亡出口)。绝不砌 wall-ring。
+        //   ③ 无镐 / 扫不到(石台孤岛/含水层遍布)→ 老实 no-op hold(物理下限)。绝不砌 wall-ring。
         // ★"可挖三填一的地面"判据 (用户令 2026-07-08: 15格内找可挖地). 徒手→只认软土; 有镐→石系也算.
         //   排除 sand/red_sand/gravel 重力柱 (digOneCapOne 会拒) + y≤16 (dig_one 是浅层夜庇护) — 别 relocate 到注定被拒的落点.
         const _hasPickInv = () => { try { return bot.inventory.items().some(i => /_pickaxe$/.test(i.name || '')); } catch (e) { return false; } };
@@ -296,7 +296,7 @@ export default async function nightShelter(bot, ctx, mode = 'seal', opts = {}) {
         }
         // ★G3: 已封成的口袋(sealedNow)遇隔墙的怪【未掉血】应继续 hold(封顶本就该扛), 不再一见怪就 return false
         //   → kernel 3-strike → 锁 5min 空转(sleep-path 审计的次级死环)。判据: 真掉血【总是】退; 仅未封成的裸 hold
-        //   遇怪近 4b 才早退交反射(裸站不是庇护, 该让 surviveNow/reflex 接管)。
+        //   遇怪近 4b 才早退交现实威胁反射(裸站不是庇护)。
         if (bot.health < lastHp - 0.5 || (!sealedNow && hostileClose(4))) {
             setSealed(false);
             log(bot, `nightShelter: ${bot.health < lastHp - 0.5 ? 'taking hits in the "shelter"' : 'unsealed hold + hostile<4'} (hp ${Math.round(bot.health)}/${Math.round(lastHp)}, sealed=${sealedNow}) — re-decide.`);

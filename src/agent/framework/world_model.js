@@ -17,7 +17,7 @@
  * precise coords (blueprint §C hard constraint).
  */
 
-import { EMPTY_WORLD, PROPOSAL_KIND, foodInstinctsEnabled, hpInstinctsEnabled } from './contracts.js';
+import { EMPTY_WORLD, PROPOSAL_KIND, foodInstinctsEnabled } from './contracts.js';
 import { readFileSync, appendFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -409,29 +409,6 @@ export function endgameNeeds(bot) {
     return v;
 }
 
-// ★T-0101/T-0083 FROZEN-ALIVE 互锁破除 — 单一判据,proposeTasks/isGoalDone/isEmergency 三处复用。
-//   lethalThreat: 真·环境急症,HOLD 是对的(出洞=送死)——贴脸 creeper<4.5 / 正在挨打 / hp 极危<=4 /
-//     swarm 围殴贴脸(closest<3 且 hostiles>=2)。这些情形宁可饿着也得守住(C32 苦力怕贴脸教训)。
-//   famineStall: 低血纯粹因 food 见底(<=2)不回血,且 NO LETHAL 急症 → 这不是该原地饿死的避险,
-//     是该主动去找食物的僵局。返回 true → HOLD 让位给 GET_FOOD 觅食(觅食自身仍有 feedUp/
-//     villageHarvest 的 hostileNear/路径安全 gate,不会无脑冲怪堆)。
-//   只在 food<=2 见底时解锁(food>2 常规 HOLD 仍生效,守等回血是对的),避免误伤正常避险。
-function lethalEnvThreat(w) {
-    const t = w.threat || {}, v = w.vitals || {};
-    // ★关键: 用 ACTIONABLE(可达威胁: d<12 且 |dy|<=4,墙外/够不到的怪不算)判 swarm,不是 raw
-    //   closest/hostiles。现场实锤 closest=0.4 但那是封箱墙外够不到的怪(actionable=1,creeperDist=9.1)
-    //   — 用 raw closest 会把"贴墙够不到的怪"误判成 LETHAL,famineStall 永远不触发 → 修复失效。
-    const creeperLethal = Number.isFinite(t.creeperDist) && t.creeperDist < 4.5;
-    const swarmPin = (t.actionable || 0) >= 2;     // 2+ 个真·可达威胁围殴 = 别出洞
-    return creeperLethal || !!t.takingDamage || (v.hp || 20) <= 4 || swarmPin;
-}
-function isFamineStall(w) {
-    // 饥饿惰性 (用户定调 2026-07-08): 默认 (MC_FOOD_INSTINCTS off) 饥饿不驱动任何行为 —
-    //   饥荒僵局不成立, 常规防御 HOLD 照常生效, 也不写 famine-forage-unlock 日志。饿死无所谓。
-    if (!foodInstinctsEnabled()) return false;
-    const v = w.vitals || {};
-    return !lethalEnvThreat(w) && (v.food || 0) <= 2 && (v.hp || 20) < 10 && !v.canRegen;
-}
 // ★2026-07-06 oracle 制导采矿: ore-oracle 的最近矿坐标 (严格按发布 expiresAt/默认2min TTL;
 //   缺失/陈旧 → null, 调用方回退盲挖)。key ∈ {iron, coal, diamonds}。
 function oracleOreTarget(w, key, yMax = Infinity) {
@@ -612,22 +589,11 @@ export function proposeTasks(world, bot) {
     // ── ★2026-07-08 用户令: 临时禁用「饥饿/种田/食物」本能 (乱逛源) ──────────────────────
     //    foodInstincts=false 时不 push 任何主动觅食(GET_FOOD/feedUp)、种麦(OPP_WHEAT_FARM/
     //    wheatFarm)、村庄采集(OPENING_VILLAGE/villageHarvest) 提案 —— 这些正是"接到命令后到处
-    //    乱逛"的来源。保命(HP)链、夜链、tier 链、auto_eat 补血分支均不受影响。
+    //    乱逛"的来源。环境/现实威胁链、夜链、tier 链、背包内治疗例外均不受影响。
     //    回头恢复: 设 MC_FOOD_INSTINCTS=1 重启。见 contracts.foodInstinctsEnabled /
     //    docs/food-instincts-disabled.md。
     const foodInstincts = foodInstinctsEnabled();
-    const hpInstincts = hpInstinctsEnabled();   // ★2026-07-09 hp 侧同构闸 (narrow: 只熔断"因低血"任务闸/求生派发, 威胁触发战斗自保保留)
-
-    // ★危血禁下深矿 (T-0098续 / 06-25T12:31 实锤: hp8 food17 被 GO_UNDERGROUND@45 派 mineDown,
-    //   从 y62 下潜 48 层到 y14,全程不回血(food<18=低于 MC 自然回血线),遇地下僵尸 dist1 裸甲一击死).
-    //   下深矿要有血量 buffer 应对地下怪偷袭: hp<8 一律危险; hp 8-11 仅在能回血(food>=18,边下边回)放行;
-    //   hp>=12 放行。低血不回血时下矿=送死 → gate 关下矿后 GET_FOOD@88/55 接管上浮 feedUp 补食回血,
-    //   宁可 idle 等食也不深入送死(keepInv ON,idle 不死)。只 gate 真·下深矿(GO_UNDERGROUND@45/
-    //   GET_DIAMOND@46),不动 sufficientForUnderground(本文件:134 警告: 收紧它=回归 T-0088/T-0060 石棺
-    //   死锁)、不动地表 smelt/craft(GET_IRON_TOOLS@47=furnace 作业非下矿)。夜 MINE_THROUGH_NIGHT 不在
-    //   此 gate(夜决策由 computeNightPlan 的 alreadyDeepEnclosed/FIGHT 链自管,避免破坏夜庇护 fallback)。
-    // ★2026-07-09 用户令: 双闸全 OFF 时 hp/food 不再阻挡下矿 (因低血/因饿不打断任务, 死了拉倒); 任一闸开恢复原安全门。
-    const hpSafeForUnderground = (!hpInstincts && !foodInstincts) || vitals.hp >= 12 || (vitals.hp >= 8 && vitals.food >= 18);
+    const foodSafeForUnderground = !foodInstincts || vitals.food >= 18;
 
     // ── ★T-0093 NORTH STAR: stamp the explicit tier state onto the world model EVERY pass.
     //    modes.js rebuilds bot._world right before calling proposeTasks, then flushes it to
@@ -638,38 +604,10 @@ export function proposeTasks(world, bot) {
     try { if (bot && bot._world) bot._world.tier = tier; } catch (e) {}
     try { if (bot) bot._tier = tier; } catch (e) {}
 
-    // ── ★T-0101/T-0083 FROZEN-ALIVE 互锁破除 (worker-frozen) ──
-    //   LETHAL 环境急症 vs 纯饥饿僵局的分诊。背景: HOLD@95 是最高优先级生存承诺,
-    //   isGoalDone 要求 "威胁消失 OR hp>=10" 才解除。但 food=0 永不回血(MC food<18 不回血)
-    //   → hp 永远卡在 <10 → HOLD 永不 done → bot 守在原地 → 永远走不到 village 吃东西 →
-    //   food 永远 0 → FROZEN-ALIVE 死锁(9h 实锤@91,159 food0 hp7,苦力怕远 9.1格够不到).
-    //   修: 把 "低血" 拆成两类——
-    //     (a) lethalThreat: 真·环境急症,HOLD 是对的(必须守住别送死)——
-    //         · 贴脸 creeper (<4.5m): 出洞就被炸(C32 教训,保命第一)
-    //         · 正在挨打 (takingDamage): 有怪真打到我了
-    //         · hp 极危 (<=4): 一击就死,任何移动都赌命
-    //         · swarm 围殴贴脸 (closest<3 且 hostiles>=2): 多怪堵门
-    //     (b) famineStall: 低血纯粹因 food 太低不回血,且无上述 LETHAL 急症 → 这不是该
-    //         原地饿死的避险,是该主动去找食物的僵局。此时 NOT push HOLD → GET_FOOD@88
-    //         升为顶层 emergency 接管,bot 去 village/animal 觅食(觅食本身仍受 feedUp/
-    //         villageHarvest 自己的 hostileNear/路径安全 gate 约束,不会无脑冲怪堆)。
-    //   "封箱安全(无 LETHAL 威胁) + food=0 = 该去找食物,不是原地饿死" —— 用户核心指令。
-    //   判据下沉到模块级 isFamineStall(w)/lethalEnvThreat(w),与 isGoalDone/isEmergency 共用单一真相。
-    const famineStall = isFamineStall(w);
-    // ★review :441 — `overworld &&`: dispatching prepNether (bed/portal/surface semantics) in the
-    // nether/End at hp<10 flails off-dimension, and its 3x false returns would cool HOLD down for
-    // 5 minutes exactly mid-crisis. Off-overworld the dimension's primary skill (blazeRods /
-    // slayDragon) carries its own retreat/eat/bunker logic and the reflex modes still run between
-    // dispatches — suppressing the proposal is the smaller correct change vs inventing a new skill.
-    if (overworld && threat.actionable > 0 && vitals.hp < 10 && !famineStall) {
-        push({ kind: PROPOSAL_KIND.HOLD, priority: 95, skill: 'prepNether',
-               rationale: 'under reachable threat at low hp — defend/shelter before any venture' });
-    } else if (famineStall) {
-        // 饥饿僵局: 不 HOLD,记录决策让 worker 取证可见。GET_FOOD@88 在下方 push,
-        //   isEmergency(food<=4 但 villageClose 否决)的 villageClose 例外也在下面破除。
-        try { appendFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../bots/_supervisor/progress.txt'),
-            `[${new Date().toISOString()}] [proposeTasks] ★famine-forage-unlock: food=${vitals.food} hp=${vitals.hp} canRegen=${vitals.canRegen} creeperD=${threat.creeperDist} closest=${threat.closest} swarm=${threat.hostiles} — NOT HOLD, 让 GET_FOOD 接管去觅食(无 LETHAL 急症)\n`); } catch (e) {}
-    }
+    // HOLD is threat-driven only: creepers, active damage, and reachable swarms may justify it;
+    // hunger and food acquisition remain a separate subsystem.
+    // Absolute HP is telemetry only. Threat reactions stay in self_defense/self_preservation;
+    // the proposal market must never synthesize a HOLD task merely because HP is low.
 
     // ── Fixed opening flow (blueprint §D): first unmet prerequisite dominates. ──
     // 1) Bootstrap kit: wood→planks→table→pickaxe→stone tools — AND a wood buffer
@@ -680,7 +618,7 @@ export function proposeTasks(world, bot) {
     //    outranking GET_BLAZE_RODS/SLAY_DRAGON and flailing wood-gathering in a dimension with
     //    no logs. Off-overworld the primary in-dimension skills need no wood/pick to proceed.
     // ★2026-07-09 用户令 "prepNether 退役": BOOTSTRAP_KIT 提案停用 — 不再自主派 prepNether 冷开局
-    //   凑木→板→台→镐→石器。bot 之后靠 admin 指令驱动起步。回床 (GET_BED) / 低血防御 (HOLD) 保留。
+    //   凑木→板→台→镐→石器。bot 之后靠 admin 指令驱动起步。回床 (GET_BED) / 威胁防御 (HOLD) 保留。
     //   ★恢复方法: 取消下面 push 的注释即可 (prepNether.js:944 的 goals[] 也需一并复活)。
     // if (overworld && !isBootstrapDone(w, bot)) {
     //     const noPick = kit.picks < 1;
@@ -903,10 +841,10 @@ export function proposeTasks(world, bot) {
         //   授权扩展), 闭环不留"甲齐缺桶铁"的死角。
         //   @46.5: TOOL_UPKEEP@47 之下(先保镐再采矿)、GET_DIAMOND@46 之上(先甲后钻 — GET_DIAMOND 只要
         //   armor>=1 但 ENTER_NETHER 要 4)。下矿三重门与 GO_UNDERGROUND@45/GET_DIAMOND@46 同款
-        //   (sufficientForUnderground/hpSafeForUnderground/口粮>=2), 新 kind 不绕开危血禁下矿(:450)
+        //   (sufficientForUnderground/foodSafeForUnderground/口粮>=2), 新 kind 不绕开资源门
         //   与 dive-ration(:917) 两个既有不变量; day/safe/surfaceGate 由外层 tierReady 已保证。
         if (hasIronTierPick(w) && ironForArmor(bot) < ironDemandTotal(w, bot)
-            && kit.sufficientForUnderground && hpSafeForUnderground
+            && kit.sufficientForUnderground && foodSafeForUnderground
             && (!foodInstincts || carriedRations(bot) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档: 贫瘠世界口粮存不下来, 满腹+灰区兜底+keepInv 等效(夜挖门同理)
             const demand = ironDemandTotal(w, bot);
             // ★2026-07-06 用户令 (oracle视角挖铁): ore-oracle 已扫铁坐标 → mineOres 直奔;
@@ -924,7 +862,7 @@ export function proposeTasks(world, bot) {
         //   Requires armor>=4 (GET_ARMOR@68 closes that first) so the bot never strip-mines the
         //   deep diamond band unarmored. @46: above GO_UNDERGROUND@45 so a kitted iron bot heads for
         //   the diamond band on purpose instead of the open-ended shallow descent.
-        if (hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < diamondTarget(bot) && !diamondGearComplete(bot) && hpSafeForUnderground
+        if (hasIronTierPick(w) && (vitals.armor || 0) >= 1 && diamondsOnHand(bot) < diamondTarget(bot) && !diamondGearComplete(bot) && foodSafeForUnderground
             && kit.sufficientForUnderground
             && (!foodInstincts || invCount(bot, /^(cooked_\w+|bread|apple|baked_potato|carrot|beef|porkchop|mutton)$/) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档(贫瘠世界口粮存不下, 满腹+灰区兜底+keepInv 等效); ★T-0092 (worker-sync): armor>=4(full set=24 iron, unreachable since GET_ARMOR yields at <4) → armor>=1(reachable from one craftArmor pass) so an iron-tooled+lightly-armored bot actually commits GET_DIAMOND → mineDiamonds descends to y-52. NOT >=0. ★tool-budget: also gated on kit.sufficientForUnderground (spare-with-table or field-recraft kit) like GO_UNDERGROUND — the skill-side pick guard is the LAST line, not the plan; TOOL_UPKEEP@47 restores the invariant first. ★dive rations (task #9): >=2 carried edibles or GET_FOOD stocks first — the y12 famine surfacing (checkpoint #6) ate the whole night's descent.
             // Dispatch the DEDICATED mineDiamonds skill: it water-aware-descends to the diamond band,
@@ -1003,7 +941,7 @@ export function proposeTasks(world, bot) {
                    hints: { pieces: diamondArmorPieces(bot), diamonds: diamondsOnHand(bot) } });
         }
         // GET_PORTAL_KIT — obsidian×OBSIDIAN_TARGET + flint_and_steel (gatherObsidian: lava pool +
-        //   water bucket, gravel→flint). hpSafeForUnderground: lava work at low hp is suicide.
+        //   water bucket, gravel→flint). Environment and food gates remain independent of HP.
         //   Mutually exclusive with ENTER_NETHER via obsOk.
         //   ★review OPEN finding gatherObsidian.js:70 铁预检 — 技能入口硬性要求 桶3锭+打火石1锭
         //   (已持有的不计, 空桶也算)且打火石还需 flint/gravel 来源; 提案门不预检就派 = 注定
@@ -1012,7 +950,7 @@ export function proposeTasks(world, bot) {
         //   flint 侧: 已有打火石 || (背包 flint/gravel 或 32 格内 gravel — flintSourceSignal, 与技能
         //   getNearestBlock('gravel',32) 同半径)。挡住时节流打点, 缺口由 RUNG 1.5 GET_IRON_ARMOR_SET
         //   @46.5 的 ironDemandTotal(含 portal 铁成本)接管补铁 → 铁到位后本门自然放行。
-        if (overworld && tierReady && eneeds.hasDiamondPick && eneeds.blazeShort > 0 && !eneeds.obsOk && hpSafeForUnderground) {
+        if (overworld && tierReady && eneeds.hasDiamondPick && eneeds.blazeShort > 0 && !eneeds.obsOk && foodSafeForUnderground) {
             const portalIronNeed = portalKitIronCost(bot);
             const portalIronOk = ironForArmor(bot) >= portalIronNeed;
             const portalFlintOk = invCount(bot, /^flint_and_steel$/) >= 1 || flintSourceSignal(bot);
@@ -1059,8 +997,7 @@ export function proposeTasks(world, bot) {
         //   dusk via the nightPre path and (b) once committed the !isNightPlan guard stops
         //   GO_BED/SEAL from re-flipping it.
         if (overworld && time.phase !== 'day' && eneeds.blazeShort === 0 && eneeds.pearlsShort > 0
-            && (vitals.armor || 0) >= 4 && (!foodInstincts || vitals.food >= 12) && (!hpInstincts || vitals.hp >= 14)
-            && !(threat.actionable > 0 && vitals.hp < 10)) {
+            && (vitals.armor || 0) >= 4 && (!foodInstincts || vitals.food >= 12)) {
             push({ kind: PROPOSAL_KIND.HUNT_PEARLS, priority: 94.5, skill: 'enderPearls',
                    args: [{ pearlTarget: eneeds.pearlsShort + eneeds.pearls, maxMs: 360000 }],
                    rationale: `night + blaze rods done — hunt endermen under 2-high cover for pearls (short ${eneeds.pearlsShort})`,
@@ -1137,7 +1074,7 @@ export function proposeTasks(world, bot) {
     //    VILLAGE_HARVEST pushed → feedUp空转 in the food desert → creeper-hunger-hold 1199s. When
     //    food is CRITICAL (<=6) and a known village is close, harvesting it is the ONLY food path,
     //    so push it even under an actionable threat — at救命 priority (just under HOLD@95, above
-    //    crisis food@88). villageHarvest still hard-defers on hostiles>2 / hp<=4, so this never
+    //    crisis food@88). villageHarvest still hard-defers on real hostile pressure, so this never
     //    walks a one-hp bot into a mob; it only unblocks the village run a stray creeper was vetoing.
     const opening = w.opening || {};
     if (foodInstincts && overworld && opening.phase === 'VILLAGE_HARVEST' && vitals.food <= 6 && time.phase === 'day'
@@ -1287,7 +1224,7 @@ export function proposeTasks(world, bot) {
     // bot survived on rotten flesh and surfaced at dawn empty-handed. Deep trips must CARRY
     // food like they carry torches: >=2 edible items or don't start the descent — GET_FOOD
     // @higher priority then stocks up first.)
-    if (overworld && kit.sufficientForUnderground && surfaceGate.mode !== 'hold' && !threat.actionable && hpSafeForUnderground
+    if (overworld && kit.sufficientForUnderground && surfaceGate.mode !== 'hold' && !threat.actionable && foodSafeForUnderground
         && (!foodInstincts || carriedRations(bot) >= 2 || vitals.food >= 16)) {   // ★2026-07-06 satiety 档 (同 GET_DIAMOND/GET_IRON_ARMOR_SET/夜挖门)
         push({ kind: PROPOSAL_KIND.GO_UNDERGROUND, priority: 45, skill: 'mineDown',
                args: [{ targetY: IRON_TARGET_Y }],
@@ -1440,7 +1377,7 @@ export function proposeTasks(world, bot) {
 // Commitment ("承诺计划") — the #1 root fix (decision-speed / don't-yo-yo).
 // proposeTasks RANKS; commitGoal STICKS to one goal until it's actually DONE, so
 // the bot doesn't get pulled off bootstrap by every feedUp/roam impulse. Only a
-// genuine emergency (critical food / reachable threat at low hp / migration need)
+// genuine emergency (critical food / reachable threat / migration need)
 // preempts a live commitment. This is the seat that replaces missionNether's
 // food-gate tangle (CHANGELOG C276/C273): commit, then SUPPRESS wander (the
 // suppression hooks into the skills are S4.3).
@@ -1547,10 +1484,8 @@ export function isGoalDone(kind, world, bot) {
         // SLEEP removed as a proposal (★C331: sleep is an instinct, not a task). Case kept
         // harmless in case a stale commitment references it — treated done at daybreak.
         case PROPOSAL_KIND.SLEEP:         return w.time.phase === 'day';
-        // ★T-0101/T-0083: HOLD 平时要求 "威胁消失 OR hp>=10" 才 done。但 famineStall(food<=2 不回血
-        //   + 无 LETHAL 急症)时 hp 永远 <10(不回血) → HOLD 永不 done → FROZEN-ALIVE。饥饿僵局下视为
-        //   done,释放 sticky HOLD commitment,让 commitGoal 重选 GET_FOOD 去觅食。
-        case PROPOSAL_KIND.HOLD:          return isFamineStall(w) || !(w.threat.actionable > 0 && w.vitals.hp < 10);
+        // Low-HP HOLD was retired. Release any stale persisted commitment immediately.
+        case PROPOSAL_KIND.HOLD:          return true;
         // ── Task-queue Phase B opportunistic kinds. One-shot grabs (ore/trader/hunt) are open-ended
         //    while live and removed by their trigger.cond/TTL when the opportunity is consumed; the
         //    village/farm ones mirror their proposer twins / the dynamic bread target. ──
@@ -1605,15 +1540,7 @@ export function isGoalDone(kind, world, bot) {
 /** Emergencies that may PREEMPT a live commitment (else we stay committed). */
 function isEmergency(p, world) {
     if (!p) return false;
-    // ★T-0101/T-0083: HOLD 平时是 emergency,但 famineStall 下 HOLD 不该再 emergency-preempt
-    //   觅食(否则 HOLD 又会从 GET_FOOD/OPENING_VILLAGE 手里抢回身体 → FROZEN-ALIVE 复发)。
-    if (p.kind === PROPOSAL_KIND.HOLD) return !isFamineStall(world);         // threat at low hp (除非饥饿僵局)
-    // ★T-0101/T-0083 饥饿僵局: 去 village 觅食是唯一食物路径,必须能 preempt 任何 stale commitment
-    //   (尤其 stale HOLD)。OPENING_VILLAGE(村近,villageHarvest 自带 hostiles>2/hp<=4 hard-defer)
-    //   与 GET_FOOD(村远,feedUp 自带 hostileNear gate)都算救命 emergency,确保 bot 不饿死在原地。
-    if (isFamineStall(world)) {
-        if (p.kind === TASK.OPENING_VILLAGE || p.kind === PROPOSAL_KIND.GET_FOOD) return true;
-    }
+    if (p.kind === PROPOSAL_KIND.HOLD) return false;
     // ★T-0069: GET_FOOD (feedUp) is the starve-now emergency — BUT not when a known village sits
     //   close. feedUp空转s in a food desert, so letting it emergency-preempt the VILLAGE_HARVEST
     //   run (which actually has food: crops + chests) just re-enters the hunger-hold deadlock.

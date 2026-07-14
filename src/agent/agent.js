@@ -306,11 +306,10 @@ export class Agent {
     // v2 只发不带值的 /gamerule keepInventory —— 纯只读查询(信息级, 与 RCON /seed /locate 同类,
     // 已授权), 服务器回 translate key commands.gamerule.query ("Gamerule keepInventory is currently
     // set to: true/false")。查询同样需要 cheats 权限, 权限不足/静默拒 → 告警, 由用户在世界层处置。
-    //   • 查到 true → 写 keepinv.json (surviveNow 求死分支的硬前置, 24h TTL) — 合法接替旧 RCON
-    //     复验职责, 每次 spawn 自动刷新。
+    //   • 查到 true → 写 keepinv.json (供死亡报告、跑坟和装备管理判断, 24h TTL), 每次 spawn 自动刷新。
     //   • 查到 false → 告警(每次死亡掉光全部物品), 明确指引: 是否开 keepInventory 是用户的决定,
-    //     bot 绝不自行 set; keepinv.json 写 value:false (诚实缓存, 求死分支自禁用)。
-    //   • 拒绝/6s 静默 → 告警, keepinv.json 不动(缺失/过期 = 求死分支自禁用, 安全默认)。
+    //     bot 绝不自行 set; keepinv.json 写 value:false (诚实缓存)。
+    //   • 拒绝/6s 静默 → 告警, keepinv.json 不动。
     // 幂等: 旧探针未结束就先拆掉再挂新的。
     _assertKeepInventory() {
         const b = this.bot;
@@ -319,7 +318,7 @@ export class Agent {
         const writeKeepinv = (val, why) => {
             try {
                 fs.writeFileSync('bots/_supervisor/keepinv.json', JSON.stringify({
-                    _comment: 'keepInventory verification cache - hard precondition for surviveNow deliberate-death branch. Written by C344v2 read-only in-game query on every spawn (no RCON on user LAN world). Branch self-disables when stale >24h or value!=true.',
+                    _comment: 'keepInventory verification cache for death reporting, corpse-run, and gear-management semantics. Written by C344v2 read-only in-game query on every spawn (no RCON on user LAN world).',
                     value: val,
                     verifiedVia: `in-game read-only query /gamerule keepInventory -> ${why}`,
                     ts: Date.now(),
@@ -345,7 +344,7 @@ export class Agent {
                 writeKeepinv(false, why);
             } else {
                 console.warn('★C344v2 keepInventory UNVERIFIED:', why);
-                evt(`KEEPINV UNVERIFIED — read-only query got no usable answer (${why}). Bot likely lacks cheats permission on this LAN world. keepinv.json untouched → surviveNow death-branch stays disabled (safe default). USER ACTION if desired: re-open to LAN with "Allow Cheats: ON".`);
+                evt(`KEEPINV UNVERIFIED — read-only query got no usable answer (${why}). Bot likely lacks cheats permission on this LAN world. keepinv.json untouched; corpse-run/gear logic will use its conservative fallback. USER ACTION if desired: re-open to LAN with "Allow Cheats: ON".`);
             }
         };
         probe.onMsg = (message, _pos, jsonMsg) => {

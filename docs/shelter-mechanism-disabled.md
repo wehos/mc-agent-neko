@@ -82,9 +82,10 @@
 - **睡床 `goBedSleep` / `DUSK_GO_BED@93`** — 有可达床就去睡到天亮。
 - **夜挖 `MINE_THROUGH_NIGHT / DUSK_MINE_NIGHT@94`** — 地下有镐够用就整夜挖。
 - **打怪 `FIGHT`** + always-on self-defense 反射 — 贴脸能打的仗照打。
-- **逃跑 `surviveNow` `RELOCATE`** (escapePlan/surfaceUp/moveAway) + **求死重生 `DEATH`** (keepInventory 已验证 ON)。
 - **`bunkerDown()`** (creeper/自保反射的往下挖应急舱，`modes.js:1119+`) — 与地表封箱是两码事，保留。
-- **`surviveNow` 的 `SHELTER` 节点** (`surviveNow.js:362`) — 它派的是 `nightShelter('dig_one')`，**不是** seal，保留。
+- **环境/现实威胁反射** — 溺水、着火、岩浆、坠落、苦力怕和可达敌对生物仍可触发对应动作。
+
+绝对血量反射已经退役：不会因残血自动逃跑、迁移、挖掘、驻守或故意死亡。
 
 ---
 
@@ -134,10 +135,10 @@ FIGHT                         贴脸能打的怪 → 让位常驻防御反射 (�
 `SEAL_FORT` 原本是**终兜底**，正因为它是**无镐 bot 唯一能用的庇护** (放方块不需要镐)。真实场景：**夜里、地表、无床、无镐 (或站在沙/砾石重力柱上)**。
 
 - 从前：砌一圈墙 (虽然经常把自己关外面，但至少是个动作)。
-- 现在：**原地 hold，不砌墙**。只靠 self-defense 反射 + hold 循环的「挨打即让位」+ `surviveNow` 的 `RELOCATE`/`DEATH` 兜底活命。
+- 现在：**原地 hold，不砌墙**。只靠 self-defense 反射 + hold 循环的「挨打即让位」响应现实威胁。
 
 **这是用户明确接受的取舍** (「不允许封箱」)。缓解：
-1. **keepInventory 已验证 ON** — 这种情况下真死了也只是重生，物品全保，代价仅是时间。
+1. **keepInventory 已验证 ON** — 意外死亡后物品保留；这只是死亡语义，不是主动求死策略。
 2. hold 循环挨任何一击就 `return false` 交还反射 (`nightShelter.js` PHASE 2 逃生舱)，不会站着白白挨打到死。
 3. **不回退到「无镐强挖 dig_one」** —— `modes.js:6014-6019` 记录了另一个已修 bug：给无镐 bot 判 dig_one viable 会让它徒手往下挖软土**把自己埋到树底下** → `chopWood` 全 blacklist → wood=0 bootstrap 死锁。所以终兜底**不能**盲目重定向到 `DIG_ONE_CAP`；无镐就是 hold，不强挖。
 

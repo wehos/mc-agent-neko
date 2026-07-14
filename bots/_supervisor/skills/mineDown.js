@@ -1,5 +1,5 @@
 // mineDown — a SAFE sealed 1-wide descending staircase miner. The bot keeps dying/stalling
-// because it never closes the armor gap (86% of deaths are unarmored), and at low hp the patch
+// because it never closes the armor gap (86% of deaths are unarmored), and the patch
 // layers gate it out of ALL mining — so it stands down forever in food deserts. But mining a
 // 1-wide staircase is SAFE even at hp10: you are always in a single-block slot no mob can reach.
 // This gets the bot DOWN to the iron band, collecting ore en route, breaking the surface

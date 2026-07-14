@@ -7,7 +7,7 @@
 // short out-and-back patrol so motion_quality can sample edgeStallMs / crossEff on the
 // NEW pathfinder config. It is a one-shot diagnostic dispatched by the supervisor.
 //
-// HARD-GUARDED: daytime + hp>=10 + no close hostile to start; aborts mid-walk on nightfall,
+// HARD-GUARDED: daytime + no close hostile to start; aborts mid-walk on nightfall,
 // a close hostile, or any hp drop. Bounded radius. This is deliberately conservative — the
 // C210 lesson (reckless low-food live poke drowned the bot) means a probe must be able to
 // bail to survival instantly and never wander far.
@@ -37,7 +37,6 @@ export default async function verifyWalk(bot, ctx, opts = {}) {
     // Restore the mission no matter how we exit (gate refusal, abort, or completion).
     try {
         if (isNight()) { L('night — daytime-only probe, skip'); return { ok: false, reason: 'night' }; }
-        if (bot.health < 10) { L(`hp=${Math.round(bot.health)} < 10 — too low, skip`); return { ok: false, reason: 'hp low' }; }
         if (closeHostile()) { L('hostile within 10 — skip probe'); return { ok: false, reason: 'hostile close' }; }
 
         const home = bot.entity.position.clone();
@@ -51,7 +50,7 @@ export default async function verifyWalk(bot, ctx, opts = {}) {
         // out, around, back-to-home — a small square patrol so it returns near the start.
         const wps = [[R, 0], [R, R], [0, R], [0, 0]];
         for (let i = 0; i < wps.length; i++) {
-            if (isNight() || closeHostile() || bot.health < startHp - 4 || bot.health < 8) {
+            if (isNight() || closeHostile() || bot.health < startHp - 4) {
                 L(`ABORT at leg ${i + 1} (hp=${Math.round(bot.health)} night=${isNight()} hostile=${closeHostile()})`);
                 break;
             }

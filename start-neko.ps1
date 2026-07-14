@@ -55,12 +55,6 @@ if ($Baseline) {
 $env:MC_FOOD_INSTINCTS = '0'
 Write-Host "food/hunger/farming instincts: DISABLED (MC_FOOD_INSTINCTS=0 — 设 1 恢复)"
 
-# ★2026-07-09 用户令: 低血本能同步熔断 — 禁止因低血/饥饿打断任何行动 (hp<12 灰区求生/hp<=4 vital 地板/
-#   no-regen 冻身 hold 家族/auto_eat/技能内低血 BAIL 全断), 饿死/死了拉倒。环境致命 (溺水/着火/岩浆) 与
-#   威胁触发防御保留。详见 docs/hp-instincts-disabled.md。恢复: 改 '1' 并重启。
-$env:MC_HP_INSTINCTS = '0'
-Write-Host "low-hp survival instincts: DISABLED (MC_HP_INSTINCTS=0 — 低血不打断任何行动; 设 1 恢复)"
-
 # In-proc vision kill switch ON by default (2026-07-02 task#12): the lazy Camera path is
 # BROKEN — prismarine-viewer's entity meshes need global.THREE which nothing sets in-proc,
 # so every vision call floods 'ReferenceError: THREE is not defined' + per-entity mesh

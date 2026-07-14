@@ -27,7 +27,6 @@ const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 export default async function mineDiamonds(bot, ctx, count = 3) {
     const { skills, world, Vec3, log } = ctx;
     // ★2026-07-09 用户令 HP/食物本能熔断: 外部熔断闸 (默认 OFF, 值='1' 恢复原行为)。
-    const _hpOn = () => process.env.MC_HP_INSTINCTS === '1';
     const yNow = () => Math.floor(bot.entity.position.y);
     const has = (n) => world.getInventoryCounts(bot)[n] || 0;
     const dia = () => has('diamond');
@@ -102,7 +101,7 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
     // 耐久<50% 且够料造≥1把; (b)已攒够 2 把镐的料(铁单位≥6)。每次开造尽量多造, 上限 3 把新镐, 且
     // 不超过 tier 目标 4 把(spec-pickaxe-stockpile)。就地链: smeltSafe 自放炉冶炼 raw_iron→锭,
     // craftRecipeLocal 自放台锻 iron_pickaxe(二者本就自带炉/台回收, 不喂幽灵设施, 不上浮)。安全:
-    // 冶炼+锻造要静止 ~30s+ → 战斗/低血/水下/近怪 不开工; 60s 节流; 永不 throw, 失败不中断下潜。
+    // 冶炼+锻造要静止 ~30s+ → 战斗/水下/近怪 不开工; 60s 节流; 永不 throw, 失败不中断下潜。
     const IRON_PICK_TARGET = 4;
     // ★节流状态挂 bot(非函数局部): mineDiamonds 每次重派都新建闭包, 局部 var 会归 0 → 60s 节流
     // 跨派发失效, 每趟首次必补(~20-30s 冻结)。挂 bot._lastPickCraftAt 让节流真正跨派发生效。
@@ -138,8 +137,7 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
             // 会自放随身台+回收), 无台就本轮不补, 免白烧节流槽。
             const tableOk = has('crafting_table') >= 1 || (() => { try { return !!world.getNearestBlock(bot, 'crafting_table', 4); } catch (e) { return false; } })();
             if (!tableOk) return false;
-            // 安全闸: 冶炼+锻造全程静止, 别在战斗/低血/水下/近怪时开工
-            if (_hpOn() && (bot.health || 20) < 12) return false;   // ★2026-07-09 用户令 HP/食物本能熔断: 低血不再阻止就地补镐(纯 HP 闸); HP 闸开恢复。
+            // 安全闸: 冶炼+锻造全程静止, 别在战斗/水下/近怪时开工
             if (inWater()) return false;
             if (hostileNearCraft(10)) return false;
             bot._lastPickCraftAt = now;   // 先占坑防重入(即便本轮部分失败也隔 60s 再试, 跨派发)

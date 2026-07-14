@@ -68,8 +68,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         } catch (err) { return 'err'; }
     };
     const emergencyJunk = async (reason = 'emergency') => {
-        const noRegenGap = bot.food <= 11 && bot.health <= 8;
-        if ((!noRegenGap && (bot.food > 10 || bot.health > 10)) || edibleHeld()) return false;
+        if (bot.food > 10 || edibleHeld()) return false;
         const junk = bot.inventory.items().find(i => /rotten_flesh|spider_eye/.test(i.name || ''));
         if (!junk) return false;
         log(bot, `feedUp: ${reason} — eating ${junk.name} at hp=${Math.round(bot.health)} food=${bot.food}`);
@@ -134,7 +133,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         const name = e && (e.name || (e.displayName || ''));
         if (!e || !e.position || !name || !((e.type === 'hostile' || e.type === 'mob') && HOSTILE.test(name))) return false;
         const d = e.position.distanceTo(bot.entity.position);
-        const daylightPassiveSpider = /^spider$/i.test(name) && !isNight() && d > 6 && bot.health >= 9 && has('stone_sword');
+        const daylightPassiveSpider = /^spider$/i.test(name) && !isNight() && d > 6 && has('stone_sword');
         if (daylightPassiveSpider) return false;
         if (/^enderman$/i.test(name) && !endermanIsThreat(e)) return false;   // 中立末影人不 guard-stop 觅食(未激怒)
         return RANGED.test(name) || Math.abs(e.position.y - bot.entity.position.y) < 5;
@@ -201,7 +200,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         moves.canDig = false;
         moves.allowParkour = false;
         moves.allow1by1towers = false;
-        moves.maxDropDown = bot.health <= 10 ? 1 : 2;
+        moves.maxDropDown = 2;
         moves.liquids.add(mc.getBlockId('water'));
         moves.liquids.add(mc.getBlockId('flowing_water'));
         moves.liquids.add(mc.getBlockId('lava'));
@@ -286,7 +285,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             if (typeof skills.hardenMovements === 'function') { try { skills.hardenMovements(bot, dm); } catch (e) {} }
             dm.allowParkour = false;
             dm.allow1by1towers = true;                 // climb out of the pocket
-            dm.maxDropDown = bot.health <= 10 ? 1 : 2;
+            dm.maxDropDown = 2;
             dm.liquids.add(mc.getBlockId('water'));
             dm.liquids.add(mc.getBlockId('flowing_water'));
             dm.liquids.add(mc.getBlockId('lava'));
@@ -319,14 +318,10 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     const desperationRoam = async (opts = {}) => {
         // Food<12 is the acquisition window: below this, prepNether has
         // stopped resource work, so feedUp must relocate instead of returning empty.
-        // Food=0 is the most obvious case, even if HP is still 7-10. The previous hp<=6 gate
-        // stranded a surfaced bot in a no-animals pocket: too healthy to roam, too hungry
-        // to resume work, and unable to regenerate. Daylight + no nearby threat is enough.
-        // Low HP + food<18 is the same deadlock even when food is 12-17: no natural regen,
-        // so a hp5/food13 bot must still relocate for food instead of "having enough buffer".
-        const noRegenHurt = bot.health < 14 && bot.food < targetFood;
-        if ((bot.food >= 12 && !noRegenHurt) || isNight() || hostileNear(8)) {
-            prog(`feedUp: famine roam guard food=${bot.food} hp=${Math.round(bot.health)} noRegen=${noRegenHurt} night=${isNight()} hostile=${hostileNear(8)}`);
+        // The acquisition decision is food-driven. Daylight + no nearby threat is enough;
+        // absolute health neither enables nor blocks the route.
+        if (bot.food >= 12 || isNight() || hostileNear(8)) {
+            prog(`feedUp: famine roam guard food=${bot.food} night=${isNight()} hostile=${hostileNear(8)}`);
             return false;
         }
         const farAnimal = world.getNearestEntityWhere(bot, e => mc.isHuntable(e) && !failedIds.has(e.id), 96);
@@ -344,7 +339,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             const maxAnimalClose = bot.food <= 4 ? 56 : (bot.food <= 6 ? 64 : (bot.food <= 10 ? 72 : 96));
             if (animalDist > maxAnimalClose || animalDy > 10) {
                 const crawlDyMax = bot.food <= 4 ? 24 : 12;
-                if (bot.food <= 6 && bot.health >= 8 && animalDist <= 96 && animalDy <= crawlDyMax && !edibleHeld()) {
+                if (bot.food <= 6 && animalDist <= 96 && animalDy <= crawlDyMax && !edibleHeld()) {
                     const p = bot.entity.position;
                     const dx = farAnimal.position.x - p.x;
                     const dz = farAnimal.position.z - p.z;
@@ -408,8 +403,8 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         const night = isNight();
         const hostiles = hostileNear(10);
         const cooldown = Math.max(0, (bot._feedUpCriticalMicroScoutCooldownUntil || 0) - Date.now());
-        const starvationScout = bot.food <= 1 && bot.health >= 7 && !edibleHeld();
-        if ((!starvationScout && bot.health > 6) || bot.food > 2 || night || hostiles || cooldown > 0) {
+        const starvationScout = bot.food <= 1 && !edibleHeld();
+        if (!starvationScout || bot.food > 2 || night || hostiles || cooldown > 0) {
             if (!bot._lastCriticalMicroScoutGuardAt || Date.now() - bot._lastCriticalMicroScoutGuardAt > 30000) {
                 bot._lastCriticalMicroScoutGuardAt = Date.now();
                 prog(`feedUp: critical micro-scout guard hp=${Math.round(bot.health)} food=${bot.food} starving=${starvationScout} night=${night} hostiles10=${hostiles} cooldown=${Math.ceil(cooldown / 1000)}s`);
@@ -511,7 +506,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     const localFish = async () => {
         try {
             if (isNight() || hostileNear(10)) return false;
-            const range = bot.health <= 6 ? 8 : 24;
+            const range = 24;
             const fish = world.getNearestEntityWhere(bot, e => {
                 const n = (e && (e.name || e.displayName) || '').toLowerCase();
                 return /cod|salmon/.test(n);
@@ -795,7 +790,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                         maxReach,
                         directReach,
                     });
-                    if (bot.food <= 3 && bot.health <= 8 && openedWindows < 3) {
+                    if (bot.food <= 3 && openedWindows < 3) {
                         const openedNow = await clearLeafSightWindow(fresh);
                         openedWindows += openedNow;
                         const nearWindow = fresh.position.distanceTo(bot.entity.position) <= directReach + 0.65;
@@ -925,7 +920,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                     prog(`feedUp: emergency leaf approach ${label} partial reach nowDist=${Math.round(leaf.position.distanceTo(bot.entity.position))}`);
                     if (await appleLeafSweep(56, sweepOpts)) return true;
                 }
-                if (bot.health < 8 || bot.food <= 0 || isNight() || hostileNear(8)) return false;
+                if (bot.food <= 0 || isNight() || hostileNear(8)) return false;
             }
         }
         const end = bot.entity.position;
@@ -953,7 +948,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         return false;
     };
     const localOakDecayKick = async (label = 'PlanD') => {
-        if (bot.food > 2 || bot.health < 7 || edibleHeld() || isNight() || hostileNear(10)) return false;
+        if (bot.food > 2 || edibleHeld() || isNight() || hostileNear(10)) return false;
         if (Date.now() < (bot._feedUpLocalOakDecayUntil || 0)) return false;
         let best = null;
         try {
@@ -1048,16 +1043,16 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     };
     const controlledOakTunnel = async (oak, label = 'oak') => {
         if (!oak || !oak.position || edibleHeld() || isNight() || hostileNear(8)) return false;
-        const starvingNoRegen = bot.health <= 8 && bot.food >= 3 && bot.food < 4;
-        if (bot.health < 7 || bot.food < (starvingNoRegen ? 3 : 4)) return false;
-        if (starvingNoRegen && hostileNear(10)) return false;
+        const starvingBand = bot.food >= 3 && bot.food < 4;
+        if (bot.food < (starvingBand ? 3 : 4)) return false;
+        if (starvingBand && hostileNear(10)) return false;
         const hasPick = () => bot.inventory.items().some(it => /_pickaxe$/.test(it.name || ''));
         if (!hasPick()) return false;
         const start = bot.entity.position.clone();
         const startDist = oak.position.distanceTo(start);
         const startDy = oak.position.y - start.y;
-        const maxDist = starvingNoRegen ? 7.5 : 8.5;
-        const maxDy = starvingNoRegen ? 2.5 : 1.5;
+        const maxDist = starvingBand ? 7.5 : 8.5;
+        const maxDy = starvingBand ? 2.5 : 1.5;
         if (startDist > maxDist || Math.abs(startDy) > maxDy) return false;
         const solid = (b) => b && b.boundingBox === 'block';
         const open = (b) => !b || b.boundingBox === 'empty' || /^(air|cave_air|void_air|short_grass|tall_grass|fern|large_fern|dead_bush|snow)$/.test(b.name || '');
@@ -1065,17 +1060,17 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         const blockName = (b) => b ? `${b.name}@${b.position.x},${b.position.y},${b.position.z}` : 'null';
         let attempted = false;
         let dug = 0;
-        prog(`feedUp: controlled oak tunnel start ${label} target=${oak.name}@${oak.position.x},${oak.position.y},${oak.position.z} dist=${Math.round(startDist)} dy=${Math.round(startDy)} food=${bot.food} hp=${Math.round(bot.health)} starving=${starvingNoRegen}`);
+        prog(`feedUp: controlled oak tunnel start ${label} target=${oak.name}@${oak.position.x},${oak.position.y},${oak.position.z} dist=${Math.round(startDist)} dy=${Math.round(startDy)} food=${bot.food} hp=${Math.round(bot.health)} starving=${starvingBand}`);
         motion('feedUp.oak_tunnel.begin', {
             label,
             target: { name: oak.name, x: oak.position.x, y: oak.position.y, z: oak.position.z },
             startDist: +startDist.toFixed(3),
             dy: +startDy.toFixed(3),
-            starvingNoRegen,
+            starvingBand,
         });
         for (let step = 0; step < 4; step++) {
-            if (edibleHeld() || isNight() || hostileNear(starvingNoRegen ? 10 : 8) || bot.health < 7 || bot.food < (starvingNoRegen ? 3 : 4)) break;
-            const sweepReach = starvingNoRegen ? 5.05 : 4.6;
+            if (edibleHeld() || isNight() || hostileNear(starvingBand ? 10 : 8) || bot.food < (starvingBand ? 3 : 4)) break;
+            const sweepReach = starvingBand ? 5.05 : 4.6;
             if (oak.position.distanceTo(bot.entity.position) <= sweepReach) {
                 const swept = await appleLeafSweep(56, { stopFood: 17, maxUp: 4, maxReach: sweepReach });
                 motion('feedUp.oak_tunnel.sweep', { label, step, swept, dist: +oak.position.distanceTo(bot.entity.position).toFixed(3), maxReach: sweepReach });
@@ -1100,7 +1095,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                     foot: blockName(foot),
                     head: blockName(head),
                     floor: blockName(floor),
-                    starvingNoRegen,
+                    starvingBand,
                 });
                 break;
             }
@@ -1115,7 +1110,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                     step,
                     targetCell: { x: targetCell.x, y: targetCell.y, z: targetCell.z },
                     block: blockName(b),
-                    starvingNoRegen,
+                    starvingBand,
                 });
                 try {
                     await skills.breakBlockAt(bot, b.position.x, b.position.y, b.position.z);
@@ -1196,7 +1191,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             });
             if (!moved) break;
         }
-        const finalSweepReach = starvingNoRegen ? 5.05 : 4.8;
+        const finalSweepReach = starvingBand ? 5.05 : 4.8;
         if (oak.position.distanceTo(bot.entity.position) <= finalSweepReach) {
             await appleLeafSweep(56, { stopFood: 17, maxUp: 4, maxReach: finalSweepReach });
             return true;
@@ -1208,7 +1203,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             dug,
                 target: { name: oak.name, x: oak.position.x, y: oak.position.y, z: oak.position.z },
                 dist: +oak.position.distanceTo(bot.entity.position).toFixed(3),
-                starvingNoRegen,
+                starvingBand,
         });
         return attempted;
     };
@@ -1266,7 +1261,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         } catch (e) {}
     };
     const criticalRescueAnimal = async () => {
-        if (bot.health > 6 || isNight() || hostileNear(12)) return false;
+        if (bot.food > 2 || isNight() || hostileNear(12)) return false;
         const animal = world.getNearestEntityWhere(bot, e => mc.isHuntable(e) && !failedIds.has(e.id), 64);
         if (!animal || !animal.position) return false;
         const dist = animal.position.distanceTo(bot.entity.position);
@@ -1282,7 +1277,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         return await eat();
     };
     const criticalRescueFish = async () => {
-        if (bot.health > 6 || isNight() || hostileNear(12)) return false;
+        if (bot.food > 2 || isNight() || hostileNear(12)) return false;
         if (Date.now() < (bot._feedUpCriticalFishCooldownUntil || 0)) return false;
         const fish = world.getNearestEntityWhere(bot, e => /cod|salmon/i.test((e && (e.name || e.displayName)) || ''), 32);
         if (!fish || !fish.position) return false;
@@ -1303,7 +1298,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         return await eat();
     };
     const criticalOakAppleForage = async () => {
-        if (bot.health > 6 || bot.food > 2 || isNight() || hostileNear(10)) return false;
+        if (bot.food > 2 || isNight() || hostileNear(10)) return false;
         if (Date.now() < (bot._feedUpCriticalOakCooldownUntil || 0)) return false;
         let oak = null;
         try {
@@ -1334,8 +1329,8 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         return true;
     };
     const targetedOakAppleForage = async () => {
-        const noRegenOakPulse = bot.health <= 8 && bot.food < targetFood && !edibleHeld();
-        if ((!noRegenOakPulse && bot.food > 10) || edibleHeld() || isNight() || (noRegenOakPulse && isDusk()) || hostileNear(10)) return false;
+        const lowFoodOakPulse = bot.food < targetFood && !edibleHeld();
+        if ((!lowFoodOakPulse && bot.food > 10) || edibleHeld() || isNight() || (lowFoodOakPulse && isDusk()) || hostileNear(10)) return false;
         if (Date.now() < (bot._feedUpTargetedOakCooldownUntil || 0)) return false;
         let oak = null;
         try {
@@ -1354,15 +1349,15 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         const dist = oak.position.distanceTo(bot.entity.position);
         const dy = Math.abs(oak.position.y - bot.entity.position.y);
         if (dist > 18 || dy > 8) return false;
-        if (noRegenOakPulse && (dist > 12 || dy > 6)) return false;
-        if (bot.health <= 12 && bot.food <= 10 && !edibleHeld() && dy > 3) {
+        if (lowFoodOakPulse && (dist > 12 || dy > 6)) return false;
+        if (bot.food <= 10 && !edibleHeld() && dy > 3) {
             prog(`feedUp: targeted oak forage skip high tree dy=${Math.round(dy)} at food=${bot.food} hp=${Math.round(bot.health)} — no edible/no regen, avoid stair-edge climb`);
             bot._feedUpTargetedOakCooldownUntil = Date.now() + 90000;
             return false;
         }
-        const cooldownMs = noRegenOakPulse ? 90000 : (bot.food <= 2 ? 10000 : 45000);
+        const cooldownMs = lowFoodOakPulse ? 90000 : (bot.food <= 2 ? 10000 : 45000);
         bot._feedUpTargetedOakCooldownUntil = Date.now() + cooldownMs;
-        const sweepStopFood = noRegenOakPulse ? 17 : 10;
+        const sweepStopFood = lowFoodOakPulse ? 17 : 10;
         const rememberOakApproachFailed = (reason, nowDist) => {
             try {
                 const base = bot.entity.position.floored();
@@ -1371,7 +1366,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                     base: { x: base.x, y: base.y, z: base.z },
                     reachable: 0,
                     broken: 0,
-                    maxUp: noRegenOakPulse ? 4 : 3,
+                    maxUp: lowFoodOakPulse ? 4 : 3,
                     nearest: { name: oak.name, x: oak.position.x, y: oak.position.y, z: oak.position.z, dist: nowDist, dy: oak.position.y - bot.entity.position.y },
                     approachFailed: true,
                     reason,
@@ -1380,16 +1375,16 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                     reason,
                     target: { name: oak.name, x: oak.position.x, y: oak.position.y, z: oak.position.z },
                     nowDist: +nowDist.toFixed(3),
-                    noRegen: noRegenOakPulse,
+                    lowFood: lowFoodOakPulse,
                 });
             } catch (e) {}
         };
-        prog(`feedUp: targeted oak forage ${oak.name}@${Math.round(dist)} dy=${Math.round(dy)} food=${bot.food} hp=${Math.round(bot.health)} noRegen=${noRegenOakPulse}`);
+        prog(`feedUp: targeted oak forage ${oak.name}@${Math.round(dist)} dy=${Math.round(dy)} food=${bot.food} hp=${Math.round(bot.health)} lowFood=${lowFoodOakPulse}`);
         if (dist > 5) {
             if (!(await safeRoamTo(oak.position.x, bot.entity.position.y, oak.position.z, 4, 'targeted-oak'))) {
                 if (bot.food <= 2 && await emergencyLeafApproach('targeted-oak')) return true;
                 const nowDist = oak.position.distanceTo(bot.entity.position);
-                if (noRegenOakPulse && nowDist <= 8.5 && await controlledOakTunnel(oak, 'targeted-oak')) return true;
+                if (lowFoodOakPulse && nowDist <= 8.5 && await controlledOakTunnel(oak, 'targeted-oak')) return true;
                 if (nowDist > 6) {
                     rememberOakApproachFailed('safe-roam-no-progress', nowDist);
                     prog(`feedUp: targeted oak forage failed to approach nowDist=${Math.round(nowDist)}; cooldown=${Math.round(cooldownMs / 1000)}s`);
@@ -1398,15 +1393,15 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                 prog(`feedUp: targeted oak forage partial approach nowDist=${Math.round(nowDist)}; try local harvest`);
             }
         }
-        if (await appleLeafSweep(40, { stopFood: sweepStopFood, maxUp: noRegenOakPulse ? 4 : 3, maxReach: noRegenOakPulse ? 5.05 : 4.5 })) return true;
-        if (noRegenOakPulse) {
+        if (await appleLeafSweep(40, { stopFood: sweepStopFood, maxUp: lowFoodOakPulse ? 4 : 3, maxReach: lowFoodOakPulse ? 5.05 : 4.5 })) return true;
+        if (lowFoodOakPulse) {
             const s = bot._feedUpLastLeafSweep && Date.now() - bot._feedUpLastLeafSweep.at < 10000 ? bot._feedUpLastLeafSweep : null;
             const detail = s ? ` reachable=${s.reachable} broken=${s.broken}` : '';
             if (bot.food <= 2 && await localOakDecayKick('targeted-oak')) return true;
             prog(`feedUp: targeted oak forage no-regen pulse stops after bounded leaf sweep${detail} food=${bot.food} hp=${Math.round(bot.health)} — no chop/climb`);
             return false;
         }
-        if (bot.health <= 10 && bot.food <= 10 && !edibleHeld()) {
+        if (bot.food <= 10 && !edibleHeld()) {
             prog(`feedUp: targeted oak forage skip local chop at no-regen floor food=${bot.food} hp=${Math.round(bot.health)} — leaves swept, avoid non-food climb/chop`);
             return false;
         }
@@ -1444,35 +1439,21 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     // ★ration-hunt entry (the last link 11:11Z: GET_FOOD proposes on rations<2 at FULL
     // hunger, but this loop keyed on hunger alone — the body never ran, feedUp honestly
     // returned false, and the takeaway buffer could never fill. Hunt also when carrying
-    // fewer than 2 rations; every in-loop guard (night, hostiles, hp) applies unchanged.)
-    while ((bot.food < targetFood || bot.health < 18 || rationsCount() < 2) && tries++ < 10) {
+    // fewer than 2 rations; night and hostile guards still apply.)
+    while ((bot.food < targetFood || rationsCount() < 2) && tries++ < 10) {
         if (bot.interrupt_code) { try { bot.interrupt_code = false; } catch (e) {} }
-        // Low HP alone must NOT block hunting: passive animals (cow/sheep/chicken) can't
-        // fight back, and at food=0 hunting is the ONLY path back to regen — a blanket
-        // hp<8 bail locked a daytime hp3 bot at no-regen forever. Bail only when low HP
-        // is COMBINED with an actual threat nearby (that's the hunt-into-death case).
+        // Absolute health never blocks hunting; only an actual nearby threat can bail the route.
         // ★C310 (T-0047): ALWAYS eat held food FIRST — it's safe, in-place, and the ONLY
         // path back to natural regen. The critical guard below used to `break` BEFORE this
-        // line, so a bot at hp<8 with 14 cooked_beef in the bag + a NON-actionable hostile
-        // 9.3b away (can't even reach it) starved FROZEN at hp4 forever (live 20:13 用户实拍
-        // "原地不动"). Eating ≈1.6s in place can't be punished by a mob that can't reach you;
-        // food→18 unlocks natural regen, which unfreezes everything (fight/flee/migrate were
-        // ALL hp-gated). The guard now only gates the ROAM/HUNT path below — the actual
+        // line. Eating ≈1.6s in place can't be punished by a mob that can't reach you;
+        // food→18 unlocks natural regen. The guard now only gates the ROAM/HUNT path below — the actual
         // hunt-into-death case it was written for.
         if (await eat()) { await skills.wait(bot, 1200); continue; }
-        // ★deadlock relaxation (live 2026-07-02 08:53: hp4/food7 at y=-29, ENCLOSED, nearest
-        // skeleton 25b away through solid stone — hostileNear(16)... registered SOMETHING and
-        // this hard-break fired before famine surface-first could climb, so 'low hp needs
-        // food' × 'food errands blocked at low hp' deadlocked in a sealed pocket forever.
-        // A mob that can't PUNCH you (nothing within 8b) can't punish a sealed staircase
-        // climb either — only a genuinely close hostile keeps the hard bail.
-        if (bot.health < 8 && hostileNear(8)) {
-            log(bot, `feedUp: HP critical (${Math.round(bot.health)}) + hostile in punch range + no held food — bailing roam/hunt to survival modes.`);
-            prog(`feedUp: critical guard hp=${Math.round(bot.health)} hostile8=true (no held food in bag to eat in place)`);
+        // Only a genuinely close hostile keeps the threat-driven hard bail.
+        if (hostileNear(8)) {
+            log(bot, 'feedUp: hostile in punch range + no held food — bailing roam/hunt to threat handling.');
+            prog('feedUp: hostile guard hostile8=true (no held food in bag to eat in place)');
             break;
-        }
-        if (bot.health < 8 && hostileNear(16)) {
-            prog(`feedUp: hp critical but nothing in punch range (8b) — allowing surface-first/desperation paths, no roam-hunt`);
         }
         // No held food. PlanC short fetch FIRST (低险快进快出,守卫前放行——烧怪掉落
         // 5分钟 despawn,等不起), then the roam guard.
@@ -1628,7 +1609,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             // still better than burning the last hunger points ping-pong roaming.
             // Only do it in daylight with no close threat, and timebox hard.
             if (bot.food <= 2 && !isNight() && !hostileNear(10)) {
-                const hasOak = bot.health <= 8 ? localOakLike(10, 10.5) : ['oak_log', 'oak_leaves', 'dark_oak_log', 'dark_oak_leaves'].some(n => {
+                const hasOak = bot.food <= 2 ? localOakLike(10, 10.5) : ['oak_log', 'oak_leaves', 'dark_oak_log', 'dark_oak_leaves'].some(n => {
                     try { return !!world.getNearestBlock(bot, n, 36); } catch (e) { return false; }
                 });
                 if (hasOak) {
@@ -1686,27 +1667,23 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                 }
             }
             if (await targetedOakAppleForage()) { await skills.wait(bot, 600); continue; }
-            if (bot.health <= 8) {
+            if (bot.food <= 2) {
                 prog(`feedUp: food_scan ${foodScan()} pos=${Math.round(bot.entity.position.x)},${Math.round(bot.entity.position.y)},${Math.round(bot.entity.position.z)} hp=${Math.round(bot.health)} food=${bot.food}`);
                 if (await criticalRescueAnimal()) { await skills.wait(bot, 600); continue; }
                 if (await criticalRescueFish()) { await skills.wait(bot, 600); continue; }
                 if (await criticalOakAppleForage()) { await skills.wait(bot, 600); continue; }
                 if (bot.food <= 1 && !edibleHeld() && await desperationRoam({ concreteOnly: true })) { await skills.wait(bot, 600); continue; }
                 if (await criticalMicroScout()) { await skills.wait(bot, 600); continue; }
-                // ★critical-branch surface-first (live 2026-07-02 08:59: hp4/food7 sealed at
-                // y=-29 — the guard relaxation let dispatches REACH this branch, but every
-                // local probe is dry 90 blocks below daylight and this break fired before the
-                // main-flow surface-first could ever run at hp<=8. Same rule as below: one
-                // sealed-staircase climb per dispatch when nothing is in punch range.)
+                // At the calorie floor, allow one surface attempt when nothing is in punch range.
                 if (!surfaceTriedThisRun && bot.entity.position.y < 60 && !hostileNear(8)) {
                     surfaceTriedThisRun = true;
-                    prog(`feedUp: critical surface-first — hp=${Math.round(bot.health)} food=${bot.food} y=${Math.round(bot.entity.position.y)}, climbing to daylight food`);
+                    prog(`feedUp: calorie-floor surface-first — food=${bot.food} y=${Math.round(bot.entity.position.y)}, climbing to daylight food`);
                     let up = false;
                     try { up = await skills.customSkill(bot, 'surfaceUp', 63); } catch (e) { prog(`feedUp: surfaceUp threw ${e && e.message || e}`); }
                     if (bot.interrupt_code || bot.health <= 0) break;
                     if (up || bot.entity.position.y >= 60) { await skills.wait(bot, 400); continue; }
                 }
-                prog(`feedUp: critical local-only stop hp=${Math.round(bot.health)} food=${bot.food} — no long roam`);
+                prog(`feedUp: calorie-floor local-only stop food=${bot.food} — no long roam`);
                 break;
             }
             // ★famine surface-first (live 2026-07-02 01:54: food=0 hp=10 FAMINE freeze @y47):

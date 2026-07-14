@@ -12,7 +12,7 @@
  *     OVERRIDE   — 新 admin 指令进来               → end('superseded') 旧 id → 起新任务
  *     IMPOSSIBLE — LLM 判定做不到 → !cannotComplete → end('impossible') → status=failed
  *                  或 self_prompt 连续无进展 → onNoProgress 仲裁 → 放弃; 或超时/死亡预算耗尽
- *     SURVIVAL   — modes 反射 stopLoop (瞬时) / kernel 危急强派 surviveNow / 死亡 → 任务不结束,
+ *     SURVIVAL   — 环境/现实威胁反射 stopLoop (瞬时) / 死亡 → 任务不结束,
  *                  自动恢复; 死亡计入预算, 超预算才发一帧 interrupted。硬保命(vitalNow)恒独立。
  *
  * 上线: env MC_ADMIN_MISSION (默认开; =0 秒回退到旧一次性路径, 每个热点路径都 gate)。硬上限:

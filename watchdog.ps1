@@ -24,10 +24,6 @@ $env:MC_FRAMEWORK_SHADOW = '0'
 # ⚠ 注意: 修改本行后必须重启 watchdog 进程本身 (已在跑的 watchdog env 不会因改文件而变); 或直接靠代码默认。
 # 回头恢复: 改成 '1' (或删除本行) 并重启 watchdog。详见 docs/food-instincts-disabled.md。
 $env:MC_FOOD_INSTINCTS = '0'
-# ★2026-07-09 用户令: 低血本能同步熔断 — 禁止因低血/饥饿打断任何行动 (hp<12 灰区/hp<=4 地板/
-# no-regen 冻身 hold/auto_eat/技能低血 BAIL 全断), 饿死/死了拉倒。恢复: 改 '1' 并重启 watchdog + bot。
-# 详见 docs/hp-instincts-disabled.md。
-$env:MC_HP_INSTINCTS = '0'
 # ★2026-07-05 新机: node 装在 zip 目录而非系统 PATH (与 start-neko.ps1 同一路径约定)。
 # Restart-Agent 及各 keep-alive 都用裸名 'node' 启动 — 若 PATH 里没有 node, 整条链一个也起不来。
 $node22 = 'C:\Users\Administrator\nodejs22'
@@ -437,8 +433,6 @@ while ($true) {
                         $todN = [int]$vit.tod
                         $nightHold = ($todN -ge 13000 -and $todN -le 23000 -and ("" + $vit.skill) -eq 'missionNether' -and $progLast -match 'NIGHT|入夜|hole up|蹲')
                     } catch {}
-                    $noRegenHold = $false
-                    $sealedBodyBudgetHold = $false
                     $lowFoodNightShelterHold = $false
                     $tableRecoveryHold = $false
                     $killBoxLowFoodHold = $false
@@ -464,17 +458,15 @@ while ($true) {
                             } catch {}
                         }
                         $mobContained = ("" + $vit.mob) -match 'ENC|POCKET|MAROONED|ENTOMBED'
-                        $sealedBodyBudgetHold = (("" + $vit.skill) -eq 'missionNether' -and [double]$vit.hp -le 8 -and [int]$vit.food -le 6 -and -not $normalFood -and ($mobContained -or $advSealed))
-                        $noRegenHold = (("" + $vit.skill) -eq 'missionNether' -and [double]$vit.hp -lt 14 -and [int]$vit.food -lt 18 -and -not $normalFood -and [int]$vit.hostiles -eq 0 -and $progLast -match 'low-hp/no-food|HUNGER/LOWHP|BREAKOUT gated: no-regen|SKIP torch kit')
                         $progTailText = ''
                         try {
                             if (Test-Path $progFile) {
                                 $progTailText = ((Get-Content $progFile -Tail 12 -ErrorAction Stop) -join "`n")
                             }
                         } catch {}
-                        $lowFoodNightShelterHold = (("" + $vit.skill) -eq 'missionNether' -and [int]$vit.food -le 6 -and [double]$vit.hp -ge 10 -and -not $normalFood -and [int]$vit.hostiles -eq 0 -and $mobContained -and $progTailText -match 'HUNGRY/LOWHP .*night|famine-night gate|BREAKOUT gated: prepNether low-food hold evidence|inside cluster but night\+covered|dug-in bunker SEALED')
-                        $killBoxLowFoodHold = (("" + $vit.skill) -eq 'missionNether' -and [int]$vit.food -le 6 -and [double]$vit.hp -ge 10 -and -not $normalFood -and $mobContained -and $progTailText -match 'KILL-BOX gated: low-food pocket recovery' -and (($advFresh -and $advActionable -eq 0) -or [int]$vit.hostiles -eq 0))
-                        $tableRecoveryHold = (("" + $vit.skill) -eq 'missionNether' -and [double]$vit.hp -ge 14 -and [int]$vit.food -ge 14 -and [int]$vit.hostiles -eq 0 -and $progTailText -match 'TABLE gate for|TABLE recovery for')
+                        $lowFoodNightShelterHold = (("" + $vit.skill) -eq 'missionNether' -and [int]$vit.food -le 6 -and -not $normalFood -and [int]$vit.hostiles -eq 0 -and $mobContained -and $progTailText -match 'famine-night gate|BREAKOUT gated: prepNether low-food hold evidence|inside cluster but night\+covered|dug-in bunker SEALED')
+                        $killBoxLowFoodHold = (("" + $vit.skill) -eq 'missionNether' -and [int]$vit.food -le 6 -and -not $normalFood -and $mobContained -and $progTailText -match 'KILL-BOX gated: low-food pocket recovery' -and (($advFresh -and $advActionable -eq 0) -or [int]$vit.hostiles -eq 0))
+                        $tableRecoveryHold = (("" + $vit.skill) -eq 'missionNether' -and [int]$vit.food -ge 14 -and [int]$vit.hostiles -eq 0 -and $progTailText -match 'TABLE gate for|TABLE recovery for')
                     } catch {}
                     # ★2026-07-14 admin 独占 hold (用户令: admin 要求的炼铁等炼完/原地待命 N 秒是合法站桩):
                     #   vitals.cmd=1 = agent 正在跑 admin 指令 (bot._extIntentUntil 新鲜, ws_server 每 15s 广播)。
@@ -483,8 +475,8 @@ while ($true) {
                     #   mission 自带 deadline, 到点 end → 窗口清零, 同样回到正常猎杀。
                     $adminCmdHold = $false
                     try { $adminCmdHold = ([int]$vit.cmd -eq 1) } catch {}
-                    if ($adminCmdHold -or $nightHold -or $noRegenHold -or $sealedBodyBudgetHold -or $lowFoodNightShelterHold -or $killBoxLowFoodHold -or $tableRecoveryHold) {
-                        # Legit sheltering / no-regen stand-down is intentionally stationary;
+                    if ($adminCmdHold -or $nightHold -or $lowFoodNightShelterHold -or $killBoxLowFoodHold -or $tableRecoveryHold) {
+                        # Legit sheltering / food stand-down is intentionally stationary;
                         # don't convert it into a cancel/restart event. Re-anchor so the 25min
                         # restart path is also suppressed while the protected hold remains fresh.
                         # Keep flowing to loop bookkeeping/sleep; a continue here makes the

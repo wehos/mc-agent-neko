@@ -56,53 +56,13 @@ const readOakAppleBackoff = () => {
 
 export default async function missionNether(bot, ctx) {
     const { skills, world, log } = ctx;
-    // ★2026-07-09 用户令 HP/食物本能熔断: 两个外部熔断开关(默认 OFF, 仅 '1' 恢复原行为)。
-    // 这些 supervisor 模块直接读 process.env(不 import contracts.js)。
     const _foodOn = () => process.env.MC_FOOD_INSTINCTS === '1';
-    const _hpOn   = () => process.env.MC_HP_INSTINCTS   === '1';
     const has = (n) => world.getInventoryCounts(bot)[n] || 0;
     const FOOD_RE = /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|^cod$|^salmon$|melon_slice|sweet_berries|_stew|^rabbit$|baked_/;
     const HOSTILE_RE = /zombie|skeleton|creeper|spider|witch|drowned|husk|stray|pillager|cave_spider/i;
     const edibleHeld = () => bot.inventory.items().some(i => FOOD_RE.test(i.name) && i.name !== 'rotten_flesh');
-    const famineCritical = () => !edibleHeld() && (bot.food <= 1 || (bot.health <= 6 && bot.food <= 2));
-    const noRegenNoFood = () => !edibleHeld() && bot.health < 14 && bot.food < 18;
-    const bodyBudgetFamine = () => !edibleHeld() && bot.health <= 8 && bot.food <= 6;
-    const noRegenBackoffRemain = () => {
-        const lowHp = Math.max(0, (bot._prepLowHpNoFoodUntil || 0) - Date.now());
-        const surface = Math.max(0, (bot._prepNoFoodSurfaceBackoffUntil || 0) - Date.now());
-        return {
-            lowHp: Math.ceil(lowHp / 1000),
-            surface: Math.ceil(surface / 1000),
-            any: Math.ceil(Math.max(lowHp, surface) / 1000),
-        };
-    };
-    const boundedOakAppleReady = () => {
-        try {
-            if (!noRegenNoFood() || bot.health > 8) return null;
-            if (Date.now() < (bot._prepOakApplePulseBackoffUntil || 0)) return null;
-            const t = (bot.time && bot.time.timeOfDay) || 0;
-            if ((t >= 11000 && t < 23000) || isNightNow()) return null;
-            if (actionableHostilesNear(16) > 0) return null;
-            if (bot.game && bot.game.dimension && !/overworld/.test(bot.game.dimension)) return null;
-            const me = bot.entity.position;
-            const dist = (p) => p && typeof p.distanceTo === 'function' ? p.distanceTo(me) : Infinity;
-            const dy = (p) => p ? Math.abs(p.y - me.y) : Infinity;
-            const blocks = world.getNearestBlocks(bot, ['oak_leaves', 'dark_oak_leaves', 'oak_log', 'dark_oak_log'], 14, 32) || [];
-            const oak = blocks
-                .filter(b => b && b.position && dist(b.position) <= 12 && dy(b.position) <= 6)
-                .sort((a, b) => dist(a.position) - dist(b.position))[0];
-            if (!oak) return null;
-            const target = `${oak.name}@${Math.round(dist(oak.position))} dy=${Math.round(oak.position.y - me.y)}`;
-            const persisted = readOakAppleBackoff();
-            if (persisted && persisted.target === target) {
-                try { bot._prepOakApplePulseBackoffUntil = Math.max(bot._prepOakApplePulseBackoffUntil || 0, persisted.until); } catch (e) {}
-                return null;
-            }
-            return target;
-        } catch (e) {
-            return null;
-        }
-    };
+    const famineCritical = () => !edibleHeld() && bot.food <= 2;
+    const bodyBudgetFamine = () => !edibleHeld() && bot.food <= 6;
     const hostilesNear = (r = 16) => {
         try {
             const me = bot.entity.position;
@@ -231,7 +191,7 @@ export default async function missionNether(bot, ctx) {
     };
     const tableRecoveryHold = () => {
         try {
-            if ((_hpOn() || _foodOn()) && (bot.health < 14 || bot.food < 14)) return false;   // ★2026-07-09 用户令 HP/食物本能熔断: table-recovery hold 的血/饱和门(mixed); 任一/双闸开恢复。
+            if (_foodOn() && bot.food < 14) return false;
             if (tableRecoveryThreat(12).actionable > 0) return false;
             if (has('crafting_table') > 0 || world.getNearestBlock(bot, 'crafting_table', 4)) return false;
             if (maxHeldPlankStack() >= 4 || heldLogs() > 0) return false;
@@ -248,7 +208,7 @@ export default async function missionNether(bot, ctx) {
             if (!_foodOn()) return null;   // ★2026-07-09 用户令 食物本能熔断: 低食物 hold 证据(纯食物); 食物闸开恢复。
             if (edibleHeld() || bot.food > 10) return null;
             const tail = freshProgressTail();
-            if (!/(HUNGER\/LOWHP gate|HUNGRY\/LOWHP .*night|hungry-night hold|no concrete food signal before cave climb|last surface\/feedUp found no food)/.test(tail)) return null;
+            if (!/(hungry-night hold|no concrete food signal before cave climb|last surface\/feedUp found no food)/.test(tail)) return null;
             const adv = freshAdvisoryThreat();
             const actionable = adv ? adv.actionable : actionableHostilesNear(12);
             if (actionable > 0) return null;
@@ -374,7 +334,7 @@ export default async function missionNether(bot, ctx) {
     };
     const daylightFamineHostileShelter = () => {
         try {
-            return (famineCritical() || (noRegenNoFood() && bot.health <= 10))
+            return famineCritical()
                 && !isNightNow()
                 && (!bot.game || !bot.game.dimension || /overworld/.test(bot.game.dimension))
                 && bot.entity.position.y >= 55
@@ -438,12 +398,12 @@ export default async function missionNether(bot, ctx) {
                 // catches a night-respawn drift. Safe: still gated by naked(inv<=8)+full-hp+day+no-pointblank
                 // +5min-throttle — fires only when the bot has made NO local progress near the bad spawn,
                 // which is exactly when migrating off it is right. (48 == the old arming radius.)
-                if (_sd < 48 && (!_hpOn() || bot.health >= 18) && _invTotal <= 8   // ★2026-07-09 用户令 HP 本能熔断: 满血 respawn 触发门(纯 HP 前置); HP 闸开恢复。
+                if (_sd < 48 && _invTotal <= 8   // ★2026-07-09 用户令 HP 本能熔断: 满血 respawn 触发门(纯 HP 前置); HP 闸开恢复。
                     && !isNightNow() && actionableHostilesNear(5) === 0
                     && (!bot._lastC226FireAt || Date.now() - bot._lastC226FireAt > 5 * 60 * 1000)) {
                     bot._lastC226FireAt = Date.now();
                     prog(`★C226-A fresh-respawn triage: hp=${Math.round(bot.health)} naked(inv=${_invTotal}) @spawn d=${_sd.toFixed(0)} day — migrate off spawn death-gauntlet`);
-                    try { await skills.customSkill(bot, 'migrate', { force: true, gateFood: 0, gateHp: 8, abortHp: 6, maxBlocks: 200, settleScore: 8 }); }
+                    try { await skills.customSkill(bot, 'migrate', { force: true, gateFood: 0, maxBlocks: 200, settleScore: 8 }); }
                     catch (e) { prog(`C226-A migrate threw: ${e.message}`); }
                     continue;
                 }
@@ -462,12 +422,12 @@ export default async function missionNether(bot, ctx) {
             const _mig = bot._world && bot._world.migration;
             const _noPick293 = !bot.inventory.items().some(it => /_pickaxe$/.test(it.name));
             const _todNow = (bot.time && typeof bot.time.timeOfDay === 'number') ? bot.time.timeOfDay : 6000;
-            if (_mig && _mig.inDeathZone && _mig.recommend && _noPick293 && (!_hpOn() || bot.health >= 14)   // ★2026-07-09 用户令 HP 本能熔断: 死亡区逃离血量储备门(纯 HP 前置); HP 闸开恢复。
+            if (_mig && _mig.inDeathZone && _mig.recommend && _noPick293
                 && !isNightNow() && _todNow < 11000 && actionableHostilesNear(6) === 0
                 && (!bot._lastC293FireAt || Date.now() - bot._lastC293FireAt > 4 * 60 * 1000)) {
                 bot._lastC293FireAt = Date.now();
                 prog(`★C293 death-zone escape: inDeathZone + pickless (junk hoard ≠ progress) hp=${Math.round(bot.health)} tod=${_todNow} → strong migrate OUT maxBlocks=400 to livable biome`);
-                try { await skills.customSkill(bot, 'migrate', { force: true, gateFood: 0, gateHp: 8, abortHp: 6, maxBlocks: 400, settleScore: 6 }); }
+                try { await skills.customSkill(bot, 'migrate', { force: true, gateFood: 0, maxBlocks: 400, settleScore: 6 }); }
                 catch (e) { prog(`C293 migrate threw: ${e.message}`); }
                 continue;
             }
@@ -658,12 +618,11 @@ export default async function missionNether(bot, ctx) {
             // reach), re-firing every 3s is a spin loop (saw 4 fires in 10s in the
             // cliff alcove). One honest attempt per minute is plenty.
             const noCloseFood = !safeCloseFoodSignal();
-            const advisoryDryNoRegen = noRegenNoFood() && noCloseFood;
             const advisoryDryFamine = famineCritical() && noCloseFood && !safeDaylightFamineForage();
-            if (advisoryDryFamine || advisoryDryNoRegen) {
+            if (advisoryDryFamine) {
                 if (!bot._lastFamineEatSkipAt || Date.now() - bot._lastFamineEatSkipAt > 30000) {
                     bot._lastFamineEatSkipAt = Date.now();
-                    prog(`★ADVISORY eat_now gated: ${advisoryDryFamine ? 'famine-critical' : 'no-regen low-hp/no-food'} hp=${Math.round(bot.health)} food=${bot.food}; no close confirmed food signal`);
+                    prog(`★ADVISORY eat_now gated: famine-critical food=${bot.food}; no close confirmed food signal`);
                 }
             } else if (gateDryFeedUp('★ADVISORY eat_now')) {
                 // Dry-site cooldown came from feedUp itself. Let mission/prep recover or
@@ -813,7 +772,7 @@ export default async function missionNether(bot, ctx) {
         // straight into prepNether→forageExplore wandering into barren mountains, never migrating).
         try {
             // ★2026-07-05 预审 P0 配套: migrate 是主世界语义(biome 搬迁), 下界不派。
-            if (!inNether() && !isNightNow() && actionableHostilesNear(8) === 0 && (!_hpOn() || Math.round(bot.health) >= 14) && (!_foodOn() || bot.food >= 6)   // ★2026-07-09 用户令 HP/食物本能熔断: early migrate 血/饱和储备门(纯前置; 保留 actionableHostilesNear 安全门); 任一/双闸开恢复。
+            if (!inNether() && !isNightNow() && actionableHostilesNear(8) === 0 && (!_foodOn() || bot.food >= 6)   // ★2026-07-09 用户令 HP/食物本能熔断: early migrate 血/饱和储备门(纯前置; 保留 actionableHostilesNear 安全门); 任一/双闸开恢复。
                 && (!bot._lastMigrateTryAt || Date.now() - bot._lastMigrateTryAt > 120000)) {
                 bot._lastMigrateTryAt = Date.now();
                 let mr = null;
@@ -891,22 +850,21 @@ export default async function missionNether(bot, ctx) {
                 // ★ANTI-IDLE (food-desert livelock fix): a low-food hold in a food desert is an
                 // ABSORBING state — sitting still guarantees no food, while the only real fix is to
                 // TRAVEL until a food source / fresh biome appears. So when it's daytime, no close
-                // actionable threat, and we're not critically fragile, ACTIVELY forageExplore
-                // (travel to find land animals; it self-gates on night/hostile/hp-drop and is
+                // actionable threat, ACTIVELY forageExplore
+                // (travel to find land animals; it self-gates on night/hostile/damage and is
                 // bounded) instead of idle-holding. Repeated legs across cycles = crude 搬家 out of
-                // the desert. Throttled 60s so it doesn't tight-loop. Night/threat/low-hp still hold.
-                if (!isNightNow() && !lowFoodHold.actionable && Math.round(bot.health) >= 10
+                // the desert. Throttled 60s so it doesn't tight-loop. Night/threat still hold.
+                if (!isNightNow() && !lowFoodHold.actionable
                     && (!bot._lastHoldForageAt || Date.now() - bot._lastHoldForageAt > 60000)) {
                     bot._lastHoldForageAt = Date.now();
                     // ★MIGRATE preempt (C220): in a CONFIRMED unlivable desert, a long-haul
                     // cross-continent relocation beats another 180-block forageExplore leg that
                     // just circles the same barren spot. This is the spot the low-food bot actually
                     // reaches (L896 was preempted by this branch). migrate self-gates (shouldMigrate:
-                    // desert via ocean-biome/streak/clustered-food-deaths + hp≥14 + off cooldown);
+                    // desert via ocean-biome/streak/clustered-food-deaths + off cooldown);
                     // if it declines it returns instantly and we fall through to the forageExplore
                     // short leg. food-gate is relaxed (6) — a human hungry in a desert leaves NOW.
-                    if (Math.round(bot.health) >= 14
-                        && (!bot._lastMigrateTryAt || Date.now() - bot._lastMigrateTryAt > 120000)) {
+                    if (!bot._lastMigrateTryAt || Date.now() - bot._lastMigrateTryAt > 120000) {
                         bot._lastMigrateTryAt = Date.now();
                         let mr = null;
                         try { mr = await skills.customSkill(bot, 'migrate', {}); } catch (e) { prog(`migrate threw: ${e.message}`); }
@@ -923,7 +881,7 @@ export default async function missionNether(bot, ctx) {
                         try { await skills.customSkill(bot, 'surfaceUp', sy); } catch (e) { prog(`hold-surfaceUp threw: ${e.message}`); }
                     } else {
                         prog('low-food hold → forageExplore (active search/relocate out of food desert, not idle-hold)');
-                        try { await skills.customSkill(bot, 'forageExplore', { gateFood: 6, gateHp: 10, maxBlocks: 180 }); }
+                        try { await skills.customSkill(bot, 'forageExplore', { gateFood: 6, maxBlocks: 180 }); }
                         catch (e) { prog(`hold-forage threw: ${e.message}`); }
                     }
                     continue;
@@ -933,7 +891,7 @@ export default async function missionNether(bot, ctx) {
                 await wait(5000);
                 continue;
             }
-            if (!bot._stagPos || fp.distanceTo(bot._stagPos) > 10) { if (bot._stagPos && fp.distanceTo(bot._stagPos) > 10) bot._noRegenFrozenSince = null; bot._stagPos = fp.clone(); bot._stagAt = Date.now(); }
+            if (!bot._stagPos || fp.distanceTo(bot._stagPos) > 10) { bot._stagPos = fp.clone(); bot._stagAt = Date.now(); }
             else if (Date.now() - bot._stagAt > 2 * 60 * 1000 && !bot._envDumped) {
                 // ★ENVIRONMENT SNAPSHOT at 4min pinned — the code-side version of the
                 // user's screenshot: what EXACTLY surrounds the bot (7x4x7), so the
@@ -966,57 +924,15 @@ export default async function missionNether(bot, ctx) {
                     await wait(5000);
                     continue;
                 }
-                if ((_hpOn() || _foodOn()) && bodyBudgetFamine()) {   // ★2026-07-09 用户令 HP/食物本能熔断: BREAKOUT body-budget famine 保命 hold(mixed hp+food); 任一/双闸开恢复。
+                if (_foodOn() && bodyBudgetFamine()) {
                     prog(`★BREAKOUT gated: body-budget famine hp=${Math.round(bot.health)} food=${bot.food} hostiles10=${hostilesNear(10)} actionable10=${actionableHostilesNear(10)}; no tunneling/sprint, preserve sealed body`);
                     try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
                     try { bot.clearControlStates(); } catch (_) {}
                     await wait(10000);
                     continue;
                 }
-                if ((_hpOn() || _foodOn()) && famineCritical()) {   // ★2026-07-09 用户令 HP/食物本能熔断: BREAKOUT famine-critical 保命 hold(mixed hp+food); 任一/双闸开恢复。
+                if (_foodOn() && famineCritical()) {
                     prog(`★BREAKOUT gated: famine-critical hp=${Math.round(bot.health)} food=${bot.food}; no tunneling/sprint, preserve body for feedUp/shelter`);
-                    try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
-                    try { bot.clearControlStates(); } catch (_) {}
-                    await wait(5000);
-                    continue;
-                }
-                if (_foodOn() && noRegenNoFood() && actionableHostilesNear(10) === 0) {   // ★2026-07-09 用户令 食物本能熔断: BREAKOUT no-regen forage/relocate 派发(保留 actionableHostilesNear 安全门); 食物闸开恢复。
-                    // ★C224b: no-regen + no-food is an ABSORBING hold — passive waiting never restores
-                    // food, and hp can't regen until food≥18, so a hurt bot freezes forever (live: hp9
-                    // food17 held at the forest surface, every subsystem holding, feedUp refusing "no
-                    // close food signal"). The escape is ACTIVE: by day with no actionable threat, TRAVEL
-                    // to hunt. forageExplore self-gates (night/hostile/hp-drop, bounded) — pass a low hp
-                    // gate (already hurt; venturing to food beats freezing, same as C217) and
-                    // targetFood:18 so the handoff forage actually fires at food17 and eats PAST the regen
-                    // floor (a target of 16 no-ops at food17 → never reaches regen). Truly-sealed →
-                    // surfaceUp first (forageExplore can't path out of a sealed pocket); POCKET near the
-                    // surface lets forageExplore's own goToPosition extract.
-                    // Only surfaceUp-first when TRULY sealed (ENTOMBED). The `enclosed` flag is true even
-                    // for a FREE bot under a tree canopy / in a 1-block dip at the surface — treating that
-                    // as sealed wrongly sent it to surfaceUp forever (live: `sealed(FREE) → surfaceUp` at
-                    // y88-93, never foraging). FREE/POCKET → forageExplore directly (it extracts itself).
-                    const sealed = !!(bot._mobility && /ENTOMBED/.test(bot._mobility.state || ''));
-                    if (!isNightNow() && Math.round(bot.health) >= 6
-                        && (!bot._lastNoRegenForageAt || Date.now() - bot._lastNoRegenForageAt > 45000)) {
-                        bot._lastNoRegenForageAt = Date.now();
-                        if (sealed) {
-                            const sy = Math.round((bot.entity.position && bot.entity.position.y) || 71) + 10;
-                            prog(`no-regen no-food + sealed(${bot._mobility && bot._mobility.state}) → surfaceUp(${sy}) first, forage next cycle (hp=${Math.round(bot.health)} food=${bot.food})`);
-                            try { await skills.customSkill(bot, 'surfaceUp', sy); } catch (e) { prog(`noRegen-surfaceUp threw: ${e && e.message || e}`); }
-                        } else {
-                            prog(`no-regen no-food → forageExplore (ACTIVE hunt; passive hold can't restore food→regen) hp=${Math.round(bot.health)} food=${bot.food}`);
-                            // ★C225: claim movement authority vs the ① mobility no-regen hold (noRegenSafeAirHold),
-                            // which otherwise pins the body so this dispatched forage can't travel. Time-boxed +
-                            // cleared in finally (backstop if finally is skipped).
-                            bot._recoveryVentureUntil = Date.now() + 180000;
-                            try { await skills.customSkill(bot, 'forageExplore', { gateHp: 6, gateFood: 8, abortHp: 5, targetFood: 18, maxBlocks: 220 }); }
-                            catch (e) { prog(`noRegen-forage threw: ${e && e.message || e}`); }
-                            finally { bot._recoveryVentureUntil = 0; }
-                        }
-                        continue;
-                    }
-                    const remain = noRegenBackoffRemain();
-                    prog(`★BREAKOUT gated: no-regen low-hp/no-food hp=${Math.round(bot.health)} food=${bot.food} cooldown=${remain.any}s surfaceBackoff=${remain.surface}s night=${isNightNow()}; no blind tunneling/sprint without threat`);
                     try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
                     try { bot.clearControlStates(); } catch (_) {}
                     await wait(5000);
@@ -1098,261 +1014,6 @@ export default async function missionNether(bot, ctx) {
             continue;
         }
 
-        if (!noRegenNoFood()) bot._noRegenFrozenSince = null;   // C217b: only persist the frozen-timer while genuinely stuck-low (recovered → reset)
-
-        // ★★C248 RECOVERY-FLOOR / pickaxe-survival invariant (ROOT CAUSE of the y66 stone-tomb
-        // deadlock — see memory resource-floor-bootstrap-kit). Evidence: bot respawned with a lone
-        // wooden_pickaxe, C232 dug it DOWN (mineDown targetY-14) with NO durability check, the pick
-        // snapped ~14b deeper, and a naked-no-pick + no-wood bot sealed in stone = PERMANENT tomb
-        // (progress spammed `TABLE gate iron_pickaxe — no wood/table/logs planksMax=2 logs=0` for
-        // hours). This is the user's "明知镐子要没了还在挖". Two guards close the SOURCE (not the
-        // escape symptom): (a) never dig DOWN with a dying last pick we can't replace — breaking it
-        // deeper strands us; (b) while that pick still has life, spend it climbing to WOOD to rebuild
-        // the kit, not digging deeper. Below-floor = no realistic pick future.
-        const C248_WOODS = ['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry'];
-        const kitCounts = () => { try { return world.getInventoryCounts(bot) || {}; } catch (e) { return {}; } };
-        const pickRemainFrac = () => {
-            const picks = bot.inventory.items().filter(it => /_pickaxe$/.test(it.name || ''));
-            if (!picks.length) return 0;
-            if (picks.length >= 2) return 1;                 // a spare exists → effectively healthy
-            const p = picks[0];
-            const max = p.maxDurability || 0;
-            const used = (typeof p.durabilityUsed === 'number') ? p.durabilityUsed : 0;
-            return max > 0 ? (max - used) / max : 1;
-        };
-        const canCraftReplacementPick = () => {
-            const c = kitCounts();
-            const planks = C248_WOODS.reduce((s, w) => s + (c[`${w}_planks`] || 0), 0);
-            const logs = C248_WOODS.reduce((s, w) => s + (c[`${w}_log`] || 0), 0);
-            const cobble = (c.cobblestone || 0) + (c.cobbled_deepslate || 0);
-            const sticks = c.stick || 0;
-            const haveTable = (c.crafting_table || 0) > 0 || planks >= 4 || logs >= 1;   // logs→planks→table
-            const haveHead = cobble >= 3 || planks >= 3 || logs >= 1;                    // pick head material
-            const haveSticks = sticks >= 2 || planks >= 2 || logs >= 1;                  // planks→sticks
-            return haveTable && haveHead && haveSticks;
-        };
-        // Safe to dig DOWN only if not risking a strand: a replacement is craftable, OR the lone
-        // pick still has >half its life (enough to dig + climb back). Past half + unreplaceable = stop.
-        const pickHealthyForDig = () => canCraftReplacementPick() || pickRemainFrac() > 0.5;
-        // Below the bootstrap floor = no realistic pick future AND no wood to rebuild one: must surface.
-        const belowRecoveryFloor = () => {
-            const c = kitCounts();
-            const logs = C248_WOODS.reduce((s, w) => s + (c[`${w}_log`] || 0), 0);
-            const planks = C248_WOODS.reduce((s, w) => s + (c[`${w}_planks`] || 0), 0);
-            const noWood = logs === 0 && planks < 4;
-            const noPick = !bot.inventory.items().some(it => /_pickaxe$/.test(it.name || ''));
-            const dyingUnreplaceablePick = pickRemainFrac() <= 0.5 && !canCraftReplacementPick();
-            return noWood && (noPick || dyingUnreplaceablePick);
-        };
-
-        // ★C232 SAFE-MINE EXIT — enclosed + 持镐 + 怪够不到 时,no-regen "保守 hold" 不该全冻死:
-        // 原地下挖是零死亡风险(mineDown 自带水/岩浆/support/摔落逐格探测 + hostile<4 bail,且朝
-        // 远离最近怪方向),且 ①产出 cobble→stone_pickaxe / raw_iron→脱 TABLE-gate ②凿离 mob-magnet。
-        // 必须放在下面 no-regen backoff 短路(wait+continue)之前,否则永被抢走。这是 C228 通则
-        // (无恢复路径的保守 hold 必须有出口)在"持镐封闭"场景落地。实测:hp6/food13/y65/enclosed/
-        // 12-16怪全 nonactionable 永冻 50min+,补给出口全要 hp≥8~14 过不去,就地安全挖矿才是出路。
-        const safeContainedMineExit = () => {
-            try {
-                if (edibleHeld()) return false;
-                if (!(bot.health < 14 && bot.food < 18)) return false;   // 仅 no-regen 死区
-                if (bot.health < 5) return false;                         // hp 极低危→不主动做事,等救/等死
-                if (inNether()) return false;
-                const hasPick = bot.inventory.items().some(it => /_pickaxe$/.test(it.name || ''));
-                if (!hasPick) return false;                               // 无镐→不啃石(沿用 material invariant)
-                if (!pickHealthyForDig()) return false;                   // ★C248: 垂死的唯一镐+无料造备用→不下挖(挖断会困死更深=石棺根因)
-                const enclosed = !!(bot._mobility && (bot._mobility.enclosed || /POCKET|ENTOMBED/.test(bot._mobility.state || ''))) || hasOverheadCover();
-                if (!enclosed) return false;                              // 仅封闭/有顶(无摔落暴露)才就地挖
-                if (actionableHostilesNear(12) > 0) return false;         // 有够得到的怪→交保命逻辑
-                const feet = bot.blockAt(bot.entity.position) || { name: 'air' };
-                const head = bot.blockAt(bot.entity.position.offset(0, 1, 0)) || { name: 'air' };
-                if (/water|lava|fire/.test(feet.name || '') || /water|lava|fire/.test(head.name || '')) return false;
-                return true;
-            } catch (e) { return false; }
-        };
-        if (safeContainedMineExit() && (!bot._lastSafeContainedMineAt || Date.now() - bot._lastSafeContainedMineAt > 45000)) {
-            bot._lastSafeContainedMineAt = Date.now();
-            bot._climbingAt = Date.now();   // 计为有目的工程,别被 MAROONED 90s 判定打断
-            prog(`★C232 SAFE-MINE EXIT: enclosed+持镐+actionable0 no-regen hold (hp=${Math.round(bot.health)} food=${bot.food} y=${Math.round(bot.entity.position.y)}) → mineDown 安全凿离/产出,不再 backoff 空冻`);
-            try {
-                await skills.customSkill(bot, 'mineDown', { targetY: Math.max(48, Math.round(bot.entity.position.y) - 14) });
-            } catch (e) {
-                prog(`SAFE-MINE EXIT mineDown threw: ${e && e.message || e}; fallback digDown`);
-                try { await skills.digDown(bot, 2); } catch (e2) {}
-            }
-            continue;
-        }
-        // ★C237: no-pick contained TERMINAL FREEZE → surface UP (the no-pick sibling of C232).
-        // C232 digs DOWN with a pick; a bot with NO pickaxe can't mine, and digging down never
-        // reaches wood — it must go UP to the surface to chop. Live root cause (this very bot):
-        // hp6 food17 SEALED at y66 with 0 pick / 0 wood / 209 cobble spun `TABLE gate no wood` for
-        // HOURS — C232 skipped (no pick), C229 paths gated at hp>=8, and surfaceUp self-blocked the
-        // breach at hp<8. A no-pick bot sealed underground can ONLY recover by surfacing (→ trees →
-        // wood → recraft chain; or, if the surface is also barren, at least exposure enables a clean
-        // death-reset instead of an absorbing freeze). Going UP is ZERO fall-risk; enclosed = no mob
-        // reaches during the climb; surfaceUp FREEZES the survival modes for the whole climb (so no
-        // ① veto — no _recoveryVentureUntil needed, unlike forage/migrate) and guards water/lava,
-        // breaking the ceiling bare-hand via the C237 relaxation. SAFETY: DAYTIME ONLY + no
-        // actionable hostiles + not nether — never surface a hurt bot into the dark.
-        const noPickContainedEscape = () => {
-            try {
-                if (edibleHeld()) return false;
-                if (inNether()) return false;
-                if (isNightNow()) return false;                          // surface into DAYLIGHT only
-                if (!(bot.health < 14 && bot.food < 18)) return false;   // the no-regen stuck band
-                // ★C248: normally has-pick → C232 owns it. EXCEPTION: a dying, unreplaceable lone pick
-                // with NO wood (belowRecoveryFloor) must NOT keep digging — spend its last life climbing
-                // to WOOD to rebuild the kit, before it snaps and strands us (the tomb's root cause).
-                if (bot.inventory.items().some(it => /_pickaxe$/.test(it.name || '')) && !belowRecoveryFloor()) return false;
-                const enclosed = !!(bot._mobility && (bot._mobility.enclosed || /POCKET|ENTOMBED/.test(bot._mobility.state || ''))) || hasOverheadCover();
-                if (!enclosed) return false;                             // only when actually contained
-                if (actionableHostilesNear(12) > 0) return false;
-                // NOTE: no y-ceiling guard here. The `enclosed` check above is the correct
-                // discriminator for "needs to surface" — a bot can be sealed under stone at ANY y
-                // (live: C237 climbed y66→84 in one daytime window, then night-gated mid-breach,
-                // still ENCLOSED at y84 with stone overhead). A y>=72 guard would wrongly block the
-                // dawn resume and strand it at y84. At the true open surface, enclosed=false → this
-                // gate skips on its own; surfaceUp is also idempotent (surfaceReady early-exit).
-                const feet = bot.blockAt(bot.entity.position) || { name: 'air' };
-                const head = bot.blockAt(bot.entity.position.offset(0, 1, 0)) || { name: 'air' };
-                if (/water|lava|fire/.test(feet.name || '') || /water|lava|fire/.test(head.name || '')) return false;
-                return true;
-            } catch (e) { return false; }
-        };
-        if (noPickContainedEscape() && (!bot._lastNoPickEscapeAt || Date.now() - bot._lastNoPickEscapeAt > 45000)) {
-            bot._lastNoPickEscapeAt = Date.now();
-            bot._climbingAt = Date.now();   // 计为有目的工程,别被 MAROONED 90s 判定打断
-            prog(`★C237 NO-PICK ESCAPE: no pick + enclosed + no-regen (hp=${Math.round(bot.health)} food=${bot.food} y=${Math.round(bot.entity.position.y)}) → surfaceUp (daytime, no hostiles) to reach trees/wood, not freeze`);
-            try {
-                await skills.customSkill(bot, 'surfaceUp', Math.min(90, Math.max(72, Math.round(bot.entity.position.y) + 12)));
-            } catch (e) { prog(`NO-PICK ESCAPE surfaceUp threw: ${e && e.message || e}`); }
-            continue;
-        }
-        const noRegenRemain = noRegenBackoffRemain();
-        if ((_hpOn() || _foodOn()) && noRegenNoFood() && noRegenRemain.any > 0) {   // ★2026-07-09 用户令 HP/食物本能熔断: no-regen 站桩 stand-down(mixed hp+food; 威胁/夜间避难经末尾无条件 prepNether 兜底); 任一/双闸开恢复。
-            const oakReady = boundedOakAppleReady();
-            if (oakReady && noRegenRemain.surface > 0) {
-                bot._prepNoFoodSurfaceBackoffUntil = 0;
-                prog(`prepNether stand-down override: bounded oak/apple ready ${oakReady}; clear surface backoff and let prepNether retry`);
-            } else {
-            prog(`prepNether stand-down: low-hp/no-food cooldown ${noRegenRemain.any}s lowHp=${noRegenRemain.lowHp}s surface=${noRegenRemain.surface}s (hp=${Math.round(bot.health)} food=${bot.food}); body stays free for survival modes`);
-            // ★C257 NIGHT no-regen freeze fix: at night forageExplore correctly self-gates (no
-            // wandering in the dark) and every handoff below is DAY/hostile-gated
-            // (daylightFamineHostileShelter, !isNightNow). So at night with hostiles16=0 the bot
-            // fell THROUGH them all to wait+continue and FROZE exposed — a confirmed 6-min stall
-            // @14,68,-11, hp12/food15 — "body stays free for survival modes" but nothing sealed it,
-            // and a wandering mob would then swarm the unarmored bot (the death-5 pattern). At night
-            // hand off to prepNether to hole up + SEAL until dawn PROACTIVELY (pairs with C256 so the
-            // unarmored bot actually seals), instead of freezing in the open until a mob arrives.
-            if (isNightNow()) {
-                prog(`★C257 night no-regen stand-down → prepNether hole-up+seal (don't freeze exposed) hp=${Math.round(bot.health)} food=${bot.food}`);
-                try { await skills.customSkill(bot, 'prepNether'); } catch (e) { prog(`night stand-down prepNether threw: ${e.message}`); }
-                await wait(1000);
-                continue;
-            }
-            if (daylightFamineHostileShelter() && (!bot._lastFamineHostileShelterAt || Date.now() - bot._lastFamineHostileShelterAt > 30000)) {
-                bot._lastFamineHostileShelterAt = Date.now();
-                prog(`cooldown shelter handoff: no-regen/low-food exposed with hostiles16=${hostilesNear(16)} actionable16=${actionableHostilesNear(16)}; prepNether digs in instead of freezing`);
-                try { await skills.customSkill(bot, 'prepNether'); } catch (e) { prog(`cooldown shelter prepNether threw: ${e.message}`); }
-                await wait(1000);
-                continue;
-            }
-            if (!isNightNow() && (!bot._lastFeedUpAt || Date.now() - bot._lastFeedUpAt > 45000)) {
-                const foodSignal = safeCloseFoodSignal();
-                const noRegenDryScan = noRegenNoFood() && !foodSignal;
-                if ((famineCritical() && !foodSignal && !safeDaylightFamineForage()) || noRegenDryScan) {
-                    // ★DEADLOCK-BREAKER (C215 family, for the no-regen hold): no-regen + no local
-                    // food signal would otherwise just wait/freeze HERE forever — a barren spot
-                    // never produces a food signal, so the bot degrades in place to the hp4 frozen
-                    // wedge. If still strong enough to travel safely (hp>=8), actively forageExplore
-                    // to RELOCATE toward food instead of rotting in place (it self-gates on
-                    // night/hostile/hp-drop, bounded). This is the EXIT the no-regen hold lacked —
-                    // relocating at hp>=8 PREVENTS degrading into the hp4 no-win deadlock. (At hp<8
-                    // it's genuinely too weak to forage safely; that no-win resolves via death.)
-                    if (Math.round(bot.health) >= 8 && !isNightNow() && actionableHostilesNear(8) === 0
-                        && (!bot._lastNoRegenRelocateAt || Date.now() - bot._lastNoRegenRelocateAt > 90000)) {
-                        bot._lastNoRegenRelocateAt = Date.now();
-                        prog(`no-regen deadlock-breaker: hp=${Math.round(bot.health)} food=${bot.food} no local food → forageExplore relocate (escape barren spot, don't freeze)`);
-                        // ★C225: claim movement authority vs ① no-regen hold + targetFood 18 so the handoff
-                        // forage eats PAST the regen floor (default 16 no-ops at food17 → hp stays pinned).
-                        bot._recoveryVentureUntil = Date.now() + 180000;
-                        try { await skills.customSkill(bot, 'forageExplore', { gateFood: 5, gateHp: 8, abortHp: 5, targetFood: 18, maxBlocks: 200 }); }
-                        catch (e) { prog(`no-regen relocate threw: ${e.message}`); }
-                        finally { bot._recoveryVentureUntil = 0; }
-                        continue;
-                    }
-                    // ★HP<8 LAST-RESORT venture — the permanent-freeze the C216 reasoning missed.
-                    // The hp>=8 deadlock-breaker above can't fire at hp<8, and the original code
-                    // assumed hp<8-no-food "resolves via death" — FALSE: with hostiles=0 and no
-                    // fall/lava the bot NEVER dies and NEVER recovers (no food source here), so it
-                    // sits frozen forever (observed 50min+ pinned at hp2). Frozen-forever is
-                    // strictly worse than a bounded venture: walking either loads chunks with
-                    // food/terrain OR dies→respawns fresh — both beat rotting in place. After
-                    // pinned very long, force ONE bounded venture regardless of hp (abortHp:1 so
-                    // forageExplore won't self-abort; survival reflexes stay active during the walk).
-                    if (!bot._noRegenFrozenSince) bot._noRegenFrozenSince = Date.now();
-                    const frozenMin = (Date.now() - bot._noRegenFrozenSince) / 60000;
-                    if (frozenMin > 12 && !isNightNow() && actionableHostilesNear(8) === 0
-                        && (!bot._lastLastResortVentureAt || Date.now() - bot._lastLastResortVentureAt > 5 * 60 * 1000)) {
-                        bot._lastLastResortVentureAt = Date.now();
-                        // C217c: if enclosed underground, forageExplore's goToPosition fast-NoPaths
-                        // (can't extract from a sealed pocket — verified live 23:37: venture fired but
-                        // bot stayed at 27,78 y78 "underground/enclosed"). Surface FIRST (dig out),
-                        // then a later cycle forages on the open surface. Mirrors C215b (L661-669).
-                        const lrEnclosed = hasOverheadCover()
-                            || !!(bot._mobility && (bot._mobility.enclosed || /POCKET|ENTOMBED/.test(bot._mobility.state || '')));
-                        if (lrEnclosed) {
-                            const sy = Math.round(bot.entity.position.y || 71) + 18;
-                            prog(`★HP<8 LAST-RESORT (frozen ${frozenMin.toFixed(0)}min @hp${Math.round(bot.health)}, enclosed y=${Math.round(bot.entity.position.y)}) → surfaceUp(${sy}) first (forageExplore can't extract from pocket)`);
-                            try { await skills.customSkill(bot, 'surfaceUp', sy); } catch (e) { prog(`last-resort surfaceUp threw: ${e.message}`); }
-                        } else {
-                            // Forage first (cheap; might load chunks with local food). Track consecutive
-                            // failures — a bounded forageExplore that keeps returning found:false means
-                            // THIS spawn is a confirmed food desert with nothing in reach.
-                            prog(`★HP<8 LAST-RESORT venture: frozen ${frozenMin.toFixed(0)}min @hp${Math.round(bot.health)} food=${bot.food} hostiles0 fails=${bot._lrForageFails || 0} — forceExplore (find-or-respawn beats frozen-forever)`);
-                            let fr = null;
-                            try { fr = await skills.customSkill(bot, 'forageExplore', { gateHp: 1, abortHp: 1, gateFood: 4, maxBlocks: 160 }); }
-                            catch (e) { prog(`last-resort venture threw: ${e.message}`); }
-                            if (fr && fr.found) bot._lrForageFails = 0; else bot._lrForageFails = (bot._lrForageFails || 0) + 1;
-                            // ★C241 (user-authorized): hp4-5 食物荒漠吸收态 — bounded forage can't escape
-                            // (out→still desert), and feedUp/forageExplore/famine-migrate all self-abort
-                            // at low hp, so the bot freezes forever until a night mob kills it. When forage
-                            // has failed >=2x here, STAYING is itself certain (slow) death → the relocate
-                            // abort-floor protection is moot. Force a long-range settle-migrate even at
-                            // hp<8: find a livable biome (landAnimals>=2, auto-setBed at the new spot) OR
-                            // die-while-moving → respawn fresh (naked-asset death cost ~= 0). This is the
-                            // hp<8 symmetric branch of C230's food<=2 famine-migrate. abortHp:2 leaves a
-                            // sliver; force:true bypasses migrate's own gates; migrate self-bunkers at night.
-                            if ((bot._lrForageFails || 0) >= 2 && !isNightNow() && actionableHostilesNear(8) === 0
-                                && (!bot._lastLastResortMigrateAt || Date.now() - bot._lastLastResortMigrateAt > 5 * 60 * 1000)) {
-                                bot._lastLastResortMigrateAt = Date.now();
-                                bot._recoveryVentureUntil = Date.now() + 600000;   // yield ① famine body-freeze during the march
-                                prog(`★C241 HP<8 DESERT-MIGRATE: ${bot._lrForageFails} forage fails @hp${Math.round(bot.health)} food=${bot.food} — bounded forage can't escape this desert; force long-range settle-migrate (livable biome or die-moving→respawn)`);
-                                try {
-                                    const mr = await skills.customSkill(bot, 'migrate', { force: true, gateFood: 0, gateHp: 1, abortHp: 2, maxBlocks: 800, settleScore: 12 });
-                                    if (mr && (mr.settled || (mr.movedBlocks || 0) >= 150)) bot._lrForageFails = 0;
-                                    prog(`★C241 DESERT-MIGRATE done: ${JSON.stringify(mr)}`);
-                                } catch (e) { prog(`C241 desert-migrate threw: ${e.message}`); }
-                                finally { bot._recoveryVentureUntil = 0; }
-                            }
-                        }
-                        continue;
-                    }
-                    if (!bot._lastFamineCooldownEatSkipAt || Date.now() - bot._lastFamineCooldownEatSkipAt > 30000) {
-                        bot._lastFamineCooldownEatSkipAt = Date.now();
-                        prog(`cooldown feedUp gated: ${famineCritical() ? 'famine-critical' : 'no-regen low-hp/no-food'} hp=${Math.round(bot.health)} food=${bot.food}; no close confirmed food signal`);
-                    }
-                } else if (gateDryFeedUp('cooldown feedUp')) {
-                    // Same dry-site guard as the advisory path.
-                } else {
-                    bot._lastFeedUpAt = Date.now();
-                    try { await skills.customSkill(bot, 'feedUp', 18); } catch (e) { prog(`cooldown feedUp threw: ${e.message}`); }
-                }
-            }
-            await wait(12000);
-            continue;
-            }
-        }
-
         // ★CROSS-CONTINENT MIGRATION (C220, 用户纠偏:像人类一样决策). Before the default
         // "grind gear locally via prepNether", ask the human question: is this whole SPAWN an
         // unlivable ocean food-desert we keep dying at? migrate self-gates (shouldMigrate:
@@ -1362,7 +1023,7 @@ export default async function missionNether(bot, ctx) {
         // and plant a bed. If migrate declines (not a confirmed desert / unhealthy / cooldown),
         // it returns instantly and we fall through to the normal prepNether grind. Only attempt
         // in the healthy post-respawn window (hp≥14/food≥12) — a long march needs reserves.
-        if (!isNightNow() && actionableHostilesNear(8) === 0 && (!_hpOn() || Math.round(bot.health) >= 14) && (!_foodOn() || bot.food >= 6)   // ★2026-07-09 用户令 HP/食物本能熔断: cross-continent migrate 血/饱和储备门(纯前置; 保留 actionableHostilesNear 安全门); 任一/双闸开恢复。
+        if (!isNightNow() && actionableHostilesNear(8) === 0 && (!_foodOn() || bot.food >= 6)   // ★2026-07-09 用户令 HP/食物本能熔断: cross-continent migrate 血/饱和储备门(纯前置; 保留 actionableHostilesNear 安全门); 任一/双闸开恢复。
             && (!bot._lastMigrateTryAt || Date.now() - bot._lastMigrateTryAt > 120000)) {
             bot._lastMigrateTryAt = Date.now();
             let mr = null;
@@ -1379,34 +1040,26 @@ export default async function missionNether(bot, ctx) {
             const t = (bot.time && bot.time.timeOfDay) || 0;
             const night = t >= 13000 && t <= 23000;
             const edible = bot.inventory.items().some(i => /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|^cod$|^salmon$|melon_slice|sweet_berries|_stew|^rabbit$|baked_/.test(i.name));
-            const bottomBodyBudgetFamine = bot.health <= 8 && bot.food <= 6 && !edible;
-            if ((_hpOn() || _foodOn()) && ((bot.food <= 2 && !edible) || bottomBodyBudgetFamine)) {   // ★2026-07-09 用户令 HP/食物本能熔断: FAMINE backoff 站桩/觅食(mixed hp+food); 任一/双闸开恢复。
+            const bottomBodyBudgetFamine = bot.food <= 6 && !edible;
+            if (_foodOn() && ((bot.food <= 2 && !edible) || bottomBodyBudgetFamine)) {
                 const hostilePressure = actionableHostilesNear(16) > 0;
                 // ★C228: a FAMINE backoff at food0 in a FOOD DESERT is an ABSORBING state — holding
-                // still guarantees no food, hp can't regen (food<18), and easy-difficulty hunger
-                // damage halts at hp10 → frozen until a night mob finally kills it (live: food0
-                // hp10 y88, 24min+ no move/no recovery, then died losing iron-tier progress). The
-                // only real exit is to TRAVEL out. So in a SAFE DAYLIGHT window — food0, hp>=10
-                // (NOT the hp<10 danger zone), no edible, daytime, no hostile within 16 — dispatch
-                // forageExplore to walk to land animals / fresher terrain. Night / hostiles / hp<10
-                // still HOLD (freezing is the correct survival act there — never venture into the
-                // dark or while hurt; movement at food0 costs food not hp, hunger already floored).
-                // forageExplore self-gates (night/hostile/hp-abort, bounded maxBlocks) and hands the
+                // still guarantees no food. The only real exit is to TRAVEL out. In a SAFE DAYLIGHT
+                // window — food0, no edible, and no hostile within 16 — dispatch forageExplore to
+                // walk to land animals / fresher terrain. Night and real threats still HOLD.
+                // forageExplore self-gates on night/threat/damage and hands the
                 // kill+eat to `forage`. _recoveryVentureUntil claims body authority vs ① famineBodyFreeze
                 // (whose skill-name allowlist can't release it — sticky _currentSkill='missionNether');
-                // same flag-yield mechanism as the no-regen ventures at L793 / L917.
+                // same flag-yield mechanism as the other food-recovery ventures.
                 const safeDayVenture = bot.food === 0
-                    && Math.round(bot.health) >= 10
                     && !night
                     && actionableHostilesNear(16) === 0 && hostilesNear(16) === 0;
                 // ★C230 (#33): forageExplore (maxBlocks 220) repeatedly landing in more desert means
                 // this whole region is barren — escalate to migrate (maxBlocks 800, locked bearing, settle
                 // only at landAnimals>=2) to relocate cross-continent + set bed at the new home (migrate
                 // does the setBed handoff itself). _famineForageFailCount counts consecutive forageExplore
-                // no-results (found:false); >=2 ⇒ area confirmed unlivable. food0-safe: migrate force-
-                // bypasses its own hp>=14/food>=6 gate (shouldMigrate force-first), abortHp:6 catches hp
-                // drops (easy floors hunger at hp10>6; normal/hard aborts before starving), night auto-
-                // bunkers. migrate is whitelisted in ① famineBodyFreeze + honored via _recoveryVentureUntil.
+                // no-results (found:false); >=2 ⇒ area confirmed unlivable. The explicit food route
+                // bypasses migrate's conservative food start gate; night/threat gates still apply.
                 const famineMigrate = safeDayVenture && (bot._famineForageFailCount || 0) >= 2
                     && (!bot._lastFamineMigrateAt || Date.now() - bot._lastFamineMigrateAt > 300000);
                 if (famineMigrate) {
@@ -1414,7 +1067,7 @@ export default async function missionNether(bot, ctx) {
                     bot._recoveryVentureUntil = Date.now() + 600000;
                     prog(`★C230 FAMINE-MIGRATE: forage no-result ×${bot._famineForageFailCount} → migrate relocate (food0-safe force) hp=${Math.round(bot.health)}`);
                     let mr = null;
-                    try { mr = await skills.customSkill(bot, 'migrate', { force: true, gateFood: 0, gateHp: 8, abortHp: 6, maxBlocks: 800, settleScore: 12 }); }
+                    try { mr = await skills.customSkill(bot, 'migrate', { force: true, gateFood: 0, maxBlocks: 800, settleScore: 12 }); }
                     catch (e) { prog(`FAMINE-migrate threw: ${e && e.message || e}`); }
                     finally { bot._recoveryVentureUntil = 0; }
                     if (mr && mr.migrated) { bot._famineForageFailCount = 0; prog(`★FAMINE-MIGRATE done: settled=${mr.settled} bedOk=${mr.bedOk} moved=${mr.movedBlocks}b end=${mr.end ? mr.end.x + ',' + mr.end.z : '?'}`); }
@@ -1425,7 +1078,7 @@ export default async function missionNether(bot, ctx) {
                     prog(`FAMINE backoff → forageExplore (food0 absorbing-state escape; safe daylight, no hostiles, hp=${Math.round(bot.health)}) — walk OUT of food desert, not idle-freeze`);
                     bot._recoveryVentureUntil = Date.now() + 180000;
                     let fr = null;
-                    try { fr = await skills.customSkill(bot, 'forageExplore', { gateHp: 8, gateFood: 0, abortHp: 6, targetFood: 18, maxBlocks: 220 }); }
+                    try { fr = await skills.customSkill(bot, 'forageExplore', { gateFood: 0, targetFood: 18, maxBlocks: 220 }); }
                     catch (e) { prog(`FAMINE-backoff forage threw: ${e && e.message || e}`); }
                     finally { bot._recoveryVentureUntil = 0; }
                     // track consecutive no-results → after 2, the famineMigrate branch above escalates
@@ -1442,28 +1095,25 @@ export default async function missionNether(bot, ctx) {
                 await wait(holdMs);
                 continue;
             }
-            // ★C233 (#33 收敛核心): the "healthy-but-locally-starving" trigger GAP. The FAMINE
-            // backoff above only fires at food<=2 (or hp<=8&&food<=6); the HP<8 last-resort
-            // venture (C217) fires at hp<=8. BETWEEN them — hp>=8 and food 3~13 — there was NO
+            // ★C233 (#33 收敛核心): the locally-starving trigger gap. The FAMINE
+            // backoff above only fires at the calorie floor; at food 3~13 there was no
             // trigger that sends the bot on a long-range venture. So in a food desert the bot
             // would feedUp locally (animal64=none, 64b scan dry), hold / mine-in-place / spin the
             // prepNether defer-loop, and only slowly starve down to food<=2 (the slow path) or die
             // at night — NEVER travelling OUT of the barren region. This closes that gap with a
             // SINGLE convergent trigger: feedUp has CONFIRMED no local food source (feedUpDryNoFood:
             // a 64b huntable scan came up empty, position-local, recent TTL — the animal64=none
-            // signal the design called for), food is below the regen line (food<14), and it's a
-            // SAFE DAYLIGHT window with the bot healthy (hp>=8) → dispatch forageExplore, escalating
+            // signal the design called for), food is low (food<14), and it's a
+            // SAFE DAYLIGHT window → dispatch forageExplore, escalating
             // to migrate after repeated no-results (SHARED _famineForageFailCount counter — forage
             // failures from this trigger and the famine path both mean "this area is barren", so a
-            // smooth convergent escalation to cross-biome migrate). SAFETY: hp>=8 + daylight + no
-            // hostiles within 16 + not nether; forageExplore/migrate self-gate (night/hostile/
-            // hp-abort, bounded maxBlocks); _recoveryVentureUntil yields the body vs ① famineBodyFreeze.
-            // NEVER ventures at low hp or night — avoids the explore-and-die cascade (see C225 obs).
+            // smooth convergent escalation to cross-biome migrate). SAFETY: daylight + no
+            // hostiles within 16 + not nether; forageExplore/migrate self-gate on night/threat/damage
+            // with bounded maxBlocks; _recoveryVentureUntil yields the food-freeze owner.
             else {
                 const dry = feedUpDryNoFood();
                 const ventureSafeDay = !!dry
                     && bot.food < 14
-                    && Math.round(bot.health) >= 8
                     && !night
                     && !edible
                     && !inNether()
@@ -1474,9 +1124,9 @@ export default async function missionNether(bot, ctx) {
                     if (ventureMigrate) {
                         bot._lastFamineMigrateAt = Date.now();
                         bot._recoveryVentureUntil = Date.now() + 600000;
-                        prog(`★C233 DESERT-MIGRATE: dry no-food ×${bot._famineForageFailCount} (${dry.scan}) → migrate relocate (healthy-but-starving, hp=${Math.round(bot.health)} food=${bot.food})`);
+                        prog(`★C233 DESERT-MIGRATE: dry no-food ×${bot._famineForageFailCount} (${dry.scan}) → migrate relocate (food=${bot.food})`);
                         let mr = null;
-                        try { mr = await skills.customSkill(bot, 'migrate', { force: true, gateFood: 0, gateHp: 8, abortHp: 6, maxBlocks: 800, settleScore: 12 }); }
+                        try { mr = await skills.customSkill(bot, 'migrate', { force: true, gateFood: 0, maxBlocks: 800, settleScore: 12 }); }
                         catch (e) { prog(`DESERT-migrate threw: ${e && e.message || e}`); }
                         finally { bot._recoveryVentureUntil = 0; }
                         if (mr && mr.migrated) { bot._famineForageFailCount = 0; prog(`★DESERT-MIGRATE done: settled=${mr.settled} bedOk=${mr.bedOk} moved=${mr.movedBlocks}b end=${mr.end ? mr.end.x + ',' + mr.end.z : '?'}`); }
@@ -1485,9 +1135,9 @@ export default async function missionNether(bot, ctx) {
                     if (!bot._lastDesertVentureAt || Date.now() - bot._lastDesertVentureAt > 90000) {
                         bot._lastDesertVentureAt = Date.now();
                         bot._recoveryVentureUntil = Date.now() + 180000;
-                        prog(`★C233 DESERT-FORAGE: healthy-but-locally-starving (hp=${Math.round(bot.health)} food=${bot.food}, ${dry.scan}) → long-range forageExplore OUT of food desert (closes famine↔HP<8 trigger gap)`);
+                        prog(`★C233 DESERT-FORAGE: locally starving (food=${bot.food}, ${dry.scan}) → long-range forageExplore OUT of food desert`);
                         let fr = null;
-                        try { fr = await skills.customSkill(bot, 'forageExplore', { gateHp: 8, gateFood: 0, abortHp: 6, targetFood: 18, maxBlocks: 220 }); }
+                        try { fr = await skills.customSkill(bot, 'forageExplore', { gateFood: 0, targetFood: 18, maxBlocks: 220 }); }
                         catch (e) { prog(`DESERT-forage threw: ${e && e.message || e}`); }
                         finally { bot._recoveryVentureUntil = 0; }
                         if (fr && fr.explored && fr.found === false) {

@@ -32,12 +32,12 @@ export default async function kernelDriver(bot, ctx) {
     const inNether = () => { try { return /nether/.test(bot.game.dimension); } catch (e) { return false; } };
 
     // Reflex-busy gate: if the ① instinct layer (modes.js) is mid-rescue — a mobility
-    // trap (ENTOMBED/POCKET/MAROONED/SEALED/SWIM) or enclosed, or an actionable threat
-    // while low on hp — DON'T dispatch a strategic child on top of it. Yield with a short
+    // trap (ENTOMBED/POCKET/MAROONED/SEALED/SWIM) or an actionable threat — DON'T dispatch
+    // a strategic child on top of it. Yield with a short
     // wait so self_preservation / mobility / self_defense can run first, then re-poll.
-    // ★T-0101/T-0083 FROZEN-ALIVE 互锁破除 (worker-frozen): 纯饥饿僵局判据——低血纯因 food 见底(<=2)
-    //   不回血,且无 LETHAL 环境急症(贴脸 creeper<4.5 / 正在挨打 / hp 极危<=4 / swarm 围殴贴脸)。
-    //   此时低血 hold 是死锁不是避险,reflexBusy 必须让位给决策层派 GET_FOOD/villageHarvest 去觅食。
+    // ★T-0101/T-0083 FROZEN-ALIVE 互锁破除 (worker-frozen): food 见底(<=2)
+    //   且无现实急症(贴脸 creeper<4.5 / 正在挨打 / swarm 围殴贴脸)时,
+    //   food hold 是死锁不是避险,reflexBusy 必须让位给决策层派 GET_FOOD/villageHarvest 去觅食。
     //   与 world_model.js isFamineStall(w) 同口径(决策层那端已破 HOLD@95 与 villageClose 否决)。
     const famineStall = () => {
         try {
@@ -45,10 +45,9 @@ export default async function kernelDriver(bot, ctx) {
             const t = w.threat || {}, v = w.vitals || {};
             const creeperLethal = Number.isFinite(t.creeperDist) && t.creeperDist < 4.5;
             const swarmPin = (t.actionable || 0) >= 2;   // 用 actionable(可达威胁)非 raw closest(墙外够不到的怪不算 LETHAL)
-            const lethal = creeperLethal || !!t.takingDamage || (v.hp ?? bot.health ?? 20) <= 4 || swarmPin;
+            const lethal = creeperLethal || !!t.takingDamage || swarmPin;
             const food = (v.food != null) ? v.food : (bot.food != null ? bot.food : 20);
-            const hp = (v.hp != null) ? v.hp : (bot.health != null ? bot.health : 20);
-            return !lethal && food <= 2 && hp < 10 && !v.canRegen;
+            return !lethal && food <= 2 && !v.canRegen;
         } catch (e) { return false; }
     };
     const reflexBusy = () => {
@@ -70,7 +69,7 @@ export default async function kernelDriver(bot, ctx) {
             // yielding; once they clear, the strategic layer MUST dispatch (mine/surface out). So the
             // standalone enclosed check is removed.
             const w = bot._world;
-            if (w && w.threat && w.threat.actionable && (bot.health || 20) < 10) return true;
+            if (w && w.threat && w.threat.actionable) return true;
         } catch (e) {}
         return false;
     };

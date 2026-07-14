@@ -26,10 +26,7 @@ function _deathLinesCached(bot) {
 
 const TOOL_TIER = ['wooden', 'stone', 'iron', 'diamond', 'netherite'];
 const FOOD_RE = /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef$|porkchop|^chicken$|^mutton$|^cod$|^salmon$|melon_slice|sweet_berries|_stew|^rabbit$|baked_/;
-// ★2026-07-09 用户令 HP/食物本能熔断: 两个熔断器, 默认关闭(值≠'1')=因低血/因饿的本能失效;
-// 置 '1' 恢复原行为。food breaker: MC_FOOD_INSTINCTS==='1'; hp breaker: MC_HP_INSTINCTS==='1'。
 const _foodOn = () => process.env.MC_FOOD_INSTINCTS === '1';
-const _hpOn = () => process.env.MC_HP_INSTINCTS === '1';
 // CHANCE-DROP SOURCES (2026-07-02, flint task): minecraft-data's block.drops lists
 // only the GUARANTEED drop — gravel.drops=[gravel], verified 1.21.1 — so
 // mc.getItemBlockSources('flint') returns [] and COLLECT dead-ended at "NO KNOWN
@@ -108,7 +105,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
             return Object.values(bot.entities || {}).some(e => e && e.position && mc && mc.isHostile && mc.isHostile(e) && e.position.distanceTo(bot.entity.position) < r);
         } catch (e) { return false; }
     };
-    const lowHpWorkRisk = () => bot.health <= 14 && hostileNear(12);
+    const hostileWorkRisk = () => hostileNear(12);
     const woodEq = () => sumRe(/_planks$/) + sumRe(/_log$/) * 4;
     const openSurfaceNow = () => {
         try {
@@ -143,13 +140,13 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
         if (!openSurfaceNow()) return { ok: false, reason: `not true surface y=${Math.floor(bot.entity.position.y)} mob=${bot._mobility ? bot._mobility.state : '-'}` };
         if (hostileNear(24)) return { ok: false, reason: 'hostile near 24b' };
         if (_foodOn() && bot.food <= 14 && !edibleHeld()) return { ok: false, reason: `food=${bot.food}, no edible held` };   // ★2026-07-09 用户令 HP/食物本能熔断: 纯食物门(可选木缓冲); 食物闸开恢复。
-        if (lowHpWorkRisk()) return { ok: false, reason: `hp=${Math.round(bot.health)} hostile near` };
+        if (hostileWorkRisk()) return { ok: false, reason: 'hostile near' };
         return cheapWoodTarget();
     };
     const moderateUndergroundWorkOk = () => {
         try {
             if (openSurfaceNow()) return false;
-            if ((_hpOn() || _foodOn()) && (bot.food < 8 || bot.health < 14 || edibleHeld())) return false;   // ★2026-07-09 用户令 HP/食物本能熔断: 混合血/食物豁免门; 任一/双闸开恢复。
+            if (_foodOn() && (bot.food < 8 || edibleHeld())) return false;
             if (!bot.inventory.items().some(i => /_pickaxe$/.test(i.name || ''))) return false;
             if (hostileNear(12)) return false;
             const p = bot.entity.position.floored();
@@ -846,14 +843,6 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                     return false;
                 }
             } catch (e) {}
-            if ((_hpOn() || _foodOn()) && bot.health <= 8 && bot.food < 18) {   // ★2026-07-09 用户令 HP/食物本能熔断: 混合血/食物挖矿门(surfaceUp); 任一/双闸开恢复。
-                const yy = Math.floor(bot.entity.position.y);
-                prog(`${tag}LOW-HP mining gate — hp=${Math.round(bot.health)} food=${bot.food} at y=${yy}; surface/feed before more ${block}`);
-                try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
-                try { bot.clearControlStates(); } catch (e) {}
-                try { await skills.customSkill(bot, 'surfaceUp', Math.max(48, yy + 12)); } catch (e) { prog(`${tag}LOW-HP surfaceUp err ${e.message}`); }
-                return false;
-            }
             if (_foodOn() && bot.food <= 12 && !edibleHeld() && miningBlock) {   // ★2026-07-09 用户令 HP/食物本能熔断: 纯食物挖矿门(surface/feed); 食物闸开恢复。
                 const yy = Math.floor(bot.entity.position.y);
                 if (moderateUndergroundWorkOk()) {
@@ -985,8 +974,8 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                 new Promise((_, rej) => setTimeout(() => rej(new Error('collect-timeout')), 25000)),
             ]).catch(e => { try { bot.pathfinder.stop(); } catch (_) {} try { bot.clearControlStates(); } catch (_) {} throw e; }));
             if (have() >= need) break;
-            if (!foodGoal && (lowHpWorkRisk() || ((_hpOn() || _foodOn()) && bot.health <= 12 && bot.food <= 10 && !edibleHeld()))) {   // ★2026-07-09 用户令 HP/食物本能熔断: 混合血/食物探矿让位(lowHpWorkRisk 属因怪, 保留); 任一/双闸开恢复。
-                prog(`${tag}mine probe safety yield — hp=${Math.round(bot.health)} food=${bot.food} hostile=${hostileNear(12)}; stop optional ore route`);
+            if (!foodGoal && (hostileWorkRisk() || (_foodOn() && bot.food <= 10 && !edibleHeld()))) {
+                prog(`${tag}mine probe safety yield — food=${bot.food} hostile=${hostileNear(12)}; stop optional ore route`);
                 motion('achieve.probe.safety_yield', { item, block, hp: Math.round(bot.health || 0), food: bot.food, hostileNear: hostileNear(12) });
                 try { bot.pathfinder && bot.pathfinder.stop(); } catch (e) {}
                 try { bot.clearControlStates(); } catch (e) {}

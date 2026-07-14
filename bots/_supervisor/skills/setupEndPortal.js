@@ -155,7 +155,7 @@ export default async function setupEndPortal(bot, ctx, opts = {}) {
         let lastPos = bot.entity.position.clone();
         while (budget()) {
             if (stop()) return 'interrupted';
-            if (bot.health < 8 || bot.food < 6) { prog(`travel vitals bail hp=${Math.round(bot.health)} food=${bot.food}`); return 'vitals'; }
+            if (bot.food < 6) { prog(`travel food bail food=${bot.food}`); return 'vitals'; }
             const p = bot.entity.position;
             const dx = tx - p.x, dz = tz - p.z;
             const d = Math.hypot(dx, dz);

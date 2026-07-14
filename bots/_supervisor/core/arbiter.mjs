@@ -35,11 +35,10 @@ function decide(wm) {
     // 6/5) Close actionable threat. WHO owns the body depends on whether we can survive the
     // trade. The #1 death cause is fighting zombies UNARMORED — so a naked bot (no armor, no
     // shield) must DISENGAGE (FLEE), not stand and trade hits. Only fight when we have some
-    // protection, or when fleeing is hopeless (overwhelmed AND already low — last-stand).
+    // protection. Health alone never changes ownership of the body.
     const def = wm.defense || {};
     if (t.actionableClose || t.overwhelmed) {
-        const lastStand = t.overwhelmed && wm.hp <= 6;          // cornered + dying: fighting back is the only chance
-        if (def.weakDefense && !lastStand) {
+        if (def.weakDefense) {
             return { mode: 'FLEE', reason: `close threat nearest=${t.actionableNearest} but UNARMORED (armor=0,shield=${!!def.hasShield}) — disengage, don't trade hits` };
         }
         if (t.overwhelmed) {

@@ -223,7 +223,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
         if (!hasPick()) { prog(`镐没了(r${rounds}) — 停`); break; }
         if (marooned()) { prog(`r${rounds}: MAROONED — 让位 mobility 脱困`); break; }
         // ★围殴中止 (deaths 58-60 三连死同源实录: collectBlock 把 bot 带进农场下怪窝):
-        //   ≥2 敌对近身或低血1敌对 → 携进度收工, 身体交反射/灰区 (挖矿不打逆风仗)。
+        //   ≥2 敌对近身 → 携进度收工, 身体交现实威胁反射 (挖矿不打逆风仗)。
         const swarm = (() => {
             try {
                 const p = bot.entity.position;
@@ -237,9 +237,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
                 return n;
             } catch (e) { return 0; }
         })();
-        // ★2026-07-09 用户令 (低血惰性): 单怪+低血的让位限定熔断 — 只有真围殴 (swarm>=2) 才携进度退,
-        //   单怪交给 self_defense 打, 低血不是理由。恢复: MC_HP_INSTINCTS=1。
-        if (swarm >= 2 || (swarm >= 1 && process.env.MC_HP_INSTINCTS === '1' && bot.health <= 10)) {
+        if (swarm >= 2) {
             prog(`r${rounds}: 围殴中止 (hostiles10b=${swarm} hp=${Math.round(bot.health)}) — 携进度退`);
             break;
         }
