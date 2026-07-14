@@ -17,19 +17,34 @@ const stRegister = (type, p) => {
     } catch (e) {}
 };
 export default async function smeltSafe(bot, ctx, item, num = 1) {
-    const { skills, world, Vec3, log } = ctx;
+    const { skills, world, log } = ctx;
     const findFurnace = () => world.getNearestBlock(bot, 'furnace', 4);
     if (!findFurnace()) {
         if (!(world.getInventoryCounts(bot)['furnace'] > 0)) {
-            await skills.craftRecipe(bot, 'furnace', 1).catch(() => {});
+            // Furnace is a 3x3 recipe. Craft it in the current pocket instead of
+            // walking toward an old remote table; abort cleanly if no reachable
+            // table can be placed. A failed craft must never fall through into
+            // destructive placement recovery with an empty furnace inventory.
+            const crafted = await skills.craftRecipeLocal(bot, 'furnace', 1).catch(() => false);
+            if (!crafted || !(world.getInventoryCounts(bot)['furnace'] > 0)) {
+                log(bot, 'smeltSafe: could not craft a furnace locally; placement skipped without moving or clearing terrain.');
+                return false;
+            }
         }
-        // Robust, cheat-free placement via core placeBlockNearby (digs a niche on
-        // solid footing + retries + relocates) — same logic the crafting table uses.
-        for (let attempt = 0; attempt < 3 && !findFurnace(); attempt++) {
-            await skills.placeBlockNearby(bot, 'furnace').catch(() => {});
-            if (!findFurnace()) await skills.wait(bot, 200);
+        // Smelting is a workstation action, not a travel request. Try one bounded
+        // adjacent placement (at most a two-block niche), with no relocation or
+        // pillar escape. Higher layers may explicitly choose a new work area.
+        const placed = await skills.placeBlockNearby(bot, 'furnace', {
+            maxTries: 1,
+            relocate: false,
+            pillar: false,
+            maxDigBlocks: 2,
+        }).catch(() => false);
+        if (!placed || !findFurnace()) {
+            log(bot, 'smeltSafe: could not place the carried furnace beside the bot; smelting aborted in place.');
+            return false;
         }
-        log(bot, findFurnace() ? 'furnace placed' : 'could not place furnace');
+        log(bot, 'furnace placed');
     }
     { const f0 = findFurnace(); if (f0) stRegister('furnace', f0.position); }   // 用到即登记
     // ★kernel return contract (return-contract audit 2026-07-02): smeltItem signals EVERY

@@ -550,13 +550,13 @@ export const actionsList = [
     },
     {
         name: '!craftRecipe',
-        description: 'Craft the given recipe a given number of times.',
+        description: 'Craft the given recipe a given number of times at the current location. For recipes needing a crafting table, reuse one within reach or place the carried table beside the bot; do not walk to a distant table.',
         params: {
             'recipe_name': { type: 'ItemName', description: 'The name of the output item to craft.' },
             'num': { type: 'int', description: 'The number of times to craft the recipe. This is NOT the number of output items, as it may craft many more items depending on the recipe.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, recipe_name, num) => {
-            await skills.craftRecipe(agent.bot, recipe_name, num);
+            await skills.craftRecipeLocal(agent.bot, recipe_name, num);
         })
     },
     {
@@ -583,11 +583,15 @@ export const actionsList = [
     },
         {
         name: '!placeHere',
-        description: 'Place a given block in the current location. Do NOT use to build structures, only use for single blocks/torches.',
+        description: 'Place one block beside the bot without walking away or pillaring. May clear at most a two-block niche in a cramped pocket. Use for "place here", "原地放置", crafting tables, furnaces, and other single blocks; do not use for structures.',
         params: {'type': { type: 'BlockOrItemName', description: 'The block type to place.' }},
         perform: runAsAction(async (agent, type) => {
-            let pos = agent.bot.entity.position;
-            await skills.placeBlock(agent.bot, type, pos.x, pos.y, pos.z);
+            await skills.placeBlockNearby(agent.bot, type, {
+                maxTries: 1,
+                relocate: false,
+                pillar: false,
+                maxDigBlocks: 2,
+            });
         })
     },
     {
