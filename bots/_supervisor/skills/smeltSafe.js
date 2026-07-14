@@ -38,11 +38,16 @@ export default async function smeltSafe(bot, ctx, item, num = 1) {
             maxTries: 1,
             relocate: false,
             pillar: false,
+            positioning: false,
             maxDigBlocks: 2,
         }).catch(() => false);
-        if (!placed || !findFurnace()) {
+        const observedFurnace = findFurnace();
+        if (!observedFurnace) {
             log(bot, 'smeltSafe: could not place the carried furnace beside the bot; smelting aborted in place.');
             return false;
+        }
+        if (!placed) {
+            log(bot, 'smeltSafe: placement confirmation failed, but the furnace is present; continuing with the observed furnace.');
         }
         log(bot, 'furnace placed');
     }

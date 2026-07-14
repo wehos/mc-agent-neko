@@ -590,6 +590,7 @@ export const actionsList = [
                 maxTries: 1,
                 relocate: false,
                 pillar: false,
+                positioning: false,
                 maxDigBlocks: 2,
             });
         })

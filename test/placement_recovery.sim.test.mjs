@@ -61,8 +61,29 @@ async function testSmeltPlacementIsBoundedAndStationary() {
     };
     const ok = await smeltSafe({ interrupt_code: false }, ctx, 'raw_iron', 3);
     assert.equal(ok, false);
-    assert.deepEqual(receivedOpts, { maxTries: 1, relocate: false, pillar: false, maxDigBlocks: 2 });
+    assert.deepEqual(receivedOpts, { maxTries: 1, relocate: false, pillar: false, positioning: false, maxDigBlocks: 2 });
     assert.equal(smeltCalls, 0);
+}
+
+async function testObservedFurnaceWinsOverPlacementTimeout() {
+    let furnaceLookups = 0;
+    let smeltCalls = 0;
+    const furnace = { position: { x: 1, y: 2, z: 3 } };
+    const ctx = {
+        world: {
+            getNearestBlock: () => (++furnaceLookups === 1 ? null : furnace),
+            getInventoryCounts: () => ({ furnace: 1, raw_iron: 3 }),
+        },
+        skills: {
+            craftRecipeLocal: async () => { throw new Error('already has furnace'); },
+            placeBlockNearby: async () => false,
+            smeltItem: async () => { smeltCalls++; return true; },
+        },
+        log: () => {},
+    };
+    const ok = await smeltSafe({ interrupt_code: false }, ctx, 'raw_iron', 3);
+    assert.equal(ok, true);
+    assert.equal(smeltCalls, 1);
 }
 
 async function testMakePlatformRequiresExplicitAdminApproval() {
@@ -90,6 +111,7 @@ function testConstraintRefinementsBypassDuplicateThrottle() {
 await testMissingItemDoesNotPrepareTerrain();
 await testSmeltCraftFailureStopsBeforePlacement();
 await testSmeltPlacementIsBoundedAndStationary();
+await testObservedFurnaceWinsOverPlacementTimeout();
 await testMakePlatformRequiresExplicitAdminApproval();
 testConstraintRefinementsBypassDuplicateThrottle();
 console.log('placement_recovery.sim: all checks passed');

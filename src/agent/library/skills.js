@@ -2528,7 +2528,7 @@ export async function breakBlockAt(bot, x, y, z) {
 }
 
 
-export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dontCheat=false) {
+export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dontCheat=false, opts={}) {
     /**
      * Place the given block type at the given position. It will build off from any adjacent blocks. Will fail if there is a block in the way or nothing to build off of.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
@@ -2538,12 +2538,15 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
      * @param {number} z, the z coordinate of the block to place.
      * @param {string} placeOn, the preferred side of the block to place on. Can be 'top', 'bottom', 'north', 'south', 'east', 'west', or 'side'. Defaults to bottom. Will place on first available side if not possible.
      * @param {boolean} dontCheat, overrides cheat mode to place the block normally. Defaults to false.
+     * @param {object} opts, placement policy. positioning:false forbids pathfinder movement.
      * @returns {Promise<boolean>} true if the block was placed, false otherwise.
      * @example
      * let p = world.getPosition(bot);
      * await skills.placeBlock(bot, "oak_log", p.x + 2, p.y, p.x);
      * await skills.placeBlock(bot, "torch", p.x + 1, p.y, p.x, 'side');
     **/
+    opts = opts && typeof opts === 'object' ? opts : {};
+    const allowPositioning = opts.positioning !== false;
     const target_dest = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
     const placeCtx = (extra = {}) => ({
         blockType,
@@ -2551,6 +2554,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         target: motionVecObj(target_dest),
         placeOn,
         dontCheat,
+        allowPositioning,
         env: motionEnvSnap(bot),
         ...extra,
     });
@@ -2716,7 +2720,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, item: item_name, reason: 'intersects-body' }));
         return false;
     }
-    if (!dont_move_for.includes(item_name) && (pos.distanceTo(targetBlock.position) < 1.1 || pos_above.distanceTo(targetBlock.position) < 1.1)) {
+    if (allowPositioning && !dont_move_for.includes(item_name) && (pos.distanceTo(targetBlock.position) < 1.1 || pos_above.distanceTo(targetBlock.position) < 1.1)) {
         // too close
         motionAudit(bot, 'place_skill.positioning.begin', placeCtx({ item: item_name, reason: 'too-close', distance: +pos.distanceTo(targetBlock.position).toFixed(3) }));
         let goal = new pf.goals.GoalNear(targetBlock.position.x, targetBlock.position.y, targetBlock.position.z, 2);
@@ -2732,6 +2736,11 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
     }
     
     if (bot.entity.position.distanceTo(targetBlock.position) > 4.5) {
+        if (!allowPositioning) {
+            log(bot, `Cannot place ${blockType} at ${target_dest} without moving: target is out of reach.`);
+            motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, item: item_name, reason: 'positioning-disabled-out-of-reach' }));
+            return false;
+        }
         // too far
         let pos = targetBlock.position;
         let movements = new pf.Movements(bot);
@@ -2922,7 +2931,8 @@ export async function placeBlockNearby(bot, blockName, maxTries=4, opts={}) {
      * @param {string} blockName, e.g. 'crafting_table' or 'furnace' (must be in inventory).
      * @param {number|object} maxTries, relocate-and-retry rounds, or an options object.
      * @param {object} opts recovery policy. relocate:false,pillar:false keeps the bot
-     *        in its current pocket; maxDigBlocks bounds destructive preparation.
+     *        in its current pocket; positioning:false also disables placeBlock pathfinding;
+     *        maxDigBlocks bounds destructive preparation.
      * @returns {Promise<boolean>} true if the block ended up placed.
      **/
     if (maxTries && typeof maxTries === 'object') {
@@ -2934,6 +2944,7 @@ export async function placeBlockNearby(bot, blockName, maxTries=4, opts={}) {
     const allowDig = opts.allowDig !== false;
     const allowRelocate = opts.relocate !== false;
     const allowPillar = opts.pillar !== false;
+    const allowPositioning = opts.positioning !== false;
     const maxDigBlocks = Math.max(0, Math.floor(Number(opts.maxDigBlocks == null ? 8 : opts.maxDigBlocks) || 0));
     let dugBlocks = 0;
 
@@ -2975,7 +2986,9 @@ export async function placeBlockNearby(bot, blockName, maxTries=4, opts={}) {
             }
         }
         if (!hasPlaceItem()) return false;
-        return await placeBlock(bot, blockName, cell.x, cell.y, cell.z, 'bottom', true);
+        return await placeBlock(bot, blockName, cell.x, cell.y, cell.z, 'bottom', true, {
+            positioning: allowPositioning,
+        });
     };
     // ★PRE-ESCAPE if sealed/cramped (THE "place table" deadlock deep underground). If NO
     // horizontal neighbor is open air, the offset loop below would try to DIG each stone cell —
