@@ -583,6 +583,15 @@ export default async function mineDown(bot, ctx, opts = {}) {
                 const ox = fx + dx, oy = cy + dy, oz = fz + dz;
                 const b = bn(ox, oy, oz);
                 if (!(b && ORE.test(b.name))) continue;
+                // ★2026-07-14 PICK-TIER GUARD (用户: "偶发性用石镐挖钻石"): 顺路矿环别用够不着品级的镐去敲矿石。
+                //   ORE 正则含 diamond_ore/deepslate_diamond_ore/gold_ore/redstone_ore —— 石镐采不下(canHarvest
+                //   false)敲碎它就零掉落=纯浪费(下铁矿途中被 mineOres/GO_UNDERGROUND 派来时手上常只有石镐)。
+                //   只挖【库存里有镐能真正采下】的矿; 采不了的留着等换到更好的镐(breakBlockAt 也已兜底拒挖, 这里
+                //   显式跳过省一次白挖 + 避免 ore 计数虚增)。iron/copper/lapis/coal 石镐可采, 不受影响照常挖。
+                if (!bot.inventory.items().some(it => { try { return /_pickaxe$/.test(it.name || '') && b.canHarvest(it.type); } catch (e) { return false; } })) {
+                    log_(`skip ${b.name}@${ox},${oy},${oz} — 无够品级镐可采 (保矿, 不用石镐把它敲没)`);
+                    continue;
+                }
                 // ★C311 (T-0048): don't pop an ore that's plugging a fluid pocket — breaking it
                 // releases lava/water into the stair (#113 lava: deep ore-ring with no fluid check).
                 let oreFluidAdj = false;

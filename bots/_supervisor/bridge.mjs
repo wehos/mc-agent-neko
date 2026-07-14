@@ -132,7 +132,11 @@ function handle(msg) {
     // skill_result, so re-arming on it loops reject→re-arm→reject every 8s forever.
     if (data.type === 'skill_result') {
         skillActive = false; lastSkillEndAt = Date.now();
+        // ★2026-07-14: busy 拒绝 (ws_server 对 sticky 重挂的让位, admin 任务/前台技能占身体时)
+        //   不再"永不重试"——改 30s 慢心跳: 占用方结束后 ≤30s 内自主恢复, 不会 dead-idle;
+        //   也不会像 8s 快循环那样跟前台技能抢身体。非 busy 结果照旧 8s 重挂。
         if (!String(data.error || '').startsWith('busy')) setTimeout(sendStickySkill, 8000);
+        else setTimeout(sendStickySkill, 30000);
     }
 }
 

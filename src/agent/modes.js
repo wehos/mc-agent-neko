@@ -5654,6 +5654,44 @@ const modes_list = [
                         }
                     }
                 }
+                // ★2026-07-14 PICK-TIER ORE GATE (用户: "偶发性用石镐挖钻石"): 破坏矿石(_ore/ancient_debris)时,
+                //   手上的镐必须能【真正采下】它 —— 石镐挖钻矿/金矿/红石矿会把方块敲碎且零掉落 = 纯浪费。这是
+                //   bot.dig 总闸的 BACKSTOP: 技能层(skills.js breakBlockAt 干净 return false / safeDig 返回
+                //   'wrong-tool' / mineDown 矿环显式 continue)已把挖矿路径就地拦下, 这里只兜住【不走技能层清洁闸】
+                //   的路径 —— 寻路器 canDig 顺手拆矿、LLM newAction 直调 bot.dig、以及各生存/脱困反射(fleeMove/
+                //   edge_unstick/step-edge/entombed guardedDig 等直调 bot.dig 的点)。用 block.canHarvest(镐id) 做
+                //   权威判据(免 nether_gold_ore 之类名字正则误伤)。手上镐采不下 → 先尝试换库存里够品级的镐(治
+                //   "拥有铁镐却握着石镐挖钻"); 换不出(真没铁镐+)→ throw 拒挖(调用方按挖矿失败换目标/绕路, 矿留到
+                //   拿到好镐再采)。★真困豁免: ENTOMBED/SEALED/enclosed-无出口/planned-breach 时脱困优先(与
+                //   ensurePickForDig 徒手脱困同款判据), 放行破矿保命 —— 绝不因护矿把 bot 封死(anti-石棺)。
+                if (block && block.position && /_ore$|ancient_debris/.test(block.name || '')
+                    && bot.game && bot.game.gameMode !== 'creative') {
+                    const _canH = (id) => { try { return !!block.canHarvest(id); } catch (e) { return true; } };
+                    if (!_canH(bot.heldItem ? bot.heldItem.type : null)) {
+                        // 手上镐采不下 → 换库存里能采下的镐(够品级里剩余耐久最低的先用, 护高级镐)
+                        try {
+                            const _rem = (it) => { const m = it.maxDurability || 0, u = (typeof it.durabilityUsed === 'number') ? it.durabilityUsed : 0; return m > 0 ? (m - u) : Infinity; };
+                            const _cap = bot.inventory.items()
+                                .filter(it => /_pickaxe$/.test(it.name || '') && _canH(it.type))
+                                .sort((a, b) => _rem(a) - _rem(b))[0];
+                            if (_cap) { await originalEquip(_cap, 'hand'); await new Promise(r => setTimeout(r, 60)); }
+                        } catch (e) {}
+                        if (!_canH(bot.heldItem ? bot.heldItem.type : null)) {
+                            // 全仓库无镐能采 → 除非真困, 否则拒挖(保矿不浪费)
+                            const _mbO = bot._mobility || {};
+                            const _trapO = /ENTOMBED|SEALED/.test(_mbO.state || '')
+                                || (!!_mbO.enclosed && (!_mbO.exits || _mbO.exits.length === 0))
+                                || (Date.now() < (bot._plannedNoPickStoneUntil || 0));
+                            if (!_trapO) {
+                                try { fs.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★PICKTIER-BLOCK dig ${block.name}@${block.position.x},${block.position.y},${block.position.z} held=${bot.heldItem ? bot.heldItem.name : 'empty'} — 无够品级镐可采, 拒挖(保矿不浪费)\n`); } catch (e) {}
+                                const err = new Error(`pick-tier dig blocked: ${block.name} not harvestable by any owned pickaxe`);
+                                write('dig.end', { seq, ok: false, ms: Date.now() - startedAt, target: blockObj(block), error: err.message, env: envSnap() });
+                                throw err;
+                            }
+                            write('dig.oretier_exemption', { seq, target: blockObj(block), mobility: _mbO.state || '', enclosed: !!_mbO.enclosed });
+                        }
+                    }
+                }
                 if (!(await ensurePickForDig(block, seq))) {
                     const err = new Error(`stone dig blocked without held pick: ${block ? block.name : 'unknown'}`);
                     write('dig.end', { seq, ok: false, ms: Date.now() - startedAt, target: blockObj(block), error: err.message, env: envSnap() });

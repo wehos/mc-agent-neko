@@ -469,11 +469,11 @@ export const actionsList = [
         name: '!smeltIron',
         description: 'Smelt raw iron into iron ingots at a furnace (places/uses a furnace + fuel automatically). Use after mining iron, or when told to smelt iron.',
         params: {
-            'num': { type: 'int', description: 'how many raw_iron to smelt', domain: [1, 128] }
+            'num': { type: 'int', description: 'how many raw_iron to smelt', domain: [1, 128, '[]'] }
         },
         perform: runAsAction(async (agent, num) => {
             await skills.customSkill(agent.bot, 'smeltSafe', 'raw_iron', Math.max(1, parseInt(num) || 1));
-        }, false, 10)
+        }, false, 30) // ★2026-07-14: 等炼完 (10s/件, 128 件≈22min) — 10min 超时会把长炉次拦腰打断
     },
     {
         name: '!digDownTo',
@@ -564,16 +564,14 @@ export const actionsList = [
         description: 'Smelt the given item the given number of times.',
         params: {
             'item_name': { type: 'ItemName', description: 'The name of the input item to smelt.' },
-            'num': { type: 'int', description: 'The number of times to smelt the item.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'num': { type: 'int', description: 'The number of times to smelt the item.', domain: [1, 128, '[]'] } // ≤128: 匹配 30min 动作超时 (10s/件) — 再大会被超时拦腰打断
         },
+        // ★2026-07-14: 摘掉上游遗留的"炼完成功就 cleanKill 重启刷新背包" — 本 fork 的炉后背包
+        //   没有失同步问题 (kernel 常年跑 smeltSafe→smeltItem 同一条炉路从不重启), 而重启会把
+        //   admin 回合/内核状态全部炸掉, 正是"炼完铁人就没了"的一种来源。
         perform: runAsAction(async (agent, item_name, num) => {
-            let success = await skills.smeltItem(agent.bot, item_name, num);
-            if (success) {
-                setTimeout(() => {
-                    agent.cleanKill('Safely restarting to update inventory.');
-                }, 500);
-            }
-        })
+            await skills.smeltItem(agent.bot, item_name, num);
+        }, false, 30)
     },
     {
         name: '!clearFurnace',
@@ -623,11 +621,23 @@ export const actionsList = [
     },
     {
         name: '!stay',
-        description: 'Stay in the current location no matter what. Pauses all modes.',
+        description: 'Stay in the current location no matter what, pausing ALL modes including self-preservation. For a normal "wait here N seconds" request prefer !standby.',
         params: {'type': { type: 'int', description: 'The number of seconds to stay. -1 for forever.', domain: [-1, Number.MAX_SAFE_INTEGER] }},
         perform: runAsAction(async (agent, seconds) => {
             await skills.stay(agent.bot, seconds);
         })
+    },
+    // ★2026-07-14 用户令: admin 主动要求"原地待命 N 秒"的专用指令。跟 !stay 的区别: 保命反射
+    //   (self_preservation/self_defense/auto_eat) 不关, 只暂停游荡类本能; 待命全程续期 admin 独占
+    //   窗口 (skills.standby 内 renewAdminHold), kernel/自主派发不来抢 — 新 admin 指令照常能取消。
+    //   上限 1200s = 停在 watchdog 25min STUCK-ZONE 硬重启之下; timeout 25min 只作挂死兜底。
+    {
+        name: '!standby',
+        description: 'Hold your current position and wait in place for the given number of seconds, doing nothing else. Use when the admin tells you to wait / hold position / stand by (原地待命). Life-critical self-defense stays active; wandering behaviors pause. Max 1200s per call (re-issue for longer); a new admin command cancels the hold.',
+        params: {'seconds': { type: 'int', description: 'how many seconds to stand by (max 1200)', domain: [1, 1200, '[]'] }},
+        perform: runAsAction(async (agent, seconds) => {
+            await skills.standby(agent.bot, seconds);
+        }, false, 25)
     },
     {
         name: '!setMode',

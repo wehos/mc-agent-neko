@@ -639,6 +639,34 @@ export async function wait(bot, milliseconds) {
     return true;
 }
 
+// ★2026-07-14 admin 独占窗口续期 (用户令: admin 要求的长任务 — 炼铁/待命 — 不被别的命令打断):
+// _extIntentUntil 由 handleMessage 在 admin 回合开头一次性给 5min 兜底 (agent.js:919), 长炉次/
+// 长待命会跑穿这个窗口 → kernel._survivalTick 解冻、机会主义反射解冻 → 抢身体打断任务。这里在
+// 任务主循环里每拍向后续期: 只在窗口【已开且新鲜】时延长 (Math.max 只延不缩), 窗口没开 (kernel
+// 自主派发的同名技能) 绝不凭空开 — admin 语义只能由 admin 回合建立; 回合结束 handleMessage 的
+// finally 照旧清零, 不会泄漏。
+function renewAdminHold(bot, ms = 20000) {
+    try {
+        if (bot._extIntentUntil && Date.now() < bot._extIntentUntil)
+            bot._extIntentUntil = Math.max(bot._extIntentUntil, Date.now() + ms);
+    } catch (e) {}
+}
+
+// ★2026-07-14: mineflayer openBlock 无超时 — 够不到/服务器丢 interact 时 `once('windowOpen')`
+// 永久 pending, 会把调用方(smeltItem 等待循环)钉死: interrupt/stale/deadline 检查全部失效,
+// stop() 15s 拉不停 → 强制放行+重连 (评审实锤)。race 一个计时器: 超时返 null 让调用方下一拍
+// 重试; 迟到的窗口静默关掉不留孤儿。
+function openFurnaceTimed(bot, block, ms = 6000) {
+    return new Promise((resolve) => {
+        let done = false;
+        const t = setTimeout(() => { if (!done) { done = true; resolve(null); } }, ms);
+        bot.openFurnace(block).then(w => {
+            if (done) { try { bot.closeWindow(w); } catch (e) {} return; }
+            done = true; clearTimeout(t); resolve(w);
+        }).catch(() => { if (!done) { done = true; clearTimeout(t); resolve(null); } });
+    });
+}
+
 export async function smeltItem(bot, itemName, num=1) {
     /**
      * Puts 1 coal in furnace and smelts the given item name, waits until the furnace runs out of fuel or input items.
@@ -678,10 +706,18 @@ export async function smeltItem(bot, itemName, num=1) {
         await goToNearestBlock(bot, 'furnace', 4, furnaceRange);
     }
     bot.modes.pause('unstuck');
+    // ★2026-07-14: 挪身体的机会主义本能会把炉窗挤关/把 bot 拽走 (torch 挪一格、捡物飘走) —
+    //   炼铁全程站桩, 先暂停它们 (idle 时 modes.unPauseAll 自动恢复); 保命反射不动。
+    for (const m of ['torch_placing', 'item_collecting', 'hunting', 'elbow_room', 'edge_unstick'])
+        try { bot.modes.pause(m); } catch (e) {}
     await bot.lookAt(furnaceBlock.position);
 
     console.log('smelting...');
-    const furnace = await bot.openFurnace(furnaceBlock);
+    const furnace = await openFurnaceTimed(bot, furnaceBlock, 8000);
+    if (!furnace) {
+        log(bot, `Could not open the furnace (out of reach or the server ignored the interact).`);
+        return false;
+    }
     // check if the furnace is already smelting something
     let input_item = furnace.inputItem();
     if (input_item && input_item.type !== mc.getItemId(itemName) && input_item.count > 0) {
@@ -702,6 +738,9 @@ export async function smeltItem(bot, itemName, num=1) {
     }
 
     // fuel the furnace
+    // ★2026-07-14: 槽位只有一组 (64) 容量 — 燃料/输入都改成"先投一组, 循环里续投"
+    //   (旧代码 num>64 时一次 putInput 直接抛 'destination full', 动作秒炸)。
+    let fuelType = null, fuelNeeded = 0, fuelDeposited = 0;
     if (!furnace.fuelItem()) {
         let fuel = mc.getSmeltingFuel(bot);
         if (!fuel) {
@@ -712,50 +751,133 @@ export async function smeltItem(bot, itemName, num=1) {
         }
         log(bot, `Using ${fuel.name} as fuel.`);
 
-        const put_fuel = Math.ceil(num / mc.getFuelSmeltOutput(fuel.name));
+        fuelNeeded = Math.ceil(num / mc.getFuelSmeltOutput(fuel.name));
 
-        if (fuel.count < put_fuel) {
-            log(bot, `You don't have enough ${fuel.name} to smelt ${num} ${itemName}; you need ${put_fuel}.`);
+        if (fuel.count < fuelNeeded) {
+            log(bot, `You don't have enough ${fuel.name} to smelt ${num} ${itemName}; you need ${fuelNeeded}.`);
             if (placedFurnace)
                 await collectBlock(bot, 'furnace', 1);
             return false;
         }
-        await furnace.putFuel(fuel.type, null, put_fuel);
-        log(bot, `Added ${put_fuel} ${mc.getItemName(fuel.type)} to furnace fuel.`);
-        console.log(`Added ${put_fuel} ${mc.getItemName(fuel.type)} to furnace fuel.`)
+        fuelType = fuel.type;
+        fuelDeposited = Math.min(fuelNeeded, 64);
+        await furnace.putFuel(fuelType, null, fuelDeposited);
+        log(bot, `Added ${fuelDeposited} ${mc.getItemName(fuelType)} to furnace fuel.`);
+        console.log(`Added ${fuelDeposited} ${mc.getItemName(fuelType)} to furnace fuel.`)
     }
-    // put the items in the furnace
-    await furnace.putInput(mc.getItemId(itemName), null, num);
-    // wait for the items to smelt
+    // put the items in the furnace (first batch; the wait loop tops the slot up)
+    let deposited = Math.min(num, 64);
+    await furnace.putInput(mc.getItemId(itemName), null, deposited);
+    // ★2026-07-14 用户令 (炼铁必须等炼完, 且不被别的命令打断): 旧等待段 "11s 没收到产出就 break" —
+    //   一件要烧整 10s, 服务器慢一拍/炉窗被微移挤关, 就在投料后立刻放弃 → 拿回输入、收炉跑路
+    //   (用户实拍的"投完煤和生铁任务自动结束")。重写 (全程 await 轮询, 不同步阻塞不掉线):
+    //   • 进度 = 收到产出 或 炉内输入数下降 (一件烧完才移出输入槽) — 30s 无进度才判炉死,
+    //     另有 10s/件+60s 的总时限兜底 (燃料中途烧干也能体面收场);
+    //   • 炉窗被挤关 (击退/微移) → 找回炉子重开继续收, 不再把"窗关"当"炼完";
+    //   • admin 驱动的炉次每拍 renewAdminHold 续期独占窗口 → kernel/非致命反射全程让位,
+    //     超过 5min 兜底的长炉次也不会中途被抢身体;
+    //   • 真被打断 (保命反射 / admin 撤销) → 留炉在烧、不拿回输入、不拆炉 (东西在炉里丢不了,
+    //     回头 !clearFurnace 能收) — 打断者立刻要身体, 不做收尾动作。
     let total = 0;
     let smelted_item = null;
-    await new Promise(resolve => setTimeout(resolve, 200));
-    let last_collected = Date.now();
+    let fur = furnace;
+    let furnaceOpen = true;
+    fur.once('close', () => { furnaceOpen = false; });
+    let lastInputCount = (fur.inputItem() && fur.inputItem().count) || deposited;
+    let lastProgress = Date.now();
+    const STALE_MS = 30000;
+    const deadline = Date.now() + num * 10000 + 60000;
+    let interrupted = false;
     while (total < num) {
         await new Promise(resolve => setTimeout(resolve, 1000));
-        if (furnace.outputItem()) {
-            smelted_item = await furnace.takeOutput();
-            if (smelted_item) {
-                total += smelted_item.count;
-                last_collected = Date.now();
+        if (bot.interrupt_code) { interrupted = true; break; }
+        renewAdminHold(bot);
+        try {
+            if (!fur || !furnaceOpen) {
+                const fb = bot.blockAt(furnaceBlock.position);
+                if (!fb || !fb.name.includes('furnace')) {
+                    log(bot, `The furnace is gone.`);
+                    break;
+                }
+                // 回【这口炉】的坐标 — goToNearestBlock 会走向"最近的"炉 (smeltSafe 满地登记炉,
+                // 可能是另一口), 人在别的炉旁对原炉发 interact 会被服务器无声丢弃 (评审实锤)。
+                if (bot.entity.position.distanceTo(furnaceBlock.position) > 4)
+                    await goToPosition(bot, furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 2);
+                if (bot.entity.position.distanceTo(furnaceBlock.position) > 4.5)
+                    throw new Error('still out of reach after walking back');   // → catch → 下一拍重试, stale 计时器兜底
+                fur = await openFurnaceTimed(bot, fb, 6000);
+                if (!fur)
+                    throw new Error('reopen timed out');   // → catch → 下一拍重试
+                furnaceOpen = true;
+                fur.once('close', () => { furnaceOpen = false; });
             }
+            if (fur.outputItem()) {
+                smelted_item = await fur.takeOutput();
+                if (smelted_item) {
+                    total += smelted_item.count;
+                    lastProgress = Date.now();
+                }
+            }
+            let inCount = (fur.inputItem() && fur.inputItem().count) || 0;
+            if (inCount < lastInputCount) {
+                lastInputCount = inCount;
+                lastProgress = Date.now();
+            }
+            // 分批续投: 输入槽空出位置且总量还没投完就补一批 (num>64 的唯一可行路径)
+            if (deposited < num && inCount < 64) {
+                const add = Math.min(64 - inCount, num - deposited);
+                await fur.putInput(mc.getItemId(itemName), null, add);
+                deposited += add;
+                inCount += add;
+                lastInputCount = inCount;
+            }
+            // 燃料续投: 首批只装得下一组; 槽烧空且还欠着就补
+            if (fuelType !== null && fuelDeposited < fuelNeeded && !fur.fuelItem()) {
+                const addF = Math.min(64, fuelNeeded - fuelDeposited);
+                await fur.putFuel(fuelType, null, addF);
+                fuelDeposited += addF;
+            }
+            if (inCount === 0 && deposited >= num && !fur.outputItem() && total > 0)
+                break; // 全部投完+烧完+产出收干 — 到头了 (即使服务器吞了几件也别干等)
+        } catch (err) {
+            // 窗口中途失效 (移动/击退挤关) — 置空下一拍重开, 不当致命错
+            console.log(`smeltItem furnace window hiccup: ${err.message}`);
+            fur = null;
+            furnaceOpen = false;
         }
-        if (Date.now() - last_collected > 11000) {
-            break; // if nothing has been collected in 11 seconds, stop
+        if (Date.now() - lastProgress > STALE_MS) {
+            log(bot, `Furnace made no progress for ${STALE_MS / 1000}s, giving up.`);
+            break;
         }
-        if (bot.interrupt_code) {
+        if (Date.now() > deadline) {
+            log(bot, `Smelting overran its time budget, giving up.`);
             break;
         }
     }
+    if (interrupted) {
+        // 被打断 (保命反射/admin 撤销): 窗口还开着就【快速】拿回输入+燃料 (窗口内点两下, ≲1s,
+        // 在 stop() 的 15s 脉冲窗口内) — smeltSafe 的 input-delta 进度契约依赖"没炼完的料会拿
+        // 回来"(评审实锤: 留料在炉 = 假成功喂内核)。窗口已丢就留炉在烧 (炉里丢不了, !clearFurnace
+        // 可收), 不为收尾跟打断者抢身体。
+        try {
+            if (fur && furnaceOpen) {
+                if (fur.inputItem()) await fur.takeInput();
+                if (fur.fuelItem()) await fur.takeFuel();
+            }
+        } catch (e) {}
+        try { await bot.closeWindow(fur || furnace); } catch (e) {}
+        log(bot, `Smelting interrupted after collecting ${total}/${num} ${itemName}.`);
+        return total >= num;
+    }
     // take all remaining in input/fuel slots
-    if (furnace.inputItem()) {
-        await furnace.takeInput();
-    }
-    if (furnace.fuelItem()) {
-        await furnace.takeFuel();
-    }
+    try {
+        if (fur && furnaceOpen) {
+            if (fur.inputItem()) await fur.takeInput();
+            if (fur.fuelItem()) await fur.takeFuel();
+        }
+    } catch (e) { console.log(`smeltItem cleanup hiccup: ${e.message}`); }
 
-    await bot.closeWindow(furnace);
+    try { await bot.closeWindow(fur || furnace); } catch (e) {}
 
     if (placedFurnace) {
         await collectBlock(bot, 'furnace', 1);
@@ -1191,6 +1313,16 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
             }
         }
         if (equip) await equipForDig(bot, cur);
+        // ★2026-07-14 ORE-WASTE GUARD (mirror of breakBlockAt; 用户: "偶发性用石镐挖钻石"): safeDig has no
+        // canHarvest gate, and equipForDig downgrades to the best-by-speed pick (a stone pick) when no iron+ is
+        // owned. Breaking an ORE the held pick can't harvest drops NOTHING — refuse. This protects the vein
+        // flood-fill harvestConnectedVein: if the iron pick snaps mid-diamond-vein, the remaining vein blocks
+        // would otherwise be ground to dust with the stone fallback. Return 'wrong-tool' so callers skip+exclude
+        // (handled exactly like 'occluded'/'fluidguard') and the ore survives for a proper-pick pass. Non-ore
+        // corridor/escape stone stays ungated (bare-hand tunnelling of undroppable stone is legitimate).
+        if (/_ore$|ancient_debris/.test(cur.name || '') && bot.game && bot.game.gameMode !== 'creative') {
+            try { if (!cur.canHarvest(bot.heldItem ? bot.heldItem.type : null)) return 'wrong-tool'; } catch (e) {}
+        }
         // ★Shorter timeout for normal blocks: a mineral/block we CAN'T actually break (wedged in
         // a corner / behind rock whose face we can't reach — the "对着夹角拼命空挥" the user keeps
         // seeing) gets abandoned in ~8s instead of flailing the full 15s. 8s safely covers every
@@ -2202,6 +2334,18 @@ export async function breakBlockAt(bot, x, y, z) {
             // mining keeps its own canHarvest gate in collectBlock — this only frees breakBlockAt
             // (navigation/escape digging).
             if (!block.canHarvest(itemId)) {
+                // ★2026-07-14 ORE-WASTE GUARD (用户: "偶发性用石镐挖钻石"): the relaxed <9s "escape digging"
+                // allowance below breaks wrong-tool blocks so a pickless bot can tunnel out of its own cobble
+                // bunker — but it must NEVER destroy an ORE. Breaking diamond/emerald/gold/redstone ore with a
+                // sub-iron pick (or iron/lapis/copper with a sub-stone one) drops NOTHING = the resource is gone
+                // forever. Every incidental-ore path funnels through here (mineDown's opportunistic ore-ring +
+                // staircase, digDown, digReset, prepNether, escapePlan), so refusing ore here seals them all at
+                // once. Return false CLEANLY (no throw) → callers wedge/skip gracefully with no abort-spin. You
+                // are never trapped inside solid ore, so escape digging of stone/dirt/cobble is unaffected.
+                if (/_ore$|ancient_debris/.test(block.name || '')) {
+                    log(bot, `⛏️ Refusing wrong-tool break of ${block.name} with ${bot.heldItem ? bot.heldItem.name : 'hand'} — would destroy the ore (no drop). Skipping; needs a higher-tier pickaxe.`);
+                    return false;
+                }
                 let digMs = Infinity;
                 try { digMs = block.digTime(itemId, false, false, false); } catch (e) { digMs = 0; }
                 if (!Number.isFinite(digMs) || digMs > 9000) {
@@ -4567,6 +4711,47 @@ export async function stay(bot, seconds=30) {
         await new Promise(resolve => setTimeout(resolve, 500));
     }
     log(bot, `Stayed for ${(Date.now() - start)/1000} seconds.`);
+    return true;
+}
+
+export async function standby(bot, seconds=60) {
+    /**
+     * Hold the current position and wait for the given number of seconds (admin 待命).
+     * Unlike stay(), the life-critical reflexes (self_preservation / self_defense / auto_eat /
+     * mobility escape) stay armed — only the wander-y opportunistic modes are paused.
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {number} seconds, how long to hold position (1-1200).
+     * @returns {Promise<boolean>} true if the full time elapsed, false if interrupted.
+     * @example
+     * await skills.standby(bot, 120);
+     **/
+    // ★2026-07-14 用户令 (admin 主动要求原地待命 N 秒): 站桩不游荡 — 暂停会挪身体的机会主义
+    //   本能 (idle 时 modes.unPauseAll 自动恢复); 保命反射全程在线 (跟 stay() 的"全暂停"区别开,
+    //   待命不该待成活靶子); 每拍 renewAdminHold 续期 admin 独占窗口 → kernel/非致命反射全程
+    //   让位, 超过 5min 兜底窗口的长待命也不被抢身体。新的 admin 指令照常能打断 (admin 意志绝对)。
+    //   上限 1200s (20min): watchdog 的 STUCK-ZONE 25min 硬重启是终极防冻死兜底, 待命必须停在它
+    //   之下 — 更久的待命让 admin 到点重发, 别拿掉真卡死的最后一张网。
+    seconds = Math.max(1, Math.min(1200, Math.floor(Number(seconds) || 60)));
+    for (const m of ['unstuck', 'cowardice', 'hunting', 'item_collecting', 'torch_placing', 'elbow_room', 'edge_unstick', 'idle_staring'])
+        try { bot.modes.pause(m); } catch (e) {}
+    try { bot.pathfinder.stop(); } catch (e) {}
+    try { bot.pathfinder.setGoal(null); } catch (e) {}
+    try { bot.clearControlStates(); } catch (e) {}
+    const started = Date.now();
+    const until = started + seconds * 1000;
+    log(bot, `Standing by in place for ${seconds}s.`);
+    while (Date.now() < until) {
+        if (bot.interrupt_code) {
+            // 保命反射/新指令抢走了身体 — 待命不自动续 (resume 机制会在 idle 反复重放, 有 standby
+            // 永动风险)。把剩余秒数报给 LLM, 想继续等就精确重发。
+            const remain = Math.max(1, Math.round((until - Date.now()) / 1000));
+            log(bot, `Standby interrupted after ${Math.round((Date.now() - started) / 1000)}s (of ${seconds}s). Re-issue !standby(${remain}) to continue the hold.`);
+            return false;
+        }
+        renewAdminHold(bot);
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    log(bot, `Stood by for ${seconds} seconds as requested.`);
     return true;
 }
 
