@@ -29,6 +29,7 @@ const makeWorld = ({ ores, solids = [], fluids = [], toolTypes = [3] }) => {
     for (const p of solids) blocks.set(key(p), mk('stone', p));
     for (const [name, p] of fluids) blocks.set(key(p), mk(name, p));
     const mined = [];
+    const pickupOrigins = [];
     const bot = {
         entity: { position: new Vec3(0.5, 64, 0.5) },
         health: 20,
@@ -45,8 +46,9 @@ const makeWorld = ({ ores, solids = [], fluids = [], toolTypes = [3] }) => {
             return true;
         },
         async pickupNearbyItems() {},
+        ensurePickupAt(_bot, position) { pickupOrigins.push(key(position)); return Promise.resolve(true); },
     };
-    return { bot, ctx: { skills, Vec3 }, mined };
+    return { bot, ctx: { skills, Vec3 }, mined, pickupOrigins, blocks };
 };
 
 test('descent ore family normalizes deepslate variants', () => {
@@ -65,6 +67,27 @@ test('descent sweep prioritizes exposed diamond and follows its vein', async () 
     assert.equal(result.family, 'diamonds');
     assert.equal(result.mined, 2);
     assert.deepEqual(world.mined, ['diamond_ore', 'diamond_ore']);
+    assert.equal(world.pickupOrigins.length, 2);
+});
+
+test('live ore collection retries occluded tails and includes corner-connected blocks', async () => {
+    const target = new Vec3(0, 63, 1);
+    const hiddenTail = target.offset(-1, -1, -1);
+    const opener = target.offset(-1, -1, 0);
+    const world = makeWorld({ ores: [
+        ['coal_ore', target],
+        ['coal_ore', hiddenTail],
+        ['coal_ore', opener],
+    ] });
+    world.bot.canSeeBlock = (block) => !(block.position.equals(hiddenTail) && world.blocks.has(key(opener)));
+
+    const result = await collectLiveOreBlock(world.bot, world.ctx, world.bot.blockAt(target), {
+        expectedFamily: 'coal', maxBlocks: 8, budgetMs: 2000,
+    });
+
+    assert.equal(result.mined, 3);
+    assert.equal(world.blocks.size, 0);
+    assert.equal(world.pickupOrigins.length, 3);
 });
 
 test('explicit live target can drive a bounded approach without oracle data', async () => {

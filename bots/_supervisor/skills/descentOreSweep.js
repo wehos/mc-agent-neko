@@ -5,6 +5,10 @@
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const FLUID = /^(?:water|flowing_water|lava|flowing_lava)$/;
 const SIDES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+const VEIN_NEIGHBORS = [];
+for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+    if (dx || dy || dz) VEIN_NEIGHBORS.push([dx, dy, dz]);
+}
 const FAMILY_PRIORITY = Object.freeze({
     diamonds: 100,
     iron: 90,
@@ -40,6 +44,14 @@ function exposedAndDry(bot, Vec3, block) {
     const adjacent = adjacentBlocks(bot, Vec3, block.position);
     if (adjacent.some((value) => value && FLUID.test(value.name || ''))) return false;
     return adjacent.some((value) => !value || AIR.has(value.name));
+}
+
+function liveExposure(bot, Vec3, block) {
+    const adjacent = adjacentBlocks(bot, Vec3, block.position);
+    return {
+        fluid: adjacent.some((value) => value && FLUID.test(value.name || '')),
+        exposed: adjacent.some((value) => !value || AIR.has(value.name)),
+    };
 }
 
 function harvestableWithInventory(bot, block) {
@@ -104,31 +116,66 @@ export async function collectLiveOreBlock(bot, ctx, target, {
         return { mined: 0, family, reason: 'not-live-reachable' };
     }
 
-    const queue = [targetPos];
+    // Snapshot the whole connected vein before digging. Use all 26 neighbours: natural
+    // ore blobs may connect through an edge/corner, not only a shared face. Individual
+    // blocks still need live LOS, exposure, a safe dry face, and the right tool.
+    const scan = [targetPos];
     const queued = new Set([`${targetPos.x},${targetPos.y},${targetPos.z}`]);
-    let mined = 0;
-    while (queue.length && mined < maxBlocks && Date.now() - startedAt < budgetMs) {
-        if (bot.interrupt_code || bot.health <= 0) break;
-        const position = queue.shift();
+    const component = [];
+    while (scan.length && component.length < maxBlocks) {
+        const position = scan.shift();
         let block = null;
         try { block = bot.blockAt(new Vec3(position.x, position.y, position.z)); } catch (e) {}
         if (!block || descentOreFamily(block.name) !== family) continue;
-        if (!exposedAndDry(bot, Vec3, block) || !visible(bot, block) || !harvestableWithInventory(bot, block)) continue;
-        if (bot.entity.position.offset(0, 1.62, 0).distanceTo(block.position.offset(0.5, 0.5, 0.5)) > 4.6) continue;
-        let ok = false;
-        try { ok = await skills.breakBlockAt(bot, block.position.x, block.position.y, block.position.z); } catch (e) {}
-        if (!ok) continue;
-        mined++;
-        for (const [dx, dy, dz] of SIDES) {
+        component.push(position);
+        for (const [dx, dy, dz] of VEIN_NEIGHBORS) {
             const next = new Vec3(position.x + dx, position.y + dy, position.z + dz);
             const key = `${next.x},${next.y},${next.z}`;
             if (queued.has(key)) continue;
             queued.add(key);
-            let adjacent = null;
-            try { adjacent = bot.blockAt(next); } catch (e) {}
-            if (adjacent && descentOreFamily(adjacent.name) === family) queue.push(next);
+            scan.push(next);
         }
-        await yieldEventLoop();
+    }
+
+    let mined = 0;
+    let pending = component;
+    while (pending.length && mined < maxBlocks && Date.now() - startedAt < budgetMs) {
+        let passMined = 0;
+        const retry = [];
+        for (const position of pending) {
+            if (bot.interrupt_code || bot.health <= 0 || mined >= maxBlocks || Date.now() - startedAt >= budgetMs) break;
+            let block = null;
+            try { block = bot.blockAt(new Vec3(position.x, position.y, position.z)); } catch (e) {}
+            if (!block || descentOreFamily(block.name) !== family) continue;
+            const exposure = liveExposure(bot, Vec3, block);
+            if (exposure.fluid || !harvestableWithInventory(bot, block)) continue;
+            // Another ore can temporarily cover the face/LOS. Revisit after this pass if
+            // mining a sibling exposed it; do not abandon the tail permanently.
+            if (!exposure.exposed || !visible(bot, block)) { retry.push(position); continue; }
+            if (bot.entity.position.offset(0, 1.62, 0).distanceTo(block.position.offset(0.5, 0.5, 0.5)) > 4.6) {
+                retry.push(position);
+                continue;
+            }
+            let ok = false;
+            try { ok = await skills.breakBlockAt(bot, block.position.x, block.position.y, block.position.z); }
+            catch (e) {
+                if (typeof skills.isUndergroundMiningWaterSafetyError === 'function'
+                    && skills.isUndergroundMiningWaterSafetyError(e)) throw e;
+            }
+            if (!ok) { retry.push(position); continue; }
+            mined++;
+            passMined++;
+            if (typeof skills.ensurePickupAt === 'function') {
+                try { await skills.ensurePickupAt(bot, block.position, { radius: 6, maxDescend: 3, timeoutMs: 6000 }); }
+                catch (e) {
+                    if (typeof skills.isUndergroundMiningWaterSafetyError === 'function'
+                        && skills.isUndergroundMiningWaterSafetyError(e)) throw e;
+                }
+            }
+            await yieldEventLoop();
+        }
+        if (passMined === 0) break;
+        pending = retry;
     }
     if (mined && typeof skills.pickupNearbyItems === 'function') {
         try { await skills.pickupNearbyItems(bot); }

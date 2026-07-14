@@ -16,6 +16,7 @@ import settings from "../../../settings.js";
 import path from 'path';
 import { pathToFileURL } from 'url';
 import { safeToDigBlock } from '../framework/tools/lava_guard.js';   // 岩浆/水裁判 (试装 into safeDig)
+import { corridorSafety, orderedMiningDetours, selectMiningDetour } from '../framework/tools/mining_detour.js';
 
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
 const useDelay = blockPlaceDelay > 0;
@@ -1353,10 +1354,22 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
                 new Promise((_, rej) => { _sdIv = setInterval(() => { try { if (bot.interrupt_code) rej(new Error('interrupted')); } catch (e) {} }, 200); }),
             ]);
         } finally { if (_sdIv) clearInterval(_sdIv); }
-        if (pickup) { try { await pickupNearbyItems(bot); } catch (e) {} }
+        if (pickup) {
+            let picked = false;
+            // The block-change acknowledgement can arrive one tick before the item entity.
+            // Give the drop a brief spawn window before deciding that nothing landed here.
+            await new Promise(r => setTimeout(r, 150));
+            try { picked = await ensurePickupAt(bot, cur.position, { radius: 6, maxDescend: 3, timeoutMs: 6000 }); }
+            catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
+            if (!picked) {
+                try { await pickupNearbyItems(bot); }
+                catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
+            }
+        }
         return 'ok';
     } catch (e) {
         try { bot.stopDigging(); } catch (_) {}
+        if (isUndergroundMiningWaterSafetyError(e)) throw e;
         if (e && e.message === 'interrupted') return 'error';
         return (e && e.message === 'dig-timeout') ? 'timeout' : 'error';
     }
@@ -1370,10 +1383,12 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
 //  每轮首选路径)没有。本原语补上缺失的一环: 朝埋铁凿一条 1×2 密封隧道, 逐格步进, 直到矿进臂展+可见,
 //  交回 safeDig 正常采(vein-follow 收尾)。安全闸(与 mineDown/reach-gate/C360-XR 同源, 缺一即安全停手
 //  返 false 让调用方按旧逻辑 exclude, 绝不制造新险):
-//   · 防坠: 下一站位格【脚下必须实心地板】, 否则=隔空/溶洞 → 停(不搭桥, 守住 reach-gate "不跨空隙"语义)。
-//   · 防淹: 每块 corridor 走 safeToDigBlock 岩浆/水裁判(safeDig 内建), 破面会淹 → 停(留密封)。
+//   · 防坠: 下一站位格【脚下必须实心地板】, 否则=隔空/溶洞 → 先探同层狗腿绕路; 无安全格才停
+//     (不搭桥, 守住 reach-gate "不跨空隙"语义)。
+//   · 防淹: 每块 corridor 走 safeToDigBlock 岩浆/水裁判(safeDig 内建), 破面会淹 → 同样先绕路,
+//     无安全格才停并保持密封。
 //   · 防 x-ray: corridor 块只在臂展 ≤4.6 内破(safeDig approach:false 自带 reach 守卫); 矿块从不当渣土挖,
-//     前方一旦是矿即返 true 交 safeDig(其 requireLOS + C360-XR 仍锁真实采矿, 隔厚墙 x-ray 仍不可能)。
+//     目标矿在安全前方才返 true 交 safeDig(其 requireLOS + C360-XR 仍锁真实采矿, 隔厚墙 x-ray 仍不可能)。
 //   · 有界: maxSteps + budgetMs + interrupt/death 感知; 凿不开或步进不动累计 3 次即停。
 //  off-switch: 环境变量 MC_ORE_TUNNEL=0 关闭(默认开)。
 async function tunnelToOre(bot, oreBlock, { maxSteps = 30, budgetMs = 25000, maxD3 = 24 } = {}) {
@@ -1390,7 +1405,57 @@ async function tunnelToOre(bot, oreBlock, { maxSteps = 30, budgetMs = 25000, max
         const _dbg = (m) => { try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ${m}\n`); } catch (e) {} };
         if (eyeReach() > maxD3 + 1.5) return false;             // 太远, 不承诺(与 C304 同上限)
         const t0 = Date.now();
-        let stuck = 0, carved = 0;
+        let stuck = 0, carved = 0, detours = 0;
+        const _MAX_DETOURS = 12;                                // 有界狗腿, 防大空腔里无限游走
+        const _FLUID = /lava|water/;
+        const _UNBREAKABLE = /^(bedrock|barrier|reinforced_deepslate)$/;
+        const _key = (p) => `${p.x},${p.y},${p.z}`;
+        const visited = new Set([_key(bot.entity.position.floored())]);
+        const _corridor = (feet, sx, sy, sz) => {
+            const nf = feet.offset(sx, sy, sz);      // 下一站位(脚)
+            const nh = nf.offset(0, 1, 0);           // 下一站位(头)
+            const floor = nf.offset(0, -1, 0);       // 下一站位脚下地板
+            const carveList = [nf, nh];
+            if (sy < 0 && (sx !== 0 || sz !== 0)) carveList.push(feet.offset(sx, 1, sz));
+            return { sx, sy, sz, nf, nh, floor, carveList };
+        };
+        const _probeCorridor = (plan) => {
+            const floorBlock = bot.blockAt(plan.floor);
+            let fluidInCorridor = !!(floorBlock && _FLUID.test(floorBlock.name || ''));
+            let fluidWouldEnter = false;
+            let unbreakable = false;
+            let targetAhead = false;
+            let otherOreAhead = false;
+            for (const p of plan.carveList) {
+                const b = bot.blockAt(p);
+                if (!b) continue;
+                if (_FLUID.test(b.name || '')) fluidInCorridor = true;
+                if (isOreName(b.name)) {
+                    if (_key(p) === _key(orePos)) targetAhead = true;
+                    else otherOreAhead = true;       // 不把另一条矿脉当隧道渣土挖掉
+                }
+                if (_UNBREAKABLE.test(b.name || '')) unbreakable = true;
+                if (!isDead(b)) {
+                    const guard = safeToDigBlock(bot, b);
+                    if (guard && guard.ok === false) fluidWouldEnter = true;
+                }
+            }
+            const safety = corridorSafety({
+                floorSolid: solidAt(plan.floor),
+                fluidInCorridor,
+                fluidWouldEnter,
+                unbreakable,
+                visited: visited.has(_key(plan.nf)),
+                targetAhead,
+                otherOreAhead,
+            });
+            return {
+                ...safety,
+                targetAhead,
+                score: Math.abs(orePos.x - plan.nf.x) + Math.abs(orePos.y - plan.nf.y) + Math.abs(orePos.z - plan.nf.z),
+                plan,
+            };
+        };
         for (let step = 0; step < maxSteps; step++) {
             if (bot.interrupt_code || bot.death_abort || bot.health <= 0) return false;
             if (Date.now() - t0 > budgetMs) { _dbg(`★C304-T timeout ore@${orePos.x},${orePos.y},${orePos.z} carved=${carved} step=${step}`); return false; }
@@ -1410,20 +1475,44 @@ async function tunnelToOre(bot, oreBlock, { maxSteps = 30, budgetMs = 25000, max
             if (sx === 0 && sz === 0 && sy === 0) return false;      // 已同格却未 reach/LOS → 交 safeDig
             if (sx === 0 && sz === 0 && sy > 0) return false;        // 纯竖直上矿需 pillar(越 reach-gate)→ 交 exclude
 
-            const nf = feet.offset(sx, sy, sz);      // 下一站位(脚)
-            const nh = nf.offset(0, 1, 0);           // 下一站位(头)
-            const floor = nf.offset(0, -1, 0);       // 下一站位脚下地板(升/平/降通式: nf 正下方)
-
-            // 本步要清开的 cells = 前向身位(nf 脚 + nh 头); 台阶【下】另加过渡头顶净空 feet+(sx,1,sz),
-            // 否则平移到落点前会头撞前上方石头卡死。台阶【上】只破身位, 绝不碰 floor(=承重台阶)。
-            const carveList = [nf, nh];
-            if (sy < 0 && (sx !== 0 || sz !== 0)) carveList.push(feet.offset(sx, 1, sz));
-
-            // 前方任一清开格正是矿 → 矿在正前臂展, 交 safeDig(绝不把矿当渣挖穿)
-            for (const p of carveList) { const b = bot.blockAt(p); if (b && isOreName(b.name)) { _dbg(`★C304-T ore-ahead @${p.x},${p.y},${p.z} carved=${carved} step=${step}`); return true; } }
-
-            // 防坠: 站位脚下必须实心(否则=隔空/溶洞 → 停, 不搭桥/不 pillar, 守 reach-gate 语义)
-            if (!solidAt(floor)) { _dbg(`★C304-T stop no-floor ahead @${nf.x},${nf.y},${nf.z} (gap/cave) — 不搭桥`); return false; }
+            // 先读、后动: 主方向遇水/流体开面/坑道落差时，不再原地 return false。探测左右和后方
+            // 三个同层狗腿格，挑【安全 + 未走过 + 仍最靠近目标】的一格立即绕行；下一轮重新朝矿，
+            // 自然形成绕过局部障碍后回正的折线。仍不搭桥/不 pillar，四向都危险才安全停手。
+            let plan = _corridor(feet, sx, sy, sz);
+            let probe = _probeCorridor(plan);
+            if (probe.targetAhead && probe.safe) { _dbg(`★C304-T ore-ahead @${plan.nf.x},${plan.nf.y},${plan.nf.z} carved=${carved} step=${step}`); return true; }
+            if (!probe.safe) {
+                if (detours >= _MAX_DETOURS) {
+                    _dbg(`★C304-T stop ${probe.reason} @${plan.nf.x},${plan.nf.y},${plan.nf.z} — detour budget ${detours}/${_MAX_DETOURS}`);
+                    return false;
+                }
+                // 纯竖直逼近没有水平 heading，按当前朝向取一个基准再探四周。
+                let hx = sx, hz = sz;
+                if (hx === 0 && hz === 0) {
+                    hx = -Math.sin(bot.entity.yaw || 0); hz = Math.cos(bot.entity.yaw || 0);
+                    if (Math.abs(hx) >= Math.abs(hz)) { hx = Math.sign(hx) || 1; hz = 0; }
+                    else { hz = Math.sign(hz) || 1; hx = 0; }
+                }
+                const verticalOnly = sx === 0 && sz === 0;
+                const detourDirs = orderedMiningDetours(hx, hz);
+                if (verticalOnly) detourDirs.unshift({ dx: hx, dz: hz, turn: 'forward' }); // 竖直无主方向, 四向都探
+                const alternatives = detourDirs.map(d => {
+                    const altPlan = _corridor(feet, d.dx, 0, d.dz);  // 绕路保持同层, 不盲跳/盲爬
+                    const altProbe = _probeCorridor(altPlan);
+                    return { ...d, ...altProbe };
+                });
+                const picked = verticalOnly
+                    ? alternatives.filter(a => a.safe).sort((a, b) => a.score - b.score)[0] || null
+                    : selectMiningDetour(hx, hz, alternatives);
+                if (!picked) {
+                    _dbg(`★C304-T stop ${probe.reason} @${plan.nf.x},${plan.nf.y},${plan.nf.z} — no-safe-detour ${alternatives.map(a => `${a.turn}:${a.reason}`).join(',')}`);
+                    return false;
+                }
+                detours++;
+                _dbg(`★C304-T DETOUR ${probe.reason} @${plan.nf.x},${plan.nf.y},${plan.nf.z} → ${picked.turn} ${picked.dx},${picked.dz} via ${picked.plan.nf.x},${picked.plan.nf.y},${picked.plan.nf.z} remain=${picked.score} (${detours}/${_MAX_DETOURS})`);
+                plan = picked.plan;
+            }
+            const { nf, carveList } = plan;
 
             // 逐块凿开 corridor — safeDig(approach:false)自带 ≤4.6 臂展守卫 + 岩浆/水裁判 + equip
             let opened = true;
@@ -1447,12 +1536,12 @@ async function tunnelToOre(bot, oreBlock, { maxSteps = 30, budgetMs = 25000, max
                     if (here.x === nf.x && here.z === nf.z && Math.abs(m.y - nf.y) < 0.6) { moved = true; break; }
                     try { await bot.lookAt(new Vec3(ctr.x, m.y + 1.0, ctr.z), true); } catch (e) {}
                     try { bot.setControlState('forward', true); } catch (e) {}
-                    try { bot.setControlState('jump', sy > 0); } catch (e) {}
+                    try { bot.setControlState('jump', plan.sy > 0); } catch (e) {}
                     await new Promise(r => setTimeout(r, 90));
                 }
             } finally { try { bot.clearControlStates(); } catch (e) {} }
             if (!moved) { if (++stuck >= 3) { _dbg(`★C304-T stuck move → ${nf.x},${nf.y},${nf.z} carved=${carved}`); return false; } }
-            else stuck = 0;
+            else { stuck = 0; visited.add(_key(bot.entity.position.floored())); }
         }
         _dbg(`★C304-T maxSteps ore@${orePos.x},${orePos.y},${orePos.z} carved=${carved}`);
         return false;
@@ -1476,6 +1565,33 @@ function _deathLinesCached(bot) {
     } catch (e) { return []; }
 }
 
+const ORE_COLLECT_SPECS = Object.freeze({
+    coal: { targets: ['coal'], blocks: ['coal_ore', 'deepslate_coal_ore'], drop: 'coal' },
+    diamond: { targets: ['diamond', 'diamonds'], blocks: ['diamond_ore', 'deepslate_diamond_ore'], drop: 'diamond' },
+    emerald: { targets: ['emerald'], blocks: ['emerald_ore', 'deepslate_emerald_ore'], drop: 'emerald' },
+    iron: { targets: ['iron'], blocks: ['iron_ore', 'deepslate_iron_ore'], drop: 'raw_iron' },
+    gold: { targets: ['gold'], blocks: ['gold_ore', 'deepslate_gold_ore'], drop: 'raw_gold' },
+    lapis: { targets: ['lapis', 'lapis_lazuli'], blocks: ['lapis_ore', 'deepslate_lapis_ore'], drop: 'lapis_lazuli' },
+    redstone: { targets: ['redstone'], blocks: ['redstone_ore', 'deepslate_redstone_ore'], drop: 'redstone' },
+    copper: { targets: ['copper'], blocks: ['copper_ore', 'deepslate_copper_ore'], drop: 'raw_copper' },
+    quartz: { targets: ['quartz'], blocks: ['nether_quartz_ore'], drop: 'quartz' },
+});
+
+function oreCollectSpec(blockType) {
+    const requested = String(blockType || '');
+    return Object.values(ORE_COLLECT_SPECS).find((spec) =>
+        spec.targets.includes(requested) || spec.blocks.includes(requested)) || null;
+}
+
+export function collectDropItemName(blockType) {
+    return oreCollectSpec(blockType)?.drop || blockType;
+}
+
+export function collectOreBlockTypes(blockType) {
+    const spec = oreCollectSpec(blockType);
+    return spec ? [...spec.blocks] : [blockType];
+}
+
 export async function collectBlock(bot, blockType, num=1, exclude=null, veinFollow='auto') {
     /**
      * Collect one of the given block type.
@@ -1495,14 +1611,8 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
         log(bot, `Invalid number of blocks to collect: ${num}.`);
         return false;
     }
-    let blocktypes = [blockType];
-    const oreDrops = ['coal','diamond','emerald','iron','gold','lapis_lazuli','redstone','copper'];
-    if (oreDrops.includes(blockType)) {
-        blocktypes.push(blockType+'_ore');
-        blocktypes.push('deepslate_'+blockType+'_ore'); // diamond/iron/etc at deepslate depth
-    }
-    if (blockType.endsWith('ore'))
-        blocktypes.push('deepslate_'+blockType);
+    const oreSpec = oreCollectSpec(blockType);
+    let blocktypes = collectOreBlockTypes(blockType);
     if (blockType === 'dirt')
         blocktypes.push('grass_block');
     if (blockType === 'cobblestone')
@@ -1524,8 +1634,10 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
         return false;
     }
     // Vein-follow only makes sense for ores (you don't want to chain-mine every
-    // nearby stone/dirt/log). 'auto' = on iff the search set contains an ore block.
-    const veinActive = !isLiquid && (veinFollow === true || (veinFollow === 'auto' && blocktypes.some(n => n.endsWith('_ore'))));
+    // nearby stone/dirt/log). Keep the generic *_ore fallback for modded/unlisted
+    // ores while the known specs above supply exact block-family/drop mappings.
+    const veinActive = !isLiquid && (veinFollow === true
+        || (veinFollow === 'auto' && (!!oreSpec || blocktypes.some(n => n.endsWith('_ore')))));
 
     // ★TRUTHFUL COUNT (root fix for "Collected 4 oak_log 但空包"): `collected` below counts
     // blocks BROKEN, not drops actually vacuumed. A log broken over water floats off and
@@ -1534,8 +1646,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
     // also track the real inventory delta of the drop item and report/return on THAT.
     // Ores that pick up as a differently-named item drop need the mapping (iron→raw_iron …);
     // everything else drops as its own block name.
-    const DROP_NAME = { iron: 'raw_iron', gold: 'raw_gold', copper: 'raw_copper' };
-    const dropItem = DROP_NAME[blockType] || blockType;
+    const dropItem = collectDropItemName(blockType);
     const gainOf = () => bot.inventory.items()
         .filter(i => i.name === dropItem || i.name === blockType)
         .reduce((a, i) => a + i.count, 0);
@@ -1965,27 +2076,30 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
                 // through a wall (the C304 path-exists gate selected it, but distToBlock<=4.6 alone
                 // let it reach through solid rock). Non-ore (logs/stone/dirt) dig as before.
                 const _isOre = /_ore$/.test(block.name || '');
-                let r = await safeDig(bot, block, { maxMs: 15000, equip: false, requireLOS: _isOre });
+                const gainBeforeDig = gainOf();
+                let r = await safeDig(bot, block, { maxMs: 15000, equip: false, pickup: _isOre, requireLOS: _isOre });
                 // ★C304-T (2026-07-09 "凿隧道直达"): 埋铁被 safeDig 判 unreachable/occluded 时不再直接
                 //  exclude 放弃整条矿脉 — 先朝它凿一条密封隧道(防坠/防淹/防x-ray, 任一不安全即停),
                 //  逼近到臂展再重试一次 safeDig(requireLOS 仍锁, 绝不 x-ray)。隧道失败=旧行为 exclude。
                 if (_isOre && (r === 'unreachable' || r === 'occluded') && _tunnelTries < _TUNNEL_MAX_TRIES) {
                     _tunnelTries++;
                     if (await tunnelToOre(bot, block))
-                        r = await safeDig(bot, block, { maxMs: 15000, equip: false, requireLOS: true });
+                        r = await safeDig(bot, block, { maxMs: 15000, equip: false, pickup: true, requireLOS: true });
                 }
                 if (r === 'ok') {
                     // ★Actually COLLECT the drop (fixes "挖了树不捡木头"): step ONTO the broken
                     // block's spot via a dig-capable path so mineflayer auto-vacuums the item,
                     // THEN sweep any stragglers (drops land a couple blocks off through leaves/vines).
-                    try { await goToPosition(bot, block.position.x, block.position.y, block.position.z, 1); }
-                    catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
-                    const preSweep = gainOf();
-                    await pickupNearbyItems(bot);
+                    if (gainOf() === gainBeforeDig) {
+                        try { await goToPosition(bot, block.position.x, block.position.y, block.position.z, 1); }
+                        catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
+                        try { await ensurePickupAt(bot, block.position, { radius: 6, maxDescend: 3, timeoutMs: 6000 }); }
+                        catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
+                    }
                     // ★WATER-DRIFT SWEEP: a drop broken next to water floats and drifts out of the
                     // first pickup's reach (root cause of the -79,168 lakeside chop that logged 4
                     // logs but banked 0). If the drop item still didn't land, chase once wider.
-                    if (gainOf() === preSweep) {
+                    if (gainOf() === gainBeforeDig) {
                         try { await pickupNearbyItems(bot, 12); }
                         catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
                     }
@@ -2045,42 +2159,53 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
 }
 
 // Flood-fill mine a connected ore vein starting from a just-mined block position.
-// MC ore blobs often touch only diagonally, so we expand over face- AND
-// diagonal-adjacent cells. Digs each reachable block of `blocktypes`, equipping
-// the right pickaxe per block (so it actually drops) and pathing close so the
-// pathfinder doesn't thrash. Bounded by `max`. Returns how many blocks it mined.
-async function harvestConnectedVein(bot, startPos, blocktypes, max=64) {
-    const NB = [
-        [1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1],
-        [1,1,0],[1,-1,0],[-1,1,0],[-1,-1,0],[0,1,1],[0,1,-1],[0,-1,1],[0,-1,-1],
-        [1,0,1],[1,0,-1],[-1,0,1],[-1,0,-1],
-    ];
+// MC ore blobs can touch on faces, edges, or corners, so use all 26 neighbours.
+// A block that is temporarily occluded/unreachable is retried after another vein
+// block is mined: removing its neighbour can expose a safe LOS/stand cell. Fluid
+// and wrong-tool refusals remain terminal, preserving the safety contract.
+export async function harvestConnectedVein(bot, startPos, blocktypes, max=64, opts={}) {
+    const NB = [];
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+        if (dx || dy || dz) NB.push([dx, dy, dz]);
+    }
     const isTarget = (b) => b && blocktypes.includes(b.name);
-    const seen = new Set();
-    const queue = [];
-    // Seed with the neighbours of the already-mined start block.
-    for (const [dx,dy,dz] of NB) queue.push(startPos.offset(dx,dy,dz));
-    let mined = 0;
-    while (queue.length && mined < max) {
-        if (bot.interrupt_code) break;
-        const p = queue.shift();
-        const k = `${p.x},${p.y},${p.z}`;
-        if (seen.has(k)) continue;
-        seen.add(k);
+    const keyOf = (p) => `${p.x},${p.y},${p.z}`;
+    const discovered = new Set();
+    const scan = [];
+    const component = [];
+    const enqueue = (p) => {
+        const key = keyOf(p);
+        if (discovered.has(key)) return;
+        discovered.add(key);
+        scan.push(p);
+    };
+    for (const [dx,dy,dz] of NB) enqueue(startPos.offset(dx,dy,dz));
+    while (scan.length && component.length < max) {
+        const p = scan.shift();
         const b = bot.blockAt(p);
         if (!isTarget(b)) continue;
-        // ★Break via the same safeDig primitive as the main path — reach-guard prevents the
-        // "抬头空挥" on a tall tree's high logs, the equip step keeps a sword off wood, and the
-        // 8s backstop bounds each log. Expand neighbours regardless of outcome (a leaning/bent
-        // trunk unreachable from here may be reachable from an adjacent cell).
-        // ★requireLOS: this flood-fill only ever runs on ORE veins (collectBlock veinActive), so
-        // apply the SAME anti-x-ray LOS gate as the main dig — never reach a vein block through a
-        // wall. safeDig approaches (repositions) blocks >4.4b first, so a wrapping vein still gets
-        // exhausted from reachable angles; a genuinely walled-off tail is left for the next scan
-        // (recoverable) rather than x-ray-grabbed.
-        const r = await safeDig(bot, b, { maxMs: 8000, pickup: true, requireLOS: true });
-        if (r === 'ok') mined++;
-        for (const [dx,dy,dz] of NB) queue.push(p.offset(dx,dy,dz));
+        component.push(p);
+        for (const [dx,dy,dz] of NB) enqueue(p.offset(dx,dy,dz));
+    }
+
+    const dig = typeof opts.dig === 'function'
+        ? opts.dig
+        : (b) => safeDig(bot, b, { maxMs: 8000, pickup: true, requireLOS: true });
+    let mined = 0;
+    let pending = component;
+    while (pending.length && mined < max) {
+        let passMined = 0;
+        const retry = [];
+        for (const p of pending) {
+            if (bot.interrupt_code || mined >= max) break;
+            const b = bot.blockAt(p);
+            if (!isTarget(b)) continue;
+            const r = await dig(b);
+            if (r === 'ok') { mined++; passMined++; }
+            else if (r === 'occluded' || r === 'unreachable') retry.push(p);
+        }
+        if (passMined === 0) break;
+        pending = retry;
     }
     return mined;
 }
@@ -2242,7 +2367,8 @@ export async function ensurePickupAt(bot, pos, opts = {}) {
      * SAFE descent (≤ maxDescend blocks down → ZERO fall damage) and its resting cell isn't
      * over/in lava·fire·void. Anything below that, or that the (non-digging, maxDropDown=3)
      * pathfinder refuses to safely reach, is LEFT BEHIND on purpose — losing an item is
-     * always cheaper than a death. Never throws.
+     * always cheaper than a death. Ordinary pickup/path failures return false;
+     * underground mining water-safety failures still unwind the mining skill.
      *
      * @param {MinecraftBot} bot
      * @param {Vec3} pos   the position of the block that was just mined (drop origin)
@@ -2297,18 +2423,23 @@ export async function ensurePickupAt(bot, pos, opts = {}) {
                         new Promise((_, rej) => setTimeout(() => rej(new Error('pickup-nav-timeout')), timeoutMs)),
                     ]);
                 } catch (e) {
+                    if (isUndergroundMiningWaterSafetyError(e)) throw e;
                     log(bot, `ensurePickup: couldn't safely reach drop @${Math.floor(tp.x)},${Math.floor(tp.y)},${Math.floor(tp.z)} (${e.message}) — leaving it.`);
                     _pkDBG(`reach-refuse @${Math.floor(tp.x)},${Math.floor(tp.y)},${Math.floor(tp.z)} (${e.message}) — left (pathfinder refused)`);
                     break;   // pathfinder refused (likely unsafe / blocked) — don't fight it
                 }
             }
-            try { await pickupNearbyItems(bot); } catch (e) {}
+            try { await pickupNearbyItems(bot); }
+            catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
             await new Promise(r => setTimeout(r, 200));
         }
         const got = totalItems() - before;
         if (got > 0) { log(bot, `ensurePickup: collected ${got} item(s) from the dig site.`); _pkDBG(`got ${got} item(s) @${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)} (safe descend+pickup ✓)`); }
         return got > 0;
-    } catch (e) { return false; }
+    } catch (e) {
+        if (isUndergroundMiningWaterSafetyError(e)) throw e;
+        return false;
+    }
 }
 
 
