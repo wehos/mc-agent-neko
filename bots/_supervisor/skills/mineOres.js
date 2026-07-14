@@ -31,18 +31,6 @@ const COLLECT_KEY = { iron: 'iron', coal: 'coal', gold: 'gold', copper: 'copper'
 
 export default async function mineOres(bot, ctx, opts = {}) {
     const { skills, world, Vec3 } = ctx;
-    const isWaterSafetyError = (error) => typeof skills.isUndergroundMiningWaterSafetyError === 'function'
-        && skills.isUndergroundMiningWaterSafetyError(error);
-    const stopNavigation = () => {
-        try { bot.pathfinder.stop(); } catch (e) { /* best-effort emergency stop */ }
-        try { bot.clearControlStates(); } catch (e) { /* best-effort emergency stop */ }
-    };
-    const rethrowWaterSafetyError = (error, stage) => {
-        if (!isWaterSafetyError(error)) return;
-        stopNavigation();
-        prog(`ABORT ${stage} — ${error.name}: ${error.message}`);
-        throw error;
-    };
     const ore = String((opts && opts.ore) || 'iron');
     // ★2026-07-14 挖钻石(diamonds)走竖直直井下潜(shaft, 不梯式); 其他矿(浅层铁/煤等)保留楼梯。传给下方三处 mineDown。
     const wantShaft = /^diamond/.test(ore);
@@ -199,14 +187,13 @@ export default async function mineOres(bot, ctx, opts = {}) {
             await Promise.race([
                 skills.goToPosition(bot, tgt.x, null, tgt.z, 6),
                 new Promise((_, rej) => setTimeout(() => rej(new Error('oracle-walk-timeout')), 90000)),
-            ]).catch((e) => { stopNavigation(); rethrowWaterSafetyError(e, 'oracle-walk'); });
+            ]).catch(() => { try { bot.pathfinder.stop(); } catch (e) {} try { bot.clearControlStates(); } catch (e) {} });
         }
         // 垂直逼近: 高差 >6 用 mineDown 密封下潜到矿层 y-1 (够近则 collectBlock 自己挖过去);
         // 预算余量 <60s 不再开潜 (评审: 嵌套 mineDown 自带多分钟循环, deadline 只兜 collect 环)
         if (bot.entity.position.y - tgt.y > 6 && !bot.interrupt_code && !bot.death_abort
             && deadline - Date.now() > 60000) {
-            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(tgt.y - 1, -58), shaft: wantShaft }); }
-            catch (e) { rethrowWaterSafetyError(e, 'oracle-descent'); }
+            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(tgt.y - 1, -58), shaft: wantShaft }); } catch (e) {}
         }
     } else if (!faceOreNear()) {
         // ★评审 P2: 无可用 oracle 目标(缺失/陈旧/真距超闸)时不能在地表平采 —
@@ -215,8 +202,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
         const band = ore === 'coal' ? 40 : (ore === 'diamonds' ? -52 : 14);
         if (bot.entity.position.y - band > 6 && !bot.interrupt_code && deadline - Date.now() > 60000) {
             prog(`无 oracle 目标 — 盲挖回退: mineDown 下潜 y${band}`);
-            try { await skills.customSkill(bot, 'mineDown', { targetY: band, shaft: wantShaft }); }
-            catch (e) { rethrowWaterSafetyError(e, 'blind-descent'); }
+            try { await skills.customSkill(bot, 'mineDown', { targetY: band, shaft: wantShaft }); } catch (e) {}
         }
     }
 
@@ -303,10 +289,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
             continue;
         }
         try { await skills.collectBlock(bot, collectKey, Math.max(1, Math.min(4, count - (cnt() - g0)))); }
-        catch (e) {
-            rethrowWaterSafetyError(e, `r${rounds}: collectBlock`);
-            prog(`r${rounds}: collectBlock 异常 ${(e && e.message) || e}`);
-        }
+        catch (e) { prog(`r${rounds}: collectBlock 异常 ${(e && e.message) || e}`); }
         if (cnt() > before) { bot._svnOreZeroRounds = 0; continue; }
         // 死57前实录: 13 轮 7 秒空转(collectBlock 秒败被吞) — 连续 3 轮零增量且轮耗 <5s
         // = 系统性失败(目标不可达/被挖空/镐门), 提前收工省镐, 让 3-strike 正常记账。
@@ -344,8 +327,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
         if (bandY != null && bot.entity.position.y - bandY > 8 && !bot.interrupt_code && !bot.death_abort
             && deadline - Date.now() > 60000) {
             prog(`r${rounds}: 仍高悬矿带上方 (y=${Math.floor(bot.entity.position.y)} bandY=${bandY}) — 零收获=够不着, 密封下潜切脉 (不横向蹦表层)`);
-            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(bandY - 2, -58), shaft: wantShaft }); }
-            catch (e) { rethrowWaterSafetyError(e, `r${rounds}: band-descent`); }
+            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(bandY - 2, -58), shaft: wantShaft }); } catch (e) {}
             continue;
         }
         const nxt = list.length ? list[rounds % list.length] : null;
@@ -354,17 +336,15 @@ export default async function mineOres(bot, ctx, opts = {}) {
         //   不能横向 hop 去 oracle 下一候选把它扔了(run2 病根) — 就地 branchMine 刷新暴露面, 下轮 collectBlock 再吃。
         if (faceOreNear()) {
             prog(`r${rounds}: 脸上仍有${ore}(≤${FACE_R}b)但本轮零增 — 就地 branchMine 刷面, 不横向换点`);
-            try { await skills.customSkill(bot, 'branchMine', 8); }
-            catch (e) { rethrowWaterSafetyError(e, `r${rounds}: local-branch`); }
+            try { await skills.customSkill(bot, 'branchMine', 8); } catch (e) {}
         } else if (nxt && nxtDist >= 4 && nxtDist < 250) {
             prog(`r${rounds}: 本区采空 → oracle 换点 ${nxt.x},${nxt.y},${nxt.z}`);
             await Promise.race([
                 skills.goToPosition(bot, nxt.x, nxt.y, nxt.z, 3),
                 new Promise((_, rej) => setTimeout(() => rej(new Error('hop-timeout')), 60000)),
-            ]).catch((e) => { stopNavigation(); rethrowWaterSafetyError(e, `r${rounds}: oracle-hop`); });
+            ]).catch(() => { try { bot.pathfinder.stop(); } catch (e) {} try { bot.clearControlStates(); } catch (e) {} });
         } else {
-            try { await skills.customSkill(bot, 'branchMine', 12); }
-            catch (e) { rethrowWaterSafetyError(e, `r${rounds}: refresh-branch`); }
+            try { await skills.customSkill(bot, 'branchMine', 12); } catch (e) {}
         }
     }
     const gained = cnt() - g0;
