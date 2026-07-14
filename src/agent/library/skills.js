@@ -4,6 +4,11 @@ import * as tickConfirm from "./tick_confirm.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import { unclimbVines } from './vine_unstick.js';
+import {
+    applyUndergroundWaterAvoidance,
+    isBotInWater,
+    shouldAvoidUndergroundWater,
+} from './navigation_policy.js';
 import settings from "../../../settings.js";
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -4125,6 +4130,13 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
     
     const stuckCheckPromise = new Promise((_, reject) => {
         stuckCheckInterval = setInterval(() => {
+            if (audit.abortOnWaterEntry && isBotInWater(bot)) {
+                const waterError = new Error('Underground mining path entered water');
+                waterError.name = 'UndergroundMiningWaterEntry';
+                clearInterval(stuckCheckInterval);
+                reject(waterError);
+                return;
+            }
             if (bot.interrupt_code) {
                 clearInterval(stuckCheckInterval);
                 reject(new Error('Interrupted'));
@@ -4179,6 +4191,16 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
     } catch (err) {
         clearInterval(stuckCheckInterval);
         bot.pathfinder.setGoal(null);
+        if (err && err.name === 'UndergroundMiningWaterEntry') {
+            try { bot.clearControlStates(); } catch (e) { /* best-effort emergency stop */ }
+            motionAudit(bot, 'path.water_entry_abort', {
+                seq: audit.seq,
+                phase: audit.phase,
+                ms: Date.now() - phaseStartedAt,
+                goal: audit.goal,
+            });
+            throw err;
+        }
         
         const errorMsg = err.message || err.toString();
         if (errorMsg.includes('Interrupted') || bot.interrupt_code) {
@@ -4238,6 +4260,8 @@ export async function goToGoal(bot, goal) {
     bot._lastPathGoalInfo = goalInfo;
     bot._lastPathGoalAt = Date.now();
     motionAudit(bot, 'path.begin', { seq: navSeq, goal: goalInfo });
+    const avoidUndergroundWater = shouldAvoidUndergroundWater(bot);
+    const startedInWater = avoidUndergroundWater && isBotInWater(bot);
 
     // ★MAROONED gate at the COMMON pathfinding entry (打转终极机理: 只给 goToPosition
     // 加门漏掉了 moveAway/moveAwayFromEntity/avoidEnemies — 它们直接走 goToGoal。
@@ -4314,6 +4338,25 @@ export async function goToGoal(bot, goal) {
     destructiveMovements.liquids.add(mc.getBlockId('flowing_water'));
     destructiveMovements.liquids.add(mc.getBlockId('lava'));
     destructiveMovements.liquids.add(mc.getBlockId('flowing_lava'));
+
+    // Underground mining is different from ordinary travel: an aquifer is not
+    // merely an expensive route, because a low ceiling can turn one path step
+    // into a drowning trap. Make water a hard A* veto for mining only. Keep the
+    // existing liquid entries so a route that starts in water can still model a
+    // dry exit; the runtime guard below only aborts a NEW water entry.
+    if (avoidUndergroundWater) {
+        const getBlockId = (name) => mc.getBlockId(name);
+        applyUndergroundWaterAvoidance(nonDestructiveMovements, bot, getBlockId);
+        applyUndergroundWaterAvoidance(destructiveMovements, bot, getBlockId);
+        motionAudit(bot, 'path.water_policy', {
+            seq: navSeq,
+            mode: 'hard-avoid',
+            startedInWater,
+            skill: bot._currentSkill || null,
+            y: +bot.entity.position.y.toFixed(2),
+            goal: goalInfo,
+        });
+    }
 
     // ★JUNGLE VINE FIX (user: 寻路特别容易卡在藤蔓面前动不了). Vines are CLIMBABLE in
     // mineflayer-pathfinder by default → the planner invents bogus "climb the vine" paths up
@@ -4464,7 +4507,12 @@ export async function goToGoal(bot, goal) {
 
             const result = await executePathfindingPhase(
                 bot, goal, currentMovements, phaseStuckTimeout, doorCheckInterval,
-                { seq: navSeq, phase: isDestructive ? 'destructive' : 'non-destructive', goal: goalInfo }
+                {
+                    seq: navSeq,
+                    phase: isDestructive ? 'destructive' : 'non-destructive',
+                    goal: goalInfo,
+                    abortOnWaterEntry: avoidUndergroundWater && !startedInWater,
+                }
             );
 
             if (result.success) {
