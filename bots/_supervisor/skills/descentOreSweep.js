@@ -103,8 +103,6 @@ export async function collectLiveOreBlock(bot, ctx, target, {
         } catch (e) {
             try { bot.pathfinder && bot.pathfinder.stop(); } catch (_) {}
             try { bot.clearControlStates(); } catch (_) {}
-            if (typeof skills.isUndergroundMiningWaterSafetyError === 'function'
-                && skills.isUndergroundMiningWaterSafetyError(e)) throw e;
             return { mined: 0, family, reason: 'approach-failed' };
         } finally {
             if (approachTimer) clearTimeout(approachTimer);
@@ -157,20 +155,12 @@ export async function collectLiveOreBlock(bot, ctx, target, {
                 continue;
             }
             let ok = false;
-            try { ok = await skills.breakBlockAt(bot, block.position.x, block.position.y, block.position.z); }
-            catch (e) {
-                if (typeof skills.isUndergroundMiningWaterSafetyError === 'function'
-                    && skills.isUndergroundMiningWaterSafetyError(e)) throw e;
-            }
+            try { ok = await skills.breakBlockAt(bot, block.position.x, block.position.y, block.position.z); } catch (e) {}
             if (!ok) { retry.push(position); continue; }
             mined++;
             passMined++;
             if (typeof skills.ensurePickupAt === 'function') {
-                try { await skills.ensurePickupAt(bot, block.position, { radius: 6, maxDescend: 3, timeoutMs: 6000 }); }
-                catch (e) {
-                    if (typeof skills.isUndergroundMiningWaterSafetyError === 'function'
-                        && skills.isUndergroundMiningWaterSafetyError(e)) throw e;
-                }
+                try { await skills.ensurePickupAt(bot, block.position, { radius: 6, maxDescend: 3, timeoutMs: 6000 }); } catch (e) {}
             }
             await yieldEventLoop();
         }
@@ -178,11 +168,7 @@ export async function collectLiveOreBlock(bot, ctx, target, {
         pending = retry;
     }
     if (mined && typeof skills.pickupNearbyItems === 'function') {
-        try { await skills.pickupNearbyItems(bot); }
-        catch (e) {
-            if (typeof skills.isUndergroundMiningWaterSafetyError === 'function'
-                && skills.isUndergroundMiningWaterSafetyError(e)) throw e;
-        }
+        try { await skills.pickupNearbyItems(bot); } catch (e) {}
     }
     return { mined, family, reason: mined ? 'mined' : 'candidate-not-mined', elapsedMs: Date.now() - startedAt };
 }
