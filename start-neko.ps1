@@ -4,15 +4,16 @@
 #
 # Usage:
 #   .\start-neko.ps1                      # DEFAULT: framework-v2 LIVE drives the bot + admin 指令独占优先
-#   .\start-neko.ps1 -FrameworkShadow     # framework-v2 enabled but SHADOW-only (logs decisions, doesn't act)
+#   .\start-neko.ps1 -FrameworkShadow -Telemetry # SHADOW-only; explicitly retain decision telemetry
 #   .\start-neko.ps1 -Baseline            # opt out: baseline modes + LLM brain, framework-v2 OFF (老空转模式)
 #   .\start-neko.ps1 -ScreenshotMs 5000   # also stream periodic POV screenshots every 5s (vision feed)
+#   .\start-neko.ps1 -Telemetry           # opt in to bounded diagnostic JSONL/log history
 #
 # Framework-v2 (P1): the deterministic progression engine (wood->stone->iron->diamond->...).
 #   ★2026-07-07 用户令: 默认既开 framework 自主, 又听 admin —— admin 指令通过"外部意图独占"压过
 #     framework 自主派发(硬保命凌驾一切)。默认 => MC_FRAMEWORK_V2=1 + MC_FRAMEWORK_SHADOW=0。
 #   -Baseline        => MC_FRAMEWORK_V2=0 (kernel off, 只跑 modes + LLM)
-#   -FrameworkShadow => MC_FRAMEWORK_V2=1 + MC_FRAMEWORK_SHADOW=1 (kernel logs to framework-shadow.log, no dispatch)
+#   -FrameworkShadow => MC_FRAMEWORK_V2=1 + MC_FRAMEWORK_SHADOW=1 (add -Telemetry to retain framework-shadow.log)
 #   Watch decisions live:  Get-Content .\bots\_supervisor\framework-shadow.log -Wait -Tail 20
 #
 # Vision: on-demand vision is always enabled (settings.allow_vision). -ScreenshotMs>0 adds the
@@ -20,6 +21,7 @@
 param(
     [switch]$Baseline,
     [switch]$FrameworkShadow,
+    [switch]$Telemetry,
     [int]$ScreenshotMs = 0
 )
 $ErrorActionPreference = 'Stop'
@@ -65,6 +67,15 @@ Write-Host "low-hp survival instincts: DISABLED (MC_HP_INSTINCTS=0 — 低血不
 # failures (observed ~19:25, console unusable). A broken feature is safer disabled; remove
 # this once vision_interpreter injects globalThis.THREE (task #12).
 $env:NEKO_DISABLE_INPROC_VISION = '1'
+
+if ($Telemetry) {
+    $env:MC_TELEMETRY = '1'
+    Write-Host "diagnostic telemetry: ENABLED (8MB/file, 64MB total runtime-log budget)"
+} else {
+    # Explicitly clear a stale shell value: distributed builds are telemetry-off by default.
+    Remove-Item Env:MC_TELEMETRY -ErrorAction SilentlyContinue
+    Write-Host "diagnostic telemetry: OFF (use -Telemetry to opt in)"
+}
 
 if ($ScreenshotMs -gt 0) {
     $env:NEKO_AGENT_SCREENSHOT_INTERVAL_MS = "$ScreenshotMs"

@@ -5,6 +5,7 @@ import settings from './settings.js'
 import convoManager from './conversation.js';
 import fs from 'fs';
 import Vec3 from 'vec3';
+import { appendTelemetry } from '../utils/telemetry.js';
 // Framework v2 lava_guard — pure read predicate (no lane, no flag), safe to call
 // from a reflex. Wires the blueprint §E.2 "never clutch over lava" guard into the
 // live MLG reflex below (the inline floor-scan skipped lava: boundingBox 'empty'≠'block').
@@ -3312,7 +3313,7 @@ const modes_list = [
                             } catch (e) {}
                         }
                         try {
-                            fs.appendFileSync('bots/_supervisor/mine_motion.jsonl', JSON.stringify({
+                            appendTelemetry('mine_motion.jsonl', {
                                 ts: new Date().toISOString(),
                                 event: 'step_edge.skip',
                                 pos: { x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3) },
@@ -3334,7 +3335,7 @@ const modes_list = [
                                     skipCount: this.step_skip_count,
                                     guardMs,
                                 },
-                            }) + '\n');
+                            });
                         } catch (e) {}
                     }
                     if (wantsForward && stepLike && moved < 0.12 && !hasBodyWork && !famineCriticalNoStep && now > this.step_guard_until) {
@@ -3367,7 +3368,7 @@ const modes_list = [
                             };
                             const motionLog = (event, data = {}) => {
                                 try {
-                                    fs.appendFileSync('bots/_supervisor/mine_motion.jsonl', JSON.stringify({
+                                    appendTelemetry('mine_motion.jsonl', {
                                         ts: new Date().toISOString(),
                                         event,
                                         pos: exact(),
@@ -3375,7 +3376,7 @@ const modes_list = [
                                         mob: bot._mobility ? bot._mobility.state : null,
                                         env: envSnap(),
                                         data,
-                                    }) + '\n');
+                                    });
                                 } catch (e) {}
                             };
                             const centerOnCurrentCell = async () => {
@@ -3892,11 +3893,8 @@ const modes_list = [
             }
             const W = (rec) => {
                 try {
-                    if (this.logSize === 0) { try { this.logSize = fs.statSync('bots/_supervisor/combat_log.jsonl').size; } catch (e) { this.logSize = 1; } }
-                    if (this.logSize > 20 * 1024 * 1024) { try { fs.renameSync('bots/_supervisor/combat_log.jsonl', 'bots/_supervisor/combat_log.jsonl.1'); } catch (e) {} this.logSize = 1; }
                     const line = JSON.stringify(rec) + '\n';
-                    fs.appendFileSync('bots/_supervisor/combat_log.jsonl', line);
-                    this.logSize += line.length;
+                    appendTelemetry('combat_log.jsonl', line, { json: false });
                 } catch (e) {}
             };
             // 雷达: 新接触即记录 (先手知情)
@@ -5221,8 +5219,8 @@ const modes_list = [
                         try {
                             const logIds = Object.values(bot.registry.blocksByName)
                                 .filter(b => /_log$/.test(b.name)).map(b => b.id);
-                            await new Promise(r => setImmediate(r)); const hits = bot.findBlocks({ matching: logIds, maxDistance: 64, count: 8 });   // ★findBlocks(palette)+setImmediate让路(0714)
-                            const reachable = (hits || []).filter(p => Math.abs(p.y - me0.y) <= 6)
+                            const hits = await world.getNearestBlocksWhereAsync(bot, logIds, 64, 8);
+                            const reachable = (hits || []).map(b => b.position).filter(p => Math.abs(p.y - me0.y) <= 6)
                                 .sort((a, b) => me0.distanceTo(a) - me0.distanceTo(b));
                             if (reachable.length) {
                                 ux = reachable[0].x - me0.x; uz = reachable[0].z - me0.z;
@@ -5620,7 +5618,7 @@ const modes_list = [
             };
             const write = (event, data = {}) => {
                 try {
-                    fs.appendFileSync(file, JSON.stringify({
+                    appendTelemetry('mine_motion.jsonl', {
                         ts: new Date().toISOString(),
                         event,
                         seq: data.seq,
@@ -5634,7 +5632,7 @@ const modes_list = [
                         skill: bot._currentSkill || null,
                         mob: bot._mobility ? bot._mobility.state : null,
                         data,
-                    }) + '\n');
+                    });
                 } catch (e) {}
             };
             const stony = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;
@@ -5733,7 +5731,7 @@ const modes_list = [
                     if (_xd > 2.2) {
                         const _xsee = (() => { try { return bot.canSeeBlock(block); } catch (e) { return true; } })();
                         if (!_xsee) {
-                            try { fs.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★XRAY-BLOCK dig ${block.name}@${block.position.x},${block.position.y},${block.position.z} d=${_xd.toFixed(1)} occluded — refused\n`); } catch (e) {}
+                            appendTelemetry('mine_dbg.log', `[${new Date().toISOString()}] ★XRAY-BLOCK dig ${block.name}@${block.position.x},${block.position.y},${block.position.z} d=${_xd.toFixed(1)} occluded — refused\n`, { json: false });
                             const err = new Error(`xray dig blocked: ${block.name} occluded at ${_xd.toFixed(1)}b`);
                             write('dig.end', { seq, ok: false, ms: Date.now() - startedAt, target: blockObj(block), error: err.message, env: envSnap() });
                             throw err;
@@ -5769,7 +5767,7 @@ const modes_list = [
                                 || (!!_mbO.enclosed && (!_mbO.exits || _mbO.exits.length === 0))
                                 || (Date.now() < (bot._plannedNoPickStoneUntil || 0));
                             if (!_trapO) {
-                                try { fs.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★PICKTIER-BLOCK dig ${block.name}@${block.position.x},${block.position.y},${block.position.z} held=${bot.heldItem ? bot.heldItem.name : 'empty'} — 无够品级镐可采, 拒挖(保矿不浪费)\n`); } catch (e) {}
+                                appendTelemetry('mine_dbg.log', `[${new Date().toISOString()}] ★PICKTIER-BLOCK dig ${block.name}@${block.position.x},${block.position.y},${block.position.z} held=${bot.heldItem ? bot.heldItem.name : 'empty'} — 无够品级镐可采, 拒挖(保矿不浪费)\n`, { json: false });
                                 const err = new Error(`pick-tier dig blocked: ${block.name} not harvestable by any owned pickaxe`);
                                 write('dig.end', { seq, ok: false, ms: Date.now() - startedAt, target: blockObj(block), error: err.message, env: envSnap() });
                                 throw err;
@@ -5894,10 +5892,7 @@ const modes_list = [
                     path: (bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()) ? 1 : 0,
                     dig: (bot.targetDigBlock && bot.targetDigBlock.name) || '-',
                 }) + '\n';
-                if (this.sz === 0) { try { this.sz = fs.statSync('bots/_supervisor/act_trace.jsonl').size; } catch (e) { this.sz = 1; } }
-                if (this.sz > 10 * 1024 * 1024) { try { fs.renameSync('bots/_supervisor/act_trace.jsonl', 'bots/_supervisor/act_trace.jsonl.1'); } catch (e) {} this.sz = 1; }
-                fs.appendFileSync('bots/_supervisor/act_trace.jsonl', line);
-                this.sz += line.length;
+                appendTelemetry('act_trace.jsonl', line, { json: false });
             } catch (e) {}
         }
     },
@@ -5978,10 +5973,7 @@ const modes_list = [
                     this.swings = this.swings.filter(s => s.t >= now - 10000);
                     this.hits = this.hits.filter(h => h.t >= now - 10000);
                     this._disp = 0; this._elapsed = 0; this.winStart = now;
-                    if (this.sz === 0) { try { this.sz = fs.statSync('bots/_supervisor/motion_quality.jsonl').size; } catch (e) { this.sz = 1; } }
-                    if (this.sz > 10 * 1024 * 1024) { try { fs.renameSync('bots/_supervisor/motion_quality.jsonl', 'bots/_supervisor/motion_quality.jsonl.1'); } catch (e) {} this.sz = 1; }
-                    fs.appendFileSync('bots/_supervisor/motion_quality.jsonl', line);
-                    this.sz += line.length;
+                    appendTelemetry('motion_quality.jsonl', line, { json: false });
                 }
             } catch (e) {}
         }
@@ -6569,8 +6561,8 @@ const modes_list = [
                     //   (bed/chest 常不达 count)时把整个八面体扫穿, 每命中 palette 的 section 迭代 4096 block×
                     //   new Block(满视距下加载 section 更多 → 更重, 且大量 Block 分配触发 GC = 扫描后紧跟的
                     //   other 卡顿)。
-                    //   修: 把"12s 一次全量 6 扫"改成"每 2s tick 只跑 1 组扫描, round-robin 6 组 → 12s 走完一轮"。
-                    //   单拍最坏 = 单个最贵扫描(~140ms)而非 6× 叠加; 且 DETACHED async 不占 modes 拍。行为等价:
+                    //   修: 每 2s tick 只跑 1 组, round-robin 6 组；当前进一步把所有 section 遍历放进
+                    //   block-scan Worker，主线程只做 <=8ms 快照切片。行为等价:
                     //   同 12s 刷新周期、同 reg 口径/范围/count、同落盘 — 只是把一次性 burst 摊到 6 拍。互斥
                     //   _lmScanning 防重入(上一组还在跑就跳过本 tick)。
                     if (!bot._lmScanning) {
@@ -6585,8 +6577,8 @@ const modes_list = [
                                 if (!bot._landmarks[key]) { bot._landmarks[key] = { kind, x: Math.round(x), y: Math.round(y), z: Math.round(z), ts: now, seen: now, meta: meta || null }; return true; }
                                 bot._landmarks[key].seen = now; if (meta) bot._landmarks[key].meta = meta; return false;
                             };
-                            // ★2026-07-06 session#7: 谓词函数 matcher → 缓存的方块 ID 数组。findBlocks 用数组匹配走
-                            //   isMatchingType(indexOf)而非每格 new String + 正则, 且 palette 快扫更省。ID 表由 mc.getAllBlocks
+                            // ★2026-07-06 session#7: 谓词函数 matcher → 缓存的方块 ID 数组。Worker 用 state-id Set
+                            //   匹配而非每格 new String + 正则。ID 表由 mc.getAllBlocks
                             //   按同一正则枚举一次, 挂 bot._lmIds 缓存(热重载红线: 状态在 bot 上)。语义严格等价(同方块集)。
                             if (!bot._lmIds) {
                                 try {
@@ -6606,28 +6598,27 @@ const modes_list = [
                               let dirty = false;
                               const reg = (...a) => { if (_reg(...a)) dirty = true; };
                               try {
-                                // 6 组, 每 tick 跑一组。分组把最贵的 bed / chest 各自独占一拍(它们 maxDist48 稀有
-                                // → 全扫最重), 其余便宜项拼组。跨 findBlocks 组内也不叠(每组≤1 个 findBlocks)。
+                                // 6 组, 每 tick 跑一组。每组至多提交一个 Worker 扫描任务。
                                 switch (gi) {
                                   case 0: // bed (最贵: maxDist48 count16 稀有)
-                                    if (_ids.bed) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.bed, maxDistance: 64, count: 16 })) reg('bed', bp.x, bp.y, bp.z); } catch (e) {}   // ★B定点64:findBlocks(palette快扫)+setImmediate让路(0714;≤64 getNearestBlocksWhereAsync无yield且谓词慢,此最优)
+                                    if (_ids.bed) try { for (const b of await world.getNearestBlocksWhereAsync(bot, _ids.bed, 64, 16)) { const bp = b.position; reg('bed', bp.x, bp.y, bp.z); } } catch (e) {}
                                     break;
                                   case 1: // craft/furnace/bell (maxDist48 count8) + villager 实体(便宜)
                                     try { for (const e of Object.values(bot.entities || {})) { if (e && /villager/.test(e.name || '') && e.position) reg('village', e.position.x, e.position.y, e.position.z); } } catch (e) {}
-                                    if (_ids.craft) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.craft, maxDistance: 64, count: 8 })) { const bn = bot.blockAt(bp); reg(bn && bn.name === 'bell' ? 'village' : ((bn && bn.name) || 'craft'), bp.x, bp.y, bp.z); } } catch (e) {}   // ★B定点64:findBlocks+setImmediate让路(0714)
+                                    if (_ids.craft) try { for (const bn of await world.getNearestBlocksWhereAsync(bot, _ids.craft, 64, 8)) { const bp = bn.position; reg(bn.name === 'bell' ? 'village' : (bn.name || 'craft'), bp.x, bp.y, bp.z); } } catch (e) {}
                                     break;
                                   case 2: // wood(maxDist32 count8) — ★C328 记住最近树做 bootstrap
-                                    if (_ids.wood) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.wood, maxDistance: 128, count: 8 })) reg('wood', bp.x, bp.y, bp.z); } catch (e) {}   // ★C资源型128:findBlocks(palette)+setImmediate让路(0714)
+                                    if (_ids.wood) try { for (const b of await world.getNearestBlocksWhereAsync(bot, _ids.wood, 128, 8)) { const bp = b.position; reg('wood', bp.x, bp.y, bp.z); } } catch (e) {}
                                     break;
                                   case 3: // crops/farmland(maxDist32 count8) — 村庄食物
-                                    if (_ids.crops) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.crops, maxDistance: 128, count: 8 })) reg('crops', bp.x, bp.y, bp.z); } catch (e) {}   // ★C资源型128:findBlocks+setImmediate让路(0714)
+                                    if (_ids.crops) try { for (const b of await world.getNearestBlocksWhereAsync(bot, _ids.crops, 128, 8)) { const bp = b.position; reg('crops', bp.x, bp.y, bp.z); } } catch (e) {}
                                     break;
                                   case 4: // chest/barrel(maxDist48 count8 稀有 → 较贵) + 动物实体(便宜)
-                                    if (_ids.chest) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.chest, maxDistance: 64, count: 8 })) reg('chest', bp.x, bp.y, bp.z); } catch (e) {}   // ★B定点64:findBlocks+setImmediate让路(0714)
+                                    if (_ids.chest) try { for (const b of await world.getNearestBlocksWhereAsync(bot, _ids.chest, 64, 8)) { const bp = b.position; reg('chest', bp.x, bp.y, bp.z); } } catch (e) {}
                                     try { for (const e of Object.values(bot.entities || {})) { if (e && /^(cow|pig|sheep|chicken|mooshroom)$/.test(e.name || '') && e.position) reg('animal', e.position.x, e.position.y, e.position.z, (e.name || '')); } } catch (e) {}
                                     break;
                                   case 5: // ore(maxDist16 count12 便宜) + 流浪商人(便宜) — ★task-queue Phase B 机会源
-                                    if (_ids.ore) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.ore, maxDistance: 16, count: 12 })) { const bn = bot.blockAt(bp); reg('ore', bp.x, bp.y, bp.z, /diamond/.test((bn && bn.name) || '') ? 'diamond' : 'iron'); } } catch (e) {}   // ★机会源16b:findBlocks+setImmediate让路(0714)
+                                    if (_ids.ore) try { for (const bn of await world.getNearestBlocksWhereAsync(bot, _ids.ore, 16, 12)) { const bp = bn.position; reg('ore', bp.x, bp.y, bp.z, /diamond/.test(bn.name || '') ? 'diamond' : 'iron'); } } catch (e) {}
                                     try { for (const e of Object.values(bot.entities || {})) { if (e && /^(wandering_trader|trader_llama)$/.test(e.name || '') && e.position) reg('trader', e.position.x, e.position.y, e.position.z, e.name); } } catch (e) {}
                                     break;
                                 }

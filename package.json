@@ -26,6 +26,7 @@
         "node-canvas-webgl": "^0.3.0",
         "open": "^10.2.0",
         "openai": "^4.4.0",
+        "prismarine-chunk": "^1.40.0",
         "prismarine-item": "^1.15.0",
         "prismarine-provider-anvil": "^2.13.0",
         "prismarine-viewer": "^1.32.0",

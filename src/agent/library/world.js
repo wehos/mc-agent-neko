@@ -1,5 +1,6 @@
 import pf from 'mineflayer-pathfinder';
 import * as mc from '../../utils/mcdata.js';
+import { findBlocksOffThread } from '../../utils/block_scan.js';
 
 
 export function getNearestFreeSpace(bot, size=1, distance=8) {
@@ -167,11 +168,6 @@ export function getNearestBlocksWhere(bot, predicate, distance=8, count=10000) {
     return blocks;
 }
 
-// Helper function to create a promise that yields to event loop
-function yieldToEventLoop() {
-    return new Promise(resolve => setImmediate(resolve));
-}
-
 export async function getNearestBlocksWhereAsync(bot, predicate, distance=8, count=10000) {
     /**
      * Asynchronously get a list of the nearest blocks that satisfy the given predicate.
@@ -184,35 +180,15 @@ export async function getNearestBlocksWhereAsync(bot, predicate, distance=8, cou
      * @example
      * let waterBlocks = await world.getNearestBlocksWhereAsync(bot, block => block.name === 'water', 16, 10);
      **/
-    const CHUNK_SIZE = 64; // Search in 64-block radius chunks
-    const results = [];
-    
-    // For small distances, use the synchronous version
-    if (distance <= 64) {
-        let positions = bot.findBlocks({matching: predicate, maxDistance: distance, count: count});
-        return positions.map(position => bot.blockAt(position));
-    }
-    
-    // For large distances, search in expanding spheres
-    for (let currentRadius = CHUNK_SIZE; currentRadius <= distance; currentRadius += CHUNK_SIZE) {
-        // Yield to event loop every chunk to prevent blocking
-        await yieldToEventLoop();
-        
-        const searchRadius = Math.min(currentRadius, distance);
-        let positions = bot.findBlocks({
-            matching: predicate, 
-            maxDistance: searchRadius, 
-            count: count
-        });
-        
-        if (positions.length > 0) {
-            // Convert positions to blocks
-            let blocks = positions.map(position => bot.blockAt(position));
-            return blocks; // Return as soon as we find something
-        }
-    }
-    
-    return results;
+    // `await setImmediate()` followed by mineflayer.findBlocks() is still one long
+    // synchronous scan. Snapshot loaded chunk sections in <=8ms slices and perform
+    // the expensive 4096-cell section walks in a worker thread instead.
+    return await findBlocksOffThread(bot, {
+        matching: predicate,
+        point: bot.entity.position,
+        maxDistance: distance,
+        count
+    });
 }
 
 

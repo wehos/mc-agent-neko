@@ -159,8 +159,7 @@ export default async function blazeRods(bot, ctx, opts = {}) {
     const relightPortal = async () => {
         if (has('flint_and_steel') < 1) return null;
         let cands = [];
-        await new Promise(r => setImmediate(r));
-        try { cands = bot.findBlocks({ matching: (b) => b && b.name === 'obsidian', maxDistance: 64, count: 48 }) || []; }
+        try { cands = (await world.getNearestBlocksWhereAsync(bot, (b) => b && b.name === 'obsidian', 64, 48)).map(b => b.position); }
         catch (e) { return null; }
         // Frame-bottom candidates: obsidian with the 3-tall former interior (now air, maybe
         // residual fire from the fireball) directly above. Filters out random obsidian floor.

@@ -6,6 +6,7 @@
 // ctx = { skills, world, mc, Vec3, log }
 import fs from 'fs';
 import path from 'path';
+import { appendTelemetry } from '../../../src/utils/telemetry.js';
 const PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
 const prog = (s) => { try { fs.appendFileSync(PROG, `[${new Date().toISOString()}] ${s}\n`); } catch (e) {} };
 // ★perf 2026-07-09: death_log.jsonl grows all session and was re-read+split twice per collect-loop
@@ -1127,7 +1128,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                     }
                 }
             }
-            fs.appendFileSync(path.resolve(process.cwd(), 'bots', '_supervisor', 'mine_motion.jsonl'), JSON.stringify({
+            appendTelemetry('mine_motion.jsonl', {
                 ts: new Date().toISOString(),
                 event,
                 pos: { x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3) },
@@ -1139,7 +1140,7 @@ export default async function achieve(bot, ctx, goal, depth = 0, _active = new S
                 mob: bot._mobility ? bot._mobility.state : null,
                 env,
                 data,
-            }) + '\n');
+            });
         } catch (e) {}
     }
     async function exposeMore(blockName) {

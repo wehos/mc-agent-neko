@@ -26,13 +26,16 @@ export default async function relocateToPlains(bot, ctx) {
 
     // ---- find a grassy dry death-free spot: probe a ring of candidate columns, /tp-hop outward to
     // load chunks the pathfinder can't reach, scanning at each hop. Deserts are finite — step out. ----
-    const findGoodSpot = () => {
+    const findGoodSpot = async () => {
         try {
             const gdef = bot.registry.blocksByName['grass_block'];
             if (!gdef) return null;
-            const hits = bot.findBlocks({ matching: gdef.id, maxDistance: 110, count: 400 }) || [];
+            const hits = (await ctx.world.getNearestBlocksWhereAsync(bot, gdef.id, 110, 400)).map(b => b.position);
             let best = null, bd = -1e9;
             for (const h of hits) {
+                // The worker owns the broad scan. Keep live-world validation in
+                // sub-100ms slices because blockAt() needs the live bot object.
+                await new Promise(resolve => setImmediate(resolve));
                 const top = bot.blockAt(h.offset(0, 1, 0)), top2 = bot.blockAt(h.offset(0, 2, 0));
                 if (!(top && /air|grass|fern|snow|flower/.test(top.name) && top2 && /air|grass|fern|snow|flower/.test(top2.name))) continue;
                 // ★stricter (last run landed her in water): require DRY (no water within 8b) AND a solid
@@ -51,7 +54,7 @@ export default async function relocateToPlains(bot, ctx) {
         } catch (e) { return null; }
     };
 
-    let spot = findGoodSpot();
+    let spot = await findGoodSpot();
     // not in render range → hop outward via /tp toward the cardinal least-desert; re-scan each hop.
     // ★bigger reach (1000b found NO real land — region is desert+water): hop out to ~6000b in 8
     // directions so we clear large desert/ocean and actually hit plains/forest. Each hop /tp's to
@@ -63,7 +66,7 @@ export default async function relocateToPlains(bot, ctx) {
         log(bot, `relocateToPlains: no grass in range — /tp hop ${hop + 1} → ${tx},120,${tz} to load+scan`);
         try { bot.chat(`/tp @s ${tx} 120 ${tz}`); } catch (e) {}
         try { await new Promise(r => setTimeout(r, 2500)); } catch (e) {}
-        spot = findGoodSpot();
+        spot = await findGoodSpot();
     }
 
     if (!spot) {

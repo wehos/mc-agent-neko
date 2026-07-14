@@ -40,9 +40,10 @@ const FRAME_RETAIN_MS = parseInt(process.env.FRAME_RETAIN_MS || '7200000', 10); 
 let _lastFramePrune = 0;
 // Hard-state telemetry from the agent's vitals broadcast (15s cadence):
 //   vitals.json   latest snapshot (overwritten) — watchdog/patrol read this
-//   vitals.jsonl  history for trend analysis (rotated at 20MB)
+//   vitals.jsonl  optional history for trend analysis (MC_TELEMETRY=1 only, rotated at 8MB)
 const VITALS = path.join(DIR, 'vitals.json');
 const VITALS_LOG = path.join(DIR, 'vitals.jsonl');
+const TELEMETRY_ENABLED = /^(?:1|true|yes)$/i.test(process.env.MC_TELEMETRY || '');
 
 fs.mkdirSync(FRAMES_DIR, { recursive: true });
 if (!fs.existsSync(INBOX)) fs.writeFileSync(INBOX, '');
@@ -120,10 +121,12 @@ function handle(msg) {
         // trend analysis. Deliberately NOT logEvent'd — 15s cadence would bloat
         // events.log with noise.
         try { fs.writeFileSync(VITALS, JSON.stringify(data)); } catch (e) {}
-        try {
-            if (_rotCheck++ % 100 === 0) rotateIfBig(VITALS_LOG, 20 * 1024 * 1024);
-            fs.appendFileSync(VITALS_LOG, JSON.stringify(data) + '\n');
-        } catch (e) {}
+        if (TELEMETRY_ENABLED) {
+            try {
+                if (_rotCheck++ % 100 === 0) rotateIfBig(VITALS_LOG, 8 * 1024 * 1024);
+                fs.appendFileSync(VITALS_LOG, JSON.stringify(data) + '\n');
+            } catch (e) {}
+        }
         return;
     }
     // Record everything else verbatim (trim huge inventory blobs are fine, keep them).

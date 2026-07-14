@@ -7,8 +7,8 @@
 // ctx = { skills, world, mc, Vec3, log }
 import fs from 'fs';
 import path from 'path';
+import { appendTelemetry } from '../../../src/utils/telemetry.js';
 const _CHOP_PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
-const _MINE_MOTION = path.resolve(process.cwd(), 'bots', '_supervisor', 'mine_motion.jsonl');
 const _dbg = (s) => { try { fs.appendFileSync(_CHOP_PROG, `[${new Date().toISOString()}] [chopDBG] ${s}\n`); } catch (e) {} };
 // ★perf 2026-07-09: death_log.jsonl grows all session and was re-read+split every main-loop iteration
 // here. Cache the last-64 raw lines on the persistent bot object (~15s TTL, shared across skills);
@@ -152,7 +152,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                     }
                 }
             }
-            fs.appendFileSync(_MINE_MOTION, JSON.stringify({
+            appendTelemetry('mine_motion.jsonl', {
                 ts: new Date().toISOString(),
                 event,
                 pos: { x: Number(p.x.toFixed(3)), y: Number(p.y.toFixed(3)), z: Number(p.z.toFixed(3)) },
@@ -165,7 +165,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                 above: blk(p.offset(0, 2, 0)),
                 env,
                 data,
-            }) + '\n');
+            });
         } catch (e) {}
     };
     const _placeConfirmed = async (blockName, target, label) => {
@@ -1800,9 +1800,8 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         // ★2026-07-06 session#7 ELOOP 根治(满视距丝滑): 原先对 8 种 LOGS 各跑一次 findBlocks(maxDist40
         //   count16)= 8 个八面体扫描背靠背同步, 探针实测 act=chopWood 单拍冻结 500-1795ms(⏱ELOOP 主源之一,
         //   chunkParse/physTick/gc 全 0)。稀有树(count16 常不达)时每次都把 40b 八面体扫穿, ×8。
-        //   修: 合并成 1 次 findBlocks(ID 数组 matching 全部 log 类型)。mineflayer findBlocks 支持数组匹配
-        //   (getMatchingFunction→isMatchingType, palette 快速跳过 + indexOf), 结果 = 8 类型的并集(同候选集),
-        //   处理时用 blockAt(base).name 反推类型 t 供日志。~8x 降本, 语义等价。
+        //   修: 合并全部 log 类型的 ID，并把区块扫描交给 block-scan Worker。主线程仅以 8ms
+        //   预算分批快照 section；结果仍是 8 类型并集，处理时用 blockAt(base).name 反推类型。
         // ★req#1 (2026-07-08 用户令: "40太短"): 检测环随失败次数(stale)动态放大 64→128, 不再死守 40。
         //   健康林区 count:16 立刻早退, 成本不变; 只有贫树区才把八面体扫穿, 而那正是需要看更远的时候。
         //   看得更远 → 更早"看到"真实的树并直接寻路过去(可跨水), 从根上减少下面无目标的 moveAway 逃荒。
@@ -1814,13 +1813,12 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // ★2026-07-09 socket-drop 根因修 (用户令 A, 与 scoutResources findTree 同款): 旧代码单发同步
             //   findBlocks(maxDist≤128) — 贫树/无树区凑不满 count:16 → 扫穿整个体积同步冻结事件循环 12–24s →
             //   bot 停读 MC socket → socketClosed → 重连循环 (实录 act=chopWood 是 >8s 冻结头号来源)。
-            //   改分级: 32b 同步(近树最常见, 秒回零 async 税) → 都没有才 yield 让路(放行 socket 读)后扫 64b /
-            //   _scanR。命中即停 → 健康林区永不走到大扫描; 贫树区把大扫描拆成"让路后单发", socket 不饿死。
+            //   当前保留 128/160/192 分级与命中即停语义，但每一级都由 Worker 扫描；大范围贫树搜索
+            //   不再占用 MC socket 所在的事件循环线程。
             if (logIds.length) {
                 const _stages = [128, Math.min(160, _scanR), _scanR].filter((v, i, a) => v > 0 && a.indexOf(v) === i);   // ★资源型(用户令0714): 128/160/192分级(旧32/64/128)
                 for (let _si = 0; _si < _stages.length; _si++) {
-                    await new Promise(r => setImmediate(r));   // ★让路(含首级128b, 用户令0714禁同步阻塞): 扩到128起步后首级findBlocks也可能阻塞ws → 每级前都放行事件循环/socket
-                    try { cands = bot.findBlocks({ matching: logIds, maxDistance: _stages[_si], count: 16 }) || []; } catch (e) { cands = []; }
+                    try { cands = (await world.getNearestBlocksWhereAsync(bot, logIds, _stages[_si], 16)).map(b => b.position); } catch (e) { cands = []; }
                     if (cands.length) break;
                 }
             }
