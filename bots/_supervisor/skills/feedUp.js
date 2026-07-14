@@ -8,6 +8,7 @@
 import fs from 'fs';
 import path from 'path';
 import mfp from 'mineflayer-pathfinder';
+import { appendTelemetry } from '../../../src/utils/telemetry.js';
 
 const { Movements, goals } = mfp;
 
@@ -15,7 +16,6 @@ const FOOD_RE = /cooked_|_bread|^bread$|^apple$|golden_apple|carrot|potato|^beef
 const FOOD_DROP_RE = /rotten_flesh|beef|porkchop|chicken|mutton|rabbit|cod|salmon|bread|apple|carrot|potato|melon/i;
 const SPAWNF = path.resolve(process.cwd(), 'bots', '_supervisor', 'spawn_pos.json');
 const PROG = path.resolve(process.cwd(), 'bots', '_supervisor', 'progress.txt');
-const MINE_MOTION = path.resolve(process.cwd(), 'bots', '_supervisor', 'mine_motion.jsonl');   // ★fix 2026-07-09: was a bare cwd-relative string, unlike sibling skills — resolve it like PROG
 const prog = (s) => { try { fs.appendFileSync(PROG, `[${new Date().toISOString()}] ${s}\n`); } catch (e) {} };
 
 export default async function feedUp(bot, ctx, targetFood = 18) {
@@ -162,7 +162,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
     const motion = (event, data = {}) => {
         try {
             const p = bot.entity.position;
-            fs.appendFileSync(MINE_MOTION, JSON.stringify({
+            appendTelemetry('mine_motion.jsonl', {
                 ts: new Date().toISOString(),
                 event,
                 pos: motionPos(),
@@ -176,7 +176,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                 mob: bot._mobility ? bot._mobility.state : null,
                 env: envSnap(),
                 data,
-            }) + '\n');
+            });
         } catch (e) {}
     };
     const safeRoamTo = async (x, y, z, range = 3, label = 'roam', opts = {}) => {

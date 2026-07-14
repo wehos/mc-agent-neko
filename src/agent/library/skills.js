@@ -9,6 +9,7 @@ import path from 'path';
 import { pathToFileURL } from 'url';
 import { safeToDigBlock } from '../framework/tools/lava_guard.js';   // 岩浆/水裁判 (试装 into safeDig)
 import { corridorSafety, orderedMiningDetours, selectMiningDetour } from '../framework/tools/mining_detour.js';
+import { appendTelemetry } from '../../utils/telemetry.js';
 
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
 const useDelay = blockPlaceDelay > 0;
@@ -223,7 +224,7 @@ function motionPathLen(pathResult) {
 
 function motionAudit(bot, event, data = {}) {
     try {
-        fs_dz.appendFileSync('bots/_supervisor/mine_motion.jsonl', JSON.stringify({
+        appendTelemetry('mine_motion.jsonl', {
             ts: new Date().toISOString(),
             event,
             pos: motionPos(bot),
@@ -233,7 +234,7 @@ function motionAudit(bot, event, data = {}) {
             skill: bot ? (bot._currentSkill || null) : null,
             mob: bot && bot._mobility ? bot._mobility.state : null,
             data,
-        }) + '\n');
+        });
     } catch (e) {}
 }
 
@@ -1255,7 +1256,7 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
                 const _losNow = (() => { try { return bot.canSeeBlock(cur); } catch (e) { return true; } })();
                 if (!_losNow && reachOf() < 2.2 && bot.entity.onGround) {
                     if (await _stepBackForDig(bot, cur)) {
-                        try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★STEP-BACK dig ${cur.name}@${cur.position.x},${cur.position.y},${cur.position.z} — 贴墙太近, 本格内后退取视角\n`); } catch (e) {}
+                        appendTelemetry('mine_dbg.log', `[${new Date().toISOString()}] ★STEP-BACK dig ${cur.name}@${cur.position.x},${cur.position.y},${cur.position.z} — 贴墙太近, 本格内后退取视角\n`, { json: false });
                     }
                 }
             }
@@ -1287,7 +1288,7 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
                 if (process.env.MC_DIG_FLUID_GUARD !== '0') {
                     const _og = safeToDigBlock(bot, _ob);
                     if (_og && _og.ok === false) {
-                        try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★FLUIDGUARD skip occluder ${_ob.name}@${_ob.position.x},${_ob.position.y},${_ob.position.z} — ${_og.reason}\n`); } catch (e) {}
+                        appendTelemetry('mine_dbg.log', `[${new Date().toISOString()}] ★FLUIDGUARD skip occluder ${_ob.name}@${_ob.position.x},${_ob.position.y},${_ob.position.z} — ${_og.reason}\n`, { json: false });
                         return 'fluidguard';
                     }
                 }
@@ -1296,7 +1297,7 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
                         gazeHold(bot, _ob, bot.dig(_ob)),
                         new Promise((_, rej) => setTimeout(() => rej(new Error('occluder-dig-timeout')), 6000)),
                     ]);
-                    try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★C337-C carved occluder ${_ob.name}@${_ob.position.x},${_ob.position.y},${_ob.position.z} → expose ${cur.name}@${cur.position.x},${cur.position.y},${cur.position.z}\n`); } catch (e) {}
+                    appendTelemetry('mine_dbg.log', `[${new Date().toISOString()}] ★C337-C carved occluder ${_ob.name}@${_ob.position.x},${_ob.position.y},${_ob.position.z} → expose ${cur.name}@${cur.position.x},${cur.position.y},${cur.position.z}\n`, { json: false });
                 } catch (e) { return 'occluded'; }
             }
             const _losF = (() => { try { return bot.canSeeBlock(cur); } catch (e) { return true; } })();
@@ -1313,7 +1314,7 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
         if (process.env.MC_DIG_FLUID_GUARD !== '0') {
             const _fg = safeToDigBlock(bot, cur);
             if (_fg && _fg.ok === false) {
-                try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★FLUIDGUARD skip ${cur.name}@${cur.position.x},${cur.position.y},${cur.position.z} — ${_fg.reason}\n`); } catch (e) {}
+                appendTelemetry('mine_dbg.log', `[${new Date().toISOString()}] ★FLUIDGUARD skip ${cur.name}@${cur.position.x},${cur.position.y},${cur.position.z} — ${_fg.reason}\n`, { json: false });
                 return 'fluidguard';
             }
         }
@@ -1389,7 +1390,7 @@ async function tunnelToOre(bot, oreBlock, { maxSteps = 30, budgetMs = 25000, max
         const isOreName = (n) => /_ore$/.test(n || '');
         const solidAt = (p) => { const b = bot.blockAt(p); return !!(b && b.boundingBox === 'block'); };
         const eyeReach = () => bot.entity.position.offset(0, 1.62, 0).distanceTo(oreCtr);
-        const _dbg = (m) => { try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ${m}\n`); } catch (e) {} };
+        const _dbg = (m) => appendTelemetry('mine_dbg.log', `[${new Date().toISOString()}] ${m}\n`, { json: false });
         if (eyeReach() > maxD3 + 1.5) return false;             // 太远, 不承诺(与 C304 同上限)
         const t0 = Date.now();
         let stuck = 0, carved = 0, detours = 0;
@@ -1716,7 +1717,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
     reachMoves.maxDropDown = 3;
     // ★C304 DBG: persistent one-liner per ore reach-decision so the gate is observable in-game
     // (mirrors chopDBG — bot.output only reaches the LLM, never a file). Cheap: ore-only.
-    const _mineDBG = (m) => { try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ${m}\n`); } catch (e) {} };
+    const _mineDBG = (m) => appendTelemetry('mine_dbg.log', `[${new Date().toISOString()}] ${m}\n`, { json: false });
     // ★C304-V (2026-07-08 途径铁不挖根治): the partial/no-path REJECTs below are the false-reject
     // engine — a buried-through-stone vein makes the 2000ms canDig A* time out as 'partial' with
     // little progress (or occasionally noPath), so the timed-A* verdict is a coin-flip on server
@@ -1829,12 +1830,12 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
         const _inDeathZone = (p) => _dzones.some(z => Math.hypot(z.x - p.x, z.z - p.z) < 14
             && Math.abs((typeof z.y === 'number' ? z.y : p.y) - p.y) <= 12);
         // ★C304-S (2026-07-08 用户定调"周围有怪房间最好别挖"): 刷怪笼 10 格内的矿候选直接不可见 —
-        // 主动绕开地牢/废弃矿井刷怪房, 不再只靠死后 _inDeathZone 事后学。findBlocks 按稀有方块
-        // palette 快扫, 每 pass 一次, 便宜; 扫描失败 fail-open (照旧, 交给实时威胁本能兜底)。
+        // 主动绕开地牢/废弃矿井刷怪房, 不再只靠死后 _inDeathZone 事后学。稀有方块扫描由
+        // block-scan Worker 执行；扫描失败 fail-open (照旧, 交给实时威胁本能兜底)。
         let _spawners = [];
         try {
             const _spId = mc.getBlockId('spawner');
-            if (_spId != null) { await new Promise(r => setImmediate(r)); _spawners = bot.findBlocks({ matching: _spId, maxDistance: 128, count: 8 }) || []; }   // ★SPECIAL(0714): 48→128 覆盖新128采集半径(否则48-128b刷怪笼漏检破坏C304-S)+让路
+            if (_spId != null) _spawners = (await world.getNearestBlocksWhereAsync(bot, _spId, 128, 8)).map(b => b.position);
         } catch (e) { _spawners = []; }
         const _nearSpawner = (p) => _spawners.some(s => Math.hypot(s.x - p.x, s.y - p.y, s.z - p.z) < 10);
 
@@ -1849,7 +1850,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
             //   命中格跑昂贵谓词(safeToBreak 要走邻块检查 + _inDeathZone + exclude), 且外层 maxAttempts
             //   每轮重扫 — 探针实录 act=chopWood other≈670ms(视距相关: 满视距下 64b 内加载 section 多 →
             //   全扫 + 每格 safeToBreak = 事件循环长冻)。
-            //   修: 两段扫。① 先用 findBlocks 按方块类型 ID 数组快扫(仅 palette+indexOf, 无 safeToBreak)
+            //   修: 两段扫。① 先在 Worker 按方块 state ID 快扫(无 safeToBreak)
             //   拿最近的一批候选位置(取 count 的宽松倍数, 保证过滤后仍够); ② 只对这一小批候选跑昂贵谓词
             //   (safeToBreak/deathzone/exclude/液体源)。语义等价(同 64b 半径、同最终判据、同排序), 但把
             //   O(八面体×safeToBreak) 降成 O(八面体×廉价类型判) + O(少量候选×safeToBreak)。
@@ -1859,10 +1860,11 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
             // ① 廉价类型快扫(候选取 max(64, want*8), 给 ② 的过滤留足冗余; 稀有目标时上限自然收敛)。
             let _cands = [];
             if (_ids.length) {
-                try { await new Promise(r => setImmediate(r)); _cands = bot.findBlocks({ matching: _ids, maxDistance: 128, count: Math.max(64, _want * 8) }) || []; } catch (e) { _cands = []; }   // ★C资源型(0714): 64→128+让路(collectBlock主扫描,禁同步阻塞ws)
+                try { _cands = (await world.getNearestBlocksWhereAsync(bot, _ids, 128, Math.max(64, _want * 8))).map(b => b.position); } catch (e) { _cands = []; }
             }
             // ② 对候选(已按距排序)跑昂贵谓词, 收满 want 即停 — safeToBreak 只在少量候选上求值。
             for (const _pos of _cands) {
+                await new Promise(resolve => setImmediate(resolve));
                 if (blocks.length >= _want) break;
                 const block = bot.blockAt(_pos);
                 try {
@@ -2356,7 +2358,7 @@ export async function ensurePickupAt(bot, pos, opts = {}) {
     const HAZARD = /lava|fire|magma|cactus|campfire|wither_rose|sweet_berry|powder_snow/;
     // ★T-0004 DBG: persistent one-liner per ensure-pickup outcome (bot.output never reaches a
     // file, so the in-game effect was unobservable). Shares mine_dbg.log; ★PICKUP prefix.
-    const _pkDBG = (m) => { try { fs_dz.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ★PICKUP ${m}\n`); } catch (e) {} };
+    const _pkDBG = (m) => appendTelemetry('mine_dbg.log', `[${new Date().toISOString()}] ★PICKUP ${m}\n`, { json: false });
     const totalItems = () => { try { return Object.values(world.getInventoryCounts(bot)).reduce((a, b) => a + b, 0); } catch (e) { return 0; } };
     try {
         if (!bot || !bot.entity || !bot.entity.position || !pos) return false;
@@ -5268,13 +5270,7 @@ export async function goToBed(bot) {
      * @example
      * await skills.goToBed(bot);
      **/
-    const beds = bot.findBlocks({
-        matching: (block) => {
-            return block.name.includes('bed');
-        },
-        maxDistance: 64,   // ★B定点32→64(0714)
-        count: 1
-    });
+    const beds = (await world.getNearestBlocksWhereAsync(bot, (block) => block.name.includes('bed'), 64, 1)).map(b => b.position);
     if (beds.length === 0) {
         log(bot, `Could not find a bed to sleep in.`);
         return false;
