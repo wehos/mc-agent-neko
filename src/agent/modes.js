@@ -6460,7 +6460,16 @@ const modes_list = [
                     if (bot._woodBarrenLatchAt && now - bot._woodBarrenLatchAt < 300000) {
                         const o = bot._woodBarrenOrigin;
                         const movedClear = o && Math.hypot(p.x - o.x, p.z - o.z) > 48;
-                        if (movedClear || picks >= 1) { bot._woodBarrenLatchAt = 0; bot._woodBarrenSince = 0; }   // recovered or relocated
+                        // woodBarren-2026-07-14 (yong-ling): woodBarren pan-ju zhi kan "bei-bao wu mu" bu kan "fu-jin you mei you shu".
+                        //   zhan sen-lin li kan-bu-dao shu (chopWood ka jiang-sheng/hei-ming-dan/ye-si da-duan) shi bao-kong 5min ye wu-pan barren.
+                        //   zha: shang-yi-pai di-biao you [jin(<=48b) qie xin-xian(<120s) de ke-da mu] = zhe-di zhen you shu, wen-ti zai kan-bu-dong fei mei shu ->
+                        //   bu pan barren(qing latch). zhen shu-xi-shu qun-xi(beach/desert) woodReach kong/yuan/jiu -> treeHere=false -> zhao-chang qian-xi.
+                        let treeHere = false;
+                        try {
+                            const _wr = bot._world && bot._world.landmarks && bot._world.landmarks.woodReach;
+                            treeHere = !!(_wr && Number.isFinite(_wr.dist) && _wr.dist <= 48 && Number.isFinite(_wr.age) && _wr.age < 120000);
+                        } catch (e) {}
+                        if (movedClear || picks >= 1 || treeHere) { bot._woodBarrenLatchAt = 0; bot._woodBarrenSince = 0; }   // recovered or relocated
                         else woodBarren = true;
                     }
                 } catch (e) {}

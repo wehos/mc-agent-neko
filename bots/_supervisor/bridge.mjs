@@ -69,6 +69,11 @@ function rotateIfBig(file, maxBytes) {
 }
 
 function logEvent(obj) {
+    // denoise-2026-07-14 (user): sticky re-arm keep-alive heartbeat spams events.log every 30s.
+    //   skip two info-less noise types: bridge-sent sent_sticky_skill + agent busy reject
+    //   (skill_result busy). keep-alive (run_skill send) unaffected.
+    if (obj && (obj.type === 'sent_sticky_skill' ||
+        (obj.type === 'skill_result' && obj.ok === false && /sticky re-arm rejected/.test(obj.error || '')))) return;
     lastEvent = obj;
     const line = `[${new Date().toISOString()}] ${JSON.stringify(obj)}\n`;
     if (++_rotCheck % 200 === 0) rotateIfBig(EVENTS, 30 * 1024 * 1024);
