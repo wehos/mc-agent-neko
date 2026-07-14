@@ -51,6 +51,8 @@ const COLLECT_KEY = { iron: 'iron', coal: 'coal', gold: 'gold', copper: 'copper'
 export default async function mineOres(bot, ctx, opts = {}) {
     const { skills, world } = ctx;
     const ore = String((opts && opts.ore) || 'iron');
+    // ★2026-07-14 挖钻石(diamonds)走竖直直井下潜(shaft, 不梯式); 其他矿(浅层铁/煤等)保留楼梯。传给下方三处 mineDown。
+    const wantShaft = /^diamond/.test(ore);
     const count = Number(opts && opts.count) > 0 ? Number(opts.count) : 8;
     const maxMs = Number(opts && opts.maxMs) > 0 ? Number(opts.maxMs) : 300000;
     const yMax = Number.isFinite(opts && opts.yMax) ? opts.yMax : Infinity;   // 夜挖只收地下带目标
@@ -177,7 +179,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
         // 预算余量 <60s 不再开潜 (评审: 嵌套 mineDown 自带多分钟循环, deadline 只兜 collect 环)
         if (bot.entity.position.y - tgt.y > 6 && !bot.interrupt_code && !bot.death_abort
             && deadline - Date.now() > 60000) {
-            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(tgt.y - 1, -58) }); } catch (e) {}
+            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(tgt.y - 1, -58), shaft: wantShaft }); } catch (e) {}
         }
     } else if (!faceOreNear()) {
         // ★评审 P2: 无可用 oracle 目标(缺失/陈旧/真距超闸)时不能在地表平采 —
@@ -186,7 +188,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
         const band = ore === 'coal' ? 40 : (ore === 'diamonds' ? -52 : 14);
         if (bot.entity.position.y - band > 6 && !bot.interrupt_code && deadline - Date.now() > 60000) {
             prog(`无 oracle 目标 — 盲挖回退: mineDown 下潜 y${band}`);
-            try { await skills.customSkill(bot, 'mineDown', { targetY: band }); } catch (e) {}
+            try { await skills.customSkill(bot, 'mineDown', { targetY: band, shaft: wantShaft }); } catch (e) {}
         }
     }
 
@@ -298,7 +300,7 @@ export default async function mineOres(bot, ctx, opts = {}) {
         if (bandY != null && bot.entity.position.y - bandY > 8 && !bot.interrupt_code && !bot.death_abort
             && deadline - Date.now() > 60000) {
             prog(`r${rounds}: 仍高悬矿带上方 (y=${Math.floor(bot.entity.position.y)} bandY=${bandY}) — 零收获=够不着, 密封下潜切脉 (不横向蹦表层)`);
-            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(bandY - 2, -58) }); } catch (e) {}
+            try { await skills.customSkill(bot, 'mineDown', { targetY: Math.max(bandY - 2, -58), shaft: wantShaft }); } catch (e) {}
             continue;
         }
         const nxt = list.length ? list[rounds % list.length] : null;

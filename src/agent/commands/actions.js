@@ -482,7 +482,7 @@ export const actionsList = [
             'y': { type: 'int', description: 'target Y level to reach', domain: [-63, 320] }
         },
         perform: runAsAction(async (agent, y) => {
-            await skills.customSkill(agent.bot, 'mineDown', { targetY: parseInt(y) });
+            await skills.customSkill(agent.bot, 'mineDown', { targetY: parseInt(y), shaft: true });   // ★直井: 命令语义即 "dig straight down", 修名实不符(旧实现走对角楼梯)
         }, false, 10)
     },
     // ★2026-07-13 generic entry into the CUSTOM SKILLS catalog. The named commands above

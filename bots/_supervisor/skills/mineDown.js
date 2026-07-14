@@ -39,6 +39,9 @@ export default async function mineDown(bot, ctx, opts = {}) {
     const { log, skills, Vec3 } = ctx;
     const steps = opts.steps || 40;
     const targetY = opts.targetY != null ? opts.targetY : 45;
+    // ★2026-07-14 SHAFT MODE (用户令 "挖钻石别梯式"): true 时下潜走竖直 digDown 直井(遇险回退楼梯), 而非默认对角楼梯。
+    //   只给"挖钻石"链路(mineOres diamonds / !digDownTo)传 true; 通用下潜不传=仍走楼梯保回地面顺畅(楼梯双向可走)。
+    const shaft = !!opts.shaft;
     const log_ = (m) => log(bot, `[mineDown] ${m}`);
     const bn = (x, y, z) => { try { return bot.blockAt(new Vec3(x, y, z)); } catch { return null; } };
     const nm = (b) => (b && b.name) || 'air';
@@ -262,7 +265,8 @@ export default async function mineDown(bot, ctx, opts = {}) {
         log_(`at-band start (y=${entryY} <= targetY+2=${targetY + 2}) — delegating to branchMine (lateral ore mining), not judging by descent`);
         let bmOk = null;   // true/false = branchMine's own contract verdict; null = unavailable/threw → local fallback judge
         if (typeof skills.customSkill === 'function') {
-            try { bmOk = !!(await skills.customSkill(bot, 'branchMine', 24, targetY)); }
+            // shaft 模式(挖钻石)已直井到带, 委派横掘用 length-only 免 branchMine 再斜降; 通用楼梯下潜仍传 targetY。
+            try { bmOk = !!(await skills.customSkill(bot, 'branchMine', 24, shaft ? null : targetY)); }
             catch (e) { bmOk = null; log_(`branchMine threw: ${e && e.message || e} — falling back to local progress judge`); }
         } else {
             log_('skills.customSkill unavailable — falling back to local progress judge');
@@ -538,6 +542,34 @@ export default async function mineDown(bot, ctx, opts = {}) {
         // ★C248b: stop before the only pick snaps with no replacement → don't strand deeper.
         if (pickAboutToBreak() && !canCraftPick()) { abort = `pick about to break + no replacement (planks=${invCount(/_planks$/)} logs=${invCount(/_log$/)} cobble=${invCount(/^(cobblestone|cobbled_deepslate)$/)} stick=${invCount(/^stick$/)}) — stop before stranding`; break; }
 
+        // ★2026-07-14 SHAFT MODE 竖直直井 (挖钻石别梯式): 优先 digDown(1) 逐格直下 — digDown 自带流体 6 邻 +
+        //   坠落 2 格守卫(skills.js digDown), 命中风险即返 false, 我们就回退本轮楼梯步进(下面 sx/sz 换向绕过障碍继续
+        //   挖)。竖井保留"1 格槽位怪够不到 + 逐格探测"的安全, 只是回地面靠 pillarUp/keepInv 重生(挖钻石=下去猛挖)。
+        //   放在 hostile/pick 守卫之后(那些对直井同样生效), 楼梯几何计算之前。
+        if (shaft) {
+            const _yb = Math.round(bot.entity.position.y);
+            let _sok = false;
+            try { _sok = await skills.digDown(bot, 1); } catch (e) { _sok = false; }
+            if (_sok && Math.round(bot.entity.position.y) < _yb) {
+                dug++;
+                // 顺路矿环: 竖井新底格四周一环, 与楼梯路径同款守卫 —— 石镐不敲够不着品级的矿(保矿)、不捅破流体袋。
+                const _fp = bot.entity.position.floored();
+                for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0]]) {
+                    const ox = _fp.x + dx, oy = _fp.y + dy, oz = _fp.z + dz, b = bn(ox, oy, oz);
+                    if (!(b && ORE.test(b.name))) continue;
+                    if (!bot.inventory.items().some(it => { try { return /_pickaxe$/.test(it.name || '') && b.canHarvest(it.type); } catch (e) { return false; } })) continue;
+                    let _ofa = false;
+                    for (const [ex, ey, ez] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]) {
+                        if (/lava|water/.test(nm(bn(ox + ex, oy + ey, oz + ez)))) { _ofa = true; break; }
+                    }
+                    if (_ofa) continue;
+                    try { await skills.breakBlockAt(bot, ox, oy, oz); ore++; } catch (e) {}
+                }
+                noProg = 0;
+                continue;   // 竖直下潜成功 → 下一轮继续直下, 不走对角楼梯
+            }
+            log_(`shaft: digDown blocked at y=${_yb} — fall back to staircase step this round (绕障碍)`);
+        }
         // ★ROOT-CAUSE FIX (-22,82,10 live pin): block cells use floor(), NOT round(). At
         // x=-22.30 the bot is physically in cell floor=-23, but round=-22 → mineDown dug the
         // forward staircase one cell off from where the bot actually stood, so the bot wedged

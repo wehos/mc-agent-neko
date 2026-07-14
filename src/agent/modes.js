@@ -5134,7 +5134,7 @@ const modes_list = [
                         try {
                             const logIds = Object.values(bot.registry.blocksByName)
                                 .filter(b => /_log$/.test(b.name)).map(b => b.id);
-                            const hits = bot.findBlocks({ matching: logIds, maxDistance: 64, count: 8 });
+                            await new Promise(r => setImmediate(r)); const hits = bot.findBlocks({ matching: logIds, maxDistance: 64, count: 8 });   // ★findBlocks(palette)+setImmediate让路(0714)
                             const reachable = (hits || []).filter(p => Math.abs(p.y - me0.y) <= 6)
                                 .sort((a, b) => me0.distanceTo(a) - me0.distanceTo(b));
                             if (reachable.length) {
@@ -6515,24 +6515,24 @@ const modes_list = [
                                 // → 全扫最重), 其余便宜项拼组。跨 findBlocks 组内也不叠(每组≤1 个 findBlocks)。
                                 switch (gi) {
                                   case 0: // bed (最贵: maxDist48 count16 稀有)
-                                    if (_ids.bed) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.bed, maxDistance: 64, count: 16 })) reg('bed', bp.x, bp.y, bp.z); } catch (e) {}   // ★B定点48→64+让路(用户令0714)
+                                    if (_ids.bed) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.bed, maxDistance: 64, count: 16 })) reg('bed', bp.x, bp.y, bp.z); } catch (e) {}   // ★B定点64:findBlocks(palette快扫)+setImmediate让路(0714;≤64 getNearestBlocksWhereAsync无yield且谓词慢,此最优)
                                     break;
                                   case 1: // craft/furnace/bell (maxDist48 count8) + villager 实体(便宜)
                                     try { for (const e of Object.values(bot.entities || {})) { if (e && /villager/.test(e.name || '') && e.position) reg('village', e.position.x, e.position.y, e.position.z); } } catch (e) {}
-                                    if (_ids.craft) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.craft, maxDistance: 64, count: 8 })) { const bn = bot.blockAt(bp); reg(bn && bn.name === 'bell' ? 'village' : ((bn && bn.name) || 'craft'), bp.x, bp.y, bp.z); } } catch (e) {}   // ★B定点48→64+让路(0714)
+                                    if (_ids.craft) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.craft, maxDistance: 64, count: 8 })) { const bn = bot.blockAt(bp); reg(bn && bn.name === 'bell' ? 'village' : ((bn && bn.name) || 'craft'), bp.x, bp.y, bp.z); } } catch (e) {}   // ★B定点64:findBlocks+setImmediate让路(0714)
                                     break;
                                   case 2: // wood(maxDist32 count8) — ★C328 记住最近树做 bootstrap
-                                    if (_ids.wood) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.wood, maxDistance: 128, count: 8 })) reg('wood', bp.x, bp.y, bp.z); } catch (e) {}   // ★C资源型32→128+让路(找树,0714)
+                                    if (_ids.wood) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.wood, maxDistance: 128, count: 8 })) reg('wood', bp.x, bp.y, bp.z); } catch (e) {}   // ★C资源型128:findBlocks(palette)+setImmediate让路(0714)
                                     break;
                                   case 3: // crops/farmland(maxDist32 count8) — 村庄食物
-                                    if (_ids.crops) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.crops, maxDistance: 128, count: 8 })) reg('crops', bp.x, bp.y, bp.z); } catch (e) {}   // ★C资源型32→128+让路(食物源,0714)
+                                    if (_ids.crops) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.crops, maxDistance: 128, count: 8 })) reg('crops', bp.x, bp.y, bp.z); } catch (e) {}   // ★C资源型128:findBlocks+setImmediate让路(0714)
                                     break;
                                   case 4: // chest/barrel(maxDist48 count8 稀有 → 较贵) + 动物实体(便宜)
-                                    if (_ids.chest) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.chest, maxDistance: 64, count: 8 })) reg('chest', bp.x, bp.y, bp.z); } catch (e) {}   // ★B定点48→64+让路(0714)
+                                    if (_ids.chest) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.chest, maxDistance: 64, count: 8 })) reg('chest', bp.x, bp.y, bp.z); } catch (e) {}   // ★B定点64:findBlocks+setImmediate让路(0714)
                                     try { for (const e of Object.values(bot.entities || {})) { if (e && /^(cow|pig|sheep|chicken|mooshroom)$/.test(e.name || '') && e.position) reg('animal', e.position.x, e.position.y, e.position.z, (e.name || '')); } } catch (e) {}
                                     break;
                                   case 5: // ore(maxDist16 count12 便宜) + 流浪商人(便宜) — ★task-queue Phase B 机会源
-                                    if (_ids.ore) try { for (const bp of bot.findBlocks({ matching: _ids.ore, maxDistance: 16, count: 12 })) { const bn = bot.blockAt(bp); reg('ore', bp.x, bp.y, bp.z, /diamond/.test((bn && bn.name) || '') ? 'diamond' : 'iron'); } } catch (e) {}
+                                    if (_ids.ore) try { await new Promise(r => setImmediate(r)); for (const bp of bot.findBlocks({ matching: _ids.ore, maxDistance: 16, count: 12 })) { const bn = bot.blockAt(bp); reg('ore', bp.x, bp.y, bp.z, /diamond/.test((bn && bn.name) || '') ? 'diamond' : 'iron'); } } catch (e) {}   // ★机会源16b:findBlocks+setImmediate让路(0714)
                                     try { for (const e of Object.values(bot.entities || {})) { if (e && /^(wandering_trader|trader_llama)$/.test(e.name || '') && e.position) reg('trader', e.position.x, e.position.y, e.position.z, e.name); } } catch (e) {}
                                     break;
                                 }
