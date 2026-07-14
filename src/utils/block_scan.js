@@ -5,12 +5,20 @@ import Vec3 from 'vec3';
 const SNAPSHOT_SLICE_MS = 8;
 const SECTIONS_PER_BATCH = 8;
 const SCAN_TIMEOUT_MS = 120_000;
+const CANCELLATION_POLL_MS = 10;
 
 let worker = null;
 let nextJobId = 1;
 let nextBatchId = 1;
 const waiters = new Map();
 let queue = Promise.resolve();
+
+class BlockScanCancelledError extends Error {
+  constructor () {
+    super('Block scan cancelled because the bot was superseded');
+    this.name = 'BlockScanCancelledError';
+  }
+}
 
 function createWorker () {
   const instance = new Worker(new URL('./block_scan_worker.cjs', import.meta.url));
@@ -43,25 +51,55 @@ function getWorker () {
   return worker;
 }
 
-function waitFor (key, timeoutMs = SCAN_TIMEOUT_MS) {
+function waitFor (key, timeoutMs = SCAN_TIMEOUT_MS, isCancelled = null) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    let settled = false;
+    let cancellationTimer = null;
+    const cleanup = () => {
+      clearTimeout(timeoutTimer);
+      clearTimeout(cancellationTimer);
       waiters.delete(key);
-      reject(new Error(`Timed out waiting for block scan worker (${key})`));
+    };
+    const waiter = {
+      resolve: (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      reject: (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      }
+    };
+    const checkCancellation = () => {
+      if (isCancelled?.()) {
+        waiter.reject(new BlockScanCancelledError());
+        return;
+      }
+      cancellationTimer = setTimeout(checkCancellation, CANCELLATION_POLL_MS);
+      cancellationTimer.unref?.();
+    };
+    const timeoutTimer = setTimeout(() => {
+      waiter.reject(new Error(`Timed out waiting for block scan worker (${key})`));
     }, timeoutMs);
-    timer.unref?.();
-    waiters.set(key, {
-      resolve: (value) => { clearTimeout(timer); resolve(value); },
-      reject: (error) => { clearTimeout(timer); reject(error); }
-    });
+    timeoutTimer.unref?.();
+    waiters.set(key, waiter);
+    if (isCancelled) checkCancellation();
   });
 }
 
-async function sendAndWait (message) {
+async function sendAndWait (message, bot) {
   const batchId = nextBatchId++;
-  const promise = waitFor(`batch:${batchId}`);
+  const promise = waitFor(`batch:${batchId}`, SCAN_TIMEOUT_MS, () => bot?._disposed === true);
   getWorker().postMessage({ ...message, batchId });
   await promise;
+}
+
+function throwIfDisposed (bot) {
+  if (bot?._disposed) throw new BlockScanCancelledError();
 }
 
 function statesForTypes (bot, typeIds) {
@@ -123,7 +161,7 @@ function yieldImmediate () {
 }
 
 async function scanOnce (bot, options) {
-  if (!bot?.world?.getColumns || !bot?.entity?.position) return [];
+  if (!bot?.world?.getColumns || !bot?.entity?.position || bot._disposed) return [];
   const rawCenter = options.point || bot.entity.position;
   const center = { x: Math.floor(rawCenter.x), y: Math.floor(rawCenter.y), z: Math.floor(rawCenter.z) };
   const radius = Math.max(0, Number(options.maxDistance) || 0);
@@ -137,12 +175,14 @@ async function scanOnce (bot, options) {
   let batch = [];
   let sliceStarted = performance.now();
   try {
+    throwIfDisposed(bot);
     await sendAndWait({
       type: 'start', jobId, version: bot.version,
       center: { x: center.x, y: center.y, z: center.z },
       radius, count, stateIds
-    });
+    }, bot);
     for (const entry of bot.world.getColumns()) {
+      throwIfDisposed(bot);
       // prismarine-world exposes chunk coordinates as strings from its map keys.
       const chunkX = Number(entry.chunkX ?? entry.x);
       const chunkZ = Number(entry.chunkZ ?? entry.z);
@@ -150,27 +190,34 @@ async function scanOnce (bot, options) {
       if (!Number.isFinite(chunkX) || !Number.isFinite(chunkZ) || !columnIntersects(chunkX, chunkZ, center, radius)) continue;
       const minY = Number.isFinite(column.minY) ? column.minY : 0;
       for (let index = 0; index < (column.sections || []).length; index++) {
+        throwIfDisposed(bot);
         const section = column.sections[index];
         if (!section?.toJson) continue;
         const y = minY + index * 16;
         if (y > center.y + radius || y + 15 < center.y - radius) continue;
-        batch.push({ x: chunkX * 16, y, z: chunkZ * 16, json: section.toJson() });
+        const json = section.toJson();
+        throwIfDisposed(bot);
+        batch.push({ x: chunkX * 16, y, z: chunkZ * 16, json });
         if (batch.length >= SECTIONS_PER_BATCH) {
-          await sendAndWait({ type: 'batch', jobId, sections: batch });
+          await sendAndWait({ type: 'batch', jobId, sections: batch }, bot);
           batch = [];
         }
         if (performance.now() - sliceStarted >= SNAPSHOT_SLICE_MS) {
           await yieldImmediate();
+          throwIfDisposed(bot);
           sliceStarted = performance.now();
         }
       }
     }
-    if (batch.length) await sendAndWait({ type: 'batch', jobId, sections: batch });
-    const resultPromise = waitFor(`job:${jobId}`);
+    if (batch.length) await sendAndWait({ type: 'batch', jobId, sections: batch }, bot);
+    throwIfDisposed(bot);
+    const resultPromise = waitFor(`job:${jobId}`, SCAN_TIMEOUT_MS, () => bot?._disposed === true);
     activeWorker.postMessage({ type: 'finish', jobId });
     const result = await resultPromise;
+    throwIfDisposed(bot);
     const blocks = [];
     for (const position of result.positions) {
+      throwIfDisposed(bot);
       const block = bot.blockAt(new Vec3(position.x, position.y, position.z));
       if (!block) continue;
       if (typeof options.matching === 'function' && !options.matching(block)) continue;
@@ -179,6 +226,7 @@ async function scanOnce (bot, options) {
     return blocks;
   } catch (error) {
     try { activeWorker.postMessage({ type: 'cancel', jobId }); } catch { /* worker already failed */ }
+    if (error instanceof BlockScanCancelledError) return [];
     throw error;
   } finally {
     activeWorker.unref();

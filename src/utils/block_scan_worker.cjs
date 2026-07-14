@@ -12,6 +12,57 @@ function chunkFor (version) {
   return chunkFactories.get(version);
 }
 
+function sectionStateId (section, position) {
+  if (typeof section.get === 'function') return section.get(position);
+  if (typeof section.getBlockStateId === 'function') return section.getBlockStateId(position);
+  if (typeof section.getBlock === 'function') {
+    const block = section.getBlock(position);
+    if (typeof block === 'number') return block;
+    if (Number.isFinite(block?.stateId)) return block.stateId;
+    if (Number.isFinite(block?.type)) return block.type;
+  }
+  throw new TypeError('Unsupported prismarine-chunk section accessor');
+}
+
+function compareMatches (a, b) {
+  return a.d2 - b.d2 || a.y - b.y || a.z - b.z || a.x - b.x;
+}
+
+function siftUpWorst (matches, start) {
+  let index = start;
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2);
+    if (compareMatches(matches[parent], matches[index]) >= 0) break;
+    [matches[parent], matches[index]] = [matches[index], matches[parent]];
+    index = parent;
+  }
+}
+
+function siftDownWorst (matches, start) {
+  let index = start;
+  while (true) {
+    const left = index * 2 + 1;
+    const right = left + 1;
+    let worst = index;
+    if (left < matches.length && compareMatches(matches[left], matches[worst]) > 0) worst = left;
+    if (right < matches.length && compareMatches(matches[right], matches[worst]) > 0) worst = right;
+    if (worst === index) return;
+    [matches[index], matches[worst]] = [matches[worst], matches[index]];
+    index = worst;
+  }
+}
+
+function retainNearest (job, match) {
+  if (job.matches.length < job.count) {
+    job.matches.push(match);
+    siftUpWorst(job.matches, job.matches.length - 1);
+  } else if (compareMatches(match, job.matches[0]) < 0) {
+    job.matches[0] = match;
+    siftDownWorst(job.matches, 0);
+  }
+  job.peakRetained = Math.max(job.peakRetained, job.matches.length);
+}
+
 function scanSection (job, raw) {
   const Chunk = chunkFor(job.version);
   const section = Chunk.section.fromJson(raw.json);
@@ -30,8 +81,8 @@ function scanSection (job, raw) {
         const dx = wx - job.center.x;
         const d2 = dx * dx + dy * dy + dz * dz;
         if (d2 > radius2) continue;
-        if (!wanted.has(section.get({ x, y, z }))) continue;
-        job.matches.push({ x: wx, y: wy, z: wz, d2 });
+        if (!wanted.has(sectionStateId(section, { x, y, z }))) continue;
+        retainNearest(job, { x: wx, y: wy, z: wz, d2 });
       }
     }
   }
@@ -45,9 +96,10 @@ parentPort.on('message', (message) => {
         version: message.version,
         center: message.center,
         radius: message.radius,
-        count: message.count,
+        count: Math.max(1, Math.floor(message.count)),
         wanted: new Set(message.stateIds),
-        matches: []
+        matches: [],
+        peakRetained: 0
       });
       parentPort.postMessage({ type: 'ack', jobId, batchId: message.batchId });
       return;
@@ -63,10 +115,10 @@ parentPort.on('message', (message) => {
     }
 
     if (type === 'finish') {
-      job.matches.sort((a, b) => a.d2 - b.d2);
-      const positions = job.matches.slice(0, job.count).map(({ x, y, z }) => ({ x, y, z }));
+      job.matches.sort(compareMatches);
+      const positions = job.matches.map(({ x, y, z }) => ({ x, y, z }));
       jobs.delete(jobId);
-      parentPort.postMessage({ type: 'result', jobId, positions });
+      parentPort.postMessage({ type: 'result', jobId, positions, peakRetained: job.peakRetained });
       return;
     }
 
