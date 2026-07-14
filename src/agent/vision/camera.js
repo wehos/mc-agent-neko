@@ -7,6 +7,7 @@ import { createCanvas } from 'node-canvas-webgl/lib/index.js';
 import fs from 'fs/promises';
 import { Vec3 } from 'vec3';
 import { EventEmitter } from 'events';
+import { cameraEyeHeight, cameraReleaseStep, resolveCollisionAwareCamera } from './camera_position.js';
 
 import worker_threads from 'worker_threads';
 global.Worker = worker_threads.Worker;
@@ -24,6 +25,8 @@ export class Camera extends EventEmitter {
         this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas });
         this.viewer = new Viewer(this.renderer);
         this.captureCount = 0;
+        this._cameraBackoff = 0;
+        this._cameraResolvedAt = Date.now();
         this._init().then(() => {
             this.emit('ready');
         })
@@ -48,7 +51,11 @@ export class Camera extends EventEmitter {
             return;
         }
         
-        const center = new Vec3(botPos.x, botPos.y+this.bot.entity.height, botPos.z);
+        const center = new Vec3(
+            botPos.x,
+            botPos.y + cameraEyeHeight(this.bot.entity.eyeHeight, this.bot.entity.height),
+            botPos.z,
+        );
         this.viewer.setVersion(this.bot.version);
         // Load world
         const worldView = new WorldView(this.bot.world, this.viewDistance, center);
@@ -66,11 +73,11 @@ export class Camera extends EventEmitter {
         }
         
         const pos = this.bot.entity.position;
-        const height = this.bot.entity.height || 1.62;
         const yaw = this.bot.entity.yaw || 0;
         const pitch = this.bot.entity.pitch || 0;
-        
-        const center = new Vec3(pos.x, pos.y + height, pos.z);
+
+        const eyeHeight = cameraEyeHeight(this.bot.entity.eyeHeight, this.bot.entity.height);
+        const center = new Vec3(pos.x, pos.y + eyeHeight, pos.z);
         
         // Validate position data to prevent NaN errors
         if (!this.isValidNumber(center.x) || !this.isValidNumber(center.y) || !this.isValidNumber(center.z) ||
@@ -78,13 +85,25 @@ export class Camera extends EventEmitter {
             console.error('❌ Invalid bot position data in camera capture:');
             console.error('   Position:', { x: center.x, y: center.y, z: center.z });
             console.error('   Orientation:', { yaw, pitch });
-            console.error('   Height:', height);
+            console.error('   Eye height:', eyeHeight);
             return null;
         }
-        
-        this.viewer.camera.position.set(center.x, center.y, center.z);
+
         await this.worldView.updatePosition(center);
-        this.viewer.setFirstPersonCamera(pos, yaw, pitch);
+        const resolvedAt = Date.now();
+        const camera = resolveCollisionAwareCamera({
+            eye: { x: center.x, y: center.y, z: center.z },
+            yaw,
+            pitch,
+            previousBackoff: this._cameraBackoff,
+            releaseStep: cameraReleaseStep(this._cameraResolvedAt, resolvedAt),
+            getBlock: (x, y, z) => this.bot.blockAt(new Vec3(x, y, z), false),
+        });
+        if (!camera) return null;
+        this._cameraBackoff = camera.backoff;
+        this._cameraResolvedAt = resolvedAt;
+        this.viewer.camera.position.set(camera.position.x, camera.position.y, camera.position.z);
+        this.viewer.camera.rotation.set(pitch, yaw, 0, 'ZYX');
         this.viewer.update();
         this.renderer.render(this.viewer.scene, this.viewer.camera);
 

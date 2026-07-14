@@ -23,7 +23,7 @@
 //     { t:'unloadChunk', x, z }
 //     { t:'entity', e }                           entity upsert/delete
 //     { t:'blockUpdate', pos, stateId }
-//     { t:'render', id, pos:{x,y,z}, yaw, pitch } request a frame
+//     { t:'render', id, cameraPos:{x,y,z}, yaw, pitch } request a frame
 //   worker → parent:
 //     { t:'ready' }                               renderer constructed OK
 //     { t:'frame', id, jpeg }                     jpeg as base64 string (+ id echo)
@@ -63,10 +63,10 @@ viewer.listen(emitter);
 let rendering = false;
 
 async function renderFrame(msg) {
-    const { id, pos, yaw, pitch } = msg;
+    const { id, cameraPos, yaw, pitch } = msg;
     // Set the camera directly (no TWEEN) so a one-shot capture is not chasing a
     // 50ms interpolation that never gets a follow-up frame.
-    viewer.camera.position.set(pos.x, pos.y + (viewer.playerHeight || 1.6), pos.z);
+    viewer.camera.position.set(cameraPos.x, cameraPos.y, cameraPos.z);
     viewer.camera.rotation.set(pitch, yaw, 0, 'ZYX');
     viewer.update();
     renderer.render(viewer.scene, viewer.camera);
