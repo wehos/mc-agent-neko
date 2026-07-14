@@ -4,6 +4,14 @@ import * as tickConfirm from "./tick_confirm.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import { unclimbVines } from './vine_unstick.js';
+import {
+    applyUndergroundWaterAvoidance,
+    createUndergroundWaterGuard,
+    findNearbyDryStandPositions,
+    isBotInWater,
+    isUndergroundMiningWaterSafetyError,
+} from './navigation_policy.js';
+export { isUndergroundMiningWaterSafetyError };
 import settings from "../../../settings.js";
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -1351,12 +1359,17 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
             // The block-change acknowledgement can arrive one tick before the item entity.
             // Give the drop a brief spawn window before deciding that nothing landed here.
             await new Promise(r => setTimeout(r, 150));
-            try { picked = await ensurePickupAt(bot, cur.position, { radius: 6, maxDescend: 3, timeoutMs: 6000 }); } catch (e) {}
-            if (!picked) { try { await pickupNearbyItems(bot); } catch (e) {} }
+            try { picked = await ensurePickupAt(bot, cur.position, { radius: 6, maxDescend: 3, timeoutMs: 6000 }); }
+            catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
+            if (!picked) {
+                try { await pickupNearbyItems(bot); }
+                catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
+            }
         }
         return 'ok';
     } catch (e) {
         try { bot.stopDigging(); } catch (_) {}
+        if (isUndergroundMiningWaterSafetyError(e)) throw e;
         if (e && e.message === 'interrupted') return 'error';
         return (e && e.message === 'dig-timeout') ? 'timeout' : 'error';
     }
@@ -1912,14 +1925,18 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
                         }
                         const r = await safeDig(bot, _raw, { maxMs: 15000, equip: false, requireLOS: false });
                         if (r === 'ok') {
-                            try { await goToPosition(bot, _p.x, _p.y, _p.z, 1); } catch (e) {}
+                            try { await goToPosition(bot, _p.x, _p.y, _p.z, 1); }
+                            catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
                             await pickupNearbyItems(bot);
                             collected++;
                             bot._collectSticky = null;
                             continue;   // 挖掉一块 → 重扫; 下一块最近的自然进候选或裸兜底, maxAttempts 收口
                         }
                         log(bot, `⚠️ direct-dig fallback ${_raw.name} → ${r}; give up scan.`);
-                    } catch (e) { log(bot, `direct-dig fallback err: ${e.message}`); }
+                    } catch (e) {
+                        if (isUndergroundMiningWaterSafetyError(e)) throw e;
+                        log(bot, `direct-dig fallback err: ${e.message}`);
+                    }
                     break;
                 }
             }
@@ -2074,14 +2091,17 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
                     // block's spot via a dig-capable path so mineflayer auto-vacuums the item,
                     // THEN sweep any stragglers (drops land a couple blocks off through leaves/vines).
                     if (gainOf() === gainBeforeDig) {
-                        try { await goToPosition(bot, block.position.x, block.position.y, block.position.z, 1); } catch (e) {}
-                        try { await ensurePickupAt(bot, block.position, { radius: 6, maxDescend: 3, timeoutMs: 6000 }); } catch (e) {}
+                        try { await goToPosition(bot, block.position.x, block.position.y, block.position.z, 1); }
+                        catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
+                        try { await ensurePickupAt(bot, block.position, { radius: 6, maxDescend: 3, timeoutMs: 6000 }); }
+                        catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
                     }
                     // ★WATER-DRIFT SWEEP: a drop broken next to water floats and drifts out of the
                     // first pickup's reach (root cause of the -79,168 lakeside chop that logged 4
                     // logs but banked 0). If the drop item still didn't land, chase once wider.
                     if (gainOf() === gainBeforeDig) {
-                        try { await pickupNearbyItems(bot, 12); } catch (e) {}
+                        try { await pickupNearbyItems(bot, 12); }
+                        catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
                     }
                     success = true;
                     bot._collectSticky = null;   // ★挖到了 → 松手, 下轮粘住下一块最近的
@@ -2105,6 +2125,9 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
             await autoLight(bot);
         }
         catch (err) {
+            if (isUndergroundMiningWaterSafetyError(err)) {
+                throw err;
+            }
             if (err.name === 'NoChests') {
                 log(bot, `Failed to collect ${blockType}: Inventory full, no place to deposit.`);
                 break;
@@ -2296,6 +2319,7 @@ export async function pickupNearbyItems(bot, distance = 8) {
                 )
             ]);
         } catch (error) {
+            if (isUndergroundMiningWaterSafetyError(error)) throw error;
             // Count EVERY failed leg (path-failed/NoPath/goal-changed too, not just the
             // timeout — untyped rejections previously slipped through uncounted).
             log(bot, `⚠️ Failed to reach item (${error.message}), skipping.`);
@@ -2343,7 +2367,8 @@ export async function ensurePickupAt(bot, pos, opts = {}) {
      * SAFE descent (≤ maxDescend blocks down → ZERO fall damage) and its resting cell isn't
      * over/in lava·fire·void. Anything below that, or that the (non-digging, maxDropDown=3)
      * pathfinder refuses to safely reach, is LEFT BEHIND on purpose — losing an item is
-     * always cheaper than a death. Never throws.
+     * always cheaper than a death. Ordinary pickup/path failures return false;
+     * underground mining water-safety failures still unwind the mining skill.
      *
      * @param {MinecraftBot} bot
      * @param {Vec3} pos   the position of the block that was just mined (drop origin)
@@ -2398,18 +2423,23 @@ export async function ensurePickupAt(bot, pos, opts = {}) {
                         new Promise((_, rej) => setTimeout(() => rej(new Error('pickup-nav-timeout')), timeoutMs)),
                     ]);
                 } catch (e) {
+                    if (isUndergroundMiningWaterSafetyError(e)) throw e;
                     log(bot, `ensurePickup: couldn't safely reach drop @${Math.floor(tp.x)},${Math.floor(tp.y)},${Math.floor(tp.z)} (${e.message}) — leaving it.`);
                     _pkDBG(`reach-refuse @${Math.floor(tp.x)},${Math.floor(tp.y)},${Math.floor(tp.z)} (${e.message}) — left (pathfinder refused)`);
                     break;   // pathfinder refused (likely unsafe / blocked) — don't fight it
                 }
             }
-            try { await pickupNearbyItems(bot); } catch (e) {}
+            try { await pickupNearbyItems(bot); }
+            catch (e) { if (isUndergroundMiningWaterSafetyError(e)) throw e; }
             await new Promise(r => setTimeout(r, 200));
         }
         const got = totalItems() - before;
         if (got > 0) { log(bot, `ensurePickup: collected ${got} item(s) from the dig site.`); _pkDBG(`got ${got} item(s) @${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)} (safe descend+pickup ✓)`); }
         return got > 0;
-    } catch (e) { return false; }
+    } catch (e) {
+        if (isUndergroundMiningWaterSafetyError(e)) throw e;
+        return false;
+    }
 }
 
 
@@ -4231,6 +4261,38 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
     let lastCheckTime = Date.now();
     const stuckRadius = 1.5; // Tighter radius for faster stuck detection
     const phaseStartedAt = Date.now();
+
+    const observeWaterAtSuccess = () => {
+        if (!audit.waterGuard) return null;
+        const waterState = audit.waterGuard.observe();
+        if (waterState === 'entered') {
+            const waterError = new Error('Underground mining path entered water');
+            waterError.name = 'UndergroundMiningWaterEntry';
+            return waterError;
+        }
+        if (waterState === 'armed') {
+            audit.armWaterAvoidance();
+            motionAudit(bot, 'path.water_policy_armed', {
+                seq: audit.seq,
+                phase: audit.phase,
+                atGoal: true,
+                ms: Date.now() - phaseStartedAt,
+                goal: audit.goal,
+            });
+        }
+        return null;
+    };
+
+    const abortWaterEntry = (error) => {
+        try { bot.clearControlStates(); } catch (e) { /* best-effort emergency stop */ }
+        motionAudit(bot, 'path.water_entry_abort', {
+            seq: audit.seq,
+            phase: audit.phase,
+            ms: Date.now() - phaseStartedAt,
+            goal: audit.goal,
+        });
+        throw error;
+    };
     
     bot.pathfinder.setMovements(movements);
     motionAudit(bot, 'path.phase.begin', {
@@ -4244,6 +4306,28 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
     
     const stuckCheckPromise = new Promise((_, reject) => {
         stuckCheckInterval = setInterval(() => {
+            if (audit.waterGuard) {
+                const waterState = audit.waterGuard.observe();
+                if (waterState === 'armed') {
+                    try { audit.armWaterAvoidance(); } catch (e) {
+                        clearInterval(stuckCheckInterval);
+                        reject(e);
+                        return;
+                    }
+                    const armedError = new Error('Underground mining water guard armed after dry exit');
+                    armedError.name = 'UndergroundMiningWaterPolicyArmed';
+                    clearInterval(stuckCheckInterval);
+                    reject(armedError);
+                    return;
+                }
+                if (waterState === 'entered') {
+                    const waterError = new Error('Underground mining path entered water');
+                    waterError.name = 'UndergroundMiningWaterEntry';
+                    clearInterval(stuckCheckInterval);
+                    reject(waterError);
+                    return;
+                }
+            }
             if (bot.interrupt_code) {
                 clearInterval(stuckCheckInterval);
                 reject(new Error('Interrupted'));
@@ -4286,6 +4370,11 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
             bot.pathfinder.goto(goal),
             stuckCheckPromise
         ]);
+        // A short GoalNear/GoalBlock route can enter water and finish before
+        // the 500ms monitor samples it. Re-observe at the success boundary so
+        // a nearby water goal cannot bypass the underground guard.
+        const successWaterError = observeWaterAtSuccess();
+        if (successWaterError) throw successWaterError;
         clearInterval(stuckCheckInterval);
         motionAudit(bot, 'path.phase.end', {
             seq: audit.seq,
@@ -4298,6 +4387,19 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
     } catch (err) {
         clearInterval(stuckCheckInterval);
         bot.pathfinder.setGoal(null);
+        if (err && err.name === 'UndergroundMiningWaterPolicyArmed') {
+            try { bot.clearControlStates(); } catch (e) { /* best-effort policy replan */ }
+            motionAudit(bot, 'path.water_policy_armed', {
+                seq: audit.seq,
+                phase: audit.phase,
+                ms: Date.now() - phaseStartedAt,
+                goal: audit.goal,
+            });
+            return { success: false, stuckDetected: false, waterPolicyArmed: true };
+        }
+        if (err && err.name === 'UndergroundMiningWaterEntry') {
+            abortWaterEntry(err);
+        }
         
         const errorMsg = err.message || err.toString();
         if (errorMsg.includes('Interrupted') || bot.interrupt_code) {
@@ -4317,6 +4419,11 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
         }
         // Goal reached or path completed normally despite "error"
         if (errorMsg.includes('Goal') || errorMsg.includes('arrived')) {
+            // mineflayer-pathfinder sometimes reports completion through this
+            // exception-shaped path. It is still a success boundary and must
+            // not bypass the final underground water observation.
+            const successWaterError = observeWaterAtSuccess();
+            if (successWaterError) abortWaterEntry(successWaterError);
             motionAudit(bot, 'path.phase.end', {
                 seq: audit.seq,
                 phase: audit.phase,
@@ -4340,7 +4447,7 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
     }
 }
 
-export async function goToGoal(bot, goal) {
+export async function goToGoal(bot, goal, navigationOptions = {}) {
     /**
      * Navigate to the given goal with adaptive stuck recovery.
      * Strategy:
@@ -4357,6 +4464,46 @@ export async function goToGoal(bot, goal) {
     bot._lastPathGoalInfo = goalInfo;
     bot._lastPathGoalAt = Date.now();
     motionAudit(bot, 'path.begin', { seq: navSeq, goal: goalInfo });
+    const waterGuard = createUndergroundWaterGuard(bot, {
+        disabled: navigationOptions.skipUndergroundWaterGuard === true,
+    });
+
+    // A mining navigation that is ALREADY wet must recover to a real dry stand
+    // cell before pursuing its mining goal. Sending the original goal through
+    // water can instantly succeed (GoalNear already satisfied) or swim deeper,
+    // leaving the skill active while drowning. Use a bounded composite of dry
+    // air columns and a non-destructive recovery route, then restart the
+    // original goal from dry ground so the normal hard veto is active.
+    if (waterGuard.startedInWater && !navigationOptions.skipInitialWaterRecovery) {
+        const dryPositions = findNearbyDryStandPositions(bot);
+        if (dryPositions.length === 0) {
+            const noExit = new Error('Underground mining navigation found no nearby dry water exit');
+            noExit.name = 'UndergroundMiningNoDryExit';
+            motionAudit(bot, 'path.water_recovery.none', { seq: navSeq, goal: goalInfo });
+            throw noExit;
+        }
+        const dryGoal = new pf.goals.GoalCompositeAny(
+            dryPositions.map(p => new pf.goals.GoalBlock(p.x, p.y, p.z))
+        );
+        motionAudit(bot, 'path.water_recovery.begin', {
+            seq: navSeq,
+            candidates: dryPositions.length,
+            goal: goalInfo,
+        });
+        await goToGoal(bot, dryGoal, {
+            skipUndergroundWaterGuard: true,
+            skipInitialWaterRecovery: true,
+            nonDestructiveOnly: true,
+        });
+        if (isBotInWater(bot)) {
+            const stillWet = new Error('Underground mining water recovery did not reach dry ground');
+            stillWet.name = 'UndergroundMiningStillInWater';
+            motionAudit(bot, 'path.water_recovery.end', { seq: navSeq, ok: false, goal: goalInfo });
+            throw stillWet;
+        }
+        motionAudit(bot, 'path.water_recovery.end', { seq: navSeq, ok: true, goal: goalInfo });
+        return goToGoal(bot, goal, navigationOptions);
+    }
 
     // ★MAROONED gate at the COMMON pathfinding entry (打转终极机理: 只给 goToPosition
     // 加门漏掉了 moveAway/moveAwayFromEntity/avoidEnemies — 它们直接走 goToGoal。
@@ -4434,6 +4581,31 @@ export async function goToGoal(bot, goal) {
     destructiveMovements.liquids.add(mc.getBlockId('lava'));
     destructiveMovements.liquids.add(mc.getBlockId('flowing_lava'));
 
+    // Underground mining is different from ordinary travel: an aquifer is not
+    // merely an expensive route, because a low ceiling can turn one path step
+    // into a drowning trap. Make water a hard A* veto for mining only. Keep the
+    // existing liquid entries so a route that starts in water can still model a
+    // dry exit; once it reaches dry ground the runtime guard arms this policy,
+    // cancels the recovery path, and replans with the hard veto in place.
+    const armWaterAvoidance = () => {
+        const getBlockId = (name) => mc.getBlockId(name);
+        applyUndergroundWaterAvoidance(nonDestructiveMovements, bot, getBlockId);
+        applyUndergroundWaterAvoidance(destructiveMovements, bot, getBlockId);
+    };
+    if (waterGuard.enabled && waterGuard.armed) {
+        armWaterAvoidance();
+    }
+    if (waterGuard.enabled) {
+        motionAudit(bot, 'path.water_policy', {
+            seq: navSeq,
+            mode: waterGuard.armed ? 'hard-avoid' : 'initial-water-recovery',
+            startedInWater: waterGuard.startedInWater,
+            skill: bot._currentSkill || null,
+            y: +bot.entity.position.y.toFixed(2),
+            goal: goalInfo,
+        });
+    }
+
     // ★JUNGLE VINE FIX (user: 寻路特别容易卡在藤蔓面前动不了). Vines are CLIMBABLE in
     // mineflayer-pathfinder by default → the planner invents bogus "climb the vine" paths up
     // trunks/walls that the bot can't actually execute, so it stalls in front of the vine
@@ -4510,7 +4682,7 @@ export async function goToGoal(bot, goal) {
     const _usable = (s) => s === 'success' || s === 'partial';
     const nonDestructivePath = await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout);
     let _destructivePath = null;
-    if (nonDestructivePath.status !== 'success') {
+    if (nonDestructivePath.status !== 'success' && !navigationOptions.nonDestructiveOnly) {
         _destructivePath = await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout);
     }
     // pick: nd-success > d-success > nd-partial > d-partial
@@ -4583,8 +4755,57 @@ export async function goToGoal(bot, goal) {
 
             const result = await executePathfindingPhase(
                 bot, goal, currentMovements, phaseStuckTimeout, doorCheckInterval,
-                { seq: navSeq, phase: isDestructive ? 'destructive' : 'non-destructive', goal: goalInfo }
+                {
+                    seq: navSeq,
+                    phase: isDestructive ? 'destructive' : 'non-destructive',
+                    goal: goalInfo,
+                    waterGuard,
+                    armWaterAvoidance,
+                }
             );
+
+            if (result.waterPolicyArmed) {
+                // The route crossed the underground cutoff on dry ground. Its
+                // remaining nodes may still cross water, so cancel and replan
+                // now that both movement sets carry the hard water veto. The
+                // old phase may now be noPath, so choose again rather than
+                // repeatedly feeding that stale movement mode to goto().
+                const guardedNonDestructivePath = await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout);
+                let guardedDestructivePath = null;
+                if (guardedNonDestructivePath.status !== 'success' && !navigationOptions.nonDestructiveOnly) {
+                    guardedDestructivePath = await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout);
+                }
+                let guardedPick = null;
+                if (guardedNonDestructivePath.status === 'success') guardedPick = 'nd';
+                else if (guardedDestructivePath && guardedDestructivePath.status === 'success') guardedPick = 'd';
+                else if (guardedNonDestructivePath.status === 'partial') guardedPick = 'nd';
+                else if (guardedDestructivePath && guardedDestructivePath.status === 'partial') guardedPick = 'd';
+
+                motionAudit(bot, 'path.water_policy_replan', {
+                    seq: navSeq,
+                    selected: guardedPick === 'nd' ? 'non-destructive' : guardedPick === 'd' ? 'destructive' : 'none',
+                    nonDestructive: {
+                        status: guardedNonDestructivePath.status,
+                        len: motionPathLen(guardedNonDestructivePath),
+                    },
+                    destructive: guardedDestructivePath ? {
+                        status: guardedDestructivePath.status,
+                        len: motionPathLen(guardedDestructivePath),
+                    } : undefined,
+                    goal: goalInfo,
+                });
+                if (!guardedPick) {
+                    const noGuardedPlan = new Error(
+                        `No water-safe path to destination. Non-destructive=${guardedNonDestructivePath.status}, ` +
+                        `destructive=${guardedDestructivePath ? guardedDestructivePath.status : 'noPath'}.`
+                    );
+                    noGuardedPlan.name = 'PathfindingNoPlan';
+                    throw noGuardedPlan;
+                }
+                currentMovements = guardedPick === 'nd' ? nonDestructiveMovements : destructiveMovements;
+                isDestructive = guardedPick === 'd';
+                continue;
+            }
 
             if (result.success) {
                 clearInterval(doorCheckInterval);
@@ -4601,6 +4822,10 @@ export async function goToGoal(bot, goal) {
             if (result.stuckDetected) {
                 // Phase 1: Non-destructive stuck → switch to destructive
                 if (!isDestructive) {
+                    if (navigationOptions.nonDestructiveOnly) {
+                        motionAudit(bot, 'path.recovery_stuck', { seq: navSeq, goal: goalInfo });
+                        break;
+                    }
                     // ★不因"泡在水里晃不动"就切破坏式乱挖 (2026-07-08 用户实拍"移动中莫名其妙挖土", S1 的水域facet):
                     // 站在水里被浮力晃住 → 3s 内挪不出 1.5b → 触发 PhaseStuck → 老逻辑立刻切 destructive(canDig)
                     // 朝目标挖泥开路 = "莫名其妙挖土"。水里晃不动是【游泳假象】不是【墙】, 挖土解决不了。改: 脚/头
@@ -4657,6 +4882,10 @@ export async function goToGoal(bot, goal) {
             }
 
             // Non-stuck failure (path blocked, etc.) - try unstick anyway
+            if (navigationOptions.nonDestructiveOnly) {
+                motionAudit(bot, 'path.recovery_failed', { seq: navSeq, goal: goalInfo });
+                break;
+            }
             if (unstickAttempts < maxUnstickAttempts) {
                 unstickAttempts++;
                 const stepped = await stepEdgeAssist(bot, {
@@ -4858,6 +5087,7 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
     } catch (err) {
         log(bot, `Pathfinding stopped: ${err.message}.`);
         clearInterval(progressInterval);
+        if (isUndergroundMiningWaterSafetyError(err)) throw err;
         return false;
     }
 }
