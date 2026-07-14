@@ -18,7 +18,9 @@ import { foodInstinctsEnabled, hpInstinctsEnabled } from './framework/contracts.
 const FAMINE_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_|rotten_flesh|spider_eye/;
 const NORMAL_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_/;
 // ONE shared "placeable filler block we carry" matcher for every wall/seal/interpose
-// consumer in this file (creeperInterpose + self_preservation's fillerOf). These used to
+// consumer in this file (creeperInterpose + self_preservation's fillerOf). Context-specific
+// policy is applied after matching: seal/pillar paths exclude planks, while the one-block
+// creeper interpose may still spend one. These used to
 // be two function-local copies that had ALREADY drifted (calcite/blackstone/basalt in one,
 // unanchored gravel/red_sand in the other) — the exact drift class ★C280 documents as a
 // past death loop (red_sand added to one FILL_RE but not the others → bot dug 163 red_sand
@@ -1497,11 +1499,9 @@ const modes_list = [
                 }
             } catch (e) {}
             const OPENISH = ['air', 'cave_air', 'water', 'flowing_water', 'short_grass', 'tall_grass'];
-            // ANY placeable solid we carry — CRUCIALLY including planks/logs/wood. A fresh
-            // respawn is wood-only (no stone/dirt yet); the old list omitted wood, so
-            // fillerOf() returned nothing → the bot couldn't cap/wall its shelter → it just
-            // spammed "digging in" and bled out to a single zombie. A human walls up with
-            // whatever's in hand — so do we: planks and logs seal a bunker just fine.
+            // Use any matching filler except planks. Logs/wood remain emergency-capable, but
+            // crafted planks are reserved for the tool/crafting chain and must never be sealed
+            // into a bunker or consumed by the water-edge pillar fallback below.
             // ★C280: +red_sand|red_sandstone|sandstone — BADLANDS' abundant block. Without it
             // the bot dug 163 red_sand yet fillerOf()=undefined → couldn't seal → died 3× to
             // melee mobs in the open on one night (2026-06-20). terracotta was already in.
@@ -1512,7 +1512,7 @@ const modes_list = [
             const GRAVITY_FILL = /^(sand|red_sand|gravel)$/;
             const fillerOf = () => {
                 const c = world.getInventoryCounts(bot);
-                const all = Object.keys(c).filter(n => c[n] > 0 && FILL_RE.test(n));
+                const all = Object.keys(c).filter(n => c[n] > 0 && FILL_RE.test(n) && !skills.isPlankBlock(n));
                 return all.find(n => !GRAVITY_FILL.test(n)) || all[0];
             };
             try { bot.clearControlStates(); } catch (e) {}
@@ -2120,7 +2120,7 @@ const modes_list = [
                         const AIRY = ['air', 'cave_air', 'void_air', 'short_grass', 'tall_grass', 'fern'];
                         const isAir = (b) => b && AIRY.includes(b.name);
                         const FILL = ['dirt', 'cobblestone', 'cobbled_deepslate', 'andesite', 'diorite', 'granite', 'stone', 'tuff', 'terracotta', 'sandstone', 'red_sandstone', 'netherrack', 'deepslate', 'gravel', 'sand', 'red_sand'];   // ★C280 +terracotta/sandstone/red_sand (badlands); gravity blocks last
-                        const filler = () => { const c = world.getInventoryCounts(bot); return FILL.find(n => (c[n] || 0) > 0) || Object.keys(c).find(n => /_planks$|_log$/.test(n) && c[n] > 0); };
+                        const filler = () => { const c = world.getInventoryCounts(bot); return FILL.find(n => (c[n] || 0) > 0) || Object.keys(c).find(n => /_log$/.test(n) && c[n] > 0); };
                         const inWaterNow = () => isWater(bot.blockAt(bot.entity.position)) || isWater(bot.blockAt(bot.entity.position.offset(0, 1, 0)));
                         const findShore = () => {
                             const p = bot.entity.position.floored();
@@ -4907,7 +4907,7 @@ const modes_list = [
                     const isWater2 = (b) => b && WS2.includes(b.name || '');
                     const isAir2 = (b) => b && ['air', 'cave_air', 'void_air'].includes(b.name || '');
                     const FILL2 = ['dirt', 'cobblestone', 'cobbled_deepslate', 'andesite', 'diorite', 'granite', 'stone', 'tuff', 'gravel', 'sand', 'red_sand', 'sandstone', 'netherrack', 'deepslate'];
-                    const filler2 = () => { try { const c = world.getInventoryCounts(bot); return FILL2.find(n => (c[n] || 0) > 0) || Object.keys(c).find(n => /_planks$|_log$/.test(n) && c[n] > 0); } catch (e) { return null; } };
+                    const filler2 = () => { try { const c = world.getInventoryCounts(bot); return FILL2.find(n => (c[n] || 0) > 0) || Object.keys(c).find(n => /_log$/.test(n) && c[n] > 0); } catch (e) { return null; } };
                     if (Date.now() - (bot._lastSwimStuckSayAt || 0) > 15000) { bot._lastSwimStuckSayAt = Date.now(); say(agent, 'Water-locked — climbing the vertical exit.'); }
                     const m2 = bot.entity.position.floored();
                     // VERTICAL-EXIT topology: air directly overhead (the one hole) + all four
@@ -5242,7 +5242,7 @@ const modes_list = [
                     const _origin = bot._maroonedMarchOrigin || _mStart;
                     const _foodTight = bot.food <= 10 && noEdible;
                     const _maxSeg = _foodTight ? 2 : 6;
-                    const FILLR = /^dirt$|cobblestone|cobbled|granite|andesite|diorite|^stone$|tuff|gravel|_planks$|_log$/;
+                    const FILLR = /^dirt$|cobblestone|cobbled|granite|andesite|diorite|^stone$|tuff|gravel|_log$/;
                     const canMarchDig = (b) => b
                         && b.boundingBox === 'block'
                         && !/bedrock|water|lava/.test(b.name)
@@ -5361,9 +5361,8 @@ const modes_list = [
                         };
                         let floorOK = safeLandingAhead();
                         if (!floorOK) {
-                            // ★#5 (review-2026-07-06 垫脚用木板): MAROONED 架桥选料 cheap-first, 木料末位
-                            //   回退 (原 .find(FILLR) 按槽位序先选木板 → 烧木架桥)。
-                            const fill = bot.inventory.items().find(it => FILLR.test(it.name) && !/_planks$|_log$|_wood$/.test(it.name))
+                            // MAROONED 架桥禁止木板；石土优先，原木仅作末位脱困料。
+                            const fill = bot.inventory.items().find(it => FILLR.test(it.name) && !/_log$|_wood$/.test(it.name))
                                 || bot.inventory.items().find(it => FILLR.test(it.name));
                             const bp = bot.entity.position;
                             let placedBridge = false;

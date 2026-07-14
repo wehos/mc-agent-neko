@@ -197,20 +197,18 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         _dbg(`stone dig blocked: no pick actually held for ${block.name}${why ? ' ' + why : ''} held=${bot.heldItem ? bot.heldItem.name : 'empty'}`);
         return false;
     };
-    // ★#5 贱料优先填料 (review-2026-07-06): 垫脚/垫柱选 dirt/cobble 等贱料, 木板/原木仅在实在没
-    // 别的时才用 (木料留给工具/台/棍)。扁平正则 + .find() 会按物品栏槽位序先命中木板 → 烧木板垫脚;
-    // 改成全库范式 (skills.js:2016 / modes.js:1691) 的两段式: 有序贱料先, 木料末位回退 (不可删回退 —
-    // coffin/无贱料时唯一能垫脱困)。三处 (surf-stair 732 / LEASH-stair 1488 / LEASH-pillar 1519) 共用。
+    // 垫脚/垫柱选 dirt/cobble 等贱料，禁止使用任何木板；原木/木块仍保留为末位脱困料。
+    // 三处 (surf-stair / LEASH-stair / LEASH-pillar) 共用同一选择器。
     const CHEAP_FILL = ['dirt', 'coarse_dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'deepslate',
         'andesite', 'diorite', 'granite', 'tuff', 'gravel', 'sand', 'red_sand', 'sandstone', 'red_sandstone'];
     const pickFiller = () => {
         const items = bot.inventory.items();
         for (const n of CHEAP_FILL) { const it = items.find(i => i.name === n); if (it) return it; }
         const terra = items.find(i => /_terracotta$|^terracotta$/.test(i.name)); if (terra) return terra;   // badlands 贱料
-        return items.find(i => /_planks$|_log$|_wood$/.test(i.name)) || null;   // 木料末位回退 (不可删)
+        return items.find(i => /_log$|_wood$/.test(i.name)) || null;   // 原木/木块末位回退，绝不使用木板
     };
     // ★就近取料 (用户: 垫高砍树时身上没泥土/石头 → 就近挖一点): pickFiller 只在库里翻,
-    // 翻空就烧木料/返回 null → 无贱料时垫柱直接失败或白烧木。这里在"没有真贱料(只剩木料/空)"
+    // 翻空只允许原木兜底/返回 null，绝不烧木板。这里在"没有真贱料(只剩原木/木板/空)"
     // 时, 就近挖 1-2 块地面料补上再垫柱。泥土类(dirt/grass/gravel/sand…)徒手即掉可放置物;
     // 石头类必须有镐才挖(徒手撸石掉空=白费), 且软料优先(不磨镐)。挖完 _sweepDrops 捡回。
     const _CHEAP_HAVE = new Set(CHEAP_FILL);
@@ -218,7 +216,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
     const _SOFT_SRC = /^(dirt|grass_block|coarse_dirt|rooted_dirt|dirt_path|podzol|mycelium|moss_block|gravel|sand|red_sand|mud|packed_mud|clay|sandstone|red_sandstone)$/;
     const _ensureFiller = async (why = '') => {
         const f = pickFiller();
-        if (f && !/_planks$|_log$|_wood$/.test(f.name || '')) return f;   // 已有真贱料, 直接用
+        if (f && !/_log$|_wood$/.test(f.name || '')) return f;   // 已有真贱料, 直接用
         if (_needsFoodYield && _needsFoodYield()) return f;               // 让位窗口内不额外挖料
         const m = bot.entity.position.floored();
         const eye = () => bot.entity.position.offset(0, 1.6, 0);
@@ -806,7 +804,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // dirt=21 yet it fell through to the unstable staircase). Do it by hand reliably:
             // clear the head, equip filler, jump, and place a block under our feet at the apex.
             // Vertical rise that CANNOT fall back (unlike raw stair-climbing in cave terrain).
-            const _fill = await _ensureFiller('surf-pillar');   // ★#5 贱料优先, 木料末位回退; 无贱料就近挖一块
+            const _fill = await _ensureFiller('surf-pillar');   // 贱料优先，原木末位；木板禁用
             // ★STAIR-PLACE first (deterministic +1, proven in LEASH; the self-pillar
             // below is a hitbox race that mostly loses — saw y oscillate 60↔62 for 5min
             // with 22 dirt in the bag). Place into an ADJACENT cell at foot height

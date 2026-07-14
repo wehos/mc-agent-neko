@@ -151,6 +151,10 @@ export function log(bot, message) {
     bot.output += message + '\n';
 }
 
+export function isPlankBlock(blockName = '') {
+    return typeof blockName === 'string' && /(?:^|_)planks$/.test(blockName);
+}
+
 function motionPos(bot) {
     const p = bot && bot.entity && bot.entity.position;
     return p ? { x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3) } : null;
@@ -2668,6 +2672,11 @@ export async function placeBlockUnderFeet(bot, blockType, opts = {}) {
     } = opts;
     let itemName = blockType;
     if (itemName === 'redstone_wire') itemName = 'redstone';
+    if (isPlankBlock(itemName)) {
+        log(bot, `Refusing to place ${itemName} under feet: planks are reserved for crafting.`);
+        motionAudit(bot, 'place_underfoot.end', { ok: false, blockType, item: itemName, reason: 'planks-forbidden', env: motionEnvSnap(bot) });
+        return false;
+    }
     const empty = new Set(['air', 'cave_air', 'void_air', 'water', 'flowing_water', 'grass', 'short_grass', 'tall_grass', 'snow', 'dead_bush', 'fern']);
     motionAudit(bot, 'place_underfoot.begin', {
         blockType,
@@ -2814,7 +2823,6 @@ export async function placeBlockNearby(bot, blockName, maxTries=4) {
     const _fill2 = () => {
         const c = world.getInventoryCounts(bot); const has = (n) => (c[n] || 0) > 0;
         return ['dirt','cobblestone','cobbled_deepslate','stone','andesite','diorite','granite','tuff','gravel','netherrack'].find(has)
-            || Object.keys(c).find(n => /_planks$/.test(n) && c[n] > 0)
             // ★C288: badlands/desert fallback so a mesa-dug bot (248 red_sand + 184 terracotta, 0
             // cobble) can still tower out of a cramped pocket — non-gravity terracotta/sandstone
             // first, then sand/red_sand (gravity, last resort).
@@ -2852,18 +2860,18 @@ export async function placeBlockNearby(bot, blockName, maxTries=4) {
     }
     // ★STUCK ESCAPE (用户: "原地垫石头就能上去"). Couldn't place after carving — we're sealed in
     // a cramped pocket (naked in a stone shaft: can't dig stone fast, no room). PILLAR UP on any
-    // filler we carry (planks/dirt/cobble) toward open sky so the caller's retry lands in the
+    // non-plank filler we carry (logs/dirt/cobble) toward open sky so the caller's retry lands in the
     // open. Bounded to 6 — escapes a shallow pocket; a human just towers out.
     // ★C300: include BADLANDS/desert fillers (terracotta/sandstone/red_sand) — the STUCK-ESCAPE pillar
     // that lets the bot tower out of a cramped/footing-less spot to place a table couldn't fire in a
     // mesa (it holds 400+ red_sand but FILL2 listed none), so table placement → tool/sword crafting
     // dead-locked there (T-0017 keystone; same C280/C288 whitelist gap, yet another site). Non-gravity
     // first (terracotta/sandstone — safe to stand on while towering), red_sand/sand last.
-    const FILL2 = ['dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'andesite', 'diorite', 'granite', 'tuff', 'netherrack', 'oak_planks', 'spruce_planks', 'jungle_planks', 'birch_planks', 'dark_oak_planks', 'acacia_planks', 'mangrove_planks', 'cherry_planks'];
+    const FILL2 = ['dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'andesite', 'diorite', 'granite', 'tuff', 'netherrack'];
     const filler2 = () => {
         const c = world.getInventoryCounts(bot);
         return FILL2.find(n => (c[n] || 0) > 0)
-            || Object.keys(c).find(n => (/_planks$|_log$|terracotta$|sandstone$/.test(n)) && c[n] > 0)
+            || Object.keys(c).find(n => (/_log$|terracotta$|sandstone$/.test(n)) && c[n] > 0)
             || ['gravel', 'sand', 'red_sand'].find(n => (c[n] || 0) > 0);
     };
     const headOpen = () => { const h = bot.blockAt(bot.entity.position.offset(0, 2, 0)); return !h || /^(air|cave_air|void_air|short_grass|tall_grass|snow)$/.test(h.name || ''); };
@@ -4294,7 +4302,7 @@ export async function goToGoal(bot, goal) {
     // stranded the bot (every caller, not just migrate which C318 band-aided). Give destructive the
     // fillers we ACTUALLY carry (planning with blocks we lack = a place-path that fails at exec).
     // Non-destructive stays scaffold-free — ordinary travel never improvises placement.
-    const _SCAFFOLD_RE = /^(cobblestone|cobbled_deepslate|dirt|coarse_dirt|sand|red_sand|gravel|stone|granite|diorite|andesite|tuff|netherrack|sandstone|red_sandstone)$|_planks$|terracotta$/;
+    const _SCAFFOLD_RE = /^(cobblestone|cobbled_deepslate|dirt|coarse_dirt|sand|red_sand|gravel|stone|granite|diorite|andesite|tuff|netherrack|sandstone|red_sandstone)$|terracotta$/;
     const _scaffoldIds = [];
     try {
         for (const it of bot.inventory.items()) {
@@ -5600,15 +5608,15 @@ export async function digOneCapOne(bot) {
 
     const feet = bot.entity.position.floored();
 
-    // ★封顶料 capName 先算(与 ④ 同优先级: 泥土>石系>...>木料末位保命)——① 的 gravity
+    // ★封顶料 capName 先算(与 ④ 同优先级: 泥土>石系>...>非木板兜底)——① 的 gravity
     //   闸门要靠它判定"能不能挖三填一穿沙"。inv/capName 下游 ④⑤ 直接复用。
     const inv = world.getInventoryCounts(bot);
-    // ★#4 (review-2026-07-06 乱放木板): cap/侧墙材料 cheap-first, 木料末位。旧版 _CAP_PREFS 只列
+    // ★#4 (review-2026-07-06 乱放木板): cap/侧墙材料 cheap-first。旧版 _CAP_PREFS 只列
     // oak_planks(漏 spruce 等), fallback 抓"任意固体"会选中 spruce_planks → 工作台旁乱堆木板(真凶,
-    // 初诊误判在 modes.js)。扩充贱料清单 + fallback 拆两段: 先任意非木贱料, 只有木料时才用(裸生
-    // 封顶保命 — modes.js:1175 保护的 wood-only seal 不能断)。cap(④)与侧墙(⑤ 4376)共用 capName。
+    // 初诊误判在 modes.js)。扩充贱料清单，并在 fallback 中硬排除所有木板；cap(④)与侧墙(⑤ 4376)
+    // 共用 capName，只有木板时宁可诚实失败，也不消耗工具链材料。
     // ★材料优先级 (用户令 2026-07-07: 泥土 > 石头 > 其他): dirt/coarse_dirt 优先, 石系其次;
-    //   木料仍是最末位 fallback(下方 _nonWood/_wood 两段), 仅裸生保命才用。
+    //   其他非木板固体仍可末位 fallback，但所有 *_planks 一律禁用。
     const _CAP_PREFS = [
         'dirt', 'coarse_dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'deepslate',
         'andesite', 'diorite', 'granite', 'netherrack', 'tuff', 'sandstone', 'red_sandstone', 'terracotta',
@@ -5620,9 +5628,8 @@ export async function digOneCapOne(bot) {
             !/sword|pickaxe|axe|shovel|hoe|_ingot|_pickaxe|bucket|torch|seeds|^bed$|_bed$|food|apple|bread|meat|fish/.test(it.name) &&
             (mc.getItemId(it.name) != null);
         const items = bot.inventory.items();
-        const _nonWood = items.find(it => _solidOK(it) && !/_planks$|_log$|_wood$/.test(it.name));   // 先非木贱料
-        const _wood = items.find(it => _solidOK(it) && /_planks$|_log$|_wood$/.test(it.name));       // 木料末位(仅裸生保命)
-        capName = (_nonWood && _nonWood.name) || (_wood && _wood.name) || null;
+        const _nonPlank = items.find(it => _solidOK(it) && !isPlankBlock(it.name));
+        capName = (_nonPlank && _nonPlank.name) || null;
     }
 
     // ① _gravityPitTrap (C334 sand/gravel column): if a gravity block sits just
@@ -5679,7 +5686,7 @@ export async function digOneCapOne(bot) {
     }
 
     // ④ Cap the head: place a NON-gravity block two above the (new) feet so it
-    // can't fall through the pocket. capName 已在 ① 之前算好(泥土>石系>...>木料末位)。
+    // can't fall through the pocket. capName 已在 ① 之前算好(泥土>石系>...>非木板兜底)。
 
     // ★C346 depth-adaptive cap (deaths #4/#5 2026-07-02 13:11, zombie siege at the FLAT
     // village: a 1-deep pocket's cap cell (feet+2) sits one ABOVE the original surface —
@@ -5790,8 +5797,7 @@ export async function pillarUp(bot, targetY = null, opts = {}) {
     // which don't make a reliable 1-high step).
     const SCAFFOLD = ['dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'deepslate',
         'netherrack', 'end_stone', 'granite', 'andesite', 'diorite', 'tuff', 'blackstone', 'gravel',
-        'sand', 'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks',
-        'acacia_planks', 'dark_oak_planks'];
+        'sand'];
     const held = new Set(bot.inventory.items().map(i => i.name));
     const usable = SCAFFOLD.filter(n => held.has(n));
     // ★C288: SCAFFOLD lists no badlands/desert fillers — a mesa-dug bot holding 248 red_sand +

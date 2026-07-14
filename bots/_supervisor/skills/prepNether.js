@@ -550,11 +550,11 @@ async function prepNetherInner(bot, ctx) {
                     // 是重力块: 当它盖在头顶那格(正下方 dy1 是 bot 头部 air-gap)时会**重力坠落**砸到头上,
                     // cap 永远合不拢 → "封顶失败" 刷屏 + 暴露被群杀(实证 09:34 沙漠 pos14,64,8 enderman死)。
                     // 这不是"无参考面"(那是误诊),机理是**重力块当顶盖必掉**。修: ①seal 料按优先级排序,
-                    // 非重力块(dirt/cobble/stone/sandstone/terracotta/planks)优先,重力块(sand/gravel/red_sand)
+                    // 非重力块(dirt/cobble/stone/sandstone/terracotta)优先,重力块(sand/gravel/red_sand)
                     // 垫底当 fallback; ②roofSafe=true 时(屋顶/cap, 悬在 air 上)**完全排除重力块**——脚墙/头墙
                     // 下方有实心支撑可用沙,但悬空的 cap 绝不能用沙。墙用 sealBlock(), 顶盖用 sealBlock(true)。
                     const _GRAVITY_SEAL = /^(sand|red_sand|gravel|suspicious_sand|suspicious_gravel)$/;
-                    const _isSealMat = (n) => /^(dirt|coarse_dirt|grass_block|cobblestone|cobbled_deepslate|granite|diorite|andesite|tuff|netherrack|sand|red_sand|gravel|sandstone|red_sandstone|[a-z_]*terracotta|stone)$/.test(n) || /_planks$/.test(n);
+                    const _isSealMat = (n) => /^(dirt|coarse_dirt|grass_block|cobblestone|cobbled_deepslate|granite|diorite|andesite|tuff|netherrack|sand|red_sand|gravel|sandstone|red_sandstone|[a-z_]*terracotta|stone)$/.test(n);
                     const sealBlock = (roofSafe = false) => {
                         try {
                             const cands = bot.inventory.items().filter(i => _isSealMat(i.name) && !(roofSafe && _GRAVITY_SEAL.test(i.name)));
@@ -1616,7 +1616,7 @@ async function prepNetherInner(bot, ctx) {
     // terracotta/sandstone) were absent, so a bot holding 274 red_sand read "shelter blocks=0" and
     // couldn't roof its 挖三填一 pit → dwelled exposed and died at night (用户实拍 + death #94). One
     // block to seal a dug pit is all it takes; recognize everything it can actually place.
-    const buildBlocks = () => { const c = world.getInventoryCounts(bot); return Object.keys(c).filter(n => /^(dirt|coarse_dirt|grass_block|cobblestone|cobbled_deepslate|stone|dirt_path|granite|diorite|andesite|tuff|gravel|sand|red_sand|sandstone|red_sandstone|netherrack)$/.test(n) || /_planks$|_log$|terracotta$/.test(n)).reduce((s, n) => s + c[n], 0); };
+    const buildBlocks = () => { const c = world.getInventoryCounts(bot); return Object.keys(c).filter(n => /^(dirt|coarse_dirt|grass_block|cobblestone|cobbled_deepslate|stone|dirt_path|granite|diorite|andesite|tuff|gravel|sand|red_sand|sandstone|red_sandstone|netherrack)$/.test(n) || /_log$|terracotta$/.test(n)).reduce((s, n) => s + c[n], 0); };
     // ★SHELTER-BLOCK STOCKING DISABLED — 2026-07-08 (see docs/shelter-mechanism-disabled.md)
     //   This SURVIVE-FIRST dirt-stocking existed ONLY to feed the surface wall-box ("封箱"/seal)
     //   reflex — a pillar-box UP needs ~7 pre-carried blocks and digs none of its own. That seal
