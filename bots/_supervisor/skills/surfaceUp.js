@@ -10,6 +10,7 @@
 import mfp from 'mineflayer-pathfinder';
 import fs from 'fs';
 import path from 'path';
+import { appendTelemetry } from '../../../src/utils/telemetry.js';
 const { goals, Movements } = mfp;
 // Real-time debug log (appendFileSync, unbuffered) — skill log() goes to block-buffered
 // stdout which the supervisor can't read for minutes, leaving surfaceUp un-debuggable.
@@ -239,14 +240,14 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
     const motion = (event, data = {}) => {
         try {
             const p = bot.entity.position;
-            fs.appendFileSync('bots/_supervisor/mine_motion.jsonl', JSON.stringify({
+            appendTelemetry('mine_motion.jsonl', {
                 ts: new Date().toISOString(),
                 event,
                 pos: { x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3) },
                 skill: bot._currentSkill || 'surfaceUp',
                 mob: bot._mobility ? bot._mobility.state : null,
                 data,
-            }) + '\n');
+            });
         } catch (e) {}
     };
     const envSnap = () => {
@@ -470,7 +471,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
             const target = cell.offset(c.dx, 0, c.dz);
             dbg(`step-edge assist begin ${why} dir=${c.dx},${c.dz} target=${target.x},${target.y},${target.z} step=${blockName(c.foot)} head=${blockName(c.head)} above=${blockName(c.above)} below=${blockName(c.below)}`);
             try {
-                fs.appendFileSync('bots/_supervisor/mine_motion.jsonl', JSON.stringify({
+                appendTelemetry('mine_motion.jsonl', {
                     ts: new Date().toISOString(),
                     event: 'surfaceUp.step_edge.begin',
                     pos: { x: +p0.x.toFixed(3), y: +p0.y.toFixed(3), z: +p0.z.toFixed(3) },
@@ -478,7 +479,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
                     mob: bot._mobility ? bot._mobility.state : null,
                     env: envSnap(),
                     data: { why, dir: [c.dx, c.dz], target: { x: target.x, y: target.y, z: target.z }, step: blockName(c.foot), head: blockName(c.head), above: blockName(c.above), below: blockName(c.below) },
-                }) + '\n');
+                });
             } catch (e) {}
             try {
                 bot._bodyMoveLockOwner = 'surfaceUp:step-edge';
@@ -501,14 +502,14 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
                         try { bot.clearControlStates(); } catch (e) {}
                         await skills.wait(bot, 80);
                         try {
-                            fs.appendFileSync('bots/_supervisor/mine_motion.jsonl', JSON.stringify({
+                            appendTelemetry('mine_motion.jsonl', {
                                 ts: new Date().toISOString(),
                                 event: 'surfaceUp.step_edge.runup',
                                 pos: { x: +bot.entity.position.x.toFixed(3), y: +bot.entity.position.y.toFixed(3), z: +bot.entity.position.z.toFixed(3) },
                                 skill: bot._currentSkill || 'surfaceUp',
                                 mob: bot._mobility ? bot._mobility.state : null,
                                 data: { why, dir: [c.dx, c.dz], from: { x: +start.x.toFixed(3), y: +start.y.toFixed(3), z: +start.z.toFixed(3) } },
-                            }) + '\n');
+                            });
                         } catch (e) {}
                     }
                     try { bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null); } catch (e) {}
@@ -532,7 +533,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
                 }
                 if (!ok && roseEnough(p1) && !settledInTarget(p1)) {
                     try {
-                        fs.appendFileSync('bots/_supervisor/mine_motion.jsonl', JSON.stringify({
+                        appendTelemetry('mine_motion.jsonl', {
                             ts: new Date().toISOString(),
                             event: 'surfaceUp.step_edge.edge_miss',
                             pos: { x: +p1.x.toFixed(3), y: +p1.y.toFixed(3), z: +p1.z.toFixed(3) },
@@ -547,7 +548,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
                                 targetDist: +targetDist(p1).toFixed(3),
                                 recovery: 'center-press',
                             },
-                        }) + '\n');
+                        });
                     } catch (e) {}
                     try {
                         await bot.lookAt(target.offset(0.5, 1.15, 0.5), true);
@@ -564,7 +565,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
                 }
                 dbg(`step-edge assist end ok=${ok} y=${p0.y.toFixed(2)}->${p1.y.toFixed(2)} maxRise=${(maxY - p0.y).toFixed(2)} dist=${targetDist(p1).toFixed(2)} settled=${settledInTarget(p1)}`);
                 try {
-                    fs.appendFileSync('bots/_supervisor/mine_motion.jsonl', JSON.stringify({
+                    appendTelemetry('mine_motion.jsonl', {
                         ts: new Date().toISOString(),
                         event: 'surfaceUp.step_edge.end',
                         pos: { x: +p1.x.toFixed(3), y: +p1.y.toFixed(3), z: +p1.z.toFixed(3) },
@@ -572,7 +573,7 @@ export default async function surfaceUp(bot, ctx, targetY = 63, opts = {}) {
                         mob: bot._mobility ? bot._mobility.state : null,
                         env: envSnap(),
                         data: { ok, why, dir: [c.dx, c.dz], maxRise: +(maxY - p0.y).toFixed(3), targetDist: +targetDist(p1).toFixed(3), settledInTarget: settledInTarget(p1) },
-                    }) + '\n');
+                    });
                 } catch (e) {}
                 if (ok) return true;
             } catch (e) {

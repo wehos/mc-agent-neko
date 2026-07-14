@@ -1,4 +1,4 @@
-import fs from 'fs';
+import { appendTelemetry } from '../../../src/utils/telemetry.js';
 
 export default async function installMotionAudit(bot) {
     if (!bot || !bot.entity) return { ok: false, reason: 'no-bot' };
@@ -8,7 +8,6 @@ export default async function installMotionAudit(bot) {
     bot._mineMotionAuditPatched = true;
     bot._mineMotionAuditVersion = AUDIT_VERSION;
     bot._mineMotionSeq = bot._mineMotionSeq || 0;
-    const file = 'bots/_supervisor/mine_motion.jsonl';
     const posObj = (p) => p ? ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }) : null;
     const exactPos = () => {
         const p = bot.entity && bot.entity.position;
@@ -38,7 +37,7 @@ export default async function installMotionAudit(bot) {
     };
     const write = (event, data = {}) => {
         try {
-            fs.appendFileSync(file, JSON.stringify({
+            appendTelemetry('mine_motion.jsonl', {
                 ts: new Date().toISOString(),
                 event,
                 seq: data.seq,
@@ -52,7 +51,7 @@ export default async function installMotionAudit(bot) {
                 skill: bot._currentSkill || null,
                 mob: bot._mobility ? bot._mobility.state : null,
                 data,
-            }) + '\n');
+            });
         } catch (e) {}
     };
     const stony = /stone|deepslate|andesite|diorite|granite|tuff|_ore$|obsidian|cobble/;

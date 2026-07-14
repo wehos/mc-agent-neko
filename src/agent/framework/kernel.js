@@ -21,8 +21,7 @@ import { AGENT_MODE, FRAMEWORK_ENABLED_DEFAULT, foodInstinctsEnabled, hpInstinct
 import { getWorld, mentalState, proposeTasks, commitGoal } from './world_model.js';
 import { pending as pendingInstincts } from './instinct.js';
 import { resolve as arbitrate, setBodyOwner, releaseBodyOwner, vitalNow as arbiterVitalNow } from './arbiter.js';
-
-const SHADOW_LOG = 'bots/_supervisor/framework-shadow.log';
+import { appendTelemetry } from '../../utils/telemetry.js';
 
 // ── ★DISPATCH-FAILURE COOLDOWN (livelock closure): a committed goal whose skill file is
 //    missing / hard-fails means customSkill returns false and the 2s survival tick re-dispatches
@@ -201,9 +200,7 @@ export class Kernel {
         const line = `proposer=${topStr} live=${live} busy=${ms.busy} agree=${agree?'Y':'N'} alts=[${alt}]${qstr}`;
         if (line === this._lastObserveLine) return;     // only log on change
         this._lastObserveLine = line;
-        try {
-            fs.appendFileSync(SHADOW_LOG, `[${new Date().toISOString()}] ${line}\n`);
-        } catch (e) {}
+        appendTelemetry('framework-shadow.log', `[${new Date().toISOString()}] ${line}\n`, { json: false });
     }
 
     // ── ★GRAY-ZONE anchor tracker: 每 tick 便宜维护(水平 hypot, >10b 或睡眠中重置)。

@@ -9,6 +9,7 @@
 // ctx = { skills, world, mc, Vec3, log }
 import fs from 'fs';
 import mfp from 'mineflayer-pathfinder';
+import { appendTelemetry } from '../../../src/utils/telemetry.js';
 const { goals: BM_GOALS, Movements: BM_MOVES } = mfp;
 
 // ★2026-07-05 铜矿除名 (durability leak 实锤: 227 raw_copper ≈ 75 次破坏 ≈ 半根石镐耐久
@@ -90,7 +91,7 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
     // an adjacent stand cell — canDig (mine toward a buried vein) but NO scaffolding/pillaring (can't
     // bridge a gap). Mirrors C304. Self-contained (imports pf) so it's live on ③ hot-reload, no restart.
     let _bmReach = null, _bmReachErr = false;
-    const _mineDBG = (m) => { try { fs.appendFileSync('bots/_supervisor/mine_dbg.log', `[${new Date().toISOString()}] ${m}\n`); } catch (e) {} };
+    const _mineDBG = (m) => appendTelemetry('mine_dbg.log', `[${new Date().toISOString()}] ${m}\n`, { json: false });
     // ★C305-V (2026-07-08, mirror of C304-V): geometry-based buried-vs-gap disambiguation for the
     // partial/no-path REJECTs below. Buried straight-through-stone vein → ACCEPT (A* only stalled on
     // slow digging); ore across an air/ravine gap → REJECT (C1). Distance-capped. Downstream C337
@@ -133,12 +134,12 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
     // ★C305-S (mirror C304-S 用户定调"周围有怪房间最好别挖"): 刷怪笼 10 格内的矿不碰。5s 缓存
     // (探针每 pass 最多跑 4 次, findBlocks palette 扫本就便宜, 缓存只是防抖)。fail-open。
     let _spCache = { t: 0, v: [] };
-    const _nearSpawnerBM = (p) => {
+    const _nearSpawnerBM = async (p) => {
         try {
             if (Date.now() - _spCache.t > 5000) {
                 _spCache.t = Date.now();
                 const spDef = bot.registry && bot.registry.blocksByName && bot.registry.blocksByName.spawner;
-                _spCache.v = spDef ? (bot.findBlocks({ matching: spDef.id, maxDistance: 64, count: 4 }) || []) : [];
+                _spCache.v = spDef ? (await world.getNearestBlocksWhereAsync(bot, spDef.id, 64, 4)).map(b => b.position) : [];
             }
             return _spCache.v.some(s => Math.hypot(s.x - p.x, s.y - p.y, s.z - p.z) < 10);
         } catch (e) { return false; }
@@ -146,7 +147,7 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
     const _oreReachableBM = async (oreBlock) => {
         if (_bmReachErr) return true;   // pathfinder unavailable → fail open (never block mining outright)
         try {
-            if (_nearSpawnerBM(oreBlock.position)) {
+            if (await _nearSpawnerBM(oreBlock.position)) {
                 _mineDBG(`★C305 ${oreBlock.name}@${oreBlock.position.x},${oreBlock.position.y},${oreBlock.position.z} REJECT spawner-nearby`);
                 return false;
             }
@@ -214,7 +215,7 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
     const motion = (event, data = {}) => {
         try {
             const p = bot.entity.position;
-            fs.appendFileSync('bots/_supervisor/mine_motion.jsonl', JSON.stringify({
+            appendTelemetry('mine_motion.jsonl', {
                 ts: new Date().toISOString(),
                 event,
                 pos: { x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3) },
@@ -228,7 +229,7 @@ export default async function branchMine(bot, ctx, length = 24, targetY = null) 
                 mob: bot._mobility ? bot._mobility.state : null,
                 env: envSnap(),
                 data,
-            }) + '\n');
+            });
         } catch (e) {}
     };
     // ★P0-1 回程预算前置门 (review-2026-07-04-distance.md: 铁镐三落三起, >18h 无铁镐).
