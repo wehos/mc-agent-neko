@@ -120,12 +120,24 @@ export class AdminMission {
     async _submit({ text, taskId, origin }) {
         try {
             text = String(text == null ? '' : text).replace(/\s+$/,'').trim();
-            if (!text) return;
+            if (!text) {
+                // ★2026-07-14 契约补齐: 空/纯空白 ws task 仍带 task_id — 回执一帧, 否则插件挂到自身 task_timeout
+                //   再重发 (对齐 _registerDrop 建立的"绝不静默丢 ws task_id"契约)。chat 来源无 task_id, 无需回执。
+                if (origin === 'ws' && typeof taskId === 'string' && taskId) {
+                    try { wsServer.ackDuplicateTask(taskId, '收到，但指令为空，已忽略。'); } catch (e) {}
+                }
+                return;
+            }
             // Bare lifecycle command typed by admin → drive the FSM via its perform() hook, no new mission.
             if (/^!(endGoal|cannotComplete|goal)\b/i.test(text)) {
                 this.turnManaged = true;
                 try { await this.agent.handleMessage('admin', text); }
                 finally { this.turnManaged = false; }
+                // ★2026-07-14 契约补齐: 裸生命周期命令的尾帧带的是被结束 mission 的 task_id, 不是本 ws 帧的 —
+                //   给本帧的 task_id 单独回执, 免插件把它挂到 task_timeout (对齐"绝不静默丢 ws task_id"契约)。
+                if (origin === 'ws' && typeof taskId === 'string' && taskId) {
+                    try { wsServer.ackDuplicateTask(taskId, '收到，生命周期指令已执行。'); } catch (e) {}
+                }
                 return;
             }
             // Anti-reflexive guard: never spawn a mission from the bot's own leaked banner/status chat.
@@ -145,6 +157,9 @@ export class AdminMission {
             //   被无视的都回 task_finished(status='duplicate') "收到"帧 (静默丢帧会让插件挂到自身
             //   超时, 反而催它重发), 游戏内出 🔁 banner (10s 内不重复刷)。
             if (this._throttleExact(text, taskId, origin)) return;
+            // ★2026-07-14 用户令: in-game chat 任务执行期间, 静默拒绝 ws 侧新 admin LLM 请求 + 回执当前任务
+            //   (游戏内玩家指令神圣 = 独占, 不被 ws 侧自主 LLM 打断)。排在 supersede 前。
+            if (this._rejectWsDuringChat(text, taskId, origin)) return;
             if (await this._throttleSameIntent(text, taskId, origin)) return;
             // Synchronous handoff installs the new mission (superseding any old one atomically); the
             // UNLOCKED drive runs outside the submit chain so a later submit can preempt it mid-flight.
@@ -187,6 +202,29 @@ export class AdminMission {
             return true;
         } catch (e) {
             return false;   // 节流器自身出错绝不拦真指令
+        }
+    }
+
+    // ★2026-07-14 用户令: in-game chat 任务执行期间, ws 侧新 admin LLM 请求一律静默拒绝(不 supersede),
+    //   并经 _registerDrop → wsServer.ackDuplicateTask 回执告知 ws 当前正在执行的任务。
+    //   真人游戏内 chat 换指令(origin==='chat')不受此门, 仍可打断自己的 chat 任务。
+    //   放在 _throttleSameIntent 之前: chat 任务保护优先于 LLM 判官 — 省判官调用, 且在 _handoff supersede 前拦截。
+    _rejectWsDuringChat(text, taskId, origin) {
+        try {
+            if (origin !== 'ws') return false;
+            if (this.state !== RUNNING || !this.mission || this.mission.origin !== 'chat') return false;
+            const sec = Math.max(1, Math.round((Date.now() - this.mission.startedAt) / 1000));
+            let act = '';
+            try {
+                const b = this._bot();
+                act = String((b && b._currentSkill) || (this.agent.actions && this.agent.actions.currentActionLabel) || '')
+                    .replace(/\s+/g, ' ').trim().slice(0, 120);
+            } catch (e) {}
+            this._registerDrop(this._normText(this.mission.text), text, taskId, origin,
+                `机器人正在执行玩家在游戏内下达的指令「${this.mission.text}」（已运行${sec}秒${act ? `，当前动作：${act}` : ''}），此为独占任务，暂不接受新的管理指令，请等待其完成或失败报告。`);
+            return true;
+        } catch (e) {
+            return false;   // 门自身出错绝不误拦真指令
         }
     }
 
@@ -404,7 +442,11 @@ export class AdminMission {
             + `respond with !cannotComplete("short reason"). Otherwise issue the next command to make progress. Respond:`;
         let used = false;
         try { used = await this.agent.handleMessage('system', adjudicate, 1); } catch (e) {}
-        if (this.state !== RUNNING) return;   // !endGoal / !cannotComplete already ended it
+        // !endGoal/!cannotComplete already ended it — OR a supersede swapped in a NEW mission during the
+        // await (this.mission !== m). Re-check identity like _throttleSameIntent(l.235)/_drive(l.354) do,
+        // else the stale-captured m's branches fire on the wrong mission (end the brand-new task as
+        // 'no-progress', or self_prompter.start the OLD goal onto the live loop). ★2026-07-14 review.
+        if (this.state !== RUNNING || this.mission !== m) return;
         if (used) {
             // A command ran → keep going.
             try { this.agent.self_prompter.owner = this; this.agent.self_prompter.start(m.prompt || m.text); } catch (e) {}

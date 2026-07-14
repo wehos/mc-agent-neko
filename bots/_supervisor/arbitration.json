@@ -47,7 +47,7 @@
   },
   "log": [
     {
-      "ts": "2026-07-14T06:36:35.085Z",
+      "ts": "2026-07-14T08:21:25.286Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -56,7 +56,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:36:46.103Z",
+      "ts": "2026-07-14T08:21:35.982Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -65,16 +65,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:36:56.809Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:37:05.339Z",
+      "ts": "2026-07-14T08:21:44.526Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -83,34 +74,106 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:37:09.343Z",
+      "ts": "2026-07-14T08:21:48.344Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
       "verdict": "holder",
-      "source": "llm-fallback",
+      "source": "llm",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:37:20.333Z",
+      "ts": "2026-07-14T08:21:59.511Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
       "verdict": "holder",
-      "source": "llm-fallback",
+      "source": "llm",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:37:31.032Z",
+      "ts": "2026-07-14T08:22:10.236Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
       "verdict": "holder",
-      "source": "llm-fallback",
+      "source": "llm",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:37:39.608Z",
+      "ts": "2026-07-14T08:22:20.986Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:22:31.691Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:22:42.386Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:22:53.037Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:23:03.831Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:23:14.459Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:23:25.213Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:23:35.937Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:24:14.390Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -119,7 +182,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:37:43.609Z",
+      "ts": "2026-07-14T08:24:18.401Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -128,7 +191,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:37:54.598Z",
+      "ts": "2026-07-14T08:24:29.289Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -137,7 +200,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:38:05.333Z",
+      "ts": "2026-07-14T08:24:39.952Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -146,7 +209,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:38:13.883Z",
+      "ts": "2026-07-14T08:24:48.522Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -155,7 +218,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:38:17.895Z",
+      "ts": "2026-07-14T08:24:52.527Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -164,7 +227,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:38:28.833Z",
+      "ts": "2026-07-14T08:25:03.436Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -173,7 +236,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:38:39.583Z",
+      "ts": "2026-07-14T08:25:14.139Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -182,7 +245,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:38:48.134Z",
+      "ts": "2026-07-14T08:25:22.688Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -191,7 +254,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:38:52.143Z",
+      "ts": "2026-07-14T08:25:26.704Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -200,7 +263,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:39:03.101Z",
+      "ts": "2026-07-14T08:25:37.701Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -209,16 +272,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:39:13.834Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:39:22.409Z",
+      "ts": "2026-07-14T08:26:13.976Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -227,7 +281,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:39:26.422Z",
+      "ts": "2026-07-14T08:26:17.981Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -236,7 +290,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:39:37.447Z",
+      "ts": "2026-07-14T08:26:28.977Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -245,7 +299,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:39:48.088Z",
+      "ts": "2026-07-14T08:26:39.639Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -254,43 +308,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:39:56.643Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:40:00.657Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:40:11.533Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:40:22.283Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:40:30.835Z",
+      "ts": "2026-07-14T08:26:48.237Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -299,7 +317,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:40:34.848Z",
+      "ts": "2026-07-14T08:26:52.240Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -308,7 +326,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:40:45.808Z",
+      "ts": "2026-07-14T08:27:03.187Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -317,43 +335,718 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:41:22.719Z",
+      "ts": "2026-07-14T08:27:13.878Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:41:26.732Z",
-      "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
       "verdict": "holder",
       "source": "llm-fallback",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:42:37.798Z",
+      "ts": "2026-07-14T08:27:22.426Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
       "verdict": "pending",
       "source": "default",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:42:41.808Z",
+      "ts": "2026-07-14T08:27:26.430Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
       "verdict": "holder",
       "source": "llm-fallback",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:43:32.080Z",
+      "ts": "2026-07-14T08:27:37.429Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:27:48.171Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:27:56.731Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:28:00.731Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:28:11.697Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:28:22.286Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:28:30.930Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:28:34.931Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:28:45.786Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:28:56.461Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:29:04.988Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:29:08.988Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:29:19.972Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:29:30.622Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:29:39.133Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:29:43.137Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:30:13.226Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:30:17.076Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:30:28.201Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:30:38.887Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:30:49.537Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:31:00.212Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:31:10.941Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:31:21.587Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:31:32.333Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:31:43.003Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:31:53.618Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:32:04.337Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:32:15.135Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:32:17.186Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:32:21.193Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:32:32.163Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:32:43.010Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:32:51.591Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:32:54.841Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:33:06.666Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:33:17.385Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:33:28.086Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:33:38.839Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:33:49.589Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:34:00.286Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:34:11.072Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:34:21.730Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:34:32.486Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:34:43.210Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:34:53.940Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:34:56.106Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:35:00.121Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:35:10.997Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:35:21.682Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:35:30.238Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:35:34.239Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:35:45.199Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:35:55.850Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:36:04.438Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:36:08.156Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:36:19.476Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:36:30.086Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:36:40.836Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:36:51.648Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:37:02.244Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:37:12.991Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:37:23.729Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:37:34.385Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:37:45.131Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:37:55.738Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:38:06.429Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:38:08.564Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:38:12.572Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:38:23.537Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:38:34.287Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:38:42.820Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:38:46.831Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:38:57.787Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:39:08.488Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:39:17.039Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:41:02.234Z",
       "holder": "ws:*",
       "claimant": "mode:self_preservation",
       "ctx": "reflex self_preservation wants to interrupt ws:*",
@@ -362,16 +1055,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:43:48.640Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:43:49.831Z",
+      "ts": "2026-07-14T08:41:11.425Z",
       "holder": "ws:*",
       "claimant": "mode:unstuck",
       "ctx": "reflex unstuck wants to interrupt ws:*",
@@ -380,16 +1064,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:43:52.649Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:43:53.849Z",
+      "ts": "2026-07-14T08:41:15.433Z",
       "holder": "ws:*",
       "claimant": "mode:unstuck",
       "ctx": "reflex unstuck wants to interrupt ws:*",
@@ -398,7 +1073,88 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:44:03.636Z",
+      "ts": "2026-07-14T08:41:16.334Z",
+      "holder": "ws:*",
+      "claimant": "mode:item_collecting",
+      "ctx": "reflex item_collecting wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:41:20.340Z",
+      "holder": "ws:*",
+      "claimant": "mode:item_collecting",
+      "ctx": "reflex item_collecting wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:41:33.832Z",
+      "holder": "ws:*",
+      "claimant": "mode:unstuck",
+      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:41:38.422Z",
+      "holder": "ws:*",
+      "claimant": "mode:item_collecting",
+      "ctx": "reflex item_collecting wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:42:22.183Z",
+      "holder": "ws:*",
+      "claimant": "mode:unstuck",
+      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:42:26.186Z",
+      "holder": "ws:*",
+      "claimant": "mode:unstuck",
+      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:42:52.553Z",
+      "holder": "ws:*",
+      "claimant": "mode:item_collecting",
+      "ctx": "reflex item_collecting wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:42:55.685Z",
+      "holder": "ws:*",
+      "claimant": "mode:item_collecting",
+      "ctx": "reflex item_collecting wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:43:04.006Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:43:08.014Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -407,7 +1163,673 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:55:58.482Z",
+      "ts": "2026-07-14T08:43:08.109Z",
+      "holder": "ws:*",
+      "claimant": "mode:item_collecting",
+      "ctx": "reflex item_collecting wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:43:18.977Z",
+      "holder": "ws:*",
+      "claimant": "mode:unstuck",
+      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:43:22.982Z",
+      "holder": "ws:*",
+      "claimant": "mode:unstuck",
+      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:43:23.234Z",
+      "holder": "ws:*",
+      "claimant": "mode:item_collecting",
+      "ctx": "reflex item_collecting wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:43:23.546Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:43:33.790Z",
+      "holder": "ws:*",
+      "claimant": "mode:item_collecting",
+      "ctx": "reflex item_collecting wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:43:40.827Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:43:44.879Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:43:55.885Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:44:06.663Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:44:15.287Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:44:19.287Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:44:30.348Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:44:41.053Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:44:49.617Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:44:53.625Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:45:04.582Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:45:15.281Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:45:23.833Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:45:27.840Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:45:38.857Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:45:49.622Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:45:58.174Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:46:02.182Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:46:13.216Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:46:23.918Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:46:32.552Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:46:36.560Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:46:47.596Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:46:58.481Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:47:07.032Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:47:11.121Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:47:22.146Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:47:32.983Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:47:41.656Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:47:45.664Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:47:56.733Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:48:07.501Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:48:16.199Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:48:20.202Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:48:31.333Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:48:42.109Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:48:50.671Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:48:54.725Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:49:05.807Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:49:16.630Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:49:25.261Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:49:29.270Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:49:40.347Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:49:51.165Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:49:59.832Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:50:02.598Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:50:12.708Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:50:23.383Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:50:34.146Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:51:47.083Z",
+      "holder": "ws:*",
+      "claimant": "mode:tool_keeper",
+      "ctx": "reflex tool_keeper wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:51:51.122Z",
+      "holder": "ws:*",
+      "claimant": "mode:tool_keeper",
+      "ctx": "reflex tool_keeper wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:52:02.469Z",
+      "holder": "ws:*",
+      "claimant": "mode:tool_keeper",
+      "ctx": "reflex tool_keeper wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:52:17.901Z",
+      "holder": "ws:*",
+      "claimant": "mode:tool_keeper",
+      "ctx": "reflex tool_keeper wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:52:43.858Z",
+      "holder": "ws:*",
+      "claimant": "mode:unstuck",
+      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:52:47.238Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:52:47.865Z",
+      "holder": "ws:*",
+      "claimant": "mode:unstuck",
+      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:52:51.252Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:53:02.488Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:53:04.025Z",
+      "holder": "ws:*",
+      "claimant": "mode:unstuck",
+      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:53:13.183Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:53:21.926Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:53:24.037Z",
+      "holder": "ws:*",
+      "claimant": "mode:unstuck",
+      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:53:25.399Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:53:28.043Z",
+      "holder": "ws:*",
+      "claimant": "mode:unstuck",
+      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:53:37.061Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:53:56.691Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:54:09.857Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:54:27.601Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:57:22.293Z",
       "holder": "ws:*",
       "claimant": "mode:self_preservation",
       "ctx": "reflex self_preservation wants to interrupt ws:*",
@@ -416,25 +1838,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:56:25.743Z",
-      "holder": "ws:*",
-      "claimant": "mode:item_collecting",
-      "ctx": "reflex item_collecting wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:56:29.752Z",
-      "holder": "ws:*",
-      "claimant": "mode:item_collecting",
-      "ctx": "reflex item_collecting wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:56:58.582Z",
+      "ts": "2026-07-14T08:57:34.567Z",
       "holder": "ws:*",
       "claimant": "mode:unstuck",
       "ctx": "reflex unstuck wants to interrupt ws:*",
@@ -443,7 +1847,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:57:02.596Z",
+      "ts": "2026-07-14T08:57:38.571Z",
       "holder": "ws:*",
       "claimant": "mode:unstuck",
       "ctx": "reflex unstuck wants to interrupt ws:*",
@@ -452,52 +1856,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:57:08.984Z",
-      "holder": "ws:*",
-      "claimant": "mode:item_collecting",
-      "ctx": "reflex item_collecting wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:57:12.987Z",
-      "holder": "ws:*",
-      "claimant": "mode:item_collecting",
-      "ctx": "reflex item_collecting wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:57:23.283Z",
-      "holder": "ws:*",
-      "claimant": "mode:tool_keeper",
-      "ctx": "reflex tool_keeper wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:57:27.294Z",
-      "holder": "ws:*",
-      "claimant": "mode:tool_keeper",
-      "ctx": "reflex tool_keeper wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:57:38.931Z",
-      "holder": "ws:*",
-      "claimant": "mode:tool_keeper",
-      "ctx": "reflex tool_keeper wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:57:40.784Z",
+      "ts": "2026-07-14T08:58:02.619Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -506,7 +1865,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:57:44.799Z",
+      "ts": "2026-07-14T08:58:06.974Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -515,7 +1874,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:57:46.306Z",
+      "ts": "2026-07-14T08:58:27.692Z",
       "holder": "ws:*",
       "claimant": "mode:unstuck",
       "ctx": "reflex unstuck wants to interrupt ws:*",
@@ -524,7 +1883,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:57:50.315Z",
+      "ts": "2026-07-14T08:58:31.701Z",
       "holder": "ws:*",
       "claimant": "mode:unstuck",
       "ctx": "reflex unstuck wants to interrupt ws:*",
@@ -533,43 +1892,16 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:58:00.980Z",
+      "ts": "2026-07-14T08:59:27.305Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:58:11.994Z",
-      "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:58:17.187Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:58:21.197Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:58:22.982Z",
+      "ts": "2026-07-14T08:59:53.580Z",
       "holder": "ws:*",
       "claimant": "mode:unstuck",
       "ctx": "reflex unstuck wants to interrupt ws:*",
@@ -578,7 +1910,16 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:58:26.990Z",
+      "ts": "2026-07-14T08:59:57.044Z",
+      "holder": "ws:*",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T08:59:57.580Z",
       "holder": "ws:*",
       "claimant": "mode:unstuck",
       "ctx": "reflex unstuck wants to interrupt ws:*",
@@ -587,16 +1928,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:58:32.237Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:58:37.775Z",
+      "ts": "2026-07-14T09:00:15.307Z",
       "holder": "ws:*",
       "claimant": "mode:unstuck",
       "ctx": "reflex unstuck wants to interrupt ws:*",
@@ -605,25 +1937,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:58:43.037Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:58:48.830Z",
-      "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T06:58:51.587Z",
+      "ts": "2026-07-14T09:00:15.310Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -632,7 +1946,7 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:58:55.603Z",
+      "ts": "2026-07-14T09:00:19.322Z",
       "holder": "ws:*",
       "claimant": "mode:mobility",
       "ctx": "reflex mobility wants to interrupt ws:*",
@@ -641,7 +1955,25 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:58:59.832Z",
+      "ts": "2026-07-14T09:00:27.017Z",
+      "holder": "ws:*",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T09:00:31.282Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T09:00:35.904Z",
       "holder": "ws:*",
       "claimant": "mode:unstuck",
       "ctx": "reflex unstuck wants to interrupt ws:*",
@@ -650,2100 +1982,768 @@
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:59:03.762Z",
+      "ts": "2026-07-14T09:00:39.915Z",
       "holder": "ws:*",
       "claimant": "mode:unstuck",
       "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T09:00:42.361Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T09:00:50.926Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T09:00:54.929Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T09:00:56.137Z",
+      "holder": "ws:*",
+      "claimant": "mode:unstuck",
+      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T09:01:05.969Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T09:01:08.683Z",
+      "holder": "ws:*",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T09:01:17.332Z",
+      "holder": "ws:*",
+      "claimant": "mode:unstuck",
+      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T09:01:17.334Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T09:01:21.337Z",
+      "holder": "ws:*",
+      "claimant": "mode:unstuck",
+      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "verdict": "holder",
+      "source": "llm-fallback",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T09:01:25.876Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
+      "verdict": "pending",
+      "source": "default",
+      "persisted": false
+    },
+    {
+      "ts": "2026-07-14T09:01:28.269Z",
+      "holder": "ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
       "verdict": "claimant",
       "source": "llm",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:59:06.586Z",
+      "ts": "2026-07-14T09:02:46.188Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:59:32.877Z",
+      "ts": "2026-07-14T09:03:01.201Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "claimant": "mode:mobility",
+      "ctx": "reflex mobility wants to interrupt ws:*",
       "verdict": "claimant",
       "source": "llm",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:59:46.199Z",
+      "ts": "2026-07-14T09:03:18.486Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
       "verdict": "claimant",
-      "source": "llm",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T06:59:57.297Z",
+      "ts": "2026-07-14T09:03:29.240Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
       "verdict": "claimant",
-      "source": "llm",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:00:39.682Z",
+      "ts": "2026-07-14T09:03:50.231Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
       "verdict": "claimant",
-      "source": "llm",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:01:01.434Z",
+      "ts": "2026-07-14T09:04:07.938Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
       "verdict": "claimant",
-      "source": "llm",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:01:24.132Z",
+      "ts": "2026-07-14T09:04:18.249Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:01:28.142Z",
+      "ts": "2026-07-14T09:04:22.197Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_defense",
+      "ctx": "reflex self_defense wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:01:38.895Z",
+      "ts": "2026-07-14T09:14:30.331Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:01:49.942Z",
+      "ts": "2026-07-14T09:16:18.099Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:01:52.111Z",
+      "ts": "2026-07-14T09:16:28.220Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:01:56.120Z",
+      "ts": "2026-07-14T09:16:38.481Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:02:00.981Z",
+      "ts": "2026-07-14T09:16:48.748Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:02:04.991Z",
+      "ts": "2026-07-14T09:16:58.829Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:02:07.131Z",
+      "ts": "2026-07-14T09:17:08.859Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:02:15.680Z",
+      "ts": "2026-07-14T09:22:41.031Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:02:17.823Z",
+      "ts": "2026-07-14T10:02:07.532Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:02:26.382Z",
+      "ts": "2026-07-14T10:02:36.655Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:02:26.681Z",
+      "ts": "2026-07-14T10:03:06.030Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:02:30.385Z",
+      "ts": "2026-07-14T10:03:35.573Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:02:37.681Z",
+      "ts": "2026-07-14T10:04:05.931Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:02:41.361Z",
+      "ts": "2026-07-14T10:04:35.347Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:02:41.687Z",
+      "ts": "2026-07-14T10:05:04.698Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:02:52.082Z",
+      "ts": "2026-07-14T10:05:37.474Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:02:52.383Z",
+      "ts": "2026-07-14T10:06:08.299Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:00.681Z",
+      "ts": "2026-07-14T10:06:41.432Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:03.435Z",
+      "ts": "2026-07-14T10:07:12.732Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:04.963Z",
+      "ts": "2026-07-14T10:07:24.676Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:14.482Z",
+      "ts": "2026-07-14T10:07:55.382Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:15.724Z",
+      "ts": "2026-07-14T10:08:27.643Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:18.488Z",
+      "ts": "2026-07-14T10:08:58.832Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:26.477Z",
+      "ts": "2026-07-14T10:09:24.682Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:29.200Z",
+      "ts": "2026-07-14T10:09:55.371Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:35.077Z",
+      "ts": "2026-07-14T10:10:27.669Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:39.080Z",
+      "ts": "2026-07-14T10:10:58.655Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:40.280Z",
+      "ts": "2026-07-14T10:11:32.286Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:50.056Z",
+      "ts": "2026-07-14T10:12:03.657Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:51.281Z",
+      "ts": "2026-07-14T10:12:36.090Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:03:55.281Z",
+      "ts": "2026-07-14T10:13:03.773Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:00.731Z",
+      "ts": "2026-07-14T10:13:24.860Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:05.332Z",
+      "ts": "2026-07-14T10:13:56.663Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:09.332Z",
+      "ts": "2026-07-14T10:14:29.232Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:13.342Z",
+      "ts": "2026-07-14T10:14:59.778Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:17.016Z",
+      "ts": "2026-07-14T10:15:32.291Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:24.380Z",
+      "ts": "2026-07-14T10:16:03.482Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:25.593Z",
+      "ts": "2026-07-14T10:16:35.819Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "floor",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:29.603Z",
+      "ts": "2026-07-14T10:17:05.854Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:35.117Z",
+      "ts": "2026-07-14T10:17:34.381Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:42.739Z",
+      "ts": "2026-07-14T10:18:03.189Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:43.669Z",
+      "ts": "2026-07-14T10:18:32.971Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:47.905Z",
+      "ts": "2026-07-14T10:19:03.281Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:53.730Z",
+      "ts": "2026-07-14T10:19:32.159Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:04:58.620Z",
+      "ts": "2026-07-14T10:20:03.078Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:05:01.032Z",
+      "ts": "2026-07-14T10:20:35.370Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:05:05.034Z",
+      "ts": "2026-07-14T10:21:06.031Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:05:09.336Z",
+      "ts": "2026-07-14T10:21:16.144Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:05:15.771Z",
+      "ts": "2026-07-14T10:21:43.110Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:05:17.914Z",
+      "ts": "2026-07-14T10:22:09.014Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:05:21.919Z",
+      "ts": "2026-07-14T10:22:29.726Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:05:26.204Z",
+      "ts": "2026-07-14T10:22:39.875Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:05:32.854Z",
+      "ts": "2026-07-14T10:22:49.994Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:05:37.771Z",
+      "ts": "2026-07-14T10:23:59.072Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:05:41.775Z",
+      "ts": "2026-07-14T10:24:09.729Z",
       "holder": "ws:*",
-      "claimant": "mode:unstuck",
-      "ctx": "reflex unstuck wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:05:43.588Z",
+      "ts": "2026-07-14T10:24:23.564Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:11:42.542Z",
+      "ts": "2026-07-14T10:26:01.867Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:11:46.556Z",
+      "ts": "2026-07-14T10:26:22.815Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:11:57.729Z",
+      "ts": "2026-07-14T10:27:14.400Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:12:08.571Z",
+      "ts": "2026-07-14T10:27:25.084Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:12:17.164Z",
+      "ts": "2026-07-14T10:27:36.901Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:12:21.532Z",
+      "ts": "2026-07-14T10:34:30.131Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:12:32.254Z",
+      "ts": "2026-07-14T10:34:45.697Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:12:43.030Z",
+      "ts": "2026-07-14T10:34:55.979Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     },
     {
-      "ts": "2026-07-14T07:12:51.680Z",
+      "ts": "2026-07-14T10:35:06.236Z",
       "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:12:55.694Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:13:06.779Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:13:17.612Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:13:26.302Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:13:30.302Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:13:41.326Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:13:52.118Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:14:00.696Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:14:05.045Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:14:15.730Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:14:26.551Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:14:35.191Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:14:39.199Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:14:50.279Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:15:01.129Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:15:09.775Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:15:13.780Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:15:24.872Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:15:35.728Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:15:44.280Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:15:48.340Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:15:59.371Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:16:10.156Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:16:18.830Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:16:22.087Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:16:33.880Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:16:44.680Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:16:55.580Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:17:06.190Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:17:16.953Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:17:27.731Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:17:38.580Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:17:49.478Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:18:00.233Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:18:11.099Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:18:21.830Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:18:24.095Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:18:28.096Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:18:39.253Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:18:50.050Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:18:58.630Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:19:02.632Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:19:13.728Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:19:24.579Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:19:33.239Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:19:37.253Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:19:48.457Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:19:59.358Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:20:08.004Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:20:11.856Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:20:23.110Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:20:33.930Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:20:44.668Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:20:55.529Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:21:06.387Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:21:17.230Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:21:28.029Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:21:38.829Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:21:49.530Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:22:00.130Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:31:15.082Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:31:19.084Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:31:30.130Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:31:40.873Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:31:49.522Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:31:53.531Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:32:04.530Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:32:15.231Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:32:23.831Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:32:27.833Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:32:38.987Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:32:49.894Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:32:58.481Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:33:02.496Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:33:13.629Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:33:24.482Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:33:33.130Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:33:37.138Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:33:48.231Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:33:59.072Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:34:07.725Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:34:11.730Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:34:22.871Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:34:33.630Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:34:42.225Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:34:46.230Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:34:57.280Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:35:08.088Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:35:16.731Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:35:20.733Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:35:31.843Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:35:42.646Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:35:51.233Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:35:55.247Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:36:06.395Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:36:17.231Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:36:25.831Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:36:29.836Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:36:40.680Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:36:51.580Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:37:00.276Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:37:04.276Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:37:15.180Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:37:26.044Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:37:34.481Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:37:37.329Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:37:49.408Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:38:00.058Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:38:10.827Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:38:21.680Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:38:32.622Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:38:43.434Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:38:54.046Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:39:04.583Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:39:15.329Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:39:25.864Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:39:36.449Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:39:38.603Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:39:42.605Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:39:53.760Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:40:04.544Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:40:13.234Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:40:16.459Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:40:28.373Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:50:49.532Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:50:53.545Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:51:04.474Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:51:15.080Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:51:23.582Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:51:27.585Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:51:38.433Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:51:49.054Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:51:59.718Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:52:03.730Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:52:14.631Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:52:25.281Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:52:33.781Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:52:37.797Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:52:48.654Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:52:59.345Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:53:07.831Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:53:11.831Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:53:22.782Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:53:33.423Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:53:41.924Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:53:45.930Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:53:56.981Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:54:07.730Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:54:16.301Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:54:20.311Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:54:31.481Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:54:42.226Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:54:50.901Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:54:54.913Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:55:06.065Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:55:16.680Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm-fallback",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:55:25.337Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "pending",
-      "source": "default",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:55:28.212Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
-      "persisted": false
-    },
-    {
-      "ts": "2026-07-14T07:55:38.274Z",
-      "holder": "ws:*",
-      "claimant": "mode:mobility",
-      "ctx": "reflex mobility wants to interrupt ws:*",
-      "verdict": "holder",
-      "source": "llm",
+      "claimant": "mode:self_preservation",
+      "ctx": "reflex self_preservation wants to interrupt ws:*",
+      "verdict": "claimant",
+      "source": "matrix",
       "persisted": false
     }
   ]

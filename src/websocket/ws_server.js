@@ -822,6 +822,22 @@ class WSMessageServer {
             this.broadcastTaskCompletion(payload);
         } catch (e) { console.error('ackDuplicateTask failed:', e && e.message || e); }
     }
+    // ★2026-07-14 用户令: 游戏内玩家的自然语言聊天(非指令) → 转发给 ws 外部 admin llm。agent 端已按
+    //   MC_INGAME_CHAT_FLUSH_MS(默认3s)节流聚合成 batch; 这里广播一帧, admin llm 侧监听 type:'ingame_chat'。
+    forwardIngameChat(batch) {
+        try {
+            if (!Array.isArray(batch) || !batch.length) return;
+            const lines = batch.map(m => `<${m.player}> ${m.text}`).join('\n');
+            this.broadcast({
+                type: 'ingame_chat',
+                ts: Date.now(),
+                hint: '以下是 Minecraft 游戏内玩家发送的实时聊天(自然语言, 非系统消息/非指令)。可据此对话或酌情下发 task。',
+                count: batch.length,
+                messages: batch,
+                text: lines,
+            });
+        } catch (e) { console.error('forwardIngameChat failed:', e && e.message || e); }
+    }
 
     injectMessage(message, taskId) {
         if (!message || typeof message !== 'string') {

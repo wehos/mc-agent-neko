@@ -563,6 +563,10 @@ export default async function mineDown(bot, ctx, opts = {}) {
                         if (/lava|water/.test(nm(bn(ox + ex, oy + ey, oz + ez)))) { _ofa = true; break; }
                     }
                     if (_ofa) continue;
+                    // ★2026-07-14 穿墙闸 (用户"偶发性穿墙挖矿"): 顺路矿环此前无 LOS —— 只要矿在臂展内、哪怕隔一层薄墙
+                    //   (≤2.2b 落进 modes.js C360-XR 总闸的贴脸豁免) 也会被 breakBlockAt 隔墙抠掉。补上与 safeDig(requireLOS)
+                    //   同款视线闸: 眼→矿心 canSeeBlock 被墙挡(false)=隔墙 → 跳过不挖(留着下潜/换角度后再采); 抽风异常放行。
+                    if (!(() => { try { return bot.canSeeBlock(b); } catch (e) { return true; } })()) { log_(`★穿墙闸(竖井环): 跳过隔墙矿 ${b.name}@${ox},${oy},${oz} — canSeeBlock=false, 不隔墙抠`); continue; }
                     try { await skills.breakBlockAt(bot, ox, oy, oz); ore++; } catch (e) {}
                 }
                 noProg = 0;
@@ -646,6 +650,9 @@ export default async function mineDown(bot, ctx, opts = {}) {
                     if (/lava|water/.test(nm(bn(ox + ex, oy + ey, oz + ez)))) { oreFluidAdj = true; break; }
                 }
                 if (oreFluidAdj) continue;
+                // ★2026-07-14 穿墙闸 (用户"偶发性穿墙挖矿"): 同竖井环 —— 楼梯顺路矿环走 breakBlockAt→bot.dig, ≤2.2b 隔薄墙的
+                //   矿落进 C360-XR 贴脸豁免会被隔墙抠掉。补 canSeeBlock 视线闸: 被墙挡(false)=隔墙 → 跳过(留待下潜/换角度再采); 抽风放行。
+                if (!(() => { try { return bot.canSeeBlock(b); } catch (e) { return true; } })()) { log_(`★穿墙闸(楼梯环): 跳过隔墙矿 ${b.name}@${ox},${oy},${oz} — canSeeBlock=false, 不隔墙抠`); continue; }
                 try { await skills.breakBlockAt(bot, ox, oy, oz); ore++; } catch (e) {}
             }
         } catch (e) { abort = `dig threw: ${e && e.message || e}`; break; }

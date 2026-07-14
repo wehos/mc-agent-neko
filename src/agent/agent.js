@@ -143,42 +143,14 @@ export class Agent {
 
         this.bot.on('whisper', respondFunc);
         
-        this.bot.on('chat', (username, message) => {
+        // ★2026-07-14 用户令: 游戏内 chat 路由重写 —— 根治 admin 指令风暴 (命令回执/系统消息被当指令:
+        //   实录 "Applied effect Night Vision…"/"tp Neko" 漏 ignore_messages 黑名单进 mission, 每条触发
+        //   一次 self-prompt LLM 调用 + supersede 前台任务)。反转为【正向白名单】: _routeIngameChat 多重门
+        //   滤掉非真人聊天, 只有前缀(chat_command_prefix, 默认 /neko)或 ! 开头才是指令 → adminMission 高优先级;
+        //   其余真人自然语言 → 节流聚合(默认3s)转发外部 admin llm(ws)。前缀设空 = 关门回旧行为。
+        this.bot.on('chat', (username, message, _translate, jsonMsg) => {
             if (serverProxy.getNumOtherAgents() > 0) return;
-            // ★TEMP (用户令 2026-07-07, 见 docs/ingame-chat-as-admin.md): 游戏内 chat 一律视为 admin
-            //   指令喂给 agent (临时措施) —— 让人能直接在 MC 聊天里命令 bot, 且走与 WS task 相同的
-            //   admin 完成/独占优先级机制。★必须先滤掉 bot 自己的消息: NL 镜像/◀外部指令 都是 bot.chat,
-            //   会作为 'chat' 事件被自己听到; admin 化后 respondFunc 的 self 过滤(username===this.name)
-            //   若 MC 用户名≠agent 名则漏网 → 这里双重滤(name + bot.username)防自我回灌成死循环。
-            if (username === this.name || (this.bot && username === this.bot.username)) return;
-            // ★2026-07-08 用户令: 斜杠开头的是 MC 作弊/命令 (/tp /give /gamemode /time …), 由服务器执行,
-            //   不是给 bot 的指令 —— 绝不喂进 admin/chat 解读路径, 否则会被当成一条任务去"执行"。就地丢弃。
-            //   (bot 自己的命令语法是 !command, 从不以 / 开头, 故此闸不会误挡 bot 指令。)
-            if (typeof message === 'string' && /^\s*\//.test(message)) {
-                console.log(`[chat] 忽略斜杠作弊命令(非 admin 指令): ${String(message).slice(0, 60)}`);
-                return;
-            }
-            // ★2026-07-08 修 (用户报: /give 后 bot 冒 "开始执行指令"): /命令 的服务器回执 ("Gave 25 [Dirt]
-            //   to Neko" / "Teleported …" 等) 会作为伪 chat 冒出来 —— slash 闸挡不住 (回执不以 / 开头, bot 收到
-            //   的是命令的"结果"而非你输入的 /命令)。两道闸: (a) 只认真在线玩家发的话 — 命令回执没有对应
-            //   bot.players 条目 (vanilla LAN 世界玩家名即真名, 不会误挡真人); (b) 复用 ignore_messages 前缀表
-            //   兜底 (已补 "Gave " 等回执前缀), 覆盖回执被归属到某在线玩家名的少见情形。
-            if (!username || !this.bot.players || !this.bot.players[username]) {
-                console.log(`[chat] 忽略非在线玩家消息(疑似命令回执): ${String(message).slice(0, 60)}`);
-                return;
-            }
-            if (message === '' || (typeof message === 'string' && ignore_messages.some((m) => message.startsWith(m)))) {
-                console.log(`[chat] 忽略服务器命令回执: ${String(message).slice(0, 60)}`);
-                return;
-            }
-            // ★2026-07-07 ADMIN MISSION: in-game chat becomes a persistent mission too (origin='chat',
-            //   no wire task_id → local teardown only, no task_finished frame). The line-above double
-            //   self-filter still guards mission-emitted banners/status chat from re-entry.
-            if (this._missionEnabled && this.adminMission) {
-                this.adminMission.submit({ text: message, taskId: null, origin: 'chat' });
-                return;
-            }
-            respondFunc('admin', message);
+            this._routeIngameChat(username, message, jsonMsg, ignore_messages);
         });
 
         // Set up auto-eat
@@ -210,6 +182,64 @@ export class Agent {
         else {
             // No init message, join silently
         }
+    }
+
+    // ── in-game chat 路由 (2026-07-14 用户令, 根治 admin 指令风暴; 见 bot.on('chat') 注释) ──────────
+    //   多重正向门 → 指令(前缀/! )走 adminMission 高优先级; 其余真人自然语言节流聚合转发外部 admin llm。
+    _routeIngameChat(username, message, jsonMsg, ignore_messages) {
+        try {
+            if (typeof message !== 'string' || message === '') return;
+            const bot = this.bot;
+            // 门①: 滤掉 bot 自己 (NL 镜像/banner 回灌防死循环)
+            if (username === this.name || (bot && username === bot.username)) return;
+            // 门②: 必须在线真玩家 —— 命令回执/系统广播的"发信人"无对应 bot.players 条目 (LAN 玩家名即真名)
+            if (!username || !bot.players || !bot.players[username]) return;
+            // 门③: 系统消息正向门 —— 真人聊天 jsonMsg.translate 形如 'chat.type.*'; 命令反馈是 'commands.*'
+            //   等系统键。tr 存在且非 chat.type → 系统消息, 丢弃; tr 缺失(signed chat) → 放行, 靠下游门兜底。
+            const tr = jsonMsg && jsonMsg.translate;
+            if (tr && !/^chat\.type\./.test(tr)) return;
+            // 门④: 已知服务器回执前缀兜底 (translate 缺失的畸形回执; "Applied effect"/"Teleported" 等)
+            if (Array.isArray(ignore_messages) && ignore_messages.some((m) => message.startsWith(m))) return;
+            const prefix = settings.chat_command_prefix || '';
+            const trimmed = message.replace(/^\s+/, '');
+            // 门⑤: 斜杠作弊命令 (/tp /give…) 丢弃 —— 但指令前缀(chat_command_prefix, 如 /neko)放行
+            if (/^\//.test(trimmed) && !(prefix && trimmed.startsWith(prefix))) return;
+            // 门⑥: 白名单 (空=所有真人玩家) —— 指令与聊天转发都受此门
+            const wl = Array.isArray(settings.chat_whitelist) ? settings.chat_whitelist : [];
+            if (wl.length > 0 && !wl.includes(username)) return;
+            // ── 指令 vs 聊天分流 ──
+            let body = trimmed, isCmd = false;
+            if (prefix && trimmed.startsWith(prefix)) { body = trimmed.slice(prefix.length).trim(); isCmd = true; }  // /neko … = 指令
+            else if (trimmed.startsWith('!')) { isCmd = true; }                                                       // !cmd = 指令
+            else if (!prefix) { isCmd = true; }                                                                       // 前缀关闭 → 旧行为: 真人消息都当指令
+            if (isCmd) {
+                if (!body) return;
+                console.log(`[chat] 指令 (${username}): ${body.slice(0, 80)}`);
+                if (this._missionEnabled && this.adminMission) this.adminMission.submit({ text: body, taskId: null, origin: 'chat' });
+                else if (this.respondFunc) this.respondFunc('admin', body);
+            } else {
+                console.log(`[chat] 聊天转发→admin llm (${username}, tr=${tr || '-'}): ${body.slice(0, 80)}`);
+                this._bufferChatForward(username, body);
+            }
+        } catch (e) { console.error('[chat] route error:', e && e.message || e); }
+    }
+
+    // 非指令真人聊天 → 节流聚合 (默认 3s 一批) → ws 转发外部 admin llm (env MC_INGAME_CHAT_FLUSH_MS 可调)
+    _bufferChatForward(username, text) {
+        try {
+            if (!this._chatFwdBuf) this._chatFwdBuf = [];
+            this._chatFwdBuf.push({ player: username, text });
+            if (this._chatFwdTimer) return;
+            const ms = parseInt(process.env.MC_INGAME_CHAT_FLUSH_MS, 10);
+            const flushMs = (Number.isFinite(ms) && ms > 0) ? ms : 3000;
+            this._chatFwdTimer = setTimeout(() => {
+                this._chatFwdTimer = null;
+                const batch = this._chatFwdBuf || []; this._chatFwdBuf = [];
+                if (!batch.length) return;
+                try { wsServer.forwardIngameChat(batch); }
+                catch (e) { console.error('[chat] forwardIngameChat failed:', e && e.message || e); }
+            }, flushMs);
+        } catch (e) { console.error('[chat] buffer error:', e && e.message || e); }
     }
 
     checkAllPlayersPresent() {
