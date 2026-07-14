@@ -1346,7 +1346,14 @@ async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = tru
                 new Promise((_, rej) => { _sdIv = setInterval(() => { try { if (bot.interrupt_code) rej(new Error('interrupted')); } catch (e) {} }, 200); }),
             ]);
         } finally { if (_sdIv) clearInterval(_sdIv); }
-        if (pickup) { try { await pickupNearbyItems(bot); } catch (e) {} }
+        if (pickup) {
+            let picked = false;
+            // The block-change acknowledgement can arrive one tick before the item entity.
+            // Give the drop a brief spawn window before deciding that nothing landed here.
+            await new Promise(r => setTimeout(r, 150));
+            try { picked = await ensurePickupAt(bot, cur.position, { radius: 6, maxDescend: 3, timeoutMs: 6000 }); } catch (e) {}
+            if (!picked) { try { await pickupNearbyItems(bot); } catch (e) {} }
+        }
         return 'ok';
     } catch (e) {
         try { bot.stopDigging(); } catch (_) {}
@@ -1545,6 +1552,33 @@ function _deathLinesCached(bot) {
     } catch (e) { return []; }
 }
 
+const ORE_COLLECT_SPECS = Object.freeze({
+    coal: { targets: ['coal'], blocks: ['coal_ore', 'deepslate_coal_ore'], drop: 'coal' },
+    diamond: { targets: ['diamond', 'diamonds'], blocks: ['diamond_ore', 'deepslate_diamond_ore'], drop: 'diamond' },
+    emerald: { targets: ['emerald'], blocks: ['emerald_ore', 'deepslate_emerald_ore'], drop: 'emerald' },
+    iron: { targets: ['iron'], blocks: ['iron_ore', 'deepslate_iron_ore'], drop: 'raw_iron' },
+    gold: { targets: ['gold'], blocks: ['gold_ore', 'deepslate_gold_ore'], drop: 'raw_gold' },
+    lapis: { targets: ['lapis', 'lapis_lazuli'], blocks: ['lapis_ore', 'deepslate_lapis_ore'], drop: 'lapis_lazuli' },
+    redstone: { targets: ['redstone'], blocks: ['redstone_ore', 'deepslate_redstone_ore'], drop: 'redstone' },
+    copper: { targets: ['copper'], blocks: ['copper_ore', 'deepslate_copper_ore'], drop: 'raw_copper' },
+    quartz: { targets: ['quartz'], blocks: ['nether_quartz_ore'], drop: 'quartz' },
+});
+
+function oreCollectSpec(blockType) {
+    const requested = String(blockType || '');
+    return Object.values(ORE_COLLECT_SPECS).find((spec) =>
+        spec.targets.includes(requested) || spec.blocks.includes(requested)) || null;
+}
+
+export function collectDropItemName(blockType) {
+    return oreCollectSpec(blockType)?.drop || blockType;
+}
+
+export function collectOreBlockTypes(blockType) {
+    const spec = oreCollectSpec(blockType);
+    return spec ? [...spec.blocks] : [blockType];
+}
+
 export async function collectBlock(bot, blockType, num=1, exclude=null, veinFollow='auto') {
     /**
      * Collect one of the given block type.
@@ -1564,14 +1598,8 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
         log(bot, `Invalid number of blocks to collect: ${num}.`);
         return false;
     }
-    let blocktypes = [blockType];
-    const oreDrops = ['coal','diamond','emerald','iron','gold','lapis_lazuli','redstone','copper'];
-    if (oreDrops.includes(blockType)) {
-        blocktypes.push(blockType+'_ore');
-        blocktypes.push('deepslate_'+blockType+'_ore'); // diamond/iron/etc at deepslate depth
-    }
-    if (blockType.endsWith('ore'))
-        blocktypes.push('deepslate_'+blockType);
+    const oreSpec = oreCollectSpec(blockType);
+    let blocktypes = collectOreBlockTypes(blockType);
     if (blockType === 'dirt')
         blocktypes.push('grass_block');
     if (blockType === 'cobblestone')
@@ -1593,8 +1621,10 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
         return false;
     }
     // Vein-follow only makes sense for ores (you don't want to chain-mine every
-    // nearby stone/dirt/log). 'auto' = on iff the search set contains an ore block.
-    const veinActive = !isLiquid && (veinFollow === true || (veinFollow === 'auto' && blocktypes.some(n => n.endsWith('_ore'))));
+    // nearby stone/dirt/log). Keep the generic *_ore fallback for modded/unlisted
+    // ores while the known specs above supply exact block-family/drop mappings.
+    const veinActive = !isLiquid && (veinFollow === true
+        || (veinFollow === 'auto' && (!!oreSpec || blocktypes.some(n => n.endsWith('_ore')))));
 
     // ★TRUTHFUL COUNT (root fix for "Collected 4 oak_log 但空包"): `collected` below counts
     // blocks BROKEN, not drops actually vacuumed. A log broken over water floats off and
@@ -1603,8 +1633,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
     // also track the real inventory delta of the drop item and report/return on THAT.
     // Ores that pick up as a differently-named item drop need the mapping (iron→raw_iron …);
     // everything else drops as its own block name.
-    const DROP_NAME = { iron: 'raw_iron', gold: 'raw_gold', copper: 'raw_copper' };
-    const dropItem = DROP_NAME[blockType] || blockType;
+    const dropItem = collectDropItemName(blockType);
     const gainOf = () => bot.inventory.items()
         .filter(i => i.name === dropItem || i.name === blockType)
         .reduce((a, i) => a + i.count, 0);
@@ -2030,26 +2059,28 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
                 // through a wall (the C304 path-exists gate selected it, but distToBlock<=4.6 alone
                 // let it reach through solid rock). Non-ore (logs/stone/dirt) dig as before.
                 const _isOre = /_ore$/.test(block.name || '');
-                let r = await safeDig(bot, block, { maxMs: 15000, equip: false, requireLOS: _isOre });
+                const gainBeforeDig = gainOf();
+                let r = await safeDig(bot, block, { maxMs: 15000, equip: false, pickup: _isOre, requireLOS: _isOre });
                 // ★C304-T (2026-07-09 "凿隧道直达"): 埋铁被 safeDig 判 unreachable/occluded 时不再直接
                 //  exclude 放弃整条矿脉 — 先朝它凿一条密封隧道(防坠/防淹/防x-ray, 任一不安全即停),
                 //  逼近到臂展再重试一次 safeDig(requireLOS 仍锁, 绝不 x-ray)。隧道失败=旧行为 exclude。
                 if (_isOre && (r === 'unreachable' || r === 'occluded') && _tunnelTries < _TUNNEL_MAX_TRIES) {
                     _tunnelTries++;
                     if (await tunnelToOre(bot, block))
-                        r = await safeDig(bot, block, { maxMs: 15000, equip: false, requireLOS: true });
+                        r = await safeDig(bot, block, { maxMs: 15000, equip: false, pickup: true, requireLOS: true });
                 }
                 if (r === 'ok') {
                     // ★Actually COLLECT the drop (fixes "挖了树不捡木头"): step ONTO the broken
                     // block's spot via a dig-capable path so mineflayer auto-vacuums the item,
                     // THEN sweep any stragglers (drops land a couple blocks off through leaves/vines).
-                    try { await goToPosition(bot, block.position.x, block.position.y, block.position.z, 1); } catch (e) {}
-                    const preSweep = gainOf();
-                    await pickupNearbyItems(bot);
+                    if (gainOf() === gainBeforeDig) {
+                        try { await goToPosition(bot, block.position.x, block.position.y, block.position.z, 1); } catch (e) {}
+                        try { await ensurePickupAt(bot, block.position, { radius: 6, maxDescend: 3, timeoutMs: 6000 }); } catch (e) {}
+                    }
                     // ★WATER-DRIFT SWEEP: a drop broken next to water floats and drifts out of the
                     // first pickup's reach (root cause of the -79,168 lakeside chop that logged 4
                     // logs but banked 0). If the drop item still didn't land, chase once wider.
-                    if (gainOf() === preSweep) {
+                    if (gainOf() === gainBeforeDig) {
                         try { await pickupNearbyItems(bot, 12); } catch (e) {}
                     }
                     success = true;
@@ -2105,42 +2136,53 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
 }
 
 // Flood-fill mine a connected ore vein starting from a just-mined block position.
-// MC ore blobs often touch only diagonally, so we expand over face- AND
-// diagonal-adjacent cells. Digs each reachable block of `blocktypes`, equipping
-// the right pickaxe per block (so it actually drops) and pathing close so the
-// pathfinder doesn't thrash. Bounded by `max`. Returns how many blocks it mined.
-async function harvestConnectedVein(bot, startPos, blocktypes, max=64) {
-    const NB = [
-        [1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1],
-        [1,1,0],[1,-1,0],[-1,1,0],[-1,-1,0],[0,1,1],[0,1,-1],[0,-1,1],[0,-1,-1],
-        [1,0,1],[1,0,-1],[-1,0,1],[-1,0,-1],
-    ];
+// MC ore blobs can touch on faces, edges, or corners, so use all 26 neighbours.
+// A block that is temporarily occluded/unreachable is retried after another vein
+// block is mined: removing its neighbour can expose a safe LOS/stand cell. Fluid
+// and wrong-tool refusals remain terminal, preserving the safety contract.
+export async function harvestConnectedVein(bot, startPos, blocktypes, max=64, opts={}) {
+    const NB = [];
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+        if (dx || dy || dz) NB.push([dx, dy, dz]);
+    }
     const isTarget = (b) => b && blocktypes.includes(b.name);
-    const seen = new Set();
-    const queue = [];
-    // Seed with the neighbours of the already-mined start block.
-    for (const [dx,dy,dz] of NB) queue.push(startPos.offset(dx,dy,dz));
-    let mined = 0;
-    while (queue.length && mined < max) {
-        if (bot.interrupt_code) break;
-        const p = queue.shift();
-        const k = `${p.x},${p.y},${p.z}`;
-        if (seen.has(k)) continue;
-        seen.add(k);
+    const keyOf = (p) => `${p.x},${p.y},${p.z}`;
+    const discovered = new Set();
+    const scan = [];
+    const component = [];
+    const enqueue = (p) => {
+        const key = keyOf(p);
+        if (discovered.has(key)) return;
+        discovered.add(key);
+        scan.push(p);
+    };
+    for (const [dx,dy,dz] of NB) enqueue(startPos.offset(dx,dy,dz));
+    while (scan.length && component.length < max) {
+        const p = scan.shift();
         const b = bot.blockAt(p);
         if (!isTarget(b)) continue;
-        // ★Break via the same safeDig primitive as the main path — reach-guard prevents the
-        // "抬头空挥" on a tall tree's high logs, the equip step keeps a sword off wood, and the
-        // 8s backstop bounds each log. Expand neighbours regardless of outcome (a leaning/bent
-        // trunk unreachable from here may be reachable from an adjacent cell).
-        // ★requireLOS: this flood-fill only ever runs on ORE veins (collectBlock veinActive), so
-        // apply the SAME anti-x-ray LOS gate as the main dig — never reach a vein block through a
-        // wall. safeDig approaches (repositions) blocks >4.4b first, so a wrapping vein still gets
-        // exhausted from reachable angles; a genuinely walled-off tail is left for the next scan
-        // (recoverable) rather than x-ray-grabbed.
-        const r = await safeDig(bot, b, { maxMs: 8000, pickup: true, requireLOS: true });
-        if (r === 'ok') mined++;
-        for (const [dx,dy,dz] of NB) queue.push(p.offset(dx,dy,dz));
+        component.push(p);
+        for (const [dx,dy,dz] of NB) enqueue(p.offset(dx,dy,dz));
+    }
+
+    const dig = typeof opts.dig === 'function'
+        ? opts.dig
+        : (b) => safeDig(bot, b, { maxMs: 8000, pickup: true, requireLOS: true });
+    let mined = 0;
+    let pending = component;
+    while (pending.length && mined < max) {
+        let passMined = 0;
+        const retry = [];
+        for (const p of pending) {
+            if (bot.interrupt_code || mined >= max) break;
+            const b = bot.blockAt(p);
+            if (!isTarget(b)) continue;
+            const r = await dig(b);
+            if (r === 'ok') { mined++; passMined++; }
+            else if (r === 'occluded' || r === 'unreachable') retry.push(p);
+        }
+        if (passMined === 0) break;
+        pending = retry;
     }
     return mined;
 }
