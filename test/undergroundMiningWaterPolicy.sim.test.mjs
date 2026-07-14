@@ -4,12 +4,14 @@
 //
 // Run: node test/undergroundMiningWaterPolicy.sim.test.mjs
 import process from 'node:process';
+import { readFileSync } from 'node:fs';
 import Vec3 from 'vec3';
 import {
     applyUndergroundWaterAvoidance,
     createUndergroundWaterGuard,
     findNearbyDryStandPositions,
     isBotInWater,
+    isUndergroundMiningWaterSafetyError,
     shouldAvoidUndergroundWater,
 } from '../src/agent/library/navigation_policy.js';
 
@@ -112,6 +114,38 @@ console.log('Test 6: water recovery only targets dry standable columns');
     };
     const positions = findNearbyDryStandPositions(bot);
     check('plain air and cave_air dry columns remain', positions.length === 2 && positions.includes(good) && positions.includes(caveAir));
+}
+
+console.log('Test 7: mining callers distinguish fatal water safety failures');
+for (const name of [
+    'UndergroundMiningWaterEntry',
+    'UndergroundMiningStillInWater',
+    'UndergroundMiningNoDryExit',
+]) {
+    const error = new Error(name);
+    error.name = name;
+    check(`${name} is safety-fatal`, isUndergroundMiningWaterSafetyError(error));
+}
+for (const name of ['PathfindingFailed', 'UndergroundMiningWaterPolicyArmed']) {
+    const error = new Error(name);
+    error.name = name;
+    check(`${name} remains ordinary control flow`, !isUndergroundMiningWaterSafetyError(error));
+}
+
+console.log('Test 8: water safety checks stay wired through navigation and mineOres');
+{
+    const skillsSource = readFileSync(new URL('../src/agent/library/skills.js', import.meta.url), 'utf8');
+    const mineOresSource = readFileSync(new URL('../bots/_supervisor/skills/mineOres.js', import.meta.url), 'utf8');
+    const descentSource = readFileSync(new URL('../bots/_supervisor/skills/descentOreSweep.js', import.meta.url), 'utf8');
+    check('pseudo-success path reuses the success-boundary water observer',
+        /Goal reached[\s\S]{0,500}observeWaterAtSuccess\(\)/.test(skillsSource));
+    check('policy arming performs a fresh guarded route selection',
+        /waterPolicyArmed[\s\S]{0,2500}path\.water_policy_replan/.test(skillsSource));
+    check('goToPosition rethrows water safety failures',
+        /export async function goToPosition[\s\S]{0,3000}isUndergroundMiningWaterSafetyError\(err\)\) throw err/.test(skillsSource));
+    check('mineOres rethrows water safety failures', mineOresSource.includes('rethrowWaterSafetyError'));
+    check('live ore approach rethrows water safety failures',
+        descentSource.includes('skills.isUndergroundMiningWaterSafetyError(e)'));
 }
 
 if (failures) {

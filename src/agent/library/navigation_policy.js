@@ -5,6 +5,16 @@ const UNDERGROUND_MINING_SKILLS = new Set([
     'branchMine',
     'mineDown',
 ]);
+const UNDERGROUND_WATER_SAFETY_ERRORS = new Set([
+    'UndergroundMiningWaterEntry',
+    'UndergroundMiningStillInWater',
+    'UndergroundMiningNoDryExit',
+]);
+
+/** Safety failures that mining callers must not downgrade to ordinary no-path. */
+export function isUndergroundMiningWaterSafetyError(error) {
+    return UNDERGROUND_WATER_SAFETY_ERRORS.has((error && error.name) || '');
+}
 
 function blockNameAt(bot, position) {
     try { return (bot.blockAt(position) || {}).name || ''; }
