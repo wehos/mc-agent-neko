@@ -15,6 +15,7 @@ import { canClutchWater } from './framework/tools/lava_guard.js';
 import { resolve as arbitrate, setBodyOwner, releaseBodyOwner, currentOwner as arbiterCurrentOwner, vitalNow as arbiterVitalNow } from './framework/arbiter.js';
 // ★2026-07-08 用户令: auto_eat 的「补血 vs 补体力」开关 (临时禁用饥饿/食物本能)。见 contracts.foodInstinctsEnabled。
 import { foodInstinctsEnabled, hpInstinctsEnabled } from './framework/contracts.js';
+import { observeStallContext, recoveryMovedEnough } from './stall_recovery.js';
 
 const FAMINE_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_|rotten_flesh|spider_eye/;
 const NORMAL_FOOD_RE = /cooked_|_bread|^bread$|apple|golden_apple|carrot|potato|beef|porkchop|chicken|mutton|cod|salmon|melon_slice|sweet_berries|_stew|rabbit|baked_/;
@@ -2931,7 +2932,7 @@ const modes_list = [
     },
     {
         name: 'unstuck',
-        description: 'Attempt to get unstuck when in the same place for a while. Interrupts some actions.',
+        description: 'Classify stalled body intent and recover only failed movement without stealing deliberate work or holds.',
         interrupts: ['all'],
         on: true,
         active: false,
@@ -2940,7 +2941,7 @@ const modes_list = [
         stuck_time: 0,
         last_time: Date.now(),
         max_stuck_time: 20,
-        prev_dig_block: null,
+        prev_dig_block: null, // legacy reset slot kept for mode-state compatibility
         rb_anchor: null,
         rb_prevPos: null,
         rb_sampleAt: 0,
@@ -2954,6 +2955,9 @@ const modes_list = [
         step_skip_first_at: 0,
         step_skip_count: 0,
         step_skip_last_log_at: 0,
+        prev_stall_key: null,
+        last_report_at: 0,
+        last_report_pos: null,
         update: async function (agent) {
             const bot = agent.bot;
             if (famineBodyFreeze(agent, 'unstuck')) {
@@ -3074,11 +3078,18 @@ const modes_list = [
             }
             const pathingNow = !!(bot && bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving());
             const mobilityWorkNow = !!(bot && bot._mobility && /MAROONED|POCKET|ENTOMBED/.test(bot._mobility.state || ''));
-            if (agent.isIdle() && !pathingNow && !mobilityWorkNow) {
+            // The old fallback treated "same position" as proof of a stall. That conflated
+            // deliberate holds, UI waits, slow digs and stopped/idle bots with failed travel.
+            // Only observe a declared or derived MOVE intent here. DIG has pf_dig_watchdog,
+            // interactions have their own timeouts, and HOLD/WORK must retain body ownership.
+            const stallContext = observeStallContext(agent);
+            if (!stallContext.watchMovement) {
                 this.prev_location = null;
                 this.stuck_time = 0;
+                this.prev_dig_block = null;
+                this.prev_stall_key = null;
                 this.step_prev_location = null;
-                return; // don't get stuck when idle
+                return;
             }
             // ★rubber-band / 逆向幻影块探测 (2026-07-07 session#11 实录: 服务器认为 bot 脚位有块 —
             // 用户客户端实拍半身陷在闪长岩里 — bot 本地世界却是 air → pathfinder 每次冲出 2-3 格,
@@ -3602,49 +3613,44 @@ const modes_list = [
                     this.step_prev_time = now;
                 }
             } catch (e) {}
-            const cur_dig_block = bot.targetDigBlock;
-            if (cur_dig_block && !this.prev_dig_block) {
-                this.prev_dig_block = cur_dig_block;
-            }
-            if (this.prev_location && this.prev_location.distanceTo(bot.entity.position) < this.distance && cur_dig_block == this.prev_dig_block) {
+            if (this.prev_location
+                && this.prev_stall_key === stallContext.key
+                && this.prev_location.distanceTo(bot.entity.position) < this.distance) {
                 this.stuck_time += (Date.now() - this.last_time) / 1000;
             }
             else {
                 this.prev_location = bot.entity.position.clone();
+                this.prev_stall_key = stallContext.key;
                 this.stuck_time = 0;
                 this.prev_dig_block = null;
             }
-            const max_stuck_time = cur_dig_block?.name === 'obsidian' ? this.max_stuck_time * 2 : this.max_stuck_time;
-            if (this.stuck_time > max_stuck_time) {
-                say(agent, 'I\'m stuck!');
+            if (this.stuck_time > this.max_stuck_time) {
                 this.stuck_time = 0;
+                const stallPos = bot.entity.position.clone();
+                const recovery = stallContext.recovery;
+                const shouldReport = !this.last_report_pos
+                    || this.last_report_pos.distanceTo(stallPos) > 4
+                    || Date.now() - this.last_report_at > 60000;
+                if (shouldReport) {
+                    this.last_report_at = Date.now();
+                    this.last_report_pos = stallPos.clone();
+                }
                 execute(this, agent, async () => {
-                    // ★2026-07-08 用户令 —— 软卡顿处理阶梯: 先脱困, 15s 还没解决【才重连】(绝不 process.exit)。
-                    //   旧行为: 给 moveAway 65s, 内部楔死就 cleanKill→process.exit, 整个 agent 莫名其妙退出。
-                    //   新行为: 记下卡住点 → 试 moveAway; 15s 后若"仍在原地"(既没脱出也没被别的门救走) →
-                    //   agent.reconnectNow() 掉线重进世界(清客户端楔死), 进程/记忆/任务全活着。
-                    //   moveAway 若在 15s 内成功 → 取消定时器, "I'm free."。若报错(困水/无法通行)不立即
-                    //   重连——留给 15s 定时器按"是否仍卡在原地"裁决(与其它脱困门/存活层留出机会)。
-                    const stuckPos = bot.entity.position.clone();
-                    let freed = false;
-                    const reconnectTimer = setTimeout(() => {
-                        if (freed) return;
-                        let moved = false;
-                        try { moved = !!(bot.entity && bot.entity.position.distanceTo(stuckPos) > 1.5); } catch (e) {}
-                        if (moved) return; // 已经挪开了 = 已脱困, 不重连
-                        try { fs.appendFileSync('bots/_supervisor/progress.txt',
-                            `[${new Date().toISOString()}] [stuck] unstuck failed >15s @${Math.floor(stuckPos.x)},${Math.floor(stuckPos.y)},${Math.floor(stuckPos.z)} — reconnecting (NO process exit)\n`); } catch (e) {}
-                        say(agent, 'Still stuck after 15s — reconnecting to rejoin the world.');
-                        try { agent.reconnectNow('stuck-unrecoverable'); } catch (e) {}
-                    }, 15000); // 15s 脱困窗口, 到点仍卡在原地才重连
                     try {
-                        await skills.moveAway(bot, 5);
-                        freed = true;
-                        clearTimeout(reconnectTimer);
-                        say(agent, 'I\'m free.');
-                    } catch (err) {
-                        // 不立即重连、不 clearTimeout —— 让 15s 定时器按"是否仍卡在原地"裁决。
-                        say(agent, `Failed to get unstuck: ${err.message}. Will reconnect if still stuck at 15s.`);
+                        bot.pathfinder && bot.pathfinder.setGoal && bot.pathfinder.setGoal(null);
+                        bot.pathfinder && bot.pathfinder.stop && bot.pathfinder.stop();
+                        bot.clearControlStates();
+                    } catch (e) { /* pathfinder may already be torn down */ }
+                    await new Promise(resolve => setTimeout(resolve, 150));
+                    const moved = recoveryMovedEnough(stallPos, bot.entity?.position, 1.5);
+                    try {
+                        fs.appendFileSync('bots/_supervisor/progress.txt',
+                            `[${new Date().toISOString()}] [stall] intent=${stallContext.intent} owner=${stallContext.owner || '-'} recovery=${recovery} moved=${moved} @${Math.floor(stallPos.x)},${Math.floor(stallPos.y)},${Math.floor(stallPos.z)} — cancelled stale route; task/mobility will replan (no generic moveAway, no reconnect)\n`);
+                    } catch (e) { /* diagnostics must never block recovery */ }
+                    if (shouldReport) {
+                        say(agent, recovery === 'yield-confinement'
+                            ? 'That route is blocked in this confined space; yielding to local escape planning.'
+                            : 'That route stopped making progress; cancelling it and replanning.');
                     }
                 });
             }
@@ -3654,6 +3660,7 @@ const modes_list = [
             this.prev_location = null;
             this.stuck_time = 0;
             this.prev_dig_block = null;
+            this.prev_stall_key = null;
             this.step_prev_location = null;
             this.rb_anchor = null;
             this.rb_prevPos = null;
