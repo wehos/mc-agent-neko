@@ -98,17 +98,20 @@ console.log('Test 6: water recovery only targets dry standable columns');
 {
     const bot = makeBot();
     const good = new Vec3(2, 48, 0);
+    const caveAir = new Vec3(1, 48, 0);
     const wetHead = new Vec3(3, 48, 0);
     const noFloor = new Vec3(4, 48, 0);
-    bot.findBlocks = () => [noFloor, wetHead, good];
+    bot.findBlocks = ({ matching }) => [noFloor, wetHead, good, caveAir]
+        .filter(p => matching({ name: p === caveAir ? 'cave_air' : 'air' }));
     bot.blockAt = (p) => {
         if (p.x === wetHead.x && p.y === wetHead.y + 1) return { name: 'water', boundingBox: 'empty' };
         if (p.x === noFloor.x && p.y === noFloor.y - 1) return { name: 'air', boundingBox: 'empty' };
         if (p.y === 47) return { name: 'stone', boundingBox: 'block' };
+        if (p.x === caveAir.x) return { name: 'cave_air', boundingBox: 'empty' };
         return { name: 'air', boundingBox: 'empty' };
     };
     const positions = findNearbyDryStandPositions(bot);
-    check('only the dry column with solid footing remains', positions.length === 1 && positions[0] === good);
+    check('plain air and cave_air dry columns remain', positions.length === 2 && positions.includes(good) && positions.includes(caveAir));
 }
 
 if (failures) {

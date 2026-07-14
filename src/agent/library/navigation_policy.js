@@ -97,7 +97,7 @@ export function findNearbyDryStandPositions(bot, distance = 12, count = 256) {
     let candidates = [];
     try {
         candidates = bot.findBlocks({
-            matching: (block) => block && block.name === 'air',
+            matching: (block) => block && /^(?:air|cave_air|void_air)$/.test(block.name || ''),
             maxDistance: distance,
             count,
         }) || [];

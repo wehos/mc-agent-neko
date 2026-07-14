@@ -4195,6 +4195,27 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
             bot.pathfinder.goto(goal),
             stuckCheckPromise
         ]);
+        // A short GoalNear/GoalBlock route can enter water and finish before
+        // the 500ms monitor samples it. Re-observe at the success boundary so
+        // a nearby water goal cannot bypass the underground guard.
+        if (audit.waterGuard) {
+            const waterState = audit.waterGuard.observe();
+            if (waterState === 'entered') {
+                const waterError = new Error('Underground mining path entered water');
+                waterError.name = 'UndergroundMiningWaterEntry';
+                throw waterError;
+            }
+            if (waterState === 'armed') {
+                audit.armWaterAvoidance();
+                motionAudit(bot, 'path.water_policy_armed', {
+                    seq: audit.seq,
+                    phase: audit.phase,
+                    atGoal: true,
+                    ms: Date.now() - phaseStartedAt,
+                    goal: audit.goal,
+                });
+            }
+        }
         clearInterval(stuckCheckInterval);
         motionAudit(bot, 'path.phase.end', {
             seq: audit.seq,
@@ -4587,11 +4608,13 @@ export async function goToGoal(bot, goal, navigationOptions = {}) {
             );
 
             if (result.waterPolicyArmed) {
-                // The initial recovery route reached dry ground. Its remaining
-                // nodes may still cross water, so cancel and replan immediately
+                // The route crossed the underground cutoff on dry ground. Its
+                // remaining nodes may still cross water, so cancel and replan
                 // now that both movement sets carry the hard water veto.
-                currentMovements = destructiveMovements;
-                isDestructive = true;
+                // Preserve the selected phase: a dry non-destructive staircase
+                // should remain non-destructive after crossing Y55. If that
+                // newly constrained route later sticks, the normal fallback
+                // below will still escalate to destructive movement.
                 continue;
             }
 
