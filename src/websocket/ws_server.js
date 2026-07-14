@@ -798,6 +798,30 @@ class WSMessageServer {
         this.currentTask = null;
         this.currentTaskId = null;
     }
+    // ★2026-07-14 节流回执: AdminMission 无视重复指令时, 用一帧轻量 task_finished(status='duplicate')
+    //   给插件收尾该 task_id (静默丢帧会让插件挂到自身超时, 反而诱发更多重发)。刻意不走 onTaskCompleted:
+    //   ① mission_end 去重戳会误压制 5s 内正在跑任务的真实尾帧; ② 不带 inventory、不动
+    //   currentTask/currentTaskId —— 正在跑的任务仍拥有它们。'duplicate' 不在插件已知状态词表
+    //   (ok/failed/superseded/interrupted), 按文档约定未知词当"非成功"处理, message 才是主信号。
+    // ★2026-07-14 节流: 是否真有 legacy WS 任务在飞 (injectMessage 注入且尚未完成)。断线/死亡/cleanKill
+    //   的 legacy 'interrupted' 帧只在此门为真时才发 —— 无任务时的断线重连风暴曾以 ~10s 一帧向对话 LLM
+    //   轰炸 "任务中断" (0714 实录: server 维护中 115 连发)。mission 路径不经此门 (isActive 分支自理)。
+    hasInflightTask() {
+        return !!(this.currentTask && !this.taskCompleted);
+    }
+    ackDuplicateTask(taskId, message) {
+        try {
+            const payload = {
+                type: 'task_finished',
+                status: 'duplicate',
+                message: String(message || '重复指令已忽略。'),
+                score: null,
+                timestamp: Date.now(),
+            };
+            if (typeof taskId === 'string' && taskId) payload.task_id = taskId;
+            this.broadcastTaskCompletion(payload);
+        } catch (e) { console.error('ackDuplicateTask failed:', e && e.message || e); }
+    }
 
     injectMessage(message, taskId) {
         if (!message || typeof message !== 'string') {

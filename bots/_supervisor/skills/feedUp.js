@@ -474,7 +474,12 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             try {
                 if (bot.inventory.emptySlotCount() === 0) {
                     const junk = bot.inventory.items().find(i => /^(cobblestone|cobbled_deepslate|dirt|granite|diorite|andesite|tuff|gravel|sand|netherrack)$/.test(i.name));
-                    if (junk) { await bot.toss(junk.type, null, Math.min(junk.count, 32)); await skills.wait(bot, 250); }
+                    // ★2026-07-14 坑弃: 裸 toss 扔脚底, 2s pickup-delay 一过被服务器原样塞回 = 白腾。
+                    // smartDiscard 找低地/挖 1 格坑入弃; verify:false+maxDigs:1 — 饥荒赶路不烧验证时间,
+                    // 反正马上要走向食物掉落物 (走开本身就出拾取球)。热重载窗口老 skills.js 退回裸 toss。
+                    if (junk && typeof skills.smartDiscard === 'function') {
+                        await skills.smartDiscard(bot, { name: junk.name, num: Math.min(junk.count, 32) }, { verify: false, maxDigs: 1 });
+                    } else if (junk) { await bot.toss(junk.type, null, Math.min(junk.count, 32)); await skills.wait(bot, 250); }
                 }
             } catch (e) {}
             if (dist > 1.6 && !(await safeRoamTo(drop.position.x, drop.position.y, drop.position.z, 2, 'food-drop'))) {
@@ -1231,9 +1236,10 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             nearEnt('animal64', e => mc.isHuntable(e) && !failedIds.has(e.id), 64),
             nearEnt('fish32', e => /cod|salmon/i.test((e && (e.name || e.displayName)) || ''), 32),
             nearEnt('drop32', e => e && e.name === 'item', 32),
-            nearBlock('melon48', 'melon', 48),
-            nearBlock('berry48', 'sweet_berry_bush', 48),
-            nearBlock('oak48', 'oak_log', 48),
+            // ★(0714) foodScan 是诊断字符串(仅 prog 日志), 128 同步扫穿会阻塞 ws 且不值得 → 64 同步(比原48大,安全); 真128须异步化留优化
+            nearBlock('melon64', 'melon', 64),
+            nearBlock('berry64', 'sweet_berry_bush', 64),
+            nearBlock('oak64', 'oak_log', 64),
             nearBlock('oakLeaf16', 'oak_leaves', 16),
         ].join(' ');
     };
@@ -1302,12 +1308,12 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         let oak = null;
         try {
             for (const name of ['oak_leaves', 'dark_oak_leaves']) {
-                const b = world.getNearestBlock(bot, name, 18);
+                const b = await world.getNearestBlockAsync(bot, name, 18);
                 if (!b || !b.position) continue;
                 if (!oak || b.position.distanceTo(bot.entity.position) < oak.position.distanceTo(bot.entity.position)) oak = b;
             }
             for (const name of oak ? [] : ['oak_log', 'dark_oak_log']) {
-                const b = world.getNearestBlock(bot, name, 18);
+                const b = await world.getNearestBlockAsync(bot, name, 18);
                 if (!b || !b.position) continue;
                 if (!oak || b.position.distanceTo(bot.entity.position) < oak.position.distanceTo(bot.entity.position)) oak = b;
             }
@@ -1334,12 +1340,12 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
         let oak = null;
         try {
             for (const name of ['oak_leaves', 'dark_oak_leaves']) {
-                const b = world.getNearestBlock(bot, name, 18);
+                const b = await world.getNearestBlockAsync(bot, name, 18);
                 if (!b || !b.position) continue;
                 if (!oak || b.position.distanceTo(bot.entity.position) < oak.position.distanceTo(bot.entity.position)) oak = b;
             }
             for (const name of oak ? [] : ['oak_log', 'dark_oak_log']) {
-                const b = world.getNearestBlock(bot, name, 18);
+                const b = await world.getNearestBlockAsync(bot, name, 18);
                 if (!b || !b.position) continue;
                 if (!oak || b.position.distanceTo(bot.entity.position) < oak.position.distanceTo(bot.entity.position)) oak = b;
             }
@@ -1483,9 +1489,9 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                 // table is at arm's length but one stands within 24b, WALK to it first. A 20s
                 // walk for 8 bread is the best trade on the board at food<18.
                 try {
-                    if (!world.getNearestBlock(bot, 'crafting_table', 4)) {
+                    if (!await world.getNearestBlockAsync(bot, 'crafting_table', 4)) {
                         // 48b: the C350b maiden run had the table at 28b and starved next to it (24b radius miss)
-                        const farTable = bot.findBlock({ matching: (b) => b && b.name === 'crafting_table', maxDistance: 48 });
+                        const farTable = await world.getNearestBlockAsync(bot, 'crafting_table', 64);
                         if (farTable) {
                             prog(`feedUp: C350b walking to table @${farTable.position.x},${farTable.position.z} (${Math.round(bot.entity.position.distanceTo(farTable.position))}b) to bake ${wheatCt} wheat`);
                             try { await skills.goToPosition(bot, farTable.position.x, farTable.position.y, farTable.position.z, 2); } catch (e) {}
@@ -1544,7 +1550,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
             //    hunger-effect, ~zero real danger — the classic famine food).
             let foraged = false;
             try {
-                const melon = world.getNearestBlock(bot, 'melon', 32);
+                const melon = await world.getNearestBlockAsync(bot, 'melon', 64);
                 if (melon) {
                     log(bot, 'feedUp: no animals — foraging a wild melon');
                     try { foraged = await skills.collectBlock(bot, 'melon', 1); } catch (e) {}
@@ -1560,7 +1566,7 @@ export default async function feedUp(bot, ctx, targetFood = 18) {
                 // bush is known: a hungry bot MUST spend pips reaching the only food (daytime/Easy =
                 // safe). Widen to 56 when hungry (covers the 48 scan + margin). handoff §8 / memory
                 // food-desert-spawn-deadlock.
-                const bush = world.getNearestBlock(bot, 'sweet_berry_bush', bot.food <= 10 ? 56 : 32);
+                const bush = await world.getNearestBlockAsync(bot, 'sweet_berry_bush', 64);
                 if (bush) {
                     log(bot, `feedUp: foraging sweet berries @${Math.round(bush.position.distanceTo(bot.entity.position))}b`);
                     try { await skills.goToPosition(bot, bush.position.x, bush.position.y, bush.position.z, 1); await bot.activateBlock(bush); foraged = true; } catch (e) {}

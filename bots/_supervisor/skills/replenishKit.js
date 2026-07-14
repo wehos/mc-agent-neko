@@ -109,14 +109,27 @@ export default async function replenishKit(bot, ctx, opts = {}) {
     if (!stop() && _empty() < 3) {
         const CAPS = { cobblestone: 128, dirt: 64, gravel: 8, andesite: 0, diorite: 0, granite: 0, tuff: 0, flint: 4, rotten_flesh: 8, netherrack: 0, cobbled_deepslate: 64, sand: 0, sandstone: 0, coal: 128, feather: 4, dandelion: 0, azure_bluet: 0, lily_pad: 0, brown_mushroom: 2, egg: 1 };
         let tossed = 0;
-        for (const it of bot.inventory.items()) {
-            if (_empty() >= 3) break;
-            const cap = CAPS[it.name];
-            if (cap == null) continue;
-            const have = cnt(it.name);
-            if (have <= cap) continue;
-            const drop = Math.min(it.count, have - cap);
-            try { await bot.toss(it.type, null, drop); tossed += drop; } catch (e) {}
+        // ★2026-07-14 坑弃: 裸 toss 扔脚底 2s 后被服务器原样捡回 = 清囊白干。攒 plan → smartDiscard
+        // 单坑批量入弃+验证; 热重载窗口老 skills.js 退回逐件裸 toss。
+        const _plan = [];
+        for (const name of Object.keys(CAPS)) {
+            const have = cnt(name);
+            if (have > CAPS[name]) _plan.push({ name, num: have - CAPS[name] });
+        }
+        if (_plan.length && typeof skills.smartDiscard === 'function') {
+            const pre = _plan.reduce((s, p) => s + cnt(p.name), 0);
+            try { await skills.smartDiscard(bot, _plan); } catch (e) {}
+            tossed = pre - _plan.reduce((s, p) => s + cnt(p.name), 0);
+        } else {
+            for (const it of bot.inventory.items()) {
+                if (_empty() >= 3) break;
+                const cap = CAPS[it.name];
+                if (cap == null) continue;
+                const have = cnt(it.name);
+                if (have <= cap) continue;
+                const drop = Math.min(it.count, have - cap);
+                try { await bot.toss(it.type, null, drop); tossed += drop; } catch (e) {}
+            }
         }
         prog(`replenishKit: ⓪ 清囊 tossed=${tossed} → empty=${_empty()} (砍木/合成都要有落点)`);
     }
@@ -168,14 +181,14 @@ export default async function replenishKit(bot, ctx, opts = {}) {
 
     // ── ①.5 ★oracle 先行开拔 (2026-07-05 实录 00:24: ② 的 90s 预算被 chopWood 内部
     //    oracle 行军(60s/腿)整段吃掉, 旧床死亡热点区 logs 0→0 超时循环跨两个白天窗)。
-    //    开拔与砍伐分账: 40 格内无树且 oracle 有森林(<400格) → 先专款走到林腹(穿透点),
+    //    开拔与砍伐分账: 128 格内无树且 oracle 有森林(<400格) → 先专款走到林腹(穿透点),
     //    ② 的预算全留给真砍。oracle 缺失/树在附近 → 此步零成本跳过。──────────────
     if (!stop() && !overBudget() && onSurface() && planksEq() < 64 && !(isNight() && hostilesNear(16) > 0)) {
-        const _treeNear = (() => {
+        const _treeNear = await (async () => {
             try {
-                const ids = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log']
-                    .map(n => bot.registry && bot.registry.blocksByName[n] ? bot.registry.blocksByName[n].id : null).filter(x => x != null);
-                return ids.length ? (bot.findBlocks({ matching: ids, maxDistance: 40, count: 1 }) || []).length > 0 : false;
+                const names = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
+                await new Promise(r => setImmediate(r));   // ★让路(用户令0714禁同步阻塞): 128b 探测不冻死事件循环→socket drop
+                return (await world.getNearestBlocksAsync(bot, names, 128, 1)).length > 0;   // ★async 分块 yield 版, 消同步 findBlocks 阻塞
             } catch (e) { return false; }
         })();
         if (!_treeNear) {
@@ -384,7 +397,7 @@ export default async function replenishKit(bot, ctx, opts = {}) {
     //    但没有 craftRecipeLocal 的 T-0079 回收)。包里没台且 6 格内有台块 → 拆回包。──
     if (!stop() && cnt('crafting_table') < 1) {
         try {
-            const tb = bot.findBlock({ matching: (b) => b && b.name === 'crafting_table', maxDistance: 6 });
+            const tb = (await world.getNearestBlocksWhereAsync(bot, (b) => b && b.name === 'crafting_table', 6, 1))[0];   // ★async 分块 yield 版, 消同步 findBlock 阻塞
             if (tb) {
                 await skills.breakBlockAt(bot, tb.position.x, tb.position.y, tb.position.z).catch(() => {});
                 await skills.pickupNearbyItems(bot).catch(() => {});

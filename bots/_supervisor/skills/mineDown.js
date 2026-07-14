@@ -213,6 +213,21 @@ export default async function mineDown(bot, ctx, opts = {}) {
     const _DECLUTTER_JUNK = ['cobblestone', 'cobbled_deepslate', 'deepslate', 'tuff', 'andesite', 'diorite', 'granite', 'dirt', 'gravel', 'netherrack'];
     const declutterAtDepth = async () => {
         let tossed = 0;
+        const haveOf = (n) => { try { return bot.inventory.items().reduce((s, i) => s + (i.name === n ? i.count : 0), 0); } catch (e) { return 0; } };
+        // ★2026-07-14 坑弃: 矿层就地裸 toss 扔脚底, 2s pickup-delay 一过被服务器原样捡回 → "腾格续挖"
+        // 根本没腾。攒 plan → smartDiscard 单坑批量入弃 (井道四壁全实心时它会侧挖 2 格小袋);
+        // 热重载窗口老 skills.js 退回逐件裸 toss。
+        const plan = [];
+        for (const name of _DECLUTTER_JUNK) {
+            const surplus = haveOf(name) - (_DECLUTTER_KEEP[name] || 0);
+            if (surplus > 0) plan.push({ name, num: surplus });
+        }
+        if (plan.length && typeof skills.smartDiscard === 'function') {
+            const pre = plan.reduce((s, p) => s + haveOf(p.name), 0);
+            try { await skills.smartDiscard(bot, plan); } catch (e) {}
+            tossed = pre - plan.reduce((s, p) => s + haveOf(p.name), 0);
+            return tossed;
+        }
         for (const name of _DECLUTTER_JUNK) {
             try {
                 const items = bot.inventory.items().filter(it => it.name === name);

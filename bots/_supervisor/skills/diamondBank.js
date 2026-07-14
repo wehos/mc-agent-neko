@@ -18,12 +18,12 @@ export default async function diamondBank(bot, ctx, action = 'count', n = 0) {
     const id = mc.getItemId('diamond');
 
     // Locate our chest: nearby, or pathfind to the saved position.
-    let chest = world.getNearestBlock(bot, 'chest', 5);
+    let chest = await world.getNearestBlockAsync(bot, 'chest', 5);
     if (!chest) {
         const saved = readPos();
         if (saved) {
             try { await skills.goToPosition(bot, saved.x, saved.y, saved.z, 2); } catch (e) {}
-            chest = world.getNearestBlock(bot, 'chest', 5);
+            chest = await world.getNearestBlockAsync(bot, 'chest', 5);
         }
     }
     // For deposit: if still no chest, make+place one here and remember it.
@@ -31,7 +31,7 @@ export default async function diamondBank(bot, ctx, action = 'count', n = 0) {
         if (has('chest') < 1) await skills.customSkill(bot, 'achieve', { item: 'chest', count: 1 }).catch(() => {});
         if (has('chest') >= 1) {
             await skills.placeBlockNearby(bot, 'chest').catch(() => {});
-            chest = world.getNearestBlock(bot, 'chest', 5);
+            chest = await world.getNearestBlockAsync(bot, 'chest', 5);
             if (chest) writePos({ x: chest.position.x, y: chest.position.y, z: chest.position.z });
         }
     }

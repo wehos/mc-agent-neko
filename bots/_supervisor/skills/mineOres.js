@@ -94,6 +94,8 @@ export default async function mineOres(bot, ctx, opts = {}) {
     const liveOreNear = (radius) => {
         try {
             if (!oreIds.length) return true;
+            // TODO(0714): 待异步化, 同步扫穿风险, 保持同步 —— liveOreNear 为 sync 谓词, 被 faceOreNear()
+            //   (mineOres:164/166 sync boolean 上下文) 调用, 转 async 会破坏 async 传播返回 Promise; radius 保持 64。
             const f = bot.findBlocks({ point: bot.entity.position, matching: oreIds, maxDistance: radius, count: 1 });
             return !!(f && f.length);
         } catch (e) { return true; }
@@ -222,14 +224,28 @@ export default async function mineOres(bot, ctx, opts = {}) {
             let tossed = 0;
             try {
                 const haveOf = (n) => bot.inventory.items().reduce((s, i) => s + (i.name === n ? i.count : 0), 0);
-                for (const it of bot.inventory.items()) {
-                    if (emptyN() >= 3) break;
-                    const cap = CAPS[it.name];
-                    if (cap == null) continue;
-                    const have = haveOf(it.name);
-                    if (have <= cap) continue;
-                    const drop = Math.min(it.count, have - cap);
-                    try { await bot.toss(it.type, null, drop); tossed += drop; } catch (e) {}
+                // ★2026-07-14 坑弃: 裸 toss 扔脚底 2s 后被服务器原样捡回 = 清囊白干 (tossed=890 empty
+                // 却不涨的实录根因)。改为一次性攒 plan → smartDiscard 单坑批量入弃+验证; 热重载窗口
+                // 老 skills.js 没有该函数 → 退回逐件裸 toss。
+                const plan = [];
+                for (const name of Object.keys(CAPS)) {
+                    const have = haveOf(name);
+                    if (have > CAPS[name]) plan.push({ name, num: have - CAPS[name] });
+                }
+                if (plan.length && typeof skills.smartDiscard === 'function') {
+                    const pre = plan.reduce((s, p) => s + haveOf(p.name), 0);
+                    await skills.smartDiscard(bot, plan);
+                    tossed = pre - plan.reduce((s, p) => s + haveOf(p.name), 0);
+                } else {
+                    for (const it of bot.inventory.items()) {
+                        if (emptyN() >= 3) break;
+                        const cap = CAPS[it.name];
+                        if (cap == null) continue;
+                        const have = haveOf(it.name);
+                        if (have <= cap) continue;
+                        const drop = Math.min(it.count, have - cap);
+                        try { await bot.toss(it.type, null, drop); tossed += drop; } catch (e) {}
+                    }
                 }
             } catch (e) {}
             prog(`r${rounds}: 清囊 tossed=${tossed} → empty=${emptyN()}`);

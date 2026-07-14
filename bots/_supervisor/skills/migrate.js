@@ -270,7 +270,7 @@ export default async function migrate(bot, ctx, opts = {}) {
     const _noPick = !bot.inventory.items().some(i => /_pickaxe$/.test(i.name || ''));
     const _noWoodInv = !bot.inventory.items().some(i => /_log$|_planks$/.test(i.name || ''));
     let _logsNear = 0;
-    try { _logsNear = (world.getNearestBlocks(bot, LOGS, 48, 1) || []).length; } catch (e) {}
+    try { _logsNear = (await world.getNearestBlocksAsync(bot, LOGS, 128, 1) || []).length; } catch (e) {}
     const _woodlessBootstrap = _noPick && _noWoodInv && _logsNear === 0;
     mstate.noTreeStreak = _woodlessBootstrap ? ((mstate.noTreeStreak || 0) + 1) : 0;
     writeMState(mstate);

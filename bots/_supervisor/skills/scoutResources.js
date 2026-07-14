@@ -126,16 +126,16 @@ export default async function scoutResources(bot, ctx, opts = {}) {
     const _yieldEL = () => new Promise((r) => setImmediate(r));
     const findTree = async () => {
         try {
-            // stage 1 — 32b 同步: 体积小(~1MB blocks), 近树秒回, 不付 async 税
-            let hit = _pickTree(world.getNearestBlocks(bot, LOG_TYPES, 32, 24));
-            if (hit) return hit;
-            // stage 2 — 48b: 先让路(放行 socket 读)再扫
+            // ★资源型分级 (用户令 2026-07-14): 找树 128b 起步 / 32b 间隔 / 192b 封顶 (旧 32/48/96b — 40b级别太小).
+            //   每级前都让路 + 首级也用 async 版 (禁同步阻塞 ws 掉线: 128b 同步扫穿会冻死事件循环→socket drop).
             await _yieldEL();
-            hit = _pickTree(await world.getNearestBlocksAsync(bot, LOG_TYPES, 48, 24));
+            let hit = _pickTree(await world.getNearestBlocksAsync(bot, LOG_TYPES, 128, 24));
             if (hit) return hit;
-            // stage 3 — 96b: 再让路 + expanding-shell 异步版 (shell 间 yield, 不整块冻死)
             await _yieldEL();
-            hit = _pickTree(await world.getNearestBlocksAsync(bot, LOG_TYPES, 96, 24));
+            hit = _pickTree(await world.getNearestBlocksAsync(bot, LOG_TYPES, 160, 24));
+            if (hit) return hit;
+            await _yieldEL();
+            hit = _pickTree(await world.getNearestBlocksAsync(bot, LOG_TYPES, 192, 24));
             if (hit) return hit;
         } catch (e) { log_(`findTree err: ${e && e.message || e}`); }
         return null;

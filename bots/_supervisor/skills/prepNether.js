@@ -278,7 +278,7 @@ async function prepNetherInner(bot, ctx) {
             const before = has(sword);
             await skills.craftRecipeLocal(bot, sword, 1).catch(e => prog(`prepNether: ${reason} static ${sword} err ${e.message}`));
             if (has(sword) <= before) {
-                const table = world.getNearestBlock(bot, 'crafting_table', 4);
+                const table = await world.getNearestBlockAsync(bot, 'crafting_table', 4);
                 if (table && bot.entity.position.distanceTo(table.position) <= 4.5) await directCraft(sword, table);
             }
             if (has(sword) > before) {
@@ -355,7 +355,7 @@ async function prepNetherInner(bot, ctx) {
             bot._lastBedPriorityAt = Date.now();
             const bedDist = (bb) => bot.entity.position.distanceTo(bb.position);
             const haveBedItem = bot.inventory.items().some(it => /_bed$/.test(it.name || ''));
-            const bedBlock = bot.findBlock({ matching: (b) => b && /_bed$/.test(b.name || ''), maxDistance: 24 });
+            const bedBlock = (await world.getNearestBlocksWhereAsync(bot, (b) => b && /_bed$/.test(b.name || ''), 64, 1))[0] || null;
             if (bedBlock) {
                 // ★C327b: navigate PERSISTENTLY to within sleep range, and only THEN click the bed.
                 // Bug found 06:00 (用户报"夜里没睡死罪"): the old code called bot.sleep even when
@@ -491,15 +491,15 @@ async function prepNetherInner(bot, ctx) {
                         }
                         return false;
                     };
-                    const nearestWaterDist = (r = 8) => {
+                    const nearestWaterDist = async (r = 8) => {
                         try {
-                            const wb = world.getNearestBlock(bot, 'water', r);
+                            const wb = await world.getNearestBlockAsync(bot, 'water', r);
                             if (!wb || !wb.position) return null;
                             return wb.position.distanceTo(bot.entity.position);
                         } catch (e) { return null; }
                     };
                     try {
-                        const wb = world.getNearestBlock(bot, 'water', 8);
+                        const wb = await world.getNearestBlockAsync(bot, 'water', 8);
                         if (wb) {
                             const me = bot.entity.position;
                             let ax = me.x - wb.position.x, az = me.z - wb.position.z;
@@ -512,7 +512,7 @@ async function prepNetherInner(bot, ctx) {
                             }
                         }
                     } catch (e) {}
-                    const wetDist = nearestWaterDist(4);
+                    const wetDist = await nearestWaterDist(4);
                     if (standingInFluid() || wetDist !== null) {
                         const wetFails = bot._nightWetBunkerFails || 0;
                         const injuredHold = _hpOn() && bot.health <= 16 && !standingInFluid();   // ★2026-07-09 用户令 HP/食物本能熔断: 低血接受贴水坑(纯HP,无威胁); HP闸开恢复。
@@ -1542,8 +1542,8 @@ async function prepNetherInner(bot, ctx) {
         if (bot.interrupt_code) { prog('bankRecover: interrupted en route — abort'); return; }
         // 4) Find the chest and open it.
         let chest = null;
-        try { chest = bot.findBlock({ matching: b => b && b.name && b.name.includes('chest'), maxDistance: 6 }); } catch (e) {}
-        if (!chest) { try { chest = bot.findBlock({ matching: b => b && b.name && b.name.includes('chest'), maxDistance: 12 }); } catch (e) {} }
+        try { chest = (await world.getNearestBlocksWhereAsync(bot, b => b && b.name && b.name.includes('chest'), 6, 1))[0] || null; } catch (e) {}
+        if (!chest) { try { chest = (await world.getNearestBlocksWhereAsync(bot, b => b && b.name && b.name.includes('chest'), 12, 1))[0] || null; } catch (e) {} }
         if (!chest) {
             prog('bankRecover: no chest within 12 of bank — marking ghost (skip for 1h)');
             try { fs.writeFileSync(GHOSTF, JSON.stringify({ x: Math.round(bank.x), z: Math.round(bank.z), t: Date.now() })); } catch (e) {}
@@ -1690,7 +1690,7 @@ async function prepNetherInner(bot, ctx) {
         try { if (has('bucket') < 1) await skills.customSkill(bot, 'achieve', { item: 'bucket', count: 1 }); } catch (e) {}
         try {
             if (has('bucket') > 0) {
-                const water = world.getNearestBlock(bot, 'water', 32);
+                const water = await world.getNearestBlockAsync(bot, 'water', 64);
                 if (water) {
                     await skills.goToPosition(bot, water.position.x, water.position.y + 1, water.position.z, 1);
                     const emptyB = bot.inventory.items().find(i => i.name === 'bucket');
@@ -1811,18 +1811,18 @@ async function prepNetherInner(bot, ctx) {
             if (item) return { ok: true, target: `near food-drop ${((item.getDroppedItem && item.getDroppedItem()) || {}).name || 'item'}@${Math.round(dist(item.position))} dy=${Math.round(item.position.y - me.y)}` };
             const nearBlock = (name, range, maxDy) => {
                 try {
-                    const b = world.getNearestBlock(bot, name, range);
+                    const b = world.getNearestBlock(bot, name, range);   // TODO(0714): 待异步化, 同步扫穿风险, 保持同步 (foodSignalBeforeSurface 非 async)
                     if (b && b.position && dy(b.position) <= maxDy) return b;
                 } catch (e) {}
                 return null;
             };
-            const melon = nearBlock('melon', 40, 5);
+            const melon = nearBlock('melon', 64, 5);   // ★(0714) 食物信号,同步函数不能128异步→64同步(比原40大,不阻塞ws)
             if (melon) return { ok: true, target: `melon@${Math.round(dist(melon.position))} dy=${Math.round(melon.position.y - me.y)}` };
-            const berry = nearBlock('sweet_berry_bush', 40, 5);
+            const berry = nearBlock('sweet_berry_bush', 64, 5);   // ★(0714) 同上回退64同步
             if (berry) return { ok: true, target: `sweet_berry_bush@${Math.round(dist(berry.position))} dy=${Math.round(berry.position.y - me.y)}` };
             const oak = (() => {
                 try {
-                    const blocks = world.getNearestBlocks(bot, ['oak_leaves', 'dark_oak_leaves', 'oak_log', 'dark_oak_log'], 18, 32) || [];
+                    const blocks = world.getNearestBlocks(bot, ['oak_leaves', 'dark_oak_leaves', 'oak_log', 'dark_oak_log'], 64, 32) || [];   // ★(0714) 食物信号,同步函数→回退64同步(比原18大,不阻塞);真128须异步化留优化
                     return blocks
                         .filter(b => b && b.position)
                         .sort((a, b) => dist(a.position) - dist(b.position))[0] || null;
@@ -2354,7 +2354,7 @@ async function prepNetherInner(bot, ctx) {
             + Object.keys(c).filter(k => k.endsWith('_log')).reduce((s, k) => s + c[k], 0) * 4;
     };
     const localStation = async (type) => {
-        const near = world.getNearestBlock(bot, type, 4);
+        const near = await world.getNearestBlockAsync(bot, type, 4);
         if (near && bot.entity.position.distanceTo(near.position) <= 4.5) return near;
         if (has(type) <= 0) return null;
         const empty = new Set(['air', 'cave_air', 'void_air', 'short_grass', 'tall_grass', 'snow', 'dead_bush', 'fern']);
@@ -2382,7 +2382,7 @@ async function prepNetherInner(bot, ctx) {
             try {
                 const ok = await skills.placeBlock(bot, type, p.x, p.y, p.z, 'bottom', true);
                 if (ok) {
-                    const placed = world.getNearestBlock(bot, type, 4);
+                    const placed = await world.getNearestBlockAsync(bot, type, 4);
                     if (placed) return placed;
                 }
             } catch (e) {}
@@ -2539,7 +2539,7 @@ async function prepNetherInner(bot, ctx) {
         const stable = velY < 0.12 && under && under.boundingBox === 'block' && !unsafeFluid(foot) && !unsafeFluid(head) && !unsafeFluid(under);
         const hostileCount = hostilesNear(8);
         const threat = noRegenActionableThreats(8);
-        const tableNear = world.getNearestBlock(bot, 'crafting_table', 4);
+        const tableNear = await world.getNearestBlockAsync(bot, 'crafting_table', 4);
         let c = world.getInventoryCounts(bot);
         const count = (n) => c[n] || 0;
         const planksEqLocal = () => Object.keys(c).filter(k => k.endsWith('_planks')).reduce((s, k) => s + c[k], 0)
@@ -2774,7 +2774,7 @@ async function prepNetherInner(bot, ctx) {
         //    "要用时没水,不要时遍地是水" — 路过就接是人类的肌肉记忆。
         if (cnt('bucket') > 0 && cnt('water_bucket') === 0 && !isNightNow()) {
             try {
-                const water = world.getNearestBlock(bot, 'water', 12);
+                const water = await world.getNearestBlockAsync(bot, 'water', 12);
                 if (water && Math.abs(water.position.y - bot.entity.position.y) <= 4) {
                     prog('prepNether: KIT — 顺手接水 (filling MLG bucket)');
                     await skills.goToPosition(bot, water.position.x, water.position.y + 1, water.position.z, 1);

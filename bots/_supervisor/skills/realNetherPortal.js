@@ -26,7 +26,7 @@ export default async function realNetherPortal(bot, ctx) {
     if (inNether()) { prog('already in the nether'); return { entered: true }; }
 
     // ── Re-entrancy: a lit portal already standing nearby → just walk in. ──
-    const findPortal = () => world.getNearestBlock(bot, 'nether_portal', 32);
+    const findPortal = async () => await world.getNearestBlockAsync(bot, 'nether_portal', 64);
     const enterPortal = async (pb) => {
         prog(`entering portal @ ${pb.position}`);
         try { await skills.goToPosition(bot, pb.position.x, pb.position.y, pb.position.z, 1); } catch (e) {}
@@ -66,7 +66,7 @@ export default async function realNetherPortal(bot, ctx) {
         bot._portalAnchorMissAt = 0;
     };
 
-    const existing = findPortal();
+    const existing = await findPortal();
     if (existing) {
         anchorPortal(existing.position);
         const ok = await enterPortal(existing);
@@ -100,7 +100,7 @@ export default async function realNetherPortal(bot, ctx) {
                 lastD = d;
             }
         }
-        const back = findPortal();
+        const back = await findPortal();
         if (back) {
             anchorPortal(back.position);                           // refresh — portal may sit a few blocks off the stale anchor
             const ok = await enterPortal(back);

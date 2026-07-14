@@ -217,7 +217,7 @@ export default async function slayDragon(bot, ctx, opts = {}) {
             if (wb && bot.entity.onGround && bot.heldItem && bot.heldItem.name === 'bucket') {
                 await sleep(400);
                 try {
-                    const src = world.getNearestBlock(bot, 'water', 4);
+                    const src = await world.getNearestBlockAsync(bot, 'water', 4);
                     if (src) { await bot.lookAt(src.position.offset(0.5, 0.5, 0.5), true); bot.activateItem(); }
                 } catch (e) {}
             }
@@ -429,7 +429,7 @@ export default async function slayDragon(bot, ctx, opts = {}) {
             // caged? break iron bars within reach, one at a time
             for (let bars = 0; bars < 8; bars++) {
                 if (stop()) return bail('interrupted (bars)');
-                const bb = world.getNearestBlock(bot, 'iron_bars', 3);
+                const bb = await world.getNearestBlockAsync(bot, 'iron_bars', 3);
                 if (!bb) break;
                 try { await skills.breakBlockAt(bot, bb.position.x, bb.position.y, bb.position.z); } catch (e) {}
             }

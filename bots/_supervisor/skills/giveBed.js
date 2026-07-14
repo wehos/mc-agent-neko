@@ -14,7 +14,7 @@ import fs from 'fs';
 import path from 'path';
 
 export default async function giveBed(bot, ctx) {
-    const { log } = ctx;
+    const { log, skills } = ctx;
     // Restore sticky to missionNether FIRST (devGive pattern): this skill is dispatched via
     // sticky_skill.json={skill:giveBed}+cancel_skill (the only path that releases missionNether's
     // run_skill lock); restoring sticky here means the next ~8s tick resumes the right loop.
@@ -38,7 +38,13 @@ export default async function giveBed(bot, ctx) {
         for (const re of JUNK) {
             if (freeSlot() >= 1) break;
             const it = bot.inventory.items().find(i => re.test(i.name || ''));
-            if (it) { try { await bot.tossStack(it); log(bot, `giveBed: tossed junk ${it.name} x${it.count} to free a slot`); await new Promise(r => setTimeout(r, 400)); } catch (e) { log(bot, `giveBed toss err ${e && e.message || e}`); } }
+            // ★2026-07-14 坑弃: 裸 tossStack 扔脚底 2s 后被服务器捡回 → 槽位根本没腾出来, /give 依旧
+            // 落地despawn。smartDiscard 挖坑入弃+验证; 热重载窗口老 skills.js 退回裸 toss。
+            if (it && skills && typeof skills.smartDiscard === 'function') {
+                try { await skills.smartDiscard(bot, { name: it.name, num: it.count }); log(bot, `giveBed: pit-discarded junk ${it.name} x${it.count} to free a slot`); }
+                catch (e) { log(bot, `giveBed smartDiscard err ${e && e.message || e}`); }
+            }
+            else if (it) { try { await bot.tossStack(it); log(bot, `giveBed: tossed junk ${it.name} x${it.count} to free a slot`); await new Promise(r => setTimeout(r, 400)); } catch (e) { log(bot, `giveBed toss err ${e && e.message || e}`); } }
         }
     }
     // ★RETRY (the first dispatch fired right at reconnect → the bot wasn't fully in-world yet →

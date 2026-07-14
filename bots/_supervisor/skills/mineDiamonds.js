@@ -358,8 +358,11 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
                 if (!floor || floor.boundingBox !== 'block' || LAVA.has(floor.name) || WATER.has(floor.name)) return false;   // 悬空/液体地板 → 坠落或涌水
                 for (const dy of [0, 1]) {
                     const c = blk(p.offset(dx * d, dy, dz * d));
-                    if (c && (LAVA.has(c.name) || WATER.has(c.name))) return false;   // 挖穿到液体
-                    if (!c || c.boundingBox === 'empty' || OPEN.has(c.name)) return false;   // 空穴(前方已 open)
+                    if (!c) return false;                                             // 未加载/未知格 → 保守拒
+                    if (LAVA.has(c.name) || WATER.has(c.name)) return false;          // 挖穿到液体 → 拒
+                    // ★2026-07-14 用户令「挖钻石水平直挖」: 前方空穴/洞【放行】(走过去即可, 不必挖) —
+                    //   深层钻石带多洞多裂谷, 旧逻辑一遇 open 就 return false 令直线矿透几乎不触发、退回
+                    //   collectBlock 对角楼梯; 坠落已由上面的实心地板守卫(:floor)挡住, 空气走廊本身安全。
                 }
                 // ★review 修 (off-axis 液体涌入): 侧壁/顶/底邻格若有岩浆/水, 挖开这段走廊会被从侧面淹/烧 —
                 //   补齐 digDown/blockedByLava 的 6 邻检(它们正是为"含水层从侧面涌入"而设), 有液体即拒绝直挖。
@@ -445,20 +448,36 @@ export default async function mineDiamonds(bot, ctx, count = 3) {
             return gained > 0 ? (dia() || gained) : false;
         }
         await lightUp();
-        const before = dia();
-        await skills.collectBlock(bot, 'diamond', count).catch(e => log(bot, `collect diamond err: ${e.message}`));
-        if ((banked + dia()) >= count) break;
-        if (dia() === before) {
-            // nothing in x-ray range — ★E 直线矿透: oracle 有新鲜目标且前瞻安全 → 朝它直线快挖; 否则盲挖 branchMine 暴露新面
+        // ★2026-07-14 用户令「挖钻石默认水平直挖, 不凿对角楼梯」: 到矿层后横向主力 = 水平推进,
+        //   不再让 collectBlock 用默认 pathfinder(maxDropDown=3 对角) 去够 64 格内任意上/下方的埋藏矿
+        //   —— 那正是用户抱怨"对角台阶又慢又累"的头号来源。新默认:
+        //   ① 同层臂展内(|dy|<=2 且 水平<=6)已暴露的钻矿 → collectBlock 就近点采(近矿不会凿远程楼梯), 小批 num 限连采;
+        //   ② 否则水平推进: oracle 有新鲜目标 → straightMineToward 直线矿透(门已放宽:空穴放行);
+        //                  无目标 → branchMine 平隧道(恒 y, 沿途 x-ray 采臂展矿, 不凿对角楼梯)。
+        //   权衡: 少钻几颗需垂直爬升才够到的深埋簇矿, 换掉对角台阶; 漏的靠 oracle 60s 重扫逐颗直线矿透补。
+        const DIA_ORE = ['diamond_ore', 'deepslate_diamond_ore'];
+        const nearDia = (() => {
+            try {
+                const p = bot.entity.position;
+                return (world.getNearestBlocks(bot, DIA_ORE, 20, 8) || []).some(b => b && b.position
+                    && Math.abs(b.position.y - p.y) <= 2
+                    && Math.hypot(b.position.x - p.x, b.position.z - p.z) <= 6);
+            } catch (e) { return false; }
+        })();
+        if (nearDia) {
+            // 就近点采(近矿, num 小限连采跑远); vein-follow 顺手收簇, 下一轮重判 nearDia
+            await skills.collectBlock(bot, 'diamond', Math.min(count, 6)).catch(e => log(bot, `collect diamond err: ${e.message}`));
+        } else {
             const ot = freshOracleDia();
-            let straightDug = 0;
-            if (ot) { try { straightDug = await straightMineToward(ot, 20); } catch (e) { straightDug = 0; } }
-            if (straightDug > 0) { log(bot, `⛏️ 直线矿透 +${straightDug} 步 → oracle @${ot.x},${ot.y},${ot.z} (前瞻安全)`); }
+            let advanced = 0;
+            if (ot) { try { advanced = await straightMineToward(ot, 20); } catch (e) { advanced = 0; } }
+            if (advanced > 0) { log(bot, `⛏️ 直线矿透 +${advanced} 步 → oracle @${ot.x},${ot.y},${ot.z} (水平直挖)`); }
             else {
-                try { await skills.customSkill(bot, 'branchMine', 16); }
+                try { await skills.customSkill(bot, 'branchMine', 16); }   // 平隧道扫矿, 恒 y, 不凿对角楼梯
                 catch (e) { try { await skills.digDown(bot, 6); } catch (e2) {} }
             }
         }
+        if ((banked + dia()) >= count) break;
         // bank what we've mined so far so a death from here on doesn't lose it
         if (dia() > 0) { await skills.customSkill(bot, 'diamondBank', 'deposit').catch(() => {}); }
         banked = await skills.customSkill(bot, 'diamondBank', 'count').catch(() => banked);

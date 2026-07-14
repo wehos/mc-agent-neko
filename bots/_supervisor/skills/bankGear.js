@@ -83,10 +83,10 @@ export default async function bankGear(bot, ctx) {
     // 3) Go to home, ensure a chest there (place ONE at the anchor if missing — this is the
     //    home chest, not litter), deposit.
     try { await skills.goToPosition(bot, anchor.x, anchor.y, anchor.z, 2); } catch (e) {}
-    let chest = world.getNearestBlock(bot, 'chest', 6);
+    let chest = await world.getNearestBlockAsync(bot, 'chest', 6);
     if (!chest) {
         if (has('chest') < 1) { try { await skills.craftRecipe(bot, 'chest', 1); } catch (e) {} }
-        if (has('chest') > 0) { try { await skills.placeBlockNearby(bot, 'chest'); } catch (e) {} chest = world.getNearestBlock(bot, 'chest', 6); }
+        if (has('chest') > 0) { try { await skills.placeBlockNearby(bot, 'chest'); } catch (e) {} chest = await world.getNearestBlockAsync(bot, 'chest', 6); }
     }
     if (!chest) { prog('bankGear: no chest at home and could not place one — defer'); return false; }
 

@@ -406,7 +406,7 @@ export const actionsList = [
     },
     {
         name: '!discard',
-        description: 'Discard the given item from the inventory.',
+        description: 'Discard the given item from the inventory for good (tosses it into nearby low ground or a freshly dug pit so it cannot be picked back up).',
         params: {
             'item_name': { type: 'ItemName', description: 'The name of the item to discard.' },
             'num': { type: 'int', description: 'The number of items to discard.', domain: [1, Number.MAX_SAFE_INTEGER] }

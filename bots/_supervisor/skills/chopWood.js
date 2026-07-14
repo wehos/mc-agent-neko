@@ -975,32 +975,48 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // (live: "free now 1" then next call FULL again, total stuck 0). Toss bulk junk until we hold
             // a healthy buffer of empties so logs have somewhere to go. ★C299b
             let tossed = 0;
-            for (let g = 0; g < 8 && _emptySlots() < want; g++) {
-                const junk = bot.inventory.items().filter(it => _JUNK_RE.test(it.name || '')).sort((a, b) => b.count - a.count);
-                if (!junk.length) break;
-                const d = junk[0];
-                // tossStack(item) drops THIS exact slot — robust vs bot.toss(type,...) which searches by
-                // type and throws "Can't find X in slots" when the stack sits in the hotbar range. ★C299
-                try { await bot.tossStack(d); tossed += d.count; } catch (e) { _dbg(`★C299 toss fail: ${e.message}`); break; }
-            }
-            if (tossed > 0) _dbg(`★C299 inv near-full → tossed ${tossed} junk to free slots for logs (empty now ${_emptySlots()})`);
-            // ★C321 (T-0055): second tier — when there's NO _JUNK_RE junk left but the inv is STILL
-            // full and voiding the bootstrap-critical wood pickup, TRIM the excess of over-hoarded
-            // BULK stackables above a generous keep-cap. Live root: 377 cobblestone(6 slots)+157 coal+
-            // 107 sandstone+60 dirt filled the bag, so every chopped log landed unstorable → total
-            // stayed 0 → trees got mis-blacklisted "unreachable, 树柱fails" (the failure is PICKUP, not
-            // reachability — that's why migrate-to-trees still couldn't bootstrap). A human with 377
-            // cobble drops 250 to grab the log they need. NEVER touches tools/armor/food/wood/sapling/
-            // seeds — only bulk building/fuel/dirt the bot demonstrably over-hoards.
-            if (_emptySlots() < want) {
-                const _BULK_CAP = { cobblestone: 128, cobbled_deepslate: 128, stone: 64, coal: 64, charcoal: 64, sandstone: 48, red_sandstone: 48, sand: 48, red_sand: 48, gravel: 48, dirt: 64, netherrack: 64, torch: 64, sugar_cane: 16 };
-                for (const it of bot.inventory.items().slice().sort((a, b) => b.count - a.count)) {
-                    if (_emptySlots() >= want) break;
-                    const cap = _BULK_CAP[it.name];
-                    if (cap == null || it.count <= cap) continue;
-                    const drop = it.count - cap;
-                    try { await bot.toss(it.type, null, drop); tossed += drop; _dbg(`★C321 inv-full no-junk → trimmed ${drop} ${it.name} (kept ${cap}) for log slots (empty now ${_emptySlots()})`); }
-                    catch (e) { _dbg(`★C321 trim ${it.name} fail: ${e.message}`); }
+            // ★2026-07-14 坑弃改造 (v3, 用户: "扔脚底原地再捡起来"; 旧逐-stack 裸 tossStack 扔脚底
+            // 2s pickup-delay 一过被服务器原样塞回 = "free now 1 → next FULL again" 的另一半根因):
+            // skills.smartDiscard = 走进相邻 1 深坑低头扔 (物理无关), 三快照记账 verify。合并 C299
+            // (junk 全弃) + C321 (bulk 超帽修剪) 成【单一按名 plan】一次调用 — 同名不重复、无两阶段
+            // 双扣。热重载窗口老 skills.js 没有该函数 → 退回原裸 toss (会被原地捡回, 但不崩; 重启后即坑弃)。
+            const _pitOK = typeof skills.smartDiscard === 'function';
+            const _haveOf = (n) => { try { return bot.inventory.items().reduce((s, i) => s + (i.name === n ? i.count : 0), 0); } catch (e) { return 0; } };
+            // KEEP-cap: NEVER touches tools/armor/food/wood/sapling/seeds — only bulk building/fuel/dirt
+            // the bot demonstrably over-hoards (T-0055 root: 377 cobble+157 coal+107 sandstone+60 dirt
+            // filled the bag → chopped logs landed unstorable → total stuck 0 → trees mis-blacklisted).
+            const _BULK_CAP = { cobblestone: 128, cobbled_deepslate: 128, stone: 64, coal: 64, charcoal: 64, sandstone: 48, red_sandstone: 48, sand: 48, red_sand: 48, gravel: 48, dirt: 64, netherrack: 64, torch: 64, sugar_cane: 16 };
+            if (_pitOK) {
+                const plan = [];
+                const planned = new Set();
+                for (const it of bot.inventory.items()) {                       // C299: pure junk → discard ALL
+                    if (_JUNK_RE.test(it.name || '') && !planned.has(it.name)) { plan.push({ name: it.name, num: -1 }); planned.add(it.name); }
+                }
+                for (const name of Object.keys(_BULK_CAP)) {                     // C321: over-cap bulk (skip junk already dump-all)
+                    if (planned.has(name)) continue;
+                    const surplus = _haveOf(name) - _BULK_CAP[name];
+                    if (surplus > 0) { plan.push({ name, num: surplus }); planned.add(name); }
+                }
+                if (plan.length) {
+                    const pre = [...planned].reduce((s, n) => s + _haveOf(n), 0);
+                    try { await skills.smartDiscard(bot, plan); } catch (e) { _dbg(`★C299/C321 smartDiscard fail: ${e.message}`); }
+                    tossed = pre - [...planned].reduce((s, n) => s + _haveOf(n), 0);
+                    if (tossed > 0) _dbg(`★C299/C321 pit-discarded ${tossed} junk/over-cap bulk for log slots (empty now ${_emptySlots()})`);
+                }
+            } else {
+                for (let g = 0; g < 8 && _emptySlots() < want; g++) {
+                    const junk = bot.inventory.items().filter(it => _JUNK_RE.test(it.name || '')).sort((a, b) => b.count - a.count);
+                    if (!junk.length) break;
+                    try { await bot.tossStack(junk[0]); tossed += junk[0].count; } catch (e) { _dbg(`★C299 toss fail: ${e.message}`); break; }
+                }
+                if (_emptySlots() < want) {
+                    for (const it of bot.inventory.items().slice().sort((a, b) => b.count - a.count)) {
+                        if (_emptySlots() >= want) break;
+                        const cap = _BULK_CAP[it.name];
+                        if (cap == null || it.count <= cap) continue;
+                        const drop = it.count - cap;
+                        try { await bot.toss(it.type, null, drop); tossed += drop; } catch (e) { _dbg(`★C321 trim ${it.name} fail: ${e.message}`); }
+                    }
                 }
             }
             if (tossed === 0 && _emptySlots() === 0) _dbg(`★C299/C321 inv FULL — no junk and no over-cap bulk to trim, can't make room for logs`);
@@ -1737,7 +1753,11 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                 return lg === 0 && pl < 4;
             } catch (e) { return false; }
         })();
-        const _leashR = _noWood0 ? 256 : (_unreach.size >= 8 ? 160 : 80);
+        // ★资源型半径整改 (用户令 2026-07-14: 找树是资源获取型, 128b 起步; 旧 80b 太小 → 整片森林被
+        //   锚距(床/spawn)滤光 → nearest=null 伪造"无树" → 放着脚边的树跑 oracle 远方森林远征, 用户实拍).
+        //   缰绳锚在床/spawn, 离家作业时必须保证 bot 当前位置周围 ≥128b 的树都在缰绳内(否则脚下森林被滤).
+        const _distToAnchor = Math.hypot(bot.entity.position.x - _ax, bot.entity.position.z - _az);
+        const _leashR = Math.max(_noWood0 ? 256 : (_unreach.size >= 8 ? 192 : 128), _distToAnchor + 128);
         let riskySkipped = 0;
         // ★risk 归因 (session#14): riskySkip 此前只有总数, 无法区分"近处的树全在水边(往海走坐实)"
         // 还是"全是够不到的高台树(高树崖模式 [[chopwood-high-tree-nopick-cliff]])"。分桶 + 记最近险树。
@@ -1789,7 +1809,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
         //   健康林区 count:16 立刻早退, 成本不变; 只有贫树区才把八面体扫穿, 而那正是需要看更远的时候。
         //   看得更远 → 更早"看到"真实的树并直接寻路过去(可跨水), 从根上减少下面无目标的 moveAway 逃荒。
         //   findBlocks 只能看已加载区块(视距~128b), 再远靠 oracle 定向远征 / land-bias 漫游把新区块拽进来。
-        const _scanR = Math.min(128, 64 + Math.max(0, stale) * 24);
+        const _scanR = Math.min(192, 128 + Math.max(0, stale) * 32);   // ★资源型(用户令0714): 128b起步/32b间隔/192b封顶(旧64→128)
         {
             const logIds = LOGS.map(t => (bot.registry && bot.registry.blocksByName[t] ? bot.registry.blocksByName[t].id : null)).filter(v => v != null);
             let cands = [];
@@ -1799,9 +1819,9 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             //   改分级: 32b 同步(近树最常见, 秒回零 async 税) → 都没有才 yield 让路(放行 socket 读)后扫 64b /
             //   _scanR。命中即停 → 健康林区永不走到大扫描; 贫树区把大扫描拆成"让路后单发", socket 不饿死。
             if (logIds.length) {
-                const _stages = [32, Math.min(64, _scanR), _scanR].filter((v, i, a) => v > 0 && a.indexOf(v) === i);
+                const _stages = [128, Math.min(160, _scanR), _scanR].filter((v, i, a) => v > 0 && a.indexOf(v) === i);   // ★资源型(用户令0714): 128/160/192分级(旧32/64/128)
                 for (let _si = 0; _si < _stages.length; _si++) {
-                    if (_si > 0) await new Promise(r => setImmediate(r));   // 让路: 大环扫描前放行事件循环/socket
+                    await new Promise(r => setImmediate(r));   // ★让路(含首级128b, 用户令0714禁同步阻塞): 扩到128起步后首级findBlocks也可能阻塞ws → 每级前都放行事件循环/socket
                     try { cands = bot.findBlocks({ matching: logIds, maxDistance: _stages[_si], count: 16 }) || []; } catch (e) { cands = []; }
                     if (cands.length) break;
                 }
@@ -2002,7 +2022,25 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             // 随机漫游: 先 pathfinder 分段走(60s timebox), 走不动时把远征 yaw 锁成森林方位
             // 让下面的 raw-traverse 也朝对的方向冲。每次调用最多 3 段定向, 之后回退旧逻辑
             // (oracle 可能过期/森林隔海)。oracle 缺失/daemon 死 → 此块整体跳过, 行为=旧版。
-            const _oForest = (() => {
+            // ★森林误触发修复 (用户令 2026-07-14): 森林远征必须在 (a)"有木料就归还" 和 (b)"128b不带缰绳确认确无树"
+            //   之后才判 — 否则(a)有木料 top-up 也白跑最多3段远征(每段60s);(b)缰绳/黑名单伪造的 nearest=null
+            //   会放着脚边的树跑去 oracle 指的远方森林(用户实拍"明明附近有树却找森林"). _haveWoodNow 上移到此.
+            const _haveWoodNow = (() => {
+                try {
+                    const it = bot.inventory.items();
+                    const lg = it.filter(i => /_log$/.test(i.name || '')).reduce((s, i) => s + i.count, 0);
+                    const pl = it.filter(i => /_planks$/.test(i.name || '')).reduce((s, i) => s + i.count, 0);
+                    return lg > 0 || pl >= 4;
+                } catch (e) { return false; }
+            })();
+            const _reallyNoTree = await (async () => {   // 不带缰绳/黑名单的 128b 异步确认: 真无树才准远征
+                try {
+                    if (!LOGS.length) return true;
+                    await new Promise(r => setImmediate(r));   // 让路: 128b 探测不同步阻塞 ws
+                    return (await world.getNearestBlocksAsync(bot, LOGS, 128, 1)).length === 0;   // ★async 分块 yield 版, 消同步 findBlocks 阻塞
+                } catch (e) { return true; }
+            })();
+            const _oForest = (!_haveWoodNow && _reallyNoTree) ? (() => {
                 try {
                     const o = bot._world && bot._world.oracle;
                     const f = o && o.fresh && o.nearest && o.nearest.forest;
@@ -2010,7 +2048,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                     const d = Math.hypot(f.x - bot.entity.position.x, f.z - bot.entity.position.z);
                     return (d > 30 && d < 500) ? { x: f.x, z: f.z, d } : null;
                 } catch (e) { return null; }
-            })();
+            })() : null;
             if (_oForest && (_oracleMarches = (_oracleMarches || 0) + 1) <= 3) {
                 // ★边界穿透 (实测 19:38: /locate biome 给的是群系边界点, 走到 38b 边缘仍
                 // nearest=NONE — 边缘稀树)。目标=边界点再沿进入向量深入 40 格, 直插林腹。
@@ -2020,7 +2058,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
                     return { x: Math.round(_oForest.x + (vx / L) * 40), z: Math.round(_oForest.z + (vz / L) * 40) };
                 })();
                 _dbg(`ORACLE march ${_oracleMarches}/3 → forest @${_oForest.x},${_oForest.z} (${Math.round(_oForest.d)}b) 穿透点@${_pv.x},${_pv.z}`);
-                log(bot, `No logs in 40b — oracle knows a forest ${Math.round(_oForest.d)}b away, marching into it.`);
+                log(bot, `No logs in 128b — oracle knows a forest ${Math.round(_oForest.d)}b away, marching into it.`);
                 const _m0 = bot.entity.position.clone();
                 try {
                     await Promise.race([
@@ -2038,14 +2076,7 @@ export default async function chopWood(bot, ctx, count = 8, opts = {}) {
             //   的逃荒 (正是用户实拍的"边跑边随地乱挖")。只有"无木求生"的 bootstrap (0原木 & <4板) 才值得
             //   赌命逃荒去找远处森林; 手里已有木料的只是 top-up (例: "先确保3石镐" 早已满仓, 补给却仍要
             //   凑 planksEq=64) → 果断归还控制, 绝不空转铲地皮。food 急救 forage 不受此闸 (仍需觅食)。
-            const _haveWoodNow = (() => {
-                try {
-                    const it = bot.inventory.items();
-                    const lg = it.filter(i => /_log$/.test(i.name || '')).reduce((s, i) => s + i.count, 0);
-                    const pl = it.filter(i => /_planks$/.test(i.name || '')).reduce((s, i) => s + i.count, 0);
-                    return lg > 0 || pl >= 4;
-                } catch (e) { return false; }
-            })();
+            //   (_haveWoodNow 已上移到 oracle 远征之前计算, 见上方 ★森林误触发修复)
             if (_haveWoodNow && !_opts.allowCriticalForage) {
                 _dbg(`chopWood 达标即退 at iter${i}: 无可砍树 + 已备木料(非bootstrap, planksEq=${_planksEq()} logs=${total()}) — 不进 relocate 逃荒, 归还控制`);
                 _motion('chopWood.enough_wood_no_tree_bail', { where: 'noNearest', iter: i, stale, planksEq: _planksEq(), logs: total() });

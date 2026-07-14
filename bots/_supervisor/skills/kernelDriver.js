@@ -118,7 +118,7 @@ export default async function kernelDriver(bot, ctx) {
         //    missionNether 1021-1036). Don't wander (ghasts/piglins).
         if (inNether()) {
             try {
-                const rack = world.getNearestBlock(bot, 'netherrack', 6);
+                const rack = await world.getNearestBlockAsync(bot, 'netherrack', 6);
                 if (rack && has('netherrack') < 64) await skills.collectBlock(bot, 'netherrack', 1);
             } catch (e) {}
             await wait(20000);

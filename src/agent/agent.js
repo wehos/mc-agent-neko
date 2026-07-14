@@ -592,8 +592,10 @@ export class Agent {
             //   The unconditional critical 'alert' above still informs the dialog LLM of every death.
             if (this._missionEnabled && this.adminMission && this.adminMission.isActive()) {
                 try { this.adminMission.noteDeath(); } catch (e) { console.error('adminMission.noteDeath:', e); }
-            } else {
+            } else if (wsServer.hasInflightTask()) {
                 // Report task interruption due to death (legacy one-shot path)
+                // ★2026-07-14 节流: 无任务在飞就不发 —— 上面的 critical 'alert' 已无条件告知每次死亡,
+                //   再发一帧 "任务因死亡而中断" 纯属向对话 LLM 谎报有任务被打断。
                 wsServer.onTaskCompleted({
                     status: 'interrupted',
                     message: '任务因死亡而中断',
@@ -762,15 +764,20 @@ export class Agent {
             //   the mission's own task_id (correct correlation across reconnect/restart), exactly once.
             if (this._missionEnabled && this.adminMission && this.adminMission.isActive()) {
                 this.adminMission.end('aborted', reason);
-            } else {
+                console.log('Task interrupted due to bot disconnection, task_finished message sent');
+            } else if (wsServer.hasInflightTask()) {
                 wsServer.onTaskCompleted({
                     status: 'interrupted',
                     message: '任务中断',
                     score: 0,
                     reason: reason
                 });
+                console.log('Task interrupted due to bot disconnection, task_finished message sent');
+            } else {
+                // ★2026-07-14 节流: 无任务在飞的断线不发 interrupted 帧 —— 断线重连风暴 (server 维护/
+                //   世界关闭) 曾以 ~10s 一帧向对话 LLM 轰炸 "任务中断" (0714 实录 115 连发)。
+                console.log('disconnect: no in-flight task — interrupted frame suppressed');
             }
-            console.log('Task interrupted due to bot disconnection, task_finished message sent');
         } catch (error) {
             console.error('Failed to send task interruption message:', error);
         }
@@ -1765,15 +1772,17 @@ export class Agent {
                 //   so a mission's terminal frame still goes out ahead of process.exit below.
                 if (this._missionEnabled && this.adminMission && this.adminMission.isActive()) {
                     this.adminMission.end('aborted', msg);
-                } else {
+                    console.log('Task interrupted due to agent restart, task_finished message sent');
+                } else if (wsServer.hasInflightTask()) {
                     wsServer.onTaskCompleted({
                         status: 'interrupted',
                         message: '任务中断',
                         score: 0,
                         reason: msg
                     });
+                    console.log('Task interrupted due to agent restart, task_finished message sent');
                 }
-                console.log('Task interrupted due to agent restart, task_finished message sent');
+                // ★2026-07-14 节流: 无任务在飞的 cleanKill 不发 interrupted 帧 (对话 LLM 无关任务, 别谎报)。
             } catch (error) {
                 console.error('Failed to send task interruption message:', error);
             }
