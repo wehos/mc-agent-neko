@@ -1340,9 +1340,10 @@ class WSMessageServer {
             }
 
             // Render + JPEG-encode happen in the ISOLATED renderer child process.
-            // CameraProc.capture() forwards the bot's current pos/yaw/pitch, the child
-            // renders against the chunk/entity stream it has been fed, and returns a
-            // base64 JPEG (or null on skip / worker-restarting / timeout — never throws).
+            // CameraProc.capture() derives a collision-safe camera position from the
+            // bot's current eye/yaw/pitch, then the child renders against the chunk/entity
+            // stream it has been fed and returns a base64 JPEG (or null on skip /
+            // worker-restarting / timeout — never throws).
             // 'center' above is still used only for the NaN validation guards.
             void center;
             const base64Image = await this.camera.capture();

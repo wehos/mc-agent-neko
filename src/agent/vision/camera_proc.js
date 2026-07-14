@@ -21,6 +21,7 @@ import fs from 'fs';
 import path from 'path';
 import { EventEmitter } from 'events';
 import { Vec3 } from 'vec3';
+import { cameraEyeHeight, cameraReleaseStep, resolveCollisionAwareCamera } from './camera_position.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = path.join(__dirname, 'render_worker.mjs');
@@ -43,6 +44,8 @@ export class CameraProc extends EventEmitter {
         this._destroyed = false;
         this._restartTimer = null;
         this._restartCount = 0;
+        this._cameraBackoff = 0;
+        this._cameraResolvedAt = Date.now();
 
         // Buffer chunk JSON locally so a respawned worker can be re-seeded without
         // waiting for the bot to walk into fresh chunks. Keyed "x,z".
@@ -64,7 +67,11 @@ export class CameraProc extends EventEmitter {
             return;
         }
         const p = this.bot.entity.position;
-        const center = new Vec3(p.x, p.y + (this.bot.entity.height || 1.62), p.z);
+        const center = new Vec3(
+            p.x,
+            p.y + cameraEyeHeight(this.bot.entity.eyeHeight, this.bot.entity.height),
+            p.z,
+        );
 
         // WorldView lives HERE (no GL) and is the single source of chunk/entity events.
         const worldView = new WorldView(this.bot.world, this.viewDistance, center);
@@ -191,7 +198,6 @@ export class CameraProc extends EventEmitter {
         if (!this.child || !this.childReady) return null; // worker (re)starting
 
         const pos = this.bot.entity.position;
-        const height = this.bot.entity.height || 1.62;
         const yaw = this.bot.entity.yaw || 0;
         const pitch = this.bot.entity.pitch || 0;
         if (!this._valid(pos.x) || !this._valid(pos.y) || !this._valid(pos.z) ||
@@ -199,13 +205,29 @@ export class CameraProc extends EventEmitter {
             return null;
         }
 
-        const center = pos.offset(0, height, 0);
+        const center = pos.offset(0, cameraEyeHeight(this.bot.entity.eyeHeight, this.bot.entity.height), 0);
         // Keep the parent-side WorldView following the bot — this drives the
         // loadChunk/unloadChunk stream that keeps the worker's world current.
         try { await this.worldView.updatePosition(center); } catch { /* non-fatal */ }
 
+        const resolvedAt = Date.now();
+        const camera = resolveCollisionAwareCamera({
+            eye: { x: center.x, y: center.y, z: center.z },
+            yaw,
+            pitch,
+            previousBackoff: this._cameraBackoff,
+            releaseStep: cameraReleaseStep(this._cameraResolvedAt, resolvedAt),
+            getBlock: (x, y, z) => this.bot.blockAt(new Vec3(x, y, z), false),
+        });
+        // A missing safe position means the eye is fully embedded and even the
+        // short spring-arm path is blocked. Preserve the last good frame rather
+        // than rendering an underground x-ray view.
+        if (!camera) return null;
+        this._cameraBackoff = camera.backoff;
+        this._cameraResolvedAt = resolvedAt;
+
         const id = this._nextId++;
-        const reqPos = { x: pos.x, y: pos.y, z: pos.z };
+        const cameraPos = camera.position;
         return await new Promise((resolve) => {
             const timer = setTimeout(() => {
                 this._pending.delete(id);
@@ -217,7 +239,7 @@ export class CameraProc extends EventEmitter {
                 timer,
             });
             try {
-                this.child.send({ t: 'render', id, pos: reqPos, yaw, pitch });
+                this.child.send({ t: 'render', id, cameraPos, yaw, pitch });
             } catch {
                 clearTimeout(timer);
                 this._pending.delete(id);
