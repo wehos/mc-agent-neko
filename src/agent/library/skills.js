@@ -302,8 +302,15 @@ export async function craftRecipe(bot, itemName, num=1) {
         recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, true);
         if(!recipes || recipes.length === 0) break placeTable; //Don't bother going to the table if we don't have the required resources.
 
+        // A carried table makes this a local workstation operation. Previously
+        // the 64-block search ran first, making "craft an iron pickaxe" walk
+        // toward an obsolete table despite having a table in inventory.
+        if ((world.getInventoryCounts(bot)['crafting_table'] || 0) > 0) {
+            return await craftRecipeLocal(bot, itemName, num);
+        }
+
         // Look for crafting table
-        craftingTable = await world.getNearestBlockAsync(bot, 'crafting_table', 64);   // ★B定点16→64(0714): 找现有台走过去用(下方308"刚放的台"仍用craftingTableRange紧邻,别扩)
+        craftingTable = await world.getNearestBlockAsync(bot, 'crafting_table', craftingTableRange);
         if (craftingTable === null){
 
             // Try to place crafting table
@@ -2521,7 +2528,7 @@ export async function breakBlockAt(bot, x, y, z) {
 }
 
 
-export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dontCheat=false) {
+export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dontCheat=false, opts={}) {
     /**
      * Place the given block type at the given position. It will build off from any adjacent blocks. Will fail if there is a block in the way or nothing to build off of.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
@@ -2531,12 +2538,15 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
      * @param {number} z, the z coordinate of the block to place.
      * @param {string} placeOn, the preferred side of the block to place on. Can be 'top', 'bottom', 'north', 'south', 'east', 'west', or 'side'. Defaults to bottom. Will place on first available side if not possible.
      * @param {boolean} dontCheat, overrides cheat mode to place the block normally. Defaults to false.
+     * @param {object} opts, placement policy. positioning:false forbids pathfinder movement.
      * @returns {Promise<boolean>} true if the block was placed, false otherwise.
      * @example
      * let p = world.getPosition(bot);
      * await skills.placeBlock(bot, "oak_log", p.x + 2, p.y, p.x);
      * await skills.placeBlock(bot, "torch", p.x + 1, p.y, p.x, 'side');
     **/
+    opts = opts && typeof opts === 'object' ? opts : {};
+    const allowPositioning = opts.positioning !== false;
     const target_dest = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
     const placeCtx = (extra = {}) => ({
         blockType,
@@ -2544,6 +2554,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         target: motionVecObj(target_dest),
         placeOn,
         dontCheat,
+        allowPositioning,
         env: motionEnvSnap(bot),
         ...extra,
     });
@@ -2709,7 +2720,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, item: item_name, reason: 'intersects-body' }));
         return false;
     }
-    if (!dont_move_for.includes(item_name) && (pos.distanceTo(targetBlock.position) < 1.1 || pos_above.distanceTo(targetBlock.position) < 1.1)) {
+    if (allowPositioning && !dont_move_for.includes(item_name) && (pos.distanceTo(targetBlock.position) < 1.1 || pos_above.distanceTo(targetBlock.position) < 1.1)) {
         // too close
         motionAudit(bot, 'place_skill.positioning.begin', placeCtx({ item: item_name, reason: 'too-close', distance: +pos.distanceTo(targetBlock.position).toFixed(3) }));
         let goal = new pf.goals.GoalNear(targetBlock.position.x, targetBlock.position.y, targetBlock.position.z, 2);
@@ -2725,6 +2736,11 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
     }
     
     if (bot.entity.position.distanceTo(targetBlock.position) > 4.5) {
+        if (!allowPositioning) {
+            log(bot, `Cannot place ${blockType} at ${target_dest} without moving: target is out of reach.`);
+            motionAudit(bot, 'place_skill.end', placeCtx({ ok: false, item: item_name, reason: 'positioning-disabled-out-of-reach' }));
+            return false;
+        }
         // too far
         let pos = targetBlock.position;
         let movements = new pf.Movements(bot);
@@ -2902,7 +2918,7 @@ export async function placeBlockUnderFeet(bot, blockType, opts = {}) {
     return false;
 }
 
-export async function placeBlockNearby(bot, blockName, maxTries=4) {
+export async function placeBlockNearby(bot, blockName, maxTries=4, opts={}) {
     /**
      * Robustly place a block somewhere reachable next to the bot, on solid footing,
      * WITHOUT cheating. Finds an adjacent floor cell that has a solid block beneath
@@ -2913,14 +2929,48 @@ export async function placeBlockNearby(bot, blockName, maxTries=4) {
      * so we never fall back to the cheat command.
      * @param {MinecraftBot} bot
      * @param {string} blockName, e.g. 'crafting_table' or 'furnace' (must be in inventory).
-     * @param {number} maxTries, relocate-and-retry rounds. Defaults to 4.
+     * @param {number|object} maxTries, relocate-and-retry rounds, or an options object.
+     * @param {object} opts recovery policy. relocate:false,pillar:false keeps the bot
+     *        in its current pocket; positioning:false also disables placeBlock pathfinding;
+     *        maxDigBlocks bounds destructive preparation.
      * @returns {Promise<boolean>} true if the block ended up placed.
      **/
+    if (maxTries && typeof maxTries === 'object') {
+        opts = maxTries;
+        maxTries = opts.maxTries == null ? 4 : opts.maxTries;
+    }
+    maxTries = Math.max(1, Math.floor(Number(maxTries) || 1));
+    opts = opts && typeof opts === 'object' ? opts : {};
+    const allowDig = opts.allowDig !== false;
+    const allowRelocate = opts.relocate !== false;
+    const allowPillar = opts.pillar !== false;
+    const allowPositioning = opts.positioning !== false;
+    const maxDigBlocks = Math.max(0, Math.floor(Number(opts.maxDigBlocks == null ? 8 : opts.maxDigBlocks) || 0));
+    let dugBlocks = 0;
+
+    // Never prepare terrain for an item that cannot be placed. Previously the
+    // inventory check lived inside placeBlock, after the niche had been cleared,
+    // so a missing furnace caused repeated digging, relocation, and pillaring.
+    const itemName = blockName === 'redstone_wire' ? 'redstone'
+        : blockName === 'water' ? 'water_bucket'
+        : blockName === 'lava' ? 'lava_bucket'
+        : blockName;
+    const hasPlaceItem = () => {
+        try {
+            if (bot.inventory && bot.inventory.findInventoryItem(itemName)) return true;
+            return bot.game && bot.game.gameMode === 'creative' && !bot.restrict_to_inventory;
+        } catch (e) { return false; }
+    };
+    if (!hasPlaceItem()) {
+        log(bot, `Don't have any ${itemName} to place nearby; no blocks were cleared.`);
+        return false;
+    }
+
     const empty = new Set(['air','cave_air','void_air','water','flowing_water','grass','short_grass','tall_grass','snow','dead_bush','fern','large_fern','vine','seagrass']);
     const noBuild = new Set(['lava','flowing_lava','water','flowing_water','bedrock']);
     const isSolidFloor = (b) => b && !empty.has(b.name) && !noBuild.has(b.name) && b.boundingBox === 'block';
     const tryCell = async (cell) => {
-        if (bot.interrupt_code) return false;
+        if (bot.interrupt_code || !hasPlaceItem() || botAabbIntersectsBlock(bot, cell)) return false;
         const below = bot.blockAt(cell.offset(0, -1, 0));
         if (!isSolidFloor(below)) return false; // need something solid to build off
         // Clear the target cell and the headroom above it (dig a niche if cramped).
@@ -2929,11 +2979,16 @@ export async function placeBlockNearby(bot, blockName, maxTries=4) {
             if (!b) return false;
             if (noBuild.has(b.name)) return false; // don't dig into lava/water/bedrock
             if (!empty.has(b.name)) {
+                if (!allowDig || dugBlocks >= maxDigBlocks || !hasPlaceItem()) return false;
                 try { const ok = await breakBlockAt(bot, c.x, c.y, c.z); if (!ok) return false; await new Promise(r => setTimeout(r, 150)); }
                 catch (e) { return false; }
+                dugBlocks++;
             }
         }
-        return await placeBlock(bot, blockName, cell.x, cell.y, cell.z, 'bottom', true);
+        if (!hasPlaceItem()) return false;
+        return await placeBlock(bot, blockName, cell.x, cell.y, cell.z, 'bottom', true, {
+            positioning: allowPositioning,
+        });
     };
     // ★PRE-ESCAPE if sealed/cramped (THE "place table" deadlock deep underground). If NO
     // horizontal neighbor is open air, the offset loop below would try to DIG each stone cell —
@@ -2951,10 +3006,13 @@ export async function placeBlockNearby(bot, blockName, maxTries=4) {
             || ['sand','red_sand'].find(has);
     };
     const _crampedNow = () => ![[1,0,0],[-1,0,0],[0,0,1],[0,0,-1]].some(o => { const bl = bot.blockAt(bot.entity.position.offset(o[0],o[1],o[2])); return bl && empty.has(bl.name); });
-    for (let up = 0; up < 8 && _crampedNow() && Math.floor(bot.entity.position.y) < 70 && !bot.interrupt_code; up++) {
+    for (let up = 0; allowPillar && up < 8 && _crampedNow() && Math.floor(bot.entity.position.y) < 70 && !bot.interrupt_code; up++) {
         const f = _fill2(); if (!f) break;
         const h = bot.blockAt(bot.entity.position.offset(0, 2, 0));
-        if (h && h.boundingBox === 'block' && !noBuild.has(h.name)) { try { await breakBlockAt(bot, h.x, h.y, h.z); } catch (e) {} }
+        if (h && h.boundingBox === 'block' && !noBuild.has(h.name)) {
+            if (!allowDig || dugBlocks >= maxDigBlocks || !hasPlaceItem()) break;
+            try { if (await breakBlockAt(bot, h.x, h.y, h.z)) dugBlocks++; } catch (e) {}
+        }
         try { await placeBlockUnderFeet(bot, f, { retries: 1, settleMs: 150 }); }
         catch (e) { try { bot.setControlState('jump', false); } catch (e2) {} }
     }
@@ -2977,6 +3035,7 @@ export async function placeBlockNearby(bot, blockName, maxTries=4) {
         // Couldn't place at this level — step to opener ground and retry. (A sealed/cramped
         // pocket is already handled by the FAST pre-escape pillar-up above; no slow barehanded
         // stone-carving here, which would blow the timebox.)
+        if (!allowRelocate) break;
         try { await moveAway(bot, 3); } catch (e) {}
     }
     // ★STUCK ESCAPE (用户: "原地垫石头就能上去"). Couldn't place after carving — we're sealed in
@@ -2996,8 +3055,12 @@ export async function placeBlockNearby(bot, blockName, maxTries=4) {
             || ['gravel', 'sand', 'red_sand'].find(n => (c[n] || 0) > 0);
     };
     const headOpen = () => { const h = bot.blockAt(bot.entity.position.offset(0, 2, 0)); return !h || /^(air|cave_air|void_air|short_grass|tall_grass|snow)$/.test(h.name || ''); };
-    for (let up = 0; up < 6 && filler2() && !bot.interrupt_code; up++) {
-        if (!headOpen()) { const h = bot.blockAt(bot.entity.position.offset(0, 2, 0)); try { if (h) await breakBlockAt(bot, h.x, h.y, h.z); } catch (e) {} }
+    for (let up = 0; allowPillar && up < 6 && filler2() && !bot.interrupt_code; up++) {
+        if (!headOpen()) {
+            if (!allowDig || dugBlocks >= maxDigBlocks || !hasPlaceItem()) break;
+            const h = bot.blockAt(bot.entity.position.offset(0, 2, 0));
+            try { if (h && await breakBlockAt(bot, h.x, h.y, h.z)) dugBlocks++; } catch (e) {}
+        }
         const f = filler2(); if (!f) break;
         try {
             await placeBlockUnderFeet(bot, f, { retries: 1, settleMs: 160 });
@@ -3005,7 +3068,8 @@ export async function placeBlockNearby(bot, blockName, maxTries=4) {
         } catch (e) { try { bot.setControlState('jump', false); } catch (e2) {} }
         if (Math.floor(bot.entity.position.y) >= 63) break;   // surfaced
     }
-    log(bot, `Could not place ${blockName} nearby after ${maxTries} tries (pillared up to retry).`);
+    const recovery = `${allowRelocate ? 'relocation allowed' : 'stayed in place'}, ${allowPillar ? 'pillar allowed' : 'no pillar'}, cleared ${dugBlocks}/${maxDigBlocks}`;
+    log(bot, `Could not place ${blockName} nearby after ${maxTries} tries (${recovery}).`);
     return false;
 }
 

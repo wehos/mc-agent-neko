@@ -33,6 +33,29 @@ const ENDING = 'ENDING';
 // full autonomy + gray-zone survival within this window.
 const MISSION_EXTINTENT_MS = 300000;
 
+// A paraphrase is not a duplicate when it adds an execution constraint. This is
+// deliberately deterministic and runs before the LLM duplicate judge: phrases
+// such as "原地放", "不要挖", or an exact coordinate are safety corrections
+// that must preempt a drifting/recovery action even when the objective is unchanged.
+const EXECUTION_CONSTRAINTS = [
+    /原地|就在这|不要(?:走|移动|乱跑)|别(?:走|移动|乱跑)|stay\s+(?:here|put)|in\s+place|right\s+here|do\s+not\s+move|don't\s+move/i,
+    /不要挖|别挖|不许挖|停止挖|不要清|别清|without\s+(?:digging|clearing)|do\s+not\s+(?:dig|clear)|don't\s+(?:dig|clear)/i,
+    /(?:坐标|coordinates?)\s*[:：]?\s*-?\d+\s*[, ]\s*-?\d+\s*[, ]\s*-?\d+/i,
+    /(?:在|靠近).*(?:我|玩家|医生|doctor).*(?:旁|附近)|near\s+(?:me|the\s+player|the\s+doctor)|next\s+to\s+(?:me|the\s+player|the\s+doctor)/i,
+    /先.*(?:工作台|crafting\s+table).*(?:再|然后|then)|(?:first|before).*(?:crafting\s+table)/i,
+    /停止当前|别再|重新来|重新执行|纠正|修正|stop\s+(?:that|current)|retry|try\s+again|correct/i,
+];
+
+export function addsExecutionConstraint(currentText, nextText) {
+    const current = String(currentText == null ? '' : currentText);
+    const next = String(nextText == null ? '' : nextText);
+    return EXECUTION_CONSTRAINTS.some(pattern => {
+        pattern.lastIndex = 0; const inNext = pattern.test(next);
+        pattern.lastIndex = 0; const inCurrent = pattern.test(current);
+        return inNext && !inCurrent;
+    });
+}
+
 export class AdminMission {
     constructor(agent) {
         this.agent = agent;
@@ -237,6 +260,10 @@ export class AdminMission {
             const m0 = this.mission;
             const mKey = this._normText(m0.text);
             const nKey = this._normText(text);
+            if (addsExecutionConstraint(m0.text, text)) {
+                console.log(`[adminMission] constraint refinement bypasses duplicate throttle: "${nKey.slice(0, 100)}"`);
+                return false;
+            }
             let verdict;
             if (this._judgeCache.mKey === mKey && this._judgeCache.nKey === nKey) {
                 verdict = this._judgeCache.verdict;   // 同一对刷屏只烧一次 LLM
@@ -269,8 +296,9 @@ export class AdminMission {
             + `任务A（执行中，已运行${sec}秒）：${m0.text}\n`
             + (act ? `机器人当前正在执行的动作：${act}\n` : '')
             + `新消息B：${String(newText == null ? '' : newText)}\n`
-            + '判定规则：如果B与A是同一个任务（换了措辞的重发、催促、询问进度，或执行B会产生与当前完全相同的动作），回答 SAME。'
-            + '如果B是实质不同的新任务、或明确要求停止/更改当前行为，回答 DIFFERENT。拿不准时回答 DIFFERENT。\n'
+            + '判定规则：只有B是纯粹换措辞的重发、催促或询问进度，并且没有新增执行约束时，才回答 SAME。'
+            + '只要B新增或改变了地点、原地/不要移动、不要挖掘、动作顺序、停止当前恢复方式等约束，即使最终目标相同也必须回答 DIFFERENT。'
+            + 'B是实质不同的新任务或明确要求停止/更改当前行为时也回答 DIFFERENT。拿不准时回答 DIFFERENT。\n'
             + '只回答一个单词：SAME 或 DIFFERENT。';
         let timer = null;
         try {
