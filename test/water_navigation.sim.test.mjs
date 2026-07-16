@@ -175,6 +175,29 @@ test('a complete underwater mining route preplans breathing holes no more than f
     assert.ok(Math.hypot(last.feet.x - orePos.x, last.feet.y - orePos.y, last.feet.z - orePos.z) <= 2);
 });
 
+
+test('wet A* break nodes are planned as future water instead of dry stone', () => {
+    const cells = new Map();
+    const path = [];
+    for (let x = 0; x <= 4; x++) {
+        const feet = new Vec3(x, 20, 0);
+        cells.set(key(feet), block('stone', feet, 'block'));
+        cells.set(key(feet.offset(0, -1, 0)), block('stone', feet.offset(0, -1, 0), 'block'));
+        cells.set(key(feet.offset(0, 1, 0)), block('water', feet.offset(0, 1, 0)));
+        cells.set(key(feet.offset(0, 0, 1)), block('water', feet.offset(0, 0, 1)));
+        cells.set(key(feet.offset(0, 2, 0)), block('stone', feet.offset(0, 2, 0), 'block'));
+        path.push({ x, y: 20, z: 0, toBreak: [feet] });
+    }
+    const orePos = new Vec3(5, 20, 0);
+    cells.set(key(orePos), block('iron_ore', orePos, 'block'));
+    const bot = makeBot({ cells, inWater: true, skill: 'mineOres', digTime: 800 });
+    const plan = planUnderwaterMiningBreathing(bot, path, orePos, { complete: true });
+
+    assert.equal(plan.ok, true);
+    assert.equal(plan.required, true);
+    assert.ok(plan.route.every(node => node.water), 'every water-adjacent break becomes a wet route node');
+    assert.deepEqual(plan.stations.map(station => station.pathIndex), [0, 4]);
+});
 test('sealed intermediate cells are covered by sparse holes at path gaps 5, 4', () => {
     const cells = new Map();
     const path = [];
@@ -229,6 +252,24 @@ test('a six-block gap between breathing holes makes the underwater route infeasi
     assert.equal(plan.reason, 'planned-breathing-hole-gap-too-large');
 });
 
+
+test('a planned vent includes travel distance in its full-bar oxygen proof', () => {
+    const cells = new Map();
+    const path = [];
+    for (let x = 0; x <= 5; x++) {
+        waterColumn(cells, x, 0);
+        cells.set(key(new Vec3(x, 19, 0)), block('stone', new Vec3(x, 19, 0), 'block'));
+        cells.set(key(new Vec3(x, 22, 0)), block('stone', new Vec3(x, 22, 0), 'block'));
+        cells.set(key(new Vec3(x, 23, 0)), block('stone', new Vec3(x, 23, 0), 'block'));
+        path.push({ x, y: 20, z: 0 });
+    }
+    cells.delete(key(new Vec3(5, 23, 0)));
+    const bot = makeBot({ cells, inWater: true, skill: 'mineOres', digTime: 1800 });
+    const plan = planUnderwaterMiningBreathing(bot, path, new Vec3(6, 20, 0), { complete: true });
+
+    assert.equal(plan.ok, false);
+    assert.equal(plan.reason, 'first-planned-breathing-hole-exceeds-oxygen-budget');
+});
 test('a partial route may not stop in sealed water without a breathing station', () => {
     const cells = new Map();
     const path = [];
@@ -290,6 +331,9 @@ test('clearing a route schedule preserves the sticky target and serviced breathi
     assert.equal(bot._underwaterMiningBreathPlan, null);
     assert.equal(bot._underwaterMiningBreathBlocked, false);
     assert.deepEqual(resolveUnderwaterMiningRouteTarget(bot), target);
+    const currentGoal = new Vec3(20, 20, 0);
+    assert.deepEqual(resolveUnderwaterMiningRouteTarget(bot, currentGoal), currentGoal,
+        'a new mining skill goal overrides the previous collect target');
     assert.deepEqual([...bot._underwaterMiningServicedBreathStations], ['0,20,0']);
 });
 
@@ -335,6 +379,17 @@ test('multi-block sealed ceilings and too-slow breathing holes are infeasible', 
     flooded.set(key(new Vec3(1, 22, 0)), block('water', new Vec3(1, 22, 0)));
     const floodedBot = makeBot({ cells: flooded, skill: 'mineOres' });
     assert.equal(findBreathStation(floodedBot, new Vec3(0, 20, 0)), null, 'lateral water would flood the opened hole');
+
+    const valuable = new Map();
+    waterColumn(valuable);
+    valuable.set(key(new Vec3(0, 19, 0)), block('stone', new Vec3(0, 19, 0), 'block'));
+    valuable.set(key(new Vec3(0, 22, 0)), block('diamond_ore', new Vec3(0, 22, 0), 'block', {
+        canHarvest: () => false,
+    }));
+    const underTooled = makeBot({ cells: valuable, skill: 'mineOres' });
+    underTooled.heldItem = { name: 'stone_pickaxe', type: 274 };
+    assert.equal(findBreathStation(underTooled, new Vec3(0, 20, 0)), null,
+        'an unharvestable ore ceiling is preserved instead of consumed as a vent');
 });
 
 test('underwater dig timing matches the server penalty and installs only once', () => {
@@ -455,6 +510,28 @@ test('a planned breathing hole checks live oxygen after arrival and keeps a rise
     assert.equal(dug, false, 'never begin the vent when there is no oxygen left to rise into it');
 });
 
+
+test('breathing service never digs valuable ore after vent tool selection fails', async () => {
+    const cells = new Map();
+    waterColumn(cells);
+    cells.set(key(new Vec3(0, 19, 0)), block('stone', new Vec3(0, 19, 0), 'block'));
+    const ventPos = new Vec3(0, 22, 0);
+    const ironPick = { name: 'iron_pickaxe', type: 257 };
+    cells.set(key(ventPos), block('diamond_ore', ventPos, 'block', {
+        canHarvest: type => type === ironPick.type,
+    }));
+    const bot = makeBot({ cells, inWater: true, skill: 'mineOres', oxygen: 20, digTime: 800 });
+    bot.heldItem = { name: 'stone_pickaxe', type: 274 };
+    bot.pathfinder = { bestHarvestTool: () => ironPick };
+    const station = inspectBreathColumn(bot, new Vec3(0, 20, 0));
+    let dug = false;
+    bot.tool.equipForBlock = async () => { throw new Error('tool switch failed'); };
+    bot.dig = () => { dug = true; return Promise.resolve(); };
+
+    const result = await serviceUnderwaterMiningBreath(bot, { station, maxMs: 100 });
+    assert.equal(result.reason, 'breathing-hole-would-waste-ore');
+    assert.equal(dug, false);
+});
 test('breathing service refuses sealed water instead of improvising a risky tunnel', async () => {
     const cells = new Map();
     waterColumn(cells);

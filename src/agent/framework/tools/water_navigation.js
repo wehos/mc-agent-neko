@@ -197,11 +197,36 @@ function hasSolidFloor(bot, pos) {
     }
 }
 
+function bestAvailableHarvestTool(bot, block) {
+    let tool = bot && bot.heldItem;
+    try {
+        const best = bot && bot.pathfinder && bot.pathfinder.bestHarvestTool
+            && bot.pathfinder.bestHarvestTool(block);
+        if (best) tool = best;
+    } catch (e) { /* the held tool is the conservative fallback */ }
+    return tool || null;
+}
+
+function preservesValuableVentDrop(bot, block, tool) {
+    if (!block || !/(?:_ore$|ancient_debris)/.test(block.name || '')) return true;
+    if (bot && bot.game && bot.game.gameMode === 'creative') return true;
+    const harvestTool = arguments.length >= 3 ? tool : bestAvailableHarvestTool(bot, block);
+    if (typeof block.canHarvest !== 'function') return false;
+    try {
+        return !!block.canHarvest(harvestTool ? harvestTool.type : null);
+    } catch (e) {
+        return false;
+    }
+}
+
 function safeBreathHoleBlock(bot, block) {
     try {
         if (!block || !block.position || block.boundingBox !== 'block' || block.diggable === false) return false;
         const name = block.name || '';
         if (BREATH_HOLE_BLOCK_DENY_RE.test(name) || FALLING_BLOCK_RE.test(name)) return false;
+        // A breathing route may consume ordinary corridor blocks, but it must not
+        // destroy valuable ore that the currently available tools cannot harvest.
+        if (!preservesValuableVentDrop(bot, block)) return false;
         // Water beside the newly opened cell would immediately flood the pocket.
         if (hasAdjacentLava(bot, block.position) || hasHorizontalWater(bot, block.position)) return false;
         const budget = underwaterDigBreathBudget(bot, block);
@@ -219,18 +244,21 @@ function safeBreathHoleBlock(bot, block) {
  * above it can be removed within a full oxygen bar. Sealed multi-block ceilings are
  * deliberately rejected: they make execution risk unbounded.
  */
-export function inspectBreathColumn(bot, feetPos, maxWaterRise = 3) {
+export function inspectBreathColumn(bot, feetPos, maxWaterRise = 3, assumedWater = null) {
     try {
         const feet = floorPos(feetPos);
-        if (!feet || !isWaterBlock(bot.blockAt(feet))) return null;
+        const blockAt = (pos) => assumedWater && assumedWater.has(targetKey(pos))
+            ? { name: 'water', position: floorPos(pos), boundingBox: 'empty' }
+            : bot.blockAt(pos);
+        if (!feet || !isWaterBlock(blockAt(feet))) return null;
         for (let dy = 1; dy <= maxWaterRise + 1; dy++) {
             const pos = feet.offset(0, dy, 0);
-            const current = bot.blockAt(pos);
+            const current = blockAt(pos);
             if (isWaterBlock(current)) continue;
             if (isAirBlock(current)) {
                 return { ok: true, kind: 'open-air', feet, airPos: pos, ventBlock: null, waterRise: dy - 1 };
             }
-            const above = bot.blockAt(pos.offset(0, 1, 0));
+            const above = blockAt(pos.offset(0, 1, 0));
             if (hasSolidFloor(bot, feet)
                 && safeBreathHoleBlock(bot, current) && isAirBlock(above)) {
                 const budget = underwaterDigBreathBudget(bot, current);
@@ -293,6 +321,24 @@ const targetKey = (target) => target
     : null;
 const nodePosition = (node) => new Vec3(Math.floor(node.x), Math.floor(node.y), Math.floor(node.z));
 
+function plannedRouteNode(bot, node, pathIndex) {
+    const position = nodePosition(node);
+    const wetBreaks = (Array.isArray(node && node.toBreak) ? node.toBreak : [])
+        .map(pos => floorPos(pos))
+        .filter(pos => {
+            try { return !!inspectWetMiningFace(bot, bot.blockAt(pos)); }
+            catch (e) { return false; }
+        });
+    const water = isWaterBlock(bot.blockAt(position)) || wetBreaks.length > 0;
+    // A solid destination that A* opens beside water becomes the miner's flooded
+    // route cell. Overlay it (and the wet break cells) only for route planning;
+    // live world state remains untouched until the server confirms each dig.
+    const assumedWater = wetBreaks.length
+        ? new Set([targetKey(position), ...wetBreaks.map(targetKey)])
+        : null;
+    return { pathIndex, position, water, assumedWater };
+}
+
 function prefixPathDistance(nodes) {
     const prefix = [0];
     for (let i = 1; i < nodes.length; i++) {
@@ -323,10 +369,8 @@ export function planUnderwaterMiningBreathing(bot, path, miningTarget = null, {
     maxTargetDistance = MAX_BREATH_TO_MINING_TARGET,
 } = {}) {
     if (!isUnderwaterMiningTask(bot)) return { ok: true, required: false, stations: [], route: [] };
-    const route = (Array.isArray(path) ? path : []).map((node, pathIndex) => {
-        const position = nodePosition(node);
-        return { pathIndex, position, water: isWaterBlock(bot.blockAt(position)) };
-    });
+    const route = (Array.isArray(path) ? path : [])
+        .map((node, pathIndex) => plannedRouteNode(bot, node, pathIndex));
     if (!route.some(node => node.water)) return { ok: true, required: false, stations: [], route };
 
     const stations = [];
@@ -347,7 +391,7 @@ export function planUnderwaterMiningBreathing(bot, path, miningTarget = null, {
         const segment = route.slice(start, end + 1);
         // Planned holes sit on the path itself. Cells between them may be sealed;
         // they are traversal work covered by the previous/next serviced pocket.
-        const candidates = segment.map(node => inspectBreathColumn(bot, node.position));
+        const candidates = segment.map(node => inspectBreathColumn(bot, node.position, 3, node.assumedWater));
         const prefix = prefixPathDistance(segment);
         const finalIndex = segment.length - 1;
         // Even a partial A* prefix must end at a viable breathing point before
@@ -370,22 +414,35 @@ export function planUnderwaterMiningBreathing(bot, path, miningTarget = null, {
         // Reach the first available hole from the full-air entry, then greedily
         // take the furthest reachable future hole. On a one-dimensional path this
         // maximizes progress without sacrificing any later option.
-        let last = viable[0];
-        if (prefix[last] > maxStationGap) return {
+        const supportsTravel = (candidate, distance) => candidate.kind !== 'one-block-hole'
+            || candidate.budget.requiredOxygen + 2 + Math.ceil(distance) <= MAX_OXYGEN_LEVEL;
+        const firstReachable = viable.filter(index => prefix[index] <= maxStationGap
+            && supportsTravel(candidates[index], prefix[index]));
+        if (!firstReachable.length) return {
             ok: false,
             required: true,
-            reason: 'first-planned-breathing-hole-too-far',
-            failedAt: segment[last].position,
+            reason: viable[0] != null && prefix[viable[0]] > maxStationGap
+                ? 'first-planned-breathing-hole-too-far'
+                : 'first-planned-breathing-hole-exceeds-oxygen-budget',
+            failedAt: segment[viable[0]].position,
             stations,
             route,
         };
+        let last = firstReachable[0];
         add(candidates[last], segment[last]);
         while (prefix[finalIndex] - prefix[last] > maxStationGap) {
-            const reachable = viable.filter(index => index > last && prefix[index] - prefix[last] <= maxStationGap);
+            const withinGap = viable.filter(index => index > last
+                && prefix[index] - prefix[last] <= maxStationGap);
+            const reachable = withinGap.filter(index => supportsTravel(
+                candidates[index],
+                prefix[index] - prefix[last],
+            ));
             if (!reachable.length) return {
                 ok: false,
                 required: true,
-                reason: 'planned-breathing-hole-gap-too-large',
+                reason: withinGap.length
+                    ? 'planned-breathing-hole-exceeds-oxygen-budget'
+                    : 'planned-breathing-hole-gap-too-large',
                 failedAt: segment[last].position,
                 stations,
                 route,
@@ -400,6 +457,7 @@ export function planUnderwaterMiningBreathing(bot, path, miningTarget = null, {
             if (!finalStation || stationTargetDistance(finalStation, target) > maxTargetDistance) {
                 const targetSafe = viable.filter(index => index >= last
                     && prefix[index] - prefix[last] <= maxStationGap
+                    && supportsTravel(candidates[index], prefix[index] - prefix[last])
                     && stationTargetDistance(candidates[index], target) <= maxTargetDistance);
                 if (targetSafe.length) {
                     last = targetSafe[targetSafe.length - 1];
@@ -466,6 +524,10 @@ export function clearUnderwaterMiningBreathPlan(bot) {
 export function resolveUnderwaterMiningRouteTarget(bot, fallback = null, ttlMs = 300000) {
     const sticky = bot && bot._collectSticky && bot._collectSticky.pos;
     if (sticky) return sticky;
+    // A live navigation goal belongs to the current mining skill and must beat a
+    // remembered target from an earlier collect. The remembered target is only a
+    // restart fallback when no current sticky target or goal is available.
+    if (fallback) return fallback;
     const remembered = bot && bot._underwaterMiningRouteTarget;
     if (remembered && Date.now() - remembered.updatedAt <= ttlMs) {
         try {
@@ -692,6 +754,8 @@ export async function serviceUnderwaterMiningBreath(bot, { station: preferredSta
                 if (Number.isFinite(bot.oxygenLevel) && bot.oxygenLevel < budget.requiredOxygen + riseReserve)
                     return { ok: false, reason: 'insufficient-oxygen-to-open-hole', station, budget };
                 try { if (bot.tool && bot.tool.equipForBlock) await bot.tool.equipForBlock(liveVent); } catch (e) { /* dig may still work */ }
+                if (!preservesValuableVentDrop(bot, liveVent, bot.heldItem))
+                    return { ok: false, reason: 'breathing-hole-would-waste-ore', station };
                 ensureWaterAwareDigTime(bot);
                 const timeoutMs = Math.min(30000, Math.ceil(estimateUnderwaterDigMs(bot, liveVent) * 1.35) + 750);
                 try {
