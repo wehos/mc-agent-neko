@@ -821,7 +821,7 @@ class WSMessageServer {
         } catch (e) { console.error('ackDuplicateTask failed:', e && e.message || e); }
     }
     // ★2026-07-14 用户令: 游戏内玩家的自然语言聊天(非指令) → 转发给 ws 外部 admin llm。agent 端已按
-    //   MC_INGAME_CHAT_FLUSH_MS(默认3s)节流聚合成 batch; 这里广播一帧, admin llm 侧监听 type:'ingame_chat'。
+    //   MC_INGAME_CHAT_FLUSH_MS(默认3s)节流聚合成 batch; 这里广播一帧, 外部客户端需显式监听 type:'ingame_chat'。
     forwardIngameChat(batch) {
         try {
             if (!Array.isArray(batch) || !batch.length) return;

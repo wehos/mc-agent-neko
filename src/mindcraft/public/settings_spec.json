@@ -33,7 +33,7 @@
     "chat_command_prefix": {
         "type": "string",
         "description": "In-game chat command prefix (2026-07-14): a real-player message starting with this prefix (or with '!') is treated as a high-priority admin command; other real-player chat is throttled and forwarded to the external admin LLM. Empty string = disabled (legacy behavior: every real-player message is treated as a command). Must be listed here or the mindserver socket-create path strips it before it reaches the agent.",
-        "default": "/neko"
+        "default": "@neko"
     },
     "chat_whitelist": {
         "type": "array",
