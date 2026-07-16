@@ -143,6 +143,84 @@ test('tracked pathfinder patch settles only an active underwater mining dig', ()
     assert.doesNotMatch(source, /bot\.entity\.onGround \|\| bot\.entity\.isInWater/);
 });
 
+test('tracked pathfinder patch never fabricates a scaffold block before server placement', () => {
+    const source = fs.readFileSync(new URL('../patches/mineflayer-pathfinder+2.4.5.patch', import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /bot\.world\.setBlockStateId/);
+});
+
+test('climb-top moves require a continuous climb and destination headroom', () => {
+    const movements = Object.create(pf.Movements.prototype);
+    const node = new Vec3(0, 20, 0);
+    node.remainingBlocks = 10;
+    const cell = (dy, safe, climbable = false) => ({
+        position: new Vec3(0, node.y + dy, 0),
+        safe,
+        climbable,
+        openable: false,
+    });
+    const cells = new Map([
+        [0, cell(0, true, true)],
+        [1, cell(1, true, true)],
+        [2, cell(2, true)],
+        [3, cell(3, false)],
+    ]);
+    movements.getBlock = (_node, _dx, dy) => cells.get(dy);
+    movements.safeOrBreak = target => target.safe ? 0 : 100;
+
+    const blocked = [];
+    movements.getMoveClimbTop(node, blocked);
+    assert.equal(blocked.length, 0, 'a solid destination head cell rejects the two-block climb');
+
+    cells.set(3, cell(3, true));
+    const clear = [];
+    movements.getMoveClimbTop(node, clear);
+    assert.equal(clear.length, 1, 'continuous ladder plus headroom permits the climb');
+
+    cells.set(1, cell(1, true, false));
+    const unsupported = [];
+    movements.getMoveClimbTop(node, unsupported);
+    assert.equal(unsupported.length, 0, 'air above a ladder top is not an unsupported landing shortcut');
+});
+
+test('closed openables are passable only when the consuming move schedules activation', () => {
+    const movements = Object.create(pf.Movements.prototype);
+    movements.canOpenDoors = true;
+    movements.entityCost = 1;
+    movements.exclusionStep = () => 0;
+    movements.getNumEntitiesAt = () => 0;
+    const closed = {
+        name: 'oak_door',
+        position: new Vec3(1, 20, 0),
+        safe: false,
+        physical: true,
+        liquid: false,
+        openable: true,
+        _properties: { open: false },
+    };
+    const toBreak = [];
+    assert.equal(movements.safeOrBreak(closed, toBreak), 100);
+    assert.deepEqual(toBreak, [], 'safeOrBreak cannot silently accept a closed door');
+
+    const node = new Vec3(0, 20, 0);
+    node.remainingBlocks = 10;
+    movements.getBlock = (_node, dx, dy, dz) => {
+        if (dx === 1 && dz === 0 && (dy === 0 || dy === 1)) {
+            return { ...closed, position: new Vec3(1, node.y + dy, 0) };
+        }
+        if (dx === 1 && dy === -1 && dz === 0) {
+            return { position: new Vec3(1, 19, 0), physical: true, safe: false, liquid: false };
+        }
+        return { position: new Vec3(node.x + dx, node.y + dy, node.z + dz), physical: false, safe: true, liquid: false };
+    };
+
+    const neighbors = [];
+    movements.getMoveForward(node, { x: 1, z: 0 }, neighbors);
+    assert.equal(neighbors.length, 1);
+    assert.deepEqual(neighbors[0].toBreak, []);
+    assert.equal(neighbors[0].toPlace.length, 1);
+    assert.equal(neighbors[0].toPlace[0].useOne, true, 'the forward move explicitly opens the matching door');
+});
+
 test('normal goto water remains finite while mining requires a local breathing station', () => {
     const sealedCells = new Map();
     waterColumn(sealedCells);
