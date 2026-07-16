@@ -10,7 +10,10 @@ import { appendTelemetry } from '../utils/telemetry.js';
 // from a reflex. Wires the blueprint §E.2 "never clutch over lava" guard into the
 // live MLG reflex below (the inline floor-scan skipped lava: boundingBox 'empty'≠'block').
 import { canClutchWater } from './framework/tools/lava_guard.js';
-import { isUnderwaterMiningTask } from './framework/tools/water_navigation.js';
+import {
+    isUnderwaterMiningTask,
+    shouldSuppressSwimJumpForUnderwaterDig,
+} from './framework/tools/water_navigation.js';
 // 身体所有权仲裁 (Phase 1, 设计稿 bots/_supervisor/arbitration-design.md): execute() 是
 // 反射抢身体的唯一入口, 在这里挂接入点 A + 所有权令牌。
 import { resolve as arbitrate, setBodyOwner, releaseBodyOwner, currentOwner as arbiterCurrentOwner, vitalNow as arbiterVitalNow } from './framework/arbiter.js';
@@ -1903,7 +1906,8 @@ const modes_list = [
                 //   全程返回 undefined、一块都挖不完 (实录 2026-07-09)。水面/悬浮时按 jump 保持呼吸，已落底
                 //   则松 jump 站稳以免叠加悬空挖掘惩罚；挖矿交给动作本身。氧≤0 真扣血 (drowningDamage)
                 //   或深水将溺 (上面 [A] 分支) 照常抢身。
-                const miningActive = !!bot.targetDigBlock || isUnderwaterMiningTask(bot);
+                const underwaterMiningActive = isUnderwaterMiningTask(bot);
+                const miningActive = !!bot.targetDigBlock || underwaterMiningActive;
                 if (drowning && y0 < 55) {
                     // DEEP & out of air (flooded tunnel / aquifer): no shore to swim to.
                     // The OLD code only towered straight UP toward the distant surface —
@@ -1991,7 +1995,7 @@ const modes_list = [
                     // 水下矿务有自己的氧气控制器。赶往下一矿格时仍可像 goto 一样浮水移动；真正开始
                     // 挖掘/沉底时不再被本能反复按 jump（否则悬空惩罚与水下惩罚叠成 25×）。氧气阈值
                     // 到达后，执行器暂停同一个 goal，置 _underwaterMiningBreathing 并在呼吸孔换满气。
-                    if (bot._underwaterMiningSettling || bot.targetDigBlock) bot.setControlState('jump', false);
+                    if (shouldSuppressSwimJumpForUnderwaterDig(bot)) bot.setControlState('jump', false);
                     else if (bot._underwaterMiningBreathing) bot.setControlState('jump', true);
                     else if (gotoActive && !_jumpFutile && _swimCrossing) bot.setControlState('jump', true);
                     else bot.setControlState('jump', true);

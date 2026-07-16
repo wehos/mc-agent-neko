@@ -32,6 +32,7 @@ import {
     serviceUnderwaterMiningBreath,
     settleForUnderwaterDig,
     shouldAccumulatePathStuck,
+    shouldSuppressSwimJumpForUnderwaterDig,
     shouldServiceUnderwaterBreath,
     underwaterMiningStepCost,
 } from '../src/agent/framework/tools/water_navigation.js';
@@ -151,6 +152,25 @@ test('normal goto water remains finite while mining requires a local breathing s
 
     const miner = makeBot({ cells: sealedCells, skill: 'mineOres' });
     assert.equal(underwaterMiningStepCost(miner, water), UNDERWATER_MINING_BLOCKED_COST);
+});
+
+test('ordinary water digs stay afloat while settled underwater mining digs may suppress jump', () => {
+    const target = block('oak_log', new Vec3(1, 20, 0), 'block');
+    const ordinary = makeBot({ inWater: true });
+    ordinary.targetDigBlock = target;
+    ordinary._underwaterMiningSettling = true;
+    assert.equal(shouldSuppressSwimJumpForUnderwaterDig(ordinary), false,
+        'a generic surface or shoreline dig must keep the normal swim reflex');
+
+    const miner = makeBot({ inWater: true, skill: 'mineOres' });
+    miner.targetDigBlock = block('iron_ore', target.position, 'block');
+    assert.equal(shouldSuppressSwimJumpForUnderwaterDig(miner), true);
+    miner.targetDigBlock = null;
+    miner._underwaterMiningSettling = true;
+    assert.equal(shouldSuppressSwimJumpForUnderwaterDig(miner), true);
+    miner._underwaterMiningSettling = false;
+    assert.equal(shouldSuppressSwimJumpForUnderwaterDig(miner), false,
+        'travelling between underwater mining cells keeps float movement available');
 });
 
 test('a complete underwater mining route preplans breathing holes no more than five path blocks apart', () => {

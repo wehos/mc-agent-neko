@@ -98,6 +98,11 @@ export function isUnderwaterMiningTask(bot) {
     return MINING_TASK_RE.test(String(bot._currentSkill || ''));
 }
 
+export function shouldSuppressSwimJumpForUnderwaterDig(bot) {
+    return isUnderwaterMiningTask(bot)
+        && !!(bot?._underwaterMiningSettling || bot?.targetDigBlock);
+}
+
 /**
  * Mineflayer deliberately calls Block#digTime with inWater=false. Install one
  * idempotent correction so direct digs and pathfinder execution use server time.
