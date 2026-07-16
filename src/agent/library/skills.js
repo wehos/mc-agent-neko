@@ -21,6 +21,7 @@ import {
     clearUnderwaterMiningBreathPlan,
     digTimeoutForCurrentEnvironment,
     ensureWaterAwareDigTime,
+    excludeUnsafeUnderwaterMiningTarget,
     isBotEyesInWater,
     isBotInWater,
     isUnderwaterMiningTask,
@@ -2182,6 +2183,11 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
             if (err.name === 'NoChests') {
                 log(bot, `Failed to collect ${blockType}: Inventory full, no place to deposit.`);
                 break;
+            }
+            else if (err.name === 'UnderwaterMiningUnsafe') {
+                exclude = excludeUnsafeUnderwaterMiningTarget(bot, block, exclude);
+                log(bot, `⚠️ ${block && block.name ? block.name : blockType} has no safe underwater mining route — excluded; trying next.`);
+                continue;
             }
             else if (err.name === 'PathfindingFailed' || (err.message && err.message.includes('path'))) {
                 log(bot, `⚠️ Cannot reach ${blockType} - pathfinding failed. Trying next block or consider changing target.`);

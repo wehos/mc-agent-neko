@@ -19,6 +19,7 @@ import {
     clearUnderwaterMiningBreathPlan,
     digTimeoutForCurrentEnvironment,
     ensureWaterAwareDigTime,
+    excludeUnsafeUnderwaterMiningTarget,
     findBreathStation,
     inspectBreathColumn,
     needsBreathBeforeDig,
@@ -197,6 +198,13 @@ test('wet A* break nodes are planned as future water instead of dry stone', () =
     assert.equal(plan.required, true);
     assert.ok(plan.route.every(node => node.water), 'every water-adjacent break becomes a wet route node');
     assert.deepEqual(plan.stations.map(station => station.pathIndex), [0, 4]);
+    assert.ok(plan.stations.every(station => station.requiresOpenedWater));
+    assert.equal(nextPlannedBreathStation(bot, plan), null,
+        'the executor must not service a future station while its feet cell is still solid');
+    const openedFeet = new Vec3(0, 20, 0);
+    cells.set(key(openedFeet), block('water', openedFeet));
+    assert.equal(nextPlannedBreathStation(bot, plan).pathIndex, 0,
+        'the station becomes serviceable once path execution opens the flooded cell');
 });
 test('sealed intermediate cells are covered by sparse holes at path gaps 5, 4', () => {
     const cells = new Map();
@@ -285,6 +293,24 @@ test('a partial route may not stop in sealed water without a breathing station',
 
     assert.equal(plan.ok, false);
     assert.equal(plan.reason, 'water-segment-without-plannable-breathing-hole');
+});
+
+test('a partial wet prefix must end at its own breathing station', () => {
+    const cells = new Map();
+    const path = [];
+    for (let x = 0; x <= 3; x++) {
+        waterColumn(cells, x, 0);
+        cells.set(key(new Vec3(x, 19, 0)), block('stone', new Vec3(x, 19, 0), 'block'));
+        cells.set(key(new Vec3(x, 22, 0)), block('stone', new Vec3(x, 22, 0), 'block'));
+        cells.set(key(new Vec3(x, 23, 0)), block('stone', new Vec3(x, 23, 0), 'block'));
+        path.push({ x, y: 20, z: 0 });
+    }
+    cells.delete(key(new Vec3(0, 23, 0)));
+    const bot = makeBot({ cells, inWater: true, skill: 'mineOres', digTime: 800 });
+    const plan = planUnderwaterMiningBreathing(bot, path, new Vec3(20, 20, 0), { complete: false });
+
+    assert.equal(plan.ok, false);
+    assert.equal(plan.reason, 'partial-water-route-not-ending-at-breathing-station');
 });
 
 test('an interrupted mining route resumes forward on the same target and never turns back for a missed hole', () => {
@@ -470,6 +496,28 @@ test('breathing service opens one overhead hole, refills, and preserves the mini
     assert.ok(controls.some(([name, value]) => name === 'jump' && value));
 });
 
+test('breathing service reaches the planned station height in the same water column', async () => {
+    const cells = new Map();
+    waterColumn(cells, 0, 0, 20);
+    const bot = makeBot({
+        cells,
+        position: new Vec3(0.5, 17, 0.5),
+        inWater: true,
+        skill: 'mineOres',
+        oxygen: 20,
+    });
+    const station = inspectBreathColumn(bot, new Vec3(0, 20, 0));
+    bot.setControlState = (name, value) => {
+        if (name === 'jump' && value && bot.entity.position.y < 21)
+            bot.entity.position = bot.entity.position.offset(0, 1, 0);
+    };
+
+    const result = await serviceUnderwaterMiningBreath(bot, { station, maxMs: 200 });
+    assert.equal(result.ok, true);
+    assert.ok(bot.entity.position.y >= 19.5,
+        'matching x/z at the wrong elevation is not considered arrival');
+});
+
 test('the oxygen refill window starts after a slow breathing vent is opened', async () => {
     const cells = new Map();
     waterColumn(cells);
@@ -632,6 +680,18 @@ test('a direct collect scope is recognized as mining and is cleaned up', () => {
     end();
     end();
     assert.equal(bot._underwaterMiningTaskDepth, 0);
+});
+
+test('an unsafe underwater collect target is excluded once and releases its sticky lock', () => {
+    const target = block('iron_ore', new Vec3(4, 20, 2), 'block');
+    const bot = makeBot();
+    bot._collectSticky = { pos: target.position, at: Date.now() };
+
+    const excluded = excludeUnsafeUnderwaterMiningTarget(bot, target);
+    assert.deepEqual(excluded, [target.position]);
+    assert.equal(bot._collectSticky, null);
+    assert.equal(excludeUnsafeUnderwaterMiningTarget(bot, target, excluded), excluded);
+    assert.equal(excluded.length, 1, 'retry handling must not accumulate duplicate exclusions');
 });
 
 test('a submerged miner settles onto an immediate floor before digging', async () => {

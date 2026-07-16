@@ -381,7 +381,13 @@ export function planUnderwaterMiningBreathing(bot, path, miningTarget = null, {
         ids.add(id);
         const serviced = !!(bot._underwaterMiningServicedBreathStations
             && bot._underwaterMiningServicedBreathStations.has(id));
-        stations.push({ ...candidate, id, pathIndex: node.pathIndex, serviced });
+        // A station synthesized for a wet toBreak node is a promise about the
+        // post-dig world, not a live pocket yet. Keep it in the route proof but
+        // do not let the executor service it until the server has opened the cell.
+        stations.push({
+            ...candidate, id, pathIndex: node.pathIndex, serviced,
+            requiresOpenedWater: !!node.assumedWater,
+        });
     };
 
     for (let start = 0; start < route.length;) {
@@ -449,6 +455,26 @@ export function planUnderwaterMiningBreathing(bot, path, miningTarget = null, {
             };
             last = reachable[reachable.length - 1];
             add(candidates[last], segment[last]);
+        }
+
+        // An incomplete A* result is an executable prefix. If it stops in water,
+        // the endpoint itself must be a breathing station: accepting an earlier
+        // hole merely because it is within five blocks can strand the miner at a
+        // sealed frontier before the next path calculation exists.
+        if (!complete && endsRouteInWater && last !== finalIndex) {
+            const finalCandidate = candidates[finalIndex];
+            const finalDistance = prefix[finalIndex] - prefix[last];
+            if (!finalCandidate || finalDistance > maxStationGap
+                || !supportsTravel(finalCandidate, finalDistance)) return {
+                ok: false,
+                required: true,
+                reason: 'partial-water-route-not-ending-at-breathing-station',
+                failedAt: segment[finalIndex].position,
+                stations,
+                route,
+            };
+            last = finalIndex;
+            add(finalCandidate, segment[finalIndex]);
         }
 
         if (complete && endsRouteInWater) {
@@ -521,6 +547,21 @@ export function clearUnderwaterMiningBreathPlan(bot) {
     return hadPlan;
 }
 
+/** Exclude one unsafe collect target and release only the matching sticky lock. */
+export function excludeUnsafeUnderwaterMiningTarget(bot, block, exclude = null) {
+    const next = Array.isArray(exclude) ? exclude : [];
+    const position = block && block.position;
+    if (!position) return next;
+    const samePosition = (candidate) => candidate
+        && Math.floor(candidate.x) === Math.floor(position.x)
+        && Math.floor(candidate.y) === Math.floor(position.y)
+        && Math.floor(candidate.z) === Math.floor(position.z);
+    if (!next.some(samePosition)) next.push(position);
+    const sticky = bot && bot._collectSticky && bot._collectSticky.pos;
+    if (samePosition(sticky)) bot._collectSticky = null;
+    return next;
+}
+
 export function resolveUnderwaterMiningRouteTarget(bot, fallback = null, ttlMs = 300000) {
     const sticky = bot && bot._collectSticky && bot._collectSticky.pos;
     if (sticky) return sticky;
@@ -562,6 +603,10 @@ export function nextPlannedBreathStation(bot, plan, triggerRadius = PLANNED_BREA
                 && bot._underwaterMiningServicedBreathStations.has(station.id));
         if (serviced) { plan.cursor++; continue; }
         if (plan.projectedPathIndex > station.pathIndex + 1) return { ...station, missed: true };
+        // Planned wet-break stations become real only after path execution opens
+        // their flooded feet cell. Triggering early makes service reject its own
+        // future-world plan as an invalid live station.
+        if (station.requiresOpenedWater && !inspectBreathColumn(bot, station.feet)) return null;
         const center = station.feet.offset(0.5, 0, 0.5);
         if (Math.hypot(p.x - center.x, p.y - center.y, p.z - center.z) <= triggerRadius) return station;
         return null;
@@ -707,14 +752,18 @@ async function moveToBreathStation(bot, station, maxMs = 1800) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < maxMs) {
         const p = bot.entity.position;
-        if (Math.hypot(p.x - target.x, p.z - target.z) < 0.7) return true;
+        const horizontal = Math.hypot(p.x - target.x, p.z - target.z);
+        const vertical = target.y - p.y;
+        if (horizontal < 0.7 && Math.abs(vertical) < 0.8) return true;
         try { await bot.lookAt(target.offset(0, 1, 0), true); } catch (e) { /* best effort */ }
-        try { bot.setControlState('forward', true); } catch (e) { /* best effort */ }
-        try { bot.setControlState('jump', true); } catch (e) { /* best effort */ }
+        try { bot.setControlState('forward', horizontal >= 0.2); } catch (e) { /* best effort */ }
+        try { bot.setControlState('jump', vertical > 0.35); } catch (e) { /* best effort */ }
+        try { bot.setControlState('sneak', vertical < -0.35); } catch (e) { /* best effort */ }
         await sleep(60);
     }
     const p = bot.entity.position;
-    return Math.hypot(p.x - target.x, p.z - target.z) < 0.9;
+    return Math.hypot(p.x - target.x, p.z - target.z) < 0.9
+        && Math.abs(p.y - target.y) < 1;
 }
 
 /**
