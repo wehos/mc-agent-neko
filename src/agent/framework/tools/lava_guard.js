@@ -12,6 +12,8 @@
  * functions lets any layer (instinct, tool, skill) call them cheaply.
  */
 
+import { canMineWaterAdjacentWithBreathing } from './water_navigation.js';
+
 const LAVA_RE = /lava/;
 const WATER_RE = /water/;
 const isLava = (b) => !!b && LAVA_RE.test(b.name || '');
@@ -118,9 +120,9 @@ export function safeToDigDownFluid(bot) {
  * Judge whether breaking `block` would open a fluid onto the bot's pocket:
  *   - LAVA: any lava face-adjacent to a target within FLUID_NEAR_BOT of the bot ⇒ refuse
  *     (contact = burn/death; the flow reaches the freshly-opened cell). Guarded at any depth.
- *   - WATER: refused only while the bot is UNDERGROUND (y < WATER_UNDERGROUND_Y) — the sealed
- *     drown-pocket case. Surface/near-surface water is left to the swim reflex, so riverside
- *     and coastal ore/wood are NOT needlessly skipped.
+ *   - WATER: underground wet faces are allowed only for an active miner already submerged beside
+ *     a proven breathing station, and only when the block fits in one oxygen bar. Merely being wet
+ *     is not permission; sealed water remains an execution-time hard stop, matching path planning.
  * Returns {ok:true} | {ok:false, hazard:'lava'|'water', reason}. Pure/read-only.
  * FAILS OPEN (returns ok on any error): a throwing predicate must never wedge the hot mining
  * loop — the reactive self_preservation layer stays as the backstop.
@@ -137,8 +139,13 @@ export function safeToDigBlock(bot, block) {
         const adj = fluidAdjacent(bot, p);
         if (adj.lava)
             return { ok: false, hazard: 'lava', reason: `lava face-adjacent to ${block.name} within ${FLUID_NEAR_BOT}b of bot` };
-        if (adj.water && Math.floor(bp.y) < WATER_UNDERGROUND_Y)
-            return { ok: false, hazard: 'water', reason: `water face-adjacent to ${block.name} underground (y${Math.floor(bp.y)}<${WATER_UNDERGROUND_Y})` };
+        if (adj.water && Math.floor(bp.y) < WATER_UNDERGROUND_Y
+            && !canMineWaterAdjacentWithBreathing(bot, block))
+            return {
+                ok: false,
+                hazard: 'water',
+                reason: `water face-adjacent to ${block.name} underground without safe planned breathing coverage`,
+            };
         return { ok: true };
     } catch (e) {
         return { ok: true }; // fail-open: never wedge the mining loop

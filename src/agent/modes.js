@@ -10,6 +10,7 @@ import { appendTelemetry } from '../utils/telemetry.js';
 // from a reflex. Wires the blueprint §E.2 "never clutch over lava" guard into the
 // live MLG reflex below (the inline floor-scan skipped lava: boundingBox 'empty'≠'block').
 import { canClutchWater } from './framework/tools/lava_guard.js';
+import { isUnderwaterMiningTask } from './framework/tools/water_navigation.js';
 // 身体所有权仲裁 (Phase 1, 设计稿 bots/_supervisor/arbitration-design.md): execute() 是
 // 反射抢身体的唯一入口, 在这里挂接入点 A + 所有权令牌。
 import { resolve as arbitrate, setBodyOwner, releaseBodyOwner, currentOwner as arbiterCurrentOwner, vitalNow as arbiterVitalNow } from './framework/arbiter.js';
@@ -1899,10 +1900,10 @@ const modes_list = [
                 // ★2026-07-09 修 (挖黑曜石站水边被反复拽出): 与 goto 让位同策 —— 正在挖/采集 (admin 任务
                 //   或 mineflayer 正在 dig 一块) 且没在真淹血时, 不因站在水/岩浆边就 hijack 去"游上岸"。
                 //   黑曜石 ~9.4s/块, 每个无打断窗口远短于此, [C] surface get-out 反复抢身 → collectBlocks
-                //   全程返回 undefined、一块都挖不完 (实录 2026-07-09)。只按住 jump 骑水面 (不下沉、头出水面
-                //   回氧), 挖矿交给动作本身; 氧≤0 真扣血 (drowningDamage) 或深水将溺 (上面 [A] 分支) 照常抢身。
-                const miningActive = !!bot.targetDigBlock
-                    || !!(bot._adminMission && bot._adminMission.active);
+                //   全程返回 undefined、一块都挖不完 (实录 2026-07-09)。水面/悬浮时按 jump 保持呼吸，已落底
+                //   则松 jump 站稳以免叠加悬空挖掘惩罚；挖矿交给动作本身。氧≤0 真扣血 (drowningDamage)
+                //   或深水将溺 (上面 [A] 分支) 照常抢身。
+                const miningActive = !!bot.targetDigBlock || isUnderwaterMiningTask(bot);
                 if (drowning && y0 < 55) {
                     // DEEP & out of air (flooded tunnel / aquifer): no shore to swim to.
                     // The OLD code only towered straight UP toward the distant surface —
@@ -1974,7 +1975,7 @@ const modes_list = [
                         try { bot.clearControlStates(); } catch (e) {}
                     });
                 }
-                else if (gotoActive && !drowningDamage && !_jumpFutile && _swimCrossing) {
+                else if (gotoActive && !miningActive && !drowningDamage && !_jumpFutile && _swimCrossing) {
                     // ★用户令 + 进度阀门 _swimCrossing (见上): 寻路在驱动、没在淹血、hold-jump 能自救、【且确在过水
                     // 前进】 → 绝不 hijack 去 get-out("In water — getting out")。只按住 jump 骑水面(不下沉、头出水面持续回氧),
                     // 方向/路径全交给 pathfinder。氧气真见底扣血(drowningDamage)、或 hold-jump 被实测顶
@@ -1987,10 +1988,13 @@ const modes_list = [
                     bot.setControlState('jump', true);
                 }
                 else if (miningActive && !drowningDamage && !combatHasPriority(bot)) {
-                    // ★挖矿/采集让位 (见上 miningActive): 只按住 jump 骑水面, 绝不 hijack 去游岸 —— 与
-                    //   gotoActive 分支同策。战斗有优先 (combatHasPriority) 或真淹血 (drowningDamage) 时本
-                    //   分支失效, 落到 [C] surface get-out / 下方 self_defense。
-                    bot.setControlState('jump', true);
+                    // 水下矿务有自己的氧气控制器。赶往下一矿格时仍可像 goto 一样浮水移动；真正开始
+                    // 挖掘/沉底时不再被本能反复按 jump（否则悬空惩罚与水下惩罚叠成 25×）。氧气阈值
+                    // 到达后，执行器暂停同一个 goal，置 _underwaterMiningBreathing 并在呼吸孔换满气。
+                    if (bot._underwaterMiningSettling || bot.targetDigBlock) bot.setControlState('jump', false);
+                    else if (bot._underwaterMiningBreathing) bot.setControlState('jump', true);
+                    else if (gotoActive && !_jumpFutile && _swimCrossing) bot.setControlState('jump', true);
+                    else bot.setControlState('jump', true);
                 }
                 else if (y0 >= 55 && !combatHasPriority(bot)) {
                     // ★C332 (T-0063): when a killable non-creeper mob is point-blank and we can win,
