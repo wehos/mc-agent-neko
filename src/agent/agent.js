@@ -146,7 +146,7 @@ export class Agent {
         // ★2026-07-14 用户令: 游戏内 chat 路由重写 —— 根治 admin 指令风暴 (命令回执/系统消息被当指令:
         //   实录 "Applied effect Night Vision…"/"tp Neko" 漏 ignore_messages 黑名单进 mission, 每条触发
         //   一次 self-prompt LLM 调用 + supersede 前台任务)。反转为【正向白名单】: _routeIngameChat 多重门
-        //   滤掉非真人聊天, 只有前缀(chat_command_prefix, 默认 /neko)或 ! 开头才是指令 → adminMission 高优先级;
+        //   滤掉非真人聊天, 只有前缀(chat_command_prefix, 默认 @neko)或 ! 开头才是指令 → adminMission 高优先级;
         //   其余真人自然语言 → 节流聚合(默认3s)转发外部 admin llm(ws)。前缀设空 = 关门回旧行为。
         this.bot.on('chat', (username, message, _translate, jsonMsg) => {
             if (serverProxy.getNumOtherAgents() > 0) return;
@@ -202,14 +202,14 @@ export class Agent {
             if (Array.isArray(ignore_messages) && ignore_messages.some((m) => message.startsWith(m))) return;
             const prefix = settings.chat_command_prefix || '';
             const trimmed = message.replace(/^\s+/, '');
-            // 门⑤: 斜杠作弊命令 (/tp /give…) 丢弃 —— 但指令前缀(chat_command_prefix, 如 /neko)放行
+            // 门⑤: 斜杠作弊命令 (/tp /give…) 丢弃 —— 仅当配置本身显式使用斜杠前缀时放行
             if (/^\//.test(trimmed) && !(prefix && trimmed.startsWith(prefix))) return;
             // 门⑥: 白名单 (空=所有真人玩家) —— 指令与聊天转发都受此门
             const wl = Array.isArray(settings.chat_whitelist) ? settings.chat_whitelist : [];
             if (wl.length > 0 && !wl.includes(username)) return;
             // ── 指令 vs 聊天分流 ──
             let body = trimmed, isCmd = false;
-            if (prefix && trimmed.startsWith(prefix)) { body = trimmed.slice(prefix.length).trim(); isCmd = true; }  // /neko … = 指令
+            if (prefix && trimmed.startsWith(prefix)) { body = trimmed.slice(prefix.length).trim(); isCmd = true; }  // @neko … = 指令
             else if (trimmed.startsWith('!')) { isCmd = true; }                                                       // !cmd = 指令
             else if (!prefix) { isCmd = true; }                                                                       // 前缀关闭 → 旧行为: 真人消息都当指令
             if (isCmd) {
