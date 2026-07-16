@@ -15,6 +15,8 @@ import {
     adoptUnderwaterMiningBreathPlan,
     beginUnderwaterMiningTask,
     canMineWaterAdjacentWithBreathing,
+    canPlanWaterAdjacentWithBreathing,
+    clearUnderwaterMiningBreathPlan,
     digTimeoutForCurrentEnvironment,
     ensureWaterAwareDigTime,
     findBreathStation,
@@ -124,11 +126,12 @@ test('destructive water cost is calibrated against a dry excavation step, not em
     assert.ok(wetTunnelStep >= dryTunnelStep * 4);
 });
 
-test('tracked pathfinder patch settles and never starts a dig while still swimming', () => {
+test('tracked pathfinder patch settles only an active underwater mining dig', () => {
     const source = fs.readFileSync(new URL('../patches/mineflayer-pathfinder+2.4.5.patch', import.meta.url), 'utf8');
     assert.match(source, /waterSettleStart/);
     assert.match(source, /bot\._underwaterMiningSettling = true/);
     assert.match(source, /bot\._underwaterMiningCanStartDig/);
+    assert.match(source, /bot\._underwaterMiningShouldSettle/);
     assert.match(source, /bot\._underwaterMiningBreathBlocked = true/);
     assert.match(source, /bot\.setControlState\('sneak', true\)/);
     assert.doesNotMatch(source, /bot\.entity\.onGround \|\| bot\.entity\.isInWater/);
@@ -255,6 +258,20 @@ test('an interrupted mining route resumes forward on the same target and never t
     const missed = nextPlannedBreathStation(bot, plan);
     assert.equal(missed.pathIndex, 5);
     assert.equal(missed.missed, true, 'executor must replan from here instead of swimming backward');
+});
+
+test('clearing a route schedule preserves the sticky target and serviced breathing holes', () => {
+    const target = new Vec3(8, 20, 0);
+    const cells = new Map([[key(target), block('iron_ore', target, 'block')]]);
+    const bot = makeBot({ cells, skill: 'mineOres' });
+    bot._underwaterMiningRouteTarget = { position: target, key: key(target), updatedAt: Date.now() };
+    bot._underwaterMiningServicedBreathStations = new Set(['0,20,0']);
+    bot._underwaterMiningBreathPlan = { ok: true, targetKey: key(target), stations: [] };
+
+    assert.equal(clearUnderwaterMiningBreathPlan(bot), true);
+    assert.equal(bot._underwaterMiningBreathPlan, null);
+    assert.deepEqual(resolveUnderwaterMiningRouteTarget(bot), target);
+    assert.deepEqual([...bot._underwaterMiningServicedBreathStations], ['0,20,0']);
 });
 
 test('open air makes a mining water cell finite, and a one-block hole is finite but dearer', () => {
@@ -445,6 +462,19 @@ test('the Movements exception permits only a wet miner with a breathing station'
     assert.equal(movementFor(wetMiner).safeToBreak(target), true);
     const wetTraveler = makeBot({ cells: open, inWater: true, skill: '' });
     assert.equal(movementFor(wetTraveler).safeToBreak(target), false);
+});
+
+test('A* planning accepts a future wet dig without applying the bot current reach', () => {
+    const cells = new Map();
+    waterColumn(cells, 7, 0);
+    cells.set(key(new Vec3(7, 19, 0)), block('stone', new Vec3(7, 19, 0), 'block'));
+    const future = block('stone', new Vec3(8, 20, 0), 'block');
+    cells.set(key(future.position), future);
+    const bot = makeBot({ cells, position: new Vec3(0.5, 20, 0.5), inWater: true, skill: 'mineOres' });
+
+    assert.equal(canPlanWaterAdjacentWithBreathing(bot, future), true);
+    assert.equal(canMineWaterAdjacentWithBreathing(bot, future), false,
+        'execution still enforces the live 4.6-block reach');
 });
 
 test('lava remains an absolute veto even beside a valid breathing station', () => {

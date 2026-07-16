@@ -17,6 +17,8 @@ import {
     adoptUnderwaterMiningBreathPlan,
     beginUnderwaterMiningTask,
     canMineWaterAdjacentWithBreathing,
+    canPlanWaterAdjacentWithBreathing,
+    clearUnderwaterMiningBreathPlan,
     digTimeoutForCurrentEnvironment,
     ensureWaterAwareDigTime,
     isBotEyesInWater,
@@ -182,10 +184,10 @@ class _NoScaffoldMovements extends _PFMovements {
 
     safeToBreak(block) {
         if (super.safeToBreak(block)) return true;
-        if (!this.dontCreateFlow || !canMineWaterAdjacentWithBreathing(this.bot, block)) return false;
+        if (!this.dontCreateFlow || !canPlanWaterAdjacentWithBreathing(this.bot, block)) return false;
         // Re-run the upstream checks without its all-liquid veto. The helper above has
-        // already required an active wet miner, a reachable breathing station, enough
-        // oxygen capacity for this block, and no lava. All other upstream checks remain.
+        // already required an active miner, a future breathing station, enough oxygen
+        // capacity for this block, and no lava. All other upstream checks remain.
         this.dontCreateFlow = false;
         try { return super.safeToBreak(block); }
         finally { this.dontCreateFlow = true; }
@@ -4558,6 +4560,9 @@ export async function goToGoal(bot, goal) {
     // skills may still place/pillar explicitly, but generic navigation should walk or
     // dig a known route, not improvise block placement while moving.
     ensureWaterAwareDigTime(bot);
+    // A schedule is local to one navigation attempt. Rebuild it from the bot's
+    // current cell while preserving the sticky ore target and serviced holes.
+    if (isUnderwaterMiningTask(bot)) clearUnderwaterMiningBreathPlan(bot);
     const nonDestructiveMovements = new pf.Movements(bot);
     const dontBreakBlocks = ['glass', 'glass_pane'];
     for (let block of dontBreakBlocks) {
@@ -4766,6 +4771,7 @@ export async function goToGoal(bot, goal) {
                         complete: preview.status === 'success',
                     });
                     if (!breathPlan.ok) {
+                        clearUnderwaterMiningBreathPlan(bot);
                         motionAudit(bot, 'path.water_plan', {
                             seq: navSeq,
                             ok: false,
@@ -4797,6 +4803,8 @@ export async function goToGoal(bot, goal) {
                         policy: breathPlan.policy,
                         goal: goalInfo,
                     });
+                } else {
+                    clearUnderwaterMiningBreathPlan(bot);
                 }
             }
 
@@ -4989,6 +4997,8 @@ export async function goToGoal(bot, goal) {
             goal: goalInfo,
         });
         throw err;
+    } finally {
+        clearUnderwaterMiningBreathPlan(bot);
     }
 }
 

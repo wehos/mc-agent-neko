@@ -55,17 +55,24 @@ index b38bd30..241cf51 100644
        if (b && (b.type === waterType || ((b.type === ladderId || b.type === vineId) && i + 1 < path.length && path[i + 1].y < curPoint.y))) {
          curPoint.x = Math.floor(curPoint.x) + 0.5
          curPoint.y = Math.floor(curPoint.y)
-@@ -482,6 +500,27 @@ function inject (bot) {
+@@ -482,6 +500,34 @@ function inject (bot) {
      // Handle digging
      if (digging || nextPoint.toBreak.length > 0) {
 -      if (!digging && bot.entity.onGround) {
-+      if (!digging && bot.entity.isInWater && !bot.entity.onGround) {
++      if (!digging && bot.entity.isInWater && !bot.entity.onGround
++          && typeof bot._underwaterMiningShouldSettle === 'function'
++          && bot._underwaterMiningShouldSettle()) {
 +        if (waterSettleStart === 0) waterSettleStart = performance.now()
 +        bot._underwaterMiningSettling = true
 +        fullStop()
 +        bot.setControlState('jump', false)
 +        bot.setControlState('sneak', true)
 +        return
++      }
++      if (waterSettleStart !== 0) {
++        waterSettleStart = 0
++        bot._underwaterMiningSettling = false
++        bot.setControlState('sneak', false)
 +      }
 +      if (!digging && bot.entity.onGround) {
 +        waterSettleStart = 0
@@ -84,7 +91,7 @@ index b38bd30..241cf51 100644
          digging = true
          const b = nextPoint.toBreak.shift()
          const block = bot.blockAt(new Vec3(b.x, b.y, b.z), false)
-@@ -524,6 +549,9 @@ function inject (bot) {
+@@ -524,6 +556,9 @@ function inject (bot) {
          bot.activateBlock(bot.blockAt(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z))).then(() => {
            lockUseBlock.release()
            placingBlock = nextPoint.toPlace.shift()
@@ -94,7 +101,7 @@ index b38bd30..241cf51 100644
          }, err => {
            console.error(err)
            lockUseBlock.release()
-@@ -550,6 +578,7 @@ function inject (bot) {
+@@ -550,6 +585,7 @@ function inject (bot) {
              lockEquipItem.release()
              const refBlock = bot.blockAt(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z), false)
              if (!lockPlaceBlock.tryAcquire()) return
@@ -102,7 +109,7 @@ index b38bd30..241cf51 100644
              if (interactableBlocks.includes(refBlock.name)) {
                bot.setControlState('sneak', true)
              }
-@@ -557,6 +586,7 @@ function inject (bot) {
+@@ -557,6 +593,7 @@ function inject (bot) {
                .then(function () {
                  // Dont release Sneak if the block placement was not successful
                  bot.setControlState('sneak', false)
@@ -110,7 +117,7 @@ index b38bd30..241cf51 100644
                  if (bot.pathfinder.LOSWhenPlacingBlocks && placingBlock.returnPos) returningPos = placingBlock.returnPos.clone()
                })
                .catch(_ignoreError => {
-@@ -611,6 +641,9 @@ function inject (bot) {
+@@ -611,6 +648,9 @@ function inject (bot) {
      if (bot.entity.isInWater) {
        bot.setControlState('jump', true)
        bot.setControlState('sprint', false)

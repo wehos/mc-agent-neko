@@ -108,6 +108,7 @@ export function ensureWaterAwareDigTime(bot) {
     // Planning may use a future breathing point, but execution may never spend
     // oxygen that the current bar cannot actually cover.
     bot._underwaterMiningCanStartDig = (block) => !needsBreathBeforeDig(bot, block);
+    bot._underwaterMiningShouldSettle = () => isUnderwaterMiningTask(bot);
     if (typeof bot.digTime !== 'function' || bot._waterAwareDigTimeInstalled) return false;
     const originalDigTime = bot.digTime;
     bot._waterAwareOriginalDigTime = originalDigTime;
@@ -445,6 +446,19 @@ export function adoptUnderwaterMiningBreathPlan(bot, plan, miningTarget = null) 
     return plan;
 }
 
+/**
+ * Drop only the route-local schedule. The sticky ore target and the set of
+ * already serviced breathing holes deliberately survive so an interrupted task
+ * replans forward from its current water cell instead of selecting a new ore or
+ * swimming back to an old hole.
+ */
+export function clearUnderwaterMiningBreathPlan(bot) {
+    if (!bot) return false;
+    const hadPlan = !!bot._underwaterMiningBreathPlan;
+    bot._underwaterMiningBreathPlan = null;
+    return hadPlan;
+}
+
 export function resolveUnderwaterMiningRouteTarget(bot, fallback = null, ttlMs = 300000) {
     const sticky = bot && bot._collectSticky && bot._collectSticky.pos;
     if (sticky) return sticky;
@@ -537,10 +551,39 @@ function plannedBreathingCoverage(bot, plan, maxGap = MAX_BREATH_STATION_PATH_GA
     return candidates[0] || null;
 }
 
+function inspectWetMiningFace(bot, block) {
+    if (!block || !block.position || block.boundingBox !== 'block') return null;
+    const waterCells = [];
+    for (const [dx, dy, dz] of FACE_NEIGHBOURS) {
+        const adjacent = bot.blockAt(block.position.offset(dx, dy, dz));
+        if (isLavaBlock(adjacent)) return null;
+        if (isWaterBlock(adjacent)) waterCells.push(adjacent.position);
+    }
+    if (!waterCells.length || !underwaterDigBreathBudget(bot, block).possible) return null;
+    return waterCells;
+}
+
 /**
- * Exception to pathfinder's blanket dontCreateFlow guard. It is intentionally
- * narrow: only an active miner already in water, covered by the route's five-block
- * breathing chain, may remove a reachable wet face that fits in one bar. Lava is absolute.
+ * Planning-time exception to pathfinder's blanket dontCreateFlow guard. The
+ * candidate may be many blocks ahead, so this checks its future wet route cell
+ * and nearby breathing options without consulting the bot's current reach or
+ * posture. The complete A* result is still subjected to the exact five-block
+ * ordered-chain validator before execution.
+ */
+export function canPlanWaterAdjacentWithBreathing(bot, block) {
+    try {
+        if (!isUnderwaterMiningTask(bot)) return false;
+        const waterCells = inspectWetMiningFace(bot, block);
+        return !!waterCells && waterCells.some(pos => !!findBreathStation(bot, pos, 3));
+    } catch (e) {
+        return false;
+    }
+}
+
+/**
+ * Execution-time exception to the fluid guard. Only an active miner already in
+ * water, covered by the route's five-block breathing chain, may remove a
+ * reachable wet face that fits in one bar. Lava is absolute.
  */
 export function canMineWaterAdjacentWithBreathing(bot, block, maxReach = 4.6) {
     try {
@@ -548,13 +591,7 @@ export function canMineWaterAdjacentWithBreathing(bot, block, maxReach = 4.6) {
             || !block || !block.position || block.boundingBox !== 'block') return false;
         const eye = bot.entity.position.offset(0, Number.isFinite(bot.entity.eyeHeight) ? bot.entity.eyeHeight : 1.62, 0);
         if (eye.distanceTo(block.position.offset(0.5, 0.5, 0.5)) > maxReach) return false;
-        let touchesWater = false;
-        for (const [dx, dy, dz] of FACE_NEIGHBOURS) {
-            const adjacent = bot.blockAt(block.position.offset(dx, dy, dz));
-            if (isLavaBlock(adjacent)) return false;
-            if (isWaterBlock(adjacent)) touchesWater = true;
-        }
-        if (!touchesWater || !underwaterDigBreathBudget(bot, block).possible) return false;
+        if (!inspectWetMiningFace(bot, block)) return false;
         if (!hasSolidFloor(bot, bot.entity.position)) return false;
         return !!findBreathStation(bot, bot.entity.position, 1)
             || !!plannedBreathingCoverage(bot, bot._underwaterMiningBreathPlan);
