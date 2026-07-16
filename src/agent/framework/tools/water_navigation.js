@@ -89,6 +89,7 @@ export function beginUnderwaterMiningTask(bot, active = true) {
         if (ended) return;
         ended = true;
         bot._underwaterMiningTaskDepth = Math.max(0, (bot._underwaterMiningTaskDepth || 1) - 1);
+        if (bot._underwaterMiningTaskDepth === 0) clearUnderwaterMiningBreathPlan(bot);
     };
 }
 
@@ -100,6 +101,7 @@ export function isUnderwaterMiningTask(bot) {
 
 export function shouldSuppressSwimJumpForUnderwaterDig(bot) {
     return isUnderwaterMiningTask(bot)
+        && !bot?._underwaterMiningBreathing
         && !!(bot?._underwaterMiningSettling || bot?.targetDigBlock);
 }
 
@@ -567,6 +569,20 @@ export function clearUnderwaterMiningBreathPlan(bot) {
     return hadPlan;
 }
 
+export function retainUnderwaterMiningBreathPlanForTargetDig(bot) {
+    const plan = bot && bot._underwaterMiningBreathPlan;
+    if (!plan || !plan.ok || !plan.targetKey) return false;
+    plan.retainForTargetDig = true;
+    return true;
+}
+
+export function releaseUnderwaterMiningBreathPlanForTargetDig(bot, block) {
+    const plan = bot && bot._underwaterMiningBreathPlan;
+    if (!plan || !plan.retainForTargetDig || !block || !block.position) return false;
+    if (plan.targetKey !== targetKey(block.position)) return false;
+    return clearUnderwaterMiningBreathPlan(bot);
+}
+
 /** Exclude one unsafe collect target and release only the matching sticky lock. */
 export function excludeUnsafeUnderwaterMiningTarget(bot, block, exclude = null) {
     const next = Array.isArray(exclude) ? exclude : [];
@@ -789,6 +805,24 @@ async function moveToBreathStation(bot, station, maxMs = 1800) {
         && Math.abs(p.y - target.y) < 1;
 }
 
+export async function digBreathingVentWithTimeout(bot, block, timeoutMs) {
+    let timer = null;
+    try {
+        await Promise.race([
+            bot.dig(block),
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error('breathing-hole-timeout')), timeoutMs);
+            }),
+        ]);
+        return { ok: true };
+    } catch (e) {
+        try { if (typeof bot.stopDigging === 'function') bot.stopDigging(); } catch (_) { /* best effort */ }
+        return { ok: false, reason: e && e.message ? e.message : 'breathing-hole-dig-failed' };
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
 /**
  * Pause the current mining route, reach its local station, open at most one safe
  * ceiling block, refill oxygen, then return so the caller can resume the same goal.
@@ -812,6 +846,7 @@ export async function serviceUnderwaterMiningBreath(bot, { station: preferredSta
         try { if (typeof bot.stopDigging === 'function') bot.stopDigging(); } catch (e) { /* best effort */ }
         if (!await moveToBreathStation(bot, station)) return { ok: false, reason: 'breathing-station-unreachable', station };
         try { bot.setControlState('forward', false); } catch (e) { /* stop horizontal drift before settling */ }
+        try { bot.setControlState('sneak', false); } catch (e) { /* release downward swim before refill ascent */ }
 
         if (station.ventBlock) {
             if (!await settleForUnderwaterDig(bot) && !bot.entity.onGround)
@@ -830,14 +865,8 @@ export async function serviceUnderwaterMiningBreath(bot, { station: preferredSta
                     return { ok: false, reason: 'breathing-hole-would-waste-ore', station };
                 ensureWaterAwareDigTime(bot);
                 const timeoutMs = Math.min(30000, Math.ceil(estimateUnderwaterDigMs(bot, liveVent) * 1.35) + 750);
-                try {
-                    await Promise.race([
-                        bot.dig(liveVent),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('breathing-hole-timeout')), timeoutMs)),
-                    ]);
-                } catch (e) {
-                    return { ok: false, reason: e.message || 'breathing-hole-dig-failed', station };
-                }
+                const digResult = await digBreathingVentWithTimeout(bot, liveVent, timeoutMs);
+                if (!digResult.ok) return { ok: false, reason: digResult.reason, station };
             }
         }
 

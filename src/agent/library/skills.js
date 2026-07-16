@@ -20,6 +20,8 @@ import {
     canMineWaterAdjacentWithBreathing,
     canPlanWaterAdjacentWithBreathing,
     clearUnderwaterMiningBreathPlan,
+    releaseUnderwaterMiningBreathPlanForTargetDig,
+    retainUnderwaterMiningBreathPlanForTargetDig,
     digTimeoutForCurrentEnvironment,
     ensureWaterAwareDigTime,
     excludeUnsafeUnderwaterMiningTarget,
@@ -1277,7 +1279,10 @@ export async function safeDig(bot, block, { maxMs = 15000, approach = true, equi
         // whole oxygen bar and must remain forbidden even beside a breathing hole.
         return reachTo(target) <= 4.6 && !needsBreathBeforeDig(bot, target);
     };
-    if (dead(block)) return 'gone';
+    if (dead(block)) {
+        releaseUnderwaterMiningBreathPlanForTargetDig(bot, block);
+        return 'gone';
+    }
     const reachOf = () => reachTo(block);
     try {
         if (approach && reachOf() > 4.4)
@@ -1289,8 +1294,10 @@ export async function safeDig(bot, block, { maxMs = 15000, approach = true, equi
         if (!await ensureBreathFor(cur)) return 'underwater-unsafe';
         cur = bot.blockAt(block.position);
         if (dead(cur)) return 'gone';
-        await settleForUnderwaterDig(bot);
-        if (isBotEyesInWater(bot) && !bot.entity.onGround) return 'underwater-unsafe';
+        if (isUnderwaterMiningTask(bot)) {
+            await settleForUnderwaterDig(bot);
+            if (isBotEyesInWater(bot) && !bot.entity.onGround) return 'underwater-unsafe';
+        }
         // ★#1 (用户 2026-07-07: 挖仅 1 格外的矿要站在当前脚下方块正中——否则贴边/侧身站着挖, 挖完
         //   身子迈不进空出来的坑, 或够矿的姿势别扭). 目标水平相邻(≤1.6b)且自己明显偏离脚下方块中心
         //   (>0.33b)时, 先滑到方块正中再挖。只近距+ORE(requireLOS)触发(远处 approach 已定位), 手动
@@ -1439,6 +1446,8 @@ export async function safeDig(bot, block, { maxMs = 15000, approach = true, equi
         try { bot.stopDigging(); } catch (_) {}
         if (e && e.message === 'interrupted') return 'error';
         return (e && e.message === 'dig-timeout') ? 'timeout' : 'error';
+    } finally {
+        releaseUnderwaterMiningBreathPlanForTargetDig(bot, block);
     }
 }
 
@@ -4708,6 +4717,7 @@ export async function goToGoal(bot, goal) {
 
     const doorCheckInterval = startDoorInterval(bot);
     const totalStartTime = Date.now();
+    let retainBreathPlanForTargetDig = false;
     // ★进度感知长途修 (用户令 2026-07-09 "这么普通的越野也吃 3 次 unstick 就 bail"): 老逻辑两处硬墙 —
     //   (a) maxUnstickAttempts=3 是【整趟终身计数】: bot.pathfinder.goto 一次走到底, 山地每物理楔住 3s 耗
     //       一次 unstick, 累计 3 次就抛"到不了" —— 哪怕两次楔住之间已走了上百格(成功脱困也从不清零)。
@@ -4941,6 +4951,7 @@ export async function goToGoal(bot, goal) {
             }
 
             if (result.success) {
+                retainBreathPlanForTargetDig = retainUnderwaterMiningBreathPlanForTargetDig(bot);
                 clearInterval(doorCheckInterval);
                 motionAudit(bot, 'path.end', {
                     seq: navSeq,
@@ -5087,7 +5098,7 @@ export async function goToGoal(bot, goal) {
         });
         throw err;
     } finally {
-        clearUnderwaterMiningBreathPlan(bot);
+        if (!retainBreathPlanForTargetDig) clearUnderwaterMiningBreathPlan(bot);
     }
 }
 

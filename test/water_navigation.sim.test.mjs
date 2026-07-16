@@ -18,6 +18,7 @@ import {
     canMineWaterAdjacentWithBreathing,
     canPlanWaterAdjacentWithBreathing,
     clearUnderwaterMiningBreathPlan,
+    digBreathingVentWithTimeout,
     digTimeoutForCurrentEnvironment,
     ensureWaterAwareDigTime,
     excludeUnsafeUnderwaterMiningTarget,
@@ -28,6 +29,8 @@ import {
     pathProgressDistance,
     pathStuckProfile,
     planUnderwaterMiningBreathing,
+    releaseUnderwaterMiningBreathPlanForTargetDig,
+    retainUnderwaterMiningBreathPlanForTargetDig,
     resolveUnderwaterMiningRouteTarget,
     serviceUnderwaterMiningBreath,
     settleForUnderwaterDig,
@@ -165,6 +168,10 @@ test('ordinary water digs stay afloat while settled underwater mining digs may s
     const miner = makeBot({ inWater: true, skill: 'mineOres' });
     miner.targetDigBlock = block('iron_ore', target.position, 'block');
     assert.equal(shouldSuppressSwimJumpForUnderwaterDig(miner), true);
+    miner._underwaterMiningBreathing = true;
+    assert.equal(shouldSuppressSwimJumpForUnderwaterDig(miner), false,
+        'active breathing must override stale targetDigBlock state and allow ascent');
+    miner._underwaterMiningBreathing = false;
     miner.targetDigBlock = null;
     miner._underwaterMiningSettling = true;
     assert.equal(shouldSuppressSwimJumpForUnderwaterDig(miner), true);
@@ -420,6 +427,19 @@ test('clearing a route schedule preserves the sticky target and serviced breathi
     assert.deepEqual([...bot._underwaterMiningServicedBreathStations], ['0,20,0']);
 });
 
+test('the final breath plan survives navigation only until its matching target dig returns', () => {
+    const target = new Vec3(8, 20, 0);
+    const other = block('stone', new Vec3(7, 20, 0), 'block');
+    const bot = makeBot({ skill: 'mineOres' });
+    bot._underwaterMiningBreathPlan = { ok: true, targetKey: key(target), stations: [], route: [] };
+
+    assert.equal(retainUnderwaterMiningBreathPlanForTargetDig(bot), true);
+    assert.equal(releaseUnderwaterMiningBreathPlanForTargetDig(bot, other), false);
+    assert.ok(bot._underwaterMiningBreathPlan, 'intermediate corridor digs keep target coverage');
+    assert.equal(releaseUnderwaterMiningBreathPlanForTargetDig(bot, block('iron_ore', target, 'block')), true);
+    assert.equal(bot._underwaterMiningBreathPlan, null);
+});
+
 test('open air makes a mining water cell finite, and a one-block hole is finite but dearer', () => {
     const openCells = new Map();
     waterColumn(openCells);
@@ -575,6 +595,37 @@ test('breathing service reaches the planned station height in the same water col
         'matching x/z at the wrong elevation is not considered arrival');
 });
 
+test('breathing service releases sneak before rising from a lower station', async () => {
+    const cells = new Map();
+    waterColumn(cells, 0, 0, 20, 1);
+    const bot = makeBot({
+        cells,
+        position: new Vec3(0.5, 22, 0.5),
+        inWater: true,
+        skill: 'mineOres',
+        oxygen: 10,
+    });
+    const station = inspectBreathColumn(bot, new Vec3(0, 20, 0));
+    let sneaking = false;
+    const controls = [];
+    bot.setControlState = (name, value) => {
+        controls.push([name, value]);
+        if (name === 'sneak') sneaking = value;
+        if (name === 'sneak' && value) bot.entity.position = new Vec3(0.5, 20, 0.5);
+        if (name === 'jump' && value && !sneaking) {
+            bot.entity.position = new Vec3(0.5, 21, 0.5);
+            bot.entity.isInWater = false;
+            bot.oxygenLevel = 20;
+        }
+    };
+
+    const result = await serviceUnderwaterMiningBreath(bot, { station, maxMs: 200 });
+    assert.equal(result.ok, true);
+    const release = controls.findIndex(([name, value]) => name === 'sneak' && value === false);
+    const ascent = controls.findIndex(([name, value]) => name === 'jump' && value === true);
+    assert.ok(release >= 0 && ascent > release, 'downward swim is released before refill ascent');
+});
+
 test('the oxygen refill window starts after a slow breathing vent is opened', async () => {
     const cells = new Map();
     waterColumn(cells);
@@ -596,6 +647,21 @@ test('the oxygen refill window starts after a slow breathing vent is opened', as
 
     const result = await serviceUnderwaterMiningBreath(bot, { maxMs: 50 });
     assert.equal(result.ok, true, 'vent dig time does not consume the separate refill window');
+});
+
+test('a timed-out breathing vent actively aborts the underlying dig', async () => {
+    const bot = makeBot({ inWater: true, skill: 'mineOres' });
+    let stopped = false;
+    bot.dig = () => new Promise(() => {});
+    bot.stopDigging = () => { stopped = true; };
+
+    const result = await digBreathingVentWithTimeout(
+        bot,
+        block('stone', new Vec3(0, 22, 0), 'block'),
+        20,
+    );
+    assert.deepEqual(result, { ok: false, reason: 'breathing-hole-timeout' });
+    assert.equal(stopped, true);
 });
 
 test('a planned breathing hole checks live oxygen after arrival and keeps a rise reserve', async () => {
@@ -773,6 +839,26 @@ test('safeDig refuses to dig after a refill moves an approach-disabled miner out
     assert.equal(dug, false, 'successful refill must not bypass the live reach proof');
 });
 
+test('safeDig does not force ordinary submerged collection to settle on a floor', async () => {
+    const cells = new Map();
+    waterColumn(cells);
+    const target = block('oak_log', new Vec3(1, 20, 0), 'block');
+    cells.set(key(target.position), target);
+    const bot = makeBot({ cells, inWater: true });
+    bot.entity.onGround = false;
+    let dug = false;
+    bot.dig = async () => { dug = true; };
+    const previousGuard = process.env.MC_DIG_FLUID_GUARD;
+    process.env.MC_DIG_FLUID_GUARD = '0';
+    try {
+        assert.equal(await safeDig(bot, target, { approach: false, equip: false }), 'ok');
+    } finally {
+        if (previousGuard === undefined) delete process.env.MC_DIG_FLUID_GUARD;
+        else process.env.MC_DIG_FLUID_GUARD = previousGuard;
+    }
+    assert.equal(dug, true);
+});
+
 test('a direct collect scope is recognized as mining and is cleaned up', () => {
     const bot = makeBot();
     const endNonMining = beginUnderwaterMiningTask(bot, false);
@@ -780,9 +866,11 @@ test('a direct collect scope is recognized as mining and is cleaned up', () => {
     endNonMining();
     const end = beginUnderwaterMiningTask(bot);
     assert.equal(bot._underwaterMiningTaskDepth, 1);
+    bot._underwaterMiningBreathPlan = { ok: true, targetKey: '1,2,3' };
     end();
     end();
     assert.equal(bot._underwaterMiningTaskDepth, 0);
+    assert.equal(bot._underwaterMiningBreathPlan, null, 'ending a task releases any retained target plan');
 });
 
 test('an unsafe underwater collect target is excluded once and releases its sticky lock', () => {
