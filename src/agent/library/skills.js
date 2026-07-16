@@ -15,6 +15,7 @@ import {
     DEFAULT_LIQUID_COST,
     DESTRUCTIVE_LIQUID_COST,
     adoptUnderwaterMiningBreathPlan,
+    adoptUnderwaterMiningPathUpdate,
     beginUnderwaterMiningTask,
     canMineWaterAdjacentWithBreathing,
     canPlanWaterAdjacentWithBreathing,
@@ -1259,18 +1260,25 @@ async function _stepBackForDig(bot, target) {
     } catch (e) { try { bot.clearControlStates(); } catch (_) {} return false; }
 }
 
-async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = true, pickup = false, requireLOS = false } = {}) {
+export async function safeDig(bot, block, { maxMs = 15000, approach = true, equip = true, pickup = false, requireLOS = false } = {}) {
     ensureWaterAwareDigTime(bot);
     const dead = (b) => !b || b.boundingBox === 'empty' || b.name === 'air';
+    const reachTo = (target) => bot.entity.position.offset(0, 1.62, 0)
+        .distanceTo(target.position.offset(0.5, 0.5, 0.5));
     const ensureBreathFor = async (target) => {
         if (!needsBreathBeforeDig(bot, target)) return true;
         const refill = await serviceUnderwaterMiningBreath(bot);
+        if (!refill || !refill.ok) return false;
+        // A planned station may be several blocks away. Re-approach the exact
+        // block after refilling, then prove live reach again before any dig.
+        if (approach && reachTo(target) > 4.4)
+            await goToPosition(bot, target.position.x, target.position.y, target.position.z, 2);
         // Re-evaluate after a full refill: an extremely slow block can exceed one
         // whole oxygen bar and must remain forbidden even beside a breathing hole.
-        return !!(refill && refill.ok) && !needsBreathBeforeDig(bot, target);
+        return reachTo(target) <= 4.6 && !needsBreathBeforeDig(bot, target);
     };
     if (dead(block)) return 'gone';
-    const reachOf = () => bot.entity.position.offset(0, 1.62, 0).distanceTo(block.position.offset(0.5, 0.5, 0.5));
+    const reachOf = () => reachTo(block);
     try {
         if (approach && reachOf() > 4.4)
             await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
@@ -4368,6 +4376,7 @@ function shouldAvoidRandomUnstick(bot, goalInfo = null) {
 async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doorCheckInterval, audit = {}) {
     let stuckCheckInterval;
     let plannedBreathStation = null;
+    let actualWaterPlanFailure = null;
     let lastPosition = bot.entity.position.clone();
     let stuckTime = 0;
     let lastCheckTime = Date.now();
@@ -4382,6 +4391,41 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
         allowParkour: movements.allowParkour,
         maxDropDown: movements.maxDropDown,
     });
+
+    let rejectActualWaterPlan;
+    const actualWaterPlanPromise = new Promise((_, reject) => { rejectActualWaterPlan = reject; });
+    const validateActualWaterPath = (results) => {
+        if (!isUnderwaterMiningTask(bot)) return;
+        const fallback = (typeof goal.x === 'number' && typeof goal.y === 'number' && typeof goal.z === 'number')
+            ? { x: goal.x, y: goal.y, z: goal.z }
+            : null;
+        const miningTarget = resolveUnderwaterMiningRouteTarget(bot, fallback);
+        const plan = adoptUnderwaterMiningPathUpdate(bot, results, miningTarget);
+        if (!plan) return;
+        if (!plan.ok) {
+            actualWaterPlanFailure = plan;
+            // path_update is synchronous and fires before the pathfinder stores
+            // results.path. Empty it so no unvalidated node executes this tick.
+            results.path.length = 0;
+            rejectActualWaterPlan(new Error('UnderwaterActualPathUnsafe'));
+            return;
+        }
+        motionAudit(bot, 'path.water_plan_actual', {
+            seq: audit.seq,
+            ok: true,
+            generation: plan.generation,
+            required: plan.required,
+            status: results.status,
+            stations: plan.stations.map(station => ({
+                id: station.id,
+                kind: station.kind,
+                pathIndex: station.pathIndex,
+                serviced: station.serviced,
+            })),
+            goal: audit.goal,
+        });
+    };
+    bot.on('path_update', validateActualWaterPath);
     
     const stuckCheckPromise = new Promise((_, reject) => {
         stuckCheckInterval = setInterval(() => {
@@ -4447,7 +4491,8 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
     try {
         await Promise.race([
             bot.pathfinder.goto(goal),
-            stuckCheckPromise
+            stuckCheckPromise,
+            actualWaterPlanPromise,
         ]);
         clearInterval(stuckCheckInterval);
         motionAudit(bot, 'path.phase.end', {
@@ -4465,6 +4510,23 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
         const errorMsg = err.message || err.toString();
         if (errorMsg.includes('Interrupted') || bot.interrupt_code) {
             throw new Error('Navigation interrupted');
+        }
+        if (errorMsg.includes('UnderwaterActualPathUnsafe')) {
+            motionAudit(bot, 'path.phase.end', {
+                seq: audit.seq,
+                phase: audit.phase,
+                ok: false,
+                waterPlanUnsafe: true,
+                reason: actualWaterPlanFailure && actualWaterPlanFailure.reason,
+                ms: Date.now() - phaseStartedAt,
+                goal: audit.goal,
+            });
+            return {
+                success: false,
+                stuckDetected: false,
+                waterPlanUnsafe: true,
+                reason: actualWaterPlanFailure && actualWaterPlanFailure.reason,
+            };
         }
         if (errorMsg.includes('UnderwaterPlannedBreath')) {
             motionAudit(bot, 'path.phase.end', {
@@ -4527,6 +4589,9 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
             goal: audit.goal,
         });
         return { success: false, stuckDetected: false };
+    } finally {
+        clearInterval(stuckCheckInterval);
+        bot.removeListener('path_update', validateActualWaterPath);
     }
 }
 
@@ -4824,6 +4889,18 @@ export async function goToGoal(bot, goal) {
                 bot, goal, currentMovements, phaseStuckTimeout, doorCheckInterval,
                 { seq: navSeq, phase: isDestructive ? 'destructive' : 'non-destructive', goal: goalInfo }
             );
+
+            if (result.waterPlanUnsafe) {
+                clearUnderwaterMiningBreathPlan(bot);
+                if (!isDestructive) {
+                    currentMovements = destructiveMovements;
+                    isDestructive = true;
+                    continue;
+                }
+                const unsafe = new Error(`Executed underwater path has no safe five-block breathing chain: ${result.reason || 'unknown'}`);
+                unsafe.name = 'UnderwaterMiningUnsafe';
+                throw unsafe;
+            }
 
             if (result.breathNeeded) {
                 if (result.plannedBreathStation && result.plannedBreathStation.missed) {

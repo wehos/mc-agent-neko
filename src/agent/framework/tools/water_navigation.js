@@ -533,6 +533,21 @@ export function adoptUnderwaterMiningBreathPlan(bot, plan, miningTarget = null) 
     return plan;
 }
 
+/** Rebuild the active schedule from the exact path emitted for execution. */
+export function adoptUnderwaterMiningPathUpdate(bot, result, miningTarget = null) {
+    if (!isUnderwaterMiningTask(bot) || !result
+        || !['success', 'partial'].includes(result.status)
+        || !Array.isArray(result.path)) return null;
+    const plan = planUnderwaterMiningBreathing(bot, result.path, miningTarget, {
+        complete: result.status === 'success',
+    });
+    if (!plan.ok) {
+        clearUnderwaterMiningBreathPlan(bot);
+        return plan;
+    }
+    return adoptUnderwaterMiningBreathPlan(bot, plan, miningTarget);
+}
+
 /**
  * Drop only the route-local schedule. The sticky ore target and the set of
  * already serviced breathing holes deliberately survive so an interrupted task
@@ -685,7 +700,10 @@ export function canPlanWaterAdjacentWithBreathing(bot, block) {
     try {
         if (!isUnderwaterMiningTask(bot)) return false;
         const waterCells = inspectWetMiningFace(bot, block);
-        return !!waterCells && waterCells.some(pos => !!findBreathStation(bot, pos, 3));
+        // The pathfinder can only perform the submerged dig after settling. A
+        // breath pocket alone is insufficient in a deep/floorless water column.
+        return !!waterCells && hasSolidFloor(bot, block.position)
+            && waterCells.some(pos => !!findBreathStation(bot, pos, 3));
     } catch (e) {
         return false;
     }
@@ -897,7 +915,9 @@ export function pathStuckProfile(bot, baseTimeoutMs = 3000) {
 
 export function pathProgressDistance(from, to, medium = 'land') {
     if (!from || !to) return 0;
-    if (medium === 'water') return Math.hypot(to.x - from.x, to.z - from.z);
+    // Water routes are fully three-dimensional. The 0.5-block stuck radius
+    // filters ordinary bobbing while still recognizing real shaft ascent/descent.
+    if (medium === 'water') return Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z);
     if (typeof to.distanceTo === 'function') return to.distanceTo(from);
     return Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z);
 }

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
-import '../src/agent/library/skills.js';
+import { safeDig } from '../src/agent/library/skills.js';
 import { safeToDigBlock } from '../src/agent/framework/tools/lava_guard.js';
 import {
     DEFAULT_LIQUID_COST,
@@ -13,6 +13,7 @@ import {
     UNDERWATER_DIG_MULTIPLIER,
     UNDERWATER_MINING_BLOCKED_COST,
     adoptUnderwaterMiningBreathPlan,
+    adoptUnderwaterMiningPathUpdate,
     beginUnderwaterMiningTask,
     canMineWaterAdjacentWithBreathing,
     canPlanWaterAdjacentWithBreathing,
@@ -344,6 +345,42 @@ test('an interrupted mining route resumes forward on the same target and never t
     assert.equal(missed.missed, true, 'executor must replan from here instead of swimming backward');
 });
 
+test('an emitted path update replaces the preview breathing schedule', () => {
+    const cells = new Map();
+    const preview = [];
+    const actual = [];
+    for (let i = 0; i <= 4; i++) {
+        for (const [x, z] of [[i, 0], [0, i]]) {
+            waterColumn(cells, x, z);
+            cells.set(key(new Vec3(x, 19, z)), block('stone', new Vec3(x, 19, z), 'block'));
+            cells.set(key(new Vec3(x, 22, z)), block('stone', new Vec3(x, 22, z), 'block'));
+        }
+        preview.push({ x: i, y: 20, z: 0 });
+        actual.push({ x: 0, y: 20, z: i });
+    }
+    const previewTarget = new Vec3(5, 20, 0);
+    const actualTarget = new Vec3(0, 20, 5);
+    cells.set(key(previewTarget), block('iron_ore', previewTarget, 'block'));
+    cells.set(key(actualTarget), block('iron_ore', actualTarget, 'block'));
+    const bot = makeBot({ cells, inWater: true, skill: 'mineOres', digTime: 800 });
+    adoptUnderwaterMiningBreathPlan(
+        bot,
+        planUnderwaterMiningBreathing(bot, preview, previewTarget, { complete: true }),
+        previewTarget,
+    );
+
+    const plan = adoptUnderwaterMiningPathUpdate(
+        bot,
+        { status: 'success', path: actual },
+        actualTarget,
+    );
+    assert.equal(plan.ok, true);
+    assert.equal(plan.targetKey, key(actualTarget));
+    assert.ok(plan.route.every(node => node.position.x === 0));
+    assert.equal(plan.route.at(-1).position.z, 4,
+        'the exact emitted route replaces the earlier preview route');
+});
+
 test('clearing a route schedule preserves the sticky target and serviced breathing holes', () => {
     const target = new Vec3(8, 20, 0);
     const cells = new Map([[key(target), block('iron_ore', target, 'block')]]);
@@ -616,6 +653,7 @@ test('the Movements exception permits only a wet miner with a breathing station'
     const open = new Map();
     waterColumn(open);
     open.set(key(new Vec3(0, 19, 0)), block('stone', new Vec3(0, 19, 0), 'block'));
+    open.set(key(new Vec3(1, 19, 0)), block('stone', new Vec3(1, 19, 0), 'block'));
     const movementFor = (bot) => {
         const movements = Object.create(pf.Movements.prototype);
         movements.bot = bot;
@@ -645,6 +683,9 @@ test('A* planning accepts a future wet dig without applying the bot current reac
     cells.set(key(future.position), future);
     const bot = makeBot({ cells, position: new Vec3(0.5, 20, 0.5), inWater: true, skill: 'mineOres' });
 
+    assert.equal(canPlanWaterAdjacentWithBreathing(bot, future), false,
+        'a future submerged dig without footing is not executable');
+    cells.set(key(future.position.offset(0, -1, 0)), block('stone', future.position.offset(0, -1, 0), 'block'));
     assert.equal(canPlanWaterAdjacentWithBreathing(bot, future), true);
     assert.equal(canMineWaterAdjacentWithBreathing(bot, future), false,
         'execution still enforces the live 4.6-block reach');
@@ -664,10 +705,52 @@ test('water uses a slower progress window and active digging never counts as stu
     const bot = makeBot({ inWater: true });
     const profile = pathStuckProfile(bot, 3000);
     assert.deepEqual(profile, { medium: 'water', radius: 0.5, timeoutMs: 8000 });
-    assert.equal(pathProgressDistance(new Vec3(0, 20, 0), new Vec3(0, 21, 0), profile.medium), 0);
+    assert.equal(pathProgressDistance(new Vec3(0, 20, 0), new Vec3(0, 21, 0), profile.medium), 1);
+    assert.equal(shouldAccumulatePathStuck(bot, 1, profile), false,
+        'real vertical swimming resets the water stuck timer');
+    assert.ok(pathProgressDistance(new Vec3(0, 20, 0), new Vec3(0, 20.2, 0), profile.medium) < profile.radius,
+        'ordinary sub-block bobbing remains below the progress threshold');
     assert.equal(shouldAccumulatePathStuck(bot, 0.1, profile), true);
     bot.targetDigBlock = block('stone', new Vec3(1, 20, 0), 'block');
     assert.equal(shouldAccumulatePathStuck(bot, 0, profile), false);
+});
+
+test('safeDig refuses to dig after a refill moves an approach-disabled miner out of reach', async () => {
+    const cells = new Map();
+    const path = [];
+    for (let x = 0; x <= 5; x++) {
+        waterColumn(cells, x, 0);
+        cells.set(key(new Vec3(x, 19, 0)), block('stone', new Vec3(x, 19, 0), 'block'));
+        if (x < 5) {
+            cells.set(key(new Vec3(x, 22, 0)), block('stone', new Vec3(x, 22, 0), 'block'));
+            cells.set(key(new Vec3(x, 23, 0)), block('stone', new Vec3(x, 23, 0), 'block'));
+        }
+        path.push({ x, y: 20, z: 0 });
+    }
+    const targetPos = new Vec3(-1, 20, 0);
+    const target = block('iron_ore', targetPos, 'block');
+    cells.set(key(targetPos), target);
+    cells.set(key(targetPos.offset(0, -1, 0)), block('stone', targetPos.offset(0, -1, 0), 'block'));
+    const bot = makeBot({ cells, inWater: true, skill: 'mineOres', oxygen: 2, digTime: 1000 });
+    adoptUnderwaterMiningBreathPlan(
+        bot,
+        planUnderwaterMiningBreathing(bot, path, targetPos, { complete: false }),
+        targetPos,
+    );
+    let dug = false;
+    bot.dig = async () => { dug = true; };
+    bot.setControlState = (name, value) => {
+        if (name === 'forward' && value && bot.entity.position.x < 5)
+            bot.entity.position = new Vec3(5.5, 20, 0.5);
+        if (name === 'jump' && value && bot.entity.position.x >= 5) {
+            bot.entity.position = new Vec3(5.5, 21, 0.5);
+            bot.entity.isInWater = false;
+            bot.oxygenLevel = 20;
+        }
+    };
+
+    assert.equal(await safeDig(bot, target, { approach: false, equip: false }), 'underwater-unsafe');
+    assert.equal(dug, false, 'successful refill must not bypass the live reach proof');
 });
 
 test('a direct collect scope is recognized as mining and is cleaned up', () => {
