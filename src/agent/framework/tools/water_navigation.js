@@ -81,8 +81,8 @@ function hasAquaAffinity(bot) {
  * Mark a generic collectBlock call as mining even when it was dispatched directly
  * (and therefore has no customSkill name). The returned closure makes nesting safe.
  */
-export function beginUnderwaterMiningTask(bot) {
-    if (!bot) return () => {};
+export function beginUnderwaterMiningTask(bot, active = true) {
+    if (!bot || !active) return () => {};
     bot._underwaterMiningTaskDepth = (bot._underwaterMiningTaskDepth || 0) + 1;
     let ended = false;
     return () => {
@@ -350,10 +350,13 @@ export function planUnderwaterMiningBreathing(bot, path, miningTarget = null, {
         const candidates = segment.map(node => inspectBreathColumn(bot, node.position));
         const prefix = prefixPathDistance(segment);
         const finalIndex = segment.length - 1;
-        const endsUnderwater = complete && end === route.length - 1;
+        // Even a partial A* prefix must end at a viable breathing point before
+        // execution is allowed into water. Only the final target-distance rule
+        // depends on the route being complete.
+        const endsRouteInWater = end === route.length - 1;
         const viable = candidates.map((candidate, index) => candidate ? index : -1).filter(index => index >= 0);
         if (viable.length === 0) {
-            if (!endsUnderwater && prefix[finalIndex] <= maxStationGap) { start = end + 1; continue; }
+            if (!endsRouteInWater && prefix[finalIndex] <= maxStationGap) { start = end + 1; continue; }
             return {
                 ok: false,
                 required: true,
@@ -391,7 +394,7 @@ export function planUnderwaterMiningBreathing(bot, path, miningTarget = null, {
             add(candidates[last], segment[last]);
         }
 
-        if (endsUnderwater) {
+        if (complete && endsRouteInWater) {
             const target = miningTarget || segment[finalIndex].position;
             let finalStation = [...stations].reverse().find(station => station.pathIndex >= start);
             if (!finalStation || stationTargetDistance(finalStation, target) > maxTargetDistance) {
@@ -456,6 +459,7 @@ export function clearUnderwaterMiningBreathPlan(bot) {
     if (!bot) return false;
     const hadPlan = !!bot._underwaterMiningBreathPlan;
     bot._underwaterMiningBreathPlan = null;
+    bot._underwaterMiningBreathBlocked = false;
     return hadPlan;
 }
 
@@ -658,6 +662,7 @@ async function moveToBreathStation(bot, station, maxMs = 1800) {
 export async function serviceUnderwaterMiningBreath(bot, { station: preferredStation = null, stationRadius = 1, maxMs = 6500 } = {}) {
     if (!isUnderwaterMiningTask(bot) || !isBotInWater(bot)) return { ok: false, reason: 'not-underwater-mining' };
     bot._underwaterMiningBreathBlocked = false;
+    const previousHeldItem = bot.heldItem || null;
     let station = null;
     if (preferredStation && preferredStation.feet) {
         const refreshed = inspectBreathColumn(bot, preferredStation.feet);
@@ -668,7 +673,6 @@ export async function serviceUnderwaterMiningBreath(bot, { station: preferredSta
     if (!station) station = plannedBreathingCoverage(bot, bot._underwaterMiningBreathPlan);
     if (!station) return { ok: false, reason: 'no-breathing-station' };
 
-    const startedAt = Date.now();
     bot._underwaterMiningBreathing = true;
     try {
         try { if (typeof bot.stopDigging === 'function') bot.stopDigging(); } catch (e) { /* best effort */ }
@@ -704,7 +708,11 @@ export async function serviceUnderwaterMiningBreath(bot, { station: preferredSta
         try { if (typeof bot.look === 'function') await bot.look(bot.entity.yaw || 0, -1.45, false); } catch (e) { /* best effort */ }
         try { bot.setControlState('forward', false); } catch (e) { /* best effort */ }
         try { bot.setControlState('jump', true); } catch (e) { /* best effort */ }
-        while (Date.now() - startedAt < maxMs) {
+        // Travel and vent digging have their own bounded timers. Start a fresh
+        // refill window only after the pocket is open, otherwise a legitimate
+        // slow vent can consume the entire refill timeout before ascent begins.
+        const refillStartedAt = Date.now();
+        while (Date.now() - refillStartedAt < maxMs) {
             const eyesClear = !isBotEyesInWater(bot);
             const oxygenFull = !Number.isFinite(bot.oxygenLevel) || bot.oxygenLevel >= 19;
             if (eyesClear && oxygenFull) {
@@ -718,6 +726,17 @@ export async function serviceUnderwaterMiningBreath(bot, { station: preferredSta
     } finally {
         bot._underwaterMiningBreathing = false;
         try { if (typeof bot.clearControlStates === 'function') bot.clearControlStates(); } catch (e) { /* best effort */ }
+        // Opening a dirt/clay ceiling may select a shovel. Restore the tool held
+        // for the original target so callers using safeDig(..., equip: false)
+        // neither fail canHarvest nor resume with the wrong mining speed.
+        try {
+            const current = bot.heldItem;
+            const sameTool = previousHeldItem && current
+                && previousHeldItem.type === current.type
+                && previousHeldItem.metadata === current.metadata;
+            if (previousHeldItem && !sameTool && typeof bot.equip === 'function')
+                await bot.equip(previousHeldItem, 'hand');
+        } catch (e) { /* best effort; caller still revalidates harvestability */ }
     }
 }
 

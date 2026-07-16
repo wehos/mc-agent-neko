@@ -1665,7 +1665,9 @@ export async function collectBlock(bot, blockType, num=1, exclude=null, veinFoll
      * @example
      * await skills.collectBlock(bot, "oak_log");
      **/
-    const endUnderwaterMiningTask = beginUnderwaterMiningTask(bot);
+    const underwaterMiningTarget = !!oreCollectSpec(blockType)
+        || collectOreBlockTypes(blockType).some(name => /(?:_ore$|ancient_debris$|obsidian$)/.test(String(name)));
+    const endUnderwaterMiningTask = beginUnderwaterMiningTask(bot, underwaterMiningTarget);
     try {
     if (num < 1) {
         log(bot, `Invalid number of blocks to collect: ${num}.`);
@@ -4382,13 +4384,17 @@ async function executePathfindingPhase(bot, goal, movements, stuckTimeoutMs, doo
                 reject(new Error('Interrupted'));
                 return;
             }
-            plannedBreathStation = nextPlannedBreathStation(bot, bot._underwaterMiningBreathPlan);
+            const underwaterMiningActive = isUnderwaterMiningTask(bot);
+            plannedBreathStation = underwaterMiningActive
+                ? nextPlannedBreathStation(bot, bot._underwaterMiningBreathPlan)
+                : null;
             if (plannedBreathStation) {
                 clearInterval(stuckCheckInterval);
                 reject(new Error('UnderwaterPlannedBreath'));
                 return;
             }
-            if (bot._underwaterMiningBreathBlocked) {
+            if (!underwaterMiningActive) bot._underwaterMiningBreathBlocked = false;
+            if (underwaterMiningActive && bot._underwaterMiningBreathBlocked) {
                 clearInterval(stuckCheckInterval);
                 reject(new Error('UnderwaterBreathNeeded'));
                 return;
@@ -4562,7 +4568,7 @@ export async function goToGoal(bot, goal) {
     ensureWaterAwareDigTime(bot);
     // A schedule is local to one navigation attempt. Rebuild it from the bot's
     // current cell while preserving the sticky ore target and serviced holes.
-    if (isUnderwaterMiningTask(bot)) clearUnderwaterMiningBreathPlan(bot);
+    clearUnderwaterMiningBreathPlan(bot);
     const nonDestructiveMovements = new pf.Movements(bot);
     const dontBreakBlocks = ['glass', 'glass_pane'];
     for (let block of dontBreakBlocks) {

@@ -229,6 +229,23 @@ test('a six-block gap between breathing holes makes the underwater route infeasi
     assert.equal(plan.reason, 'planned-breathing-hole-gap-too-large');
 });
 
+test('a partial route may not stop in sealed water without a breathing station', () => {
+    const cells = new Map();
+    const path = [];
+    for (let x = 0; x <= 3; x++) {
+        waterColumn(cells, x, 0);
+        cells.set(key(new Vec3(x, 19, 0)), block('stone', new Vec3(x, 19, 0), 'block'));
+        cells.set(key(new Vec3(x, 22, 0)), block('stone', new Vec3(x, 22, 0), 'block'));
+        cells.set(key(new Vec3(x, 23, 0)), block('stone', new Vec3(x, 23, 0), 'block'));
+        path.push({ x, y: 20, z: 0 });
+    }
+    const bot = makeBot({ cells, inWater: true, skill: 'mineOres', digTime: 800 });
+    const plan = planUnderwaterMiningBreathing(bot, path, new Vec3(20, 20, 0), { complete: false });
+
+    assert.equal(plan.ok, false);
+    assert.equal(plan.reason, 'water-segment-without-plannable-breathing-hole');
+});
+
 test('an interrupted mining route resumes forward on the same target and never turns back for a missed hole', () => {
     const cells = new Map();
     const path = [];
@@ -267,9 +284,11 @@ test('clearing a route schedule preserves the sticky target and serviced breathi
     bot._underwaterMiningRouteTarget = { position: target, key: key(target), updatedAt: Date.now() };
     bot._underwaterMiningServicedBreathStations = new Set(['0,20,0']);
     bot._underwaterMiningBreathPlan = { ok: true, targetKey: key(target), stations: [] };
+    bot._underwaterMiningBreathBlocked = true;
 
     assert.equal(clearUnderwaterMiningBreathPlan(bot), true);
     assert.equal(bot._underwaterMiningBreathPlan, null);
+    assert.equal(bot._underwaterMiningBreathBlocked, false);
     assert.deepEqual(resolveUnderwaterMiningRouteTarget(bot), target);
     assert.deepEqual([...bot._underwaterMiningServicedBreathStations], ['0,20,0']);
 });
@@ -366,8 +385,13 @@ test('breathing service opens one overhead hole, refills, and preserves the mini
     waterColumn(cells);
     cells.set(key(new Vec3(0, 19, 0)), block('stone', new Vec3(0, 19, 0), 'block'));
     const ventPos = new Vec3(0, 22, 0);
-    cells.set(key(ventPos), block('stone', ventPos, 'block'));
+    cells.set(key(ventPos), block('dirt', ventPos, 'block'));
     const bot = makeBot({ cells, inWater: true, skill: 'mineOres', oxygen: 16, digTime: 800 });
+    const targetTool = { name: 'iron_pickaxe', type: 257, metadata: 0 };
+    const ventTool = { name: 'iron_shovel', type: 256, metadata: 0 };
+    bot.heldItem = targetTool;
+    bot.tool.equipForBlock = async () => { bot.heldItem = ventTool; };
+    bot.equip = async (item) => { bot.heldItem = item; };
     const controls = [];
     bot.setControlState = (name, value) => {
         controls.push([name, value]);
@@ -387,7 +411,31 @@ test('breathing service opens one overhead hole, refills, and preserves the mini
     assert.equal(cells.get(key(ventPos)).name, 'air');
     assert.equal(bot._currentSkill, 'mineOres');
     assert.equal(bot._underwaterMiningBreathing, false);
+    assert.equal(bot.heldItem, targetTool, 'the original ore tool is restored after opening a dirt vent');
     assert.ok(controls.some(([name, value]) => name === 'jump' && value));
+});
+
+test('the oxygen refill window starts after a slow breathing vent is opened', async () => {
+    const cells = new Map();
+    waterColumn(cells);
+    cells.set(key(new Vec3(0, 19, 0)), block('stone', new Vec3(0, 19, 0), 'block'));
+    const ventPos = new Vec3(0, 22, 0);
+    cells.set(key(ventPos), block('stone', ventPos, 'block'));
+    const bot = makeBot({ cells, inWater: true, skill: 'mineOres', oxygen: 16, digTime: 800 });
+    bot.dig = async (target) => {
+        await new Promise(resolve => setTimeout(resolve, 120));
+        cells.set(key(target.position), block('air', target.position));
+    };
+    bot.setControlState = (name, value) => {
+        if (name === 'jump' && value && cells.get(key(ventPos))?.name === 'air') {
+            bot.entity.position = new Vec3(0.5, 21, 0.5);
+            bot.entity.isInWater = false;
+            bot.oxygenLevel = 20;
+        }
+    };
+
+    const result = await serviceUnderwaterMiningBreath(bot, { maxMs: 50 });
+    assert.equal(result.ok, true, 'vent dig time does not consume the separate refill window');
 });
 
 test('a planned breathing hole checks live oxygen after arrival and keeps a rise reserve', async () => {
@@ -499,6 +547,9 @@ test('water uses a slower progress window and active digging never counts as stu
 
 test('a direct collect scope is recognized as mining and is cleaned up', () => {
     const bot = makeBot();
+    const endNonMining = beginUnderwaterMiningTask(bot, false);
+    assert.equal(bot._underwaterMiningTaskDepth, undefined, 'logs/workstations do not enter underwater mining mode');
+    endNonMining();
     const end = beginUnderwaterMiningTask(bot);
     assert.equal(bot._underwaterMiningTaskDepth, 1);
     end();
