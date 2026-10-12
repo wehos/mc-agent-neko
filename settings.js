@@ -71,6 +71,8 @@ const settings = {
     "modern_viewer_lan_address": "", // optional local IPv4 address for subnet-only viewing
     "modern_viewer_lan_prefix": 24,
     "modern_viewer_max_sessions": 8, // shared across local/LAN pages and all viewpoints (1-16)
+    "modern_viewer_self_skin": "", // optional local 64x64 PNG for this bot's browser avatar
+    "modern_viewer_self_skin_model": "slim", // "slim" or "classic"
 
     "allow_insecure_coding": true, // allows newAction command and model can write/run code on your computer. enable at own risk
     "allow_vision": true, // allows vision model to interpret screenshots (enables !lookAtPlayer/!lookAtPosition's real vision path; vision_model falls back to chat_model when not explicitly set in profile)

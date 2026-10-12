@@ -1,11 +1,1627 @@
+// ../neko-mc-trial/mc-agent-viewer-upstream-20261013/src/agent/vision/viewer_self_skin.js
+import { readFile, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+async function loadViewerSelfSkin(filename, model = "slim") {
+  if (!filename) return null;
+  if (!["slim", "classic"].includes(model)) throw new Error("Invalid viewer self skin model");
+  if ((await stat(filename)).size > 128 * 1024) throw new Error("Viewer self skin exceeds 128 KiB");
+  const bytes = await readFile(filename);
+  if (bytes.length < 33 || bytes.length > 128 * 1024 || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || bytes.toString("ascii", 12, 16) !== "IHDR" || bytes.readUInt32BE(16) !== 64 || bytes.readUInt32BE(20) !== 64) throw new Error("Viewer self skin must be a 64\xD764 PNG");
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  return { bytes, entity: { skinUrl: `/head-texture/${hash}.png`, skinModel: model } };
+}
+
+// ../mc-visual-console/packages/modern-viewer/renderer-src/host/viewer-agent.mjs
+import { randomUUID } from "node:crypto";
+
+// ../mc-visual-console/packages/modern-viewer/renderer-src/src/modern-viewer/agent-visual-protocol.js
+var AGENT_VISUAL_COLORS = Object.freeze({
+  path: "#4ee6b1",
+  trail: "#63b8ff",
+  candidate: "#a6b7d4",
+  attack: "#ff697b",
+  gather: "#ffbe55",
+  interact: "#c59aff",
+  info: "#b7e7ff"
+});
+var AGENT_VISUAL_LIMITS = Object.freeze({
+  markers: 48,
+  vertices: 1024,
+  route: 128,
+  candidates: 4,
+  imageBytes: 512 * 1024,
+  sceneNodes: 64,
+  drawingBytes: 64 * 1024
+});
+var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var finite = (v, lo, hi) => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
+var visualText = (v, limit = 240) => typeof v === "string" ? v.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "").slice(0, limit) : "";
+var visualTtl = (v, fallback = 15e3, max = 12e4) => finite(v, 500, max) ? Math.round(v) : fallback;
+function visualSubject(v) {
+  return v && UUID.test(v.playerUuid ?? "") && /^[\w.]{1,32}$/.test(v.playerName ?? "") && Number.isSafeInteger(v.entityId) ? { playerUuid: v.playerUuid.toLowerCase(), playerName: v.playerName, entityId: v.entityId } : null;
+}
+var sameVisualSubject = (a, b) => !!a && !!b && a.playerUuid.toLowerCase() === b.playerUuid.toLowerCase() && a.entityId === b.entityId;
+function visualPoint(v, space = "world") {
+  if (space === "screen") return v && finite(v.x, 0, 1) && finite(v.y, 0, 1) ? { x: v.x, y: v.y } : null;
+  return v && finite(v.x, -3e7, 3e7) && finite(v.y, -4096, 4096) && finite(v.z, -3e7, 3e7) ? { x: v.x, y: v.y, z: v.z } : null;
+}
+function visualPoints(values, max = 128, space = "world") {
+  if (!Array.isArray(values) || !values.length) return [];
+  const count = Math.min(max, values.length), result = [];
+  for (let i = 0; i < count; i++) {
+    const p = visualPoint(values[Math.floor(i * (values.length - 1) / Math.max(1, count - 1))], space);
+    if (!p) return null;
+    result.push(p);
+  }
+  return result;
+}
+function normalizeVisualIntent(v) {
+  if (!v || typeof v !== "object") return null;
+  const status = ["planning", "acting", "waiting", "blocked", "done"].includes(v.status) ? v.status : "acting";
+  const goal = visualText(v.goal), step = visualText(v.step), summary = visualText(v.summary, 700);
+  if (!goal && !step && !summary) return null;
+  return { status, goal, step, summary, ...finite(v.progress, 0, 1) ? { progress: v.progress } : {}, ttlMs: visualTtl(v.ttlMs) };
+}
+function normalizeVisualRoute(v) {
+  if (!v || typeof v !== "object") return null;
+  const points = visualPoints(v.points ?? []);
+  if (!points) return null;
+  return {
+    points,
+    goal: visualPoint(v.goal),
+    status: ["planning", "moving", "reached", "blocked", "stopped"].includes(v.status) ? v.status : "moving",
+    source: v.source === "pathfinder" ? "pathfinder" : "agent",
+    ttlMs: visualTtl(v.ttlMs, 1e4, 3e4)
+  };
+}
+function normalizeVisualCandidates(v) {
+  if (!Array.isArray(v) || v.length > AGENT_VISUAL_LIMITS.candidates) return null;
+  const result = v.map((row, i) => {
+    const route = normalizeVisualRoute(row);
+    return route && route.points.length > 1 ? { id: visualText(row.id, 48) || `candidate-${i}`, label: visualText(row.label, 80), points: route.points } : null;
+  });
+  return result.every(Boolean) ? result : null;
+}
+var color = (v, fallback) => /^#[a-f0-9]{6}$/i.test(v ?? "") ? v : fallback;
+function normalizeVisualMarkers(values) {
+  if (!Array.isArray(values) || values.length > AGENT_VISUAL_LIMITS.markers) return null;
+  let vertices = 0;
+  const ids = /* @__PURE__ */ new Set(), result = [];
+  for (const v of values) {
+    if (!v || !["point", "line", "area", "label"].includes(v.kind)) return null;
+    const id = visualText(v.id, 48), space = v.space === "screen" ? "screen" : "world";
+    if (!id || ids.has(id)) return null;
+    ids.add(id);
+    const role = Object.hasOwn(AGENT_VISUAL_COLORS, v.role) ? v.role : "info";
+    const points = ["line", "area"].includes(v.kind) ? visualPoints(v.points, v.kind === "area" ? 64 : 128, space) : [visualPoint(v.position ?? v.points?.[0], space)];
+    if (!points || points.some((p) => !p) || points.length < (v.kind === "area" ? 3 : v.kind === "line" ? 2 : 1)) return null;
+    vertices += points.length;
+    if (vertices > AGENT_VISUAL_LIMITS.vertices) return null;
+    result.push({
+      id,
+      kind: v.kind,
+      space,
+      role,
+      points,
+      label: visualText(v.label, 100),
+      color: color(v.color, AGENT_VISUAL_COLORS[role]),
+      width: finite(v.width, 1, 10) ? v.width : 3,
+      radius: finite(v.radius, 2, 24) ? v.radius : 6,
+      dashed: v.dashed === true || role === "candidate",
+      flow: v.flow === true && v.kind === "line",
+      ttlMs: visualTtl(v.ttlMs, 1e4, 3e4)
+    });
+  }
+  return result;
+}
+function normalizeVisualPointer(v) {
+  const p = visualPoint(v, "screen");
+  return p ? { ...p, ttlMs: visualTtl(v.ttlMs, 1500, 3e3) } : null;
+}
+function normalizeVisualCamera(v) {
+  return v && finite(v.verticalFov, 5, 170) ? { verticalFov: v.verticalFov, ttlMs: visualTtl(v.ttlMs, 1e3, 3e3) } : null;
+}
+function normalizeVisualPresentation(v) {
+  if (!v || typeof v !== "object") return null;
+  const base = { id: visualText(v.id, 48), title: visualText(v.title, 100), caption: visualText(v.caption, 300), ttlMs: visualTtl(v.ttlMs, 3e4) };
+  if (!base.id) return null;
+  if (v.kind === "image") {
+    if (typeof v.src !== "string" || v.src.length > Math.ceil(AGENT_VISUAL_LIMITS.imageBytes * 4 / 3) + 100 || !/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(v.src)) return null;
+    const encoded = v.src.slice(v.src.indexOf(",") + 1);
+    if (encoded.length % 4 || encoded.length * 3 / 4 - (encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0) > AGENT_VISUAL_LIMITS.imageBytes) return null;
+    return { ...base, kind: "image", src: v.src };
+  }
+  if (v.kind === "card") {
+    const text = visualText(v.text, 1500);
+    if (!text) return null;
+    return { ...base, kind: "card", text };
+  }
+  if (v.kind !== "scene" || !finite(v.width, 64, 1920) || !finite(v.height, 64, 1080) || !Array.isArray(v.nodes) || v.nodes.length > AGENT_VISUAL_LIMITS.sceneNodes) return null;
+  const nodes = [];
+  for (const node of v.nodes) {
+    if (!node || !["rect", "circle", "line", "text"].includes(node.kind) || !finite(node.x, -4096, 4096) || !finite(node.y, -4096, 4096)) return null;
+    const row = { kind: node.kind, x: node.x, y: node.y, color: color(node.color, "#b7e7ff") };
+    if (node.kind === "rect") {
+      if (!finite(node.width, 1, 4096) || !finite(node.height, 1, 4096)) return null;
+      row.width = node.width;
+      row.height = node.height;
+    } else if (node.kind === "circle") {
+      if (!finite(node.radius, 1, 1024)) return null;
+      row.radius = node.radius;
+    } else if (node.kind === "line") {
+      if (!finite(node.x2, -4096, 4096) || !finite(node.y2, -4096, 4096)) return null;
+      row.x2 = node.x2;
+      row.y2 = node.y2;
+      row.width = finite(node.width, 1, 10) ? node.width : 2;
+    } else {
+      row.text = visualText(node.text, 180);
+      row.size = finite(node.size, 8, 96) ? node.size : 20;
+    }
+    if (node.motion) {
+      if (!finite(node.motion.dx, -4096, 4096) || !finite(node.motion.dy, -4096, 4096) || !finite(node.motion.periodMs, 500, 2e4)) return null;
+      row.motion = { dx: node.motion.dx, dy: node.motion.dy, periodMs: node.motion.periodMs };
+    }
+    nodes.push(row);
+  }
+  return { ...base, kind: "scene", width: v.width, height: v.height, background: color(v.background, "#142431"), nodes };
+}
+function normalizeAgentVisualUpdate(v) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return { ok: false, code: "AGENT_VISUAL_INVALID_UPDATE" };
+  const validators = {
+    intent: normalizeVisualIntent,
+    route: normalizeVisualRoute,
+    candidates: normalizeVisualCandidates,
+    markers: normalizeVisualMarkers,
+    presentation: normalizeVisualPresentation,
+    pointer: normalizeVisualPointer,
+    camera: normalizeVisualCamera
+  };
+  const value = {};
+  for (const [key, validate] of Object.entries(validators)) if (Object.hasOwn(v, key)) {
+    if (v[key] === null && !["candidates", "markers"].includes(key)) value[key] = null;
+    else {
+      value[key] = validate(v[key]);
+      if (value[key] === null) return { ok: false, code: `AGENT_VISUAL_INVALID_${key.toUpperCase()}` };
+    }
+  }
+  if (!Object.keys(value).length) return { ok: false, code: "AGENT_VISUAL_EMPTY_UPDATE" };
+  const drawing = { ...value };
+  delete drawing.presentation;
+  if (JSON.stringify(drawing).length > AGENT_VISUAL_LIMITS.drawingBytes) return { ok: false, code: "AGENT_VISUAL_DRAWING_BUDGET" };
+  return { ok: true, value };
+}
+
+// ../mc-visual-console/packages/modern-viewer/renderer-src/host/viewer-agent.mjs
+function createViewerAgentHub({ maximum = 64 } = {}) {
+  const records = /* @__PURE__ */ new Map();
+  return {
+    put(owner, record3) {
+      const key = record3.subject.playerUuid, old = records.get(key);
+      if (old && old.owner !== owner) return false;
+      if (!old && records.size >= maximum) return false;
+      records.set(key, { owner, record: record3 });
+      return true;
+    },
+    get(subject) {
+      const record3 = records.get(subject?.playerUuid)?.record;
+      return sameVisualSubject(subject, record3?.subject) ? record3 : null;
+    },
+    remove(owner) {
+      for (const [key, row] of records) if (row.owner === owner) records.delete(key);
+    },
+    get size() {
+      return records.size;
+    }
+  };
+}
+var viewerAgentHub = createViewerAgentHub();
+var publishers = /* @__PURE__ */ new WeakMap();
+var dispatchers = /* @__PURE__ */ new WeakMap();
+function observeSentPackets(client, callback) {
+  if (typeof client?.write !== "function") return () => {
+  };
+  let row = dispatchers.get(client);
+  if (!row) {
+    let write = function(...args) {
+      const result = original.apply(this, args);
+      for (const listener of listeners) {
+        try {
+          listener(...args);
+        } catch {
+        }
+      }
+      return result;
+    };
+    const original = client.write, listeners = /* @__PURE__ */ new Set();
+    row = { original, write, listeners };
+    dispatchers.set(client, row);
+    client.write = write;
+  }
+  row.listeners.add(callback);
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    row.listeners.delete(callback);
+    if (!row.listeners.size) {
+      if (client.write === row.write) client.write = row.original;
+      dispatchers.delete(client);
+    }
+  };
+}
+var ownSubject = (bot) => visualSubject({
+  playerUuid: bot.player?.uuid ?? bot.entity?.uuid ?? bot.uuid,
+  playerName: bot.username,
+  entityId: bot.entity?.id
+});
+var controls = ["forward", "back", "left", "right", "jump", "sprint", "sneak"];
+function createViewerAgentBridge(bot, {
+  hub = viewerAgentHub,
+  getViewerSession = () => null,
+  authorizePublish = null,
+  now = Date.now,
+  intervalMs = 100,
+  timers = true
+} = {}) {
+  if (publishers.has(bot)) throw Error("AGENT_VISUAL_HOST_ALREADY_ATTACHED");
+  const owner = {}, sockets = /* @__PURE__ */ new Map(), hooks = [];
+  let record3 = null, closed = false, ended = false, sequence = 0, operationId = 0;
+  const on = (event, handler) => {
+    bot.on(event, handler);
+    hooks.push([event, handler]);
+  };
+  const isBody = () => !ended && bot.entity && bot.game?.gameMode !== "spectator" && bot._client?.state === "play";
+  function refreshRecord() {
+    const subject = isBody() ? ownSubject(bot) : null;
+    if (!subject) {
+      hub.remove(owner);
+      record3 = null;
+      return null;
+    }
+    if (!sameVisualSubject(record3?.subject, subject)) {
+      hub.remove(owner);
+      record3 = {
+        subject,
+        epoch: randomUUID(),
+        dimension: bot.game?.dimension ?? null,
+        intent: null,
+        route: null,
+        candidates: [],
+        markers: [],
+        pointer: null,
+        camera: null,
+        presentation: null,
+        presentationRevision: 0,
+        trail: [],
+        operations: [],
+        input: {}
+      };
+      if (!hub.put(owner, record3)) {
+        record3 = null;
+        return null;
+      }
+    }
+    return record3;
+  }
+  function viewerSubject() {
+    const session = getViewerSession();
+    if (session) return session.attached ? visualSubject(session) : null;
+    return isBody() ? ownSubject(bot) : null;
+  }
+  function expire(r, time) {
+    for (const key of ["intent", "route", "pointer", "camera", "presentation"]) if (r[key]?.until <= time) r[key] = null;
+    r.candidates = r.candidates.filter((v) => v.until > time);
+    r.markers = r.markers.filter((v) => v.until > time);
+    r.operations = r.operations.filter((v) => v.until > time);
+    r.trail = r.trail.filter((v) => time - v.at <= 3e4);
+  }
+  function publish(update) {
+    if (closed) return { ok: false, code: "AGENT_VISUAL_HOST_CLOSED" };
+    const parsed = normalizeAgentVisualUpdate(update);
+    if (!parsed.ok) return parsed;
+    const r = refreshRecord();
+    if (!r) return { ok: false, code: "AGENT_VISUAL_ACTION_PLAYER_UNAVAILABLE" };
+    const time = now();
+    for (const [key, value] of Object.entries(parsed.value)) {
+      if (key === "candidates" || key === "markers") r[key] = value.map((v) => ({ ...v, until: time + (v.ttlMs ?? 1e4) }));
+      else r[key] = value ? { ...value, until: time + value.ttlMs } : null;
+      if (key === "presentation") r.presentationRevision++;
+    }
+    return { ok: true, code: "AGENT_VISUAL_ACCEPTED", subject: { ...r.subject }, accepted: Object.keys(parsed.value) };
+  }
+  publishers.set(bot, publish);
+  on("viewer:agent", (update, acknowledge) => {
+    const result = publish(update);
+    if (typeof acknowledge === "function") acknowledge(result);
+  });
+  on("spawn", () => {
+    ended = false;
+    hub.remove(owner);
+    record3 = null;
+    refreshRecord();
+    flush(true);
+  });
+  on("respawn", () => {
+    hub.remove(owner);
+    record3 = null;
+    flush(true);
+  });
+  on("end", () => {
+    ended = true;
+    hub.remove(owner);
+    record3 = null;
+    flush(true);
+  });
+  on("path_update", (result) => {
+    const r = refreshRecord();
+    if (!r) return;
+    const status = ["noPath", "timeout"].includes(result?.status) ? "blocked" : result?.status === "partial" ? "planning" : "moving";
+    const route = normalizeVisualRoute({ points: result?.path ?? [], goal: bot.pathfinder?.goal, status, source: "pathfinder" });
+    if (route) r.route = { ...route, until: now() + route.ttlMs };
+  });
+  for (const [event, status] of [["path_reset", "planning"], ["path_stop", "stopped"], ["goal_reached", "reached"]]) on(event, () => {
+    const r = refreshRecord();
+    if (!r?.route) return;
+    r.route = { ...r.route, status, points: [], until: now() + 3e3 };
+  });
+  const stopPackets = observeSentPackets(bot._client, (name2, data) => {
+    const r = refreshRecord();
+    if (!r || !data) return;
+    let kind, target = null, detail = "";
+    if (name2 === "use_entity") {
+      kind = data.mouse === 1 ? "attack" : "interact";
+      target = visualPoint(bot.entities?.[data.target]?.position);
+      detail = `\u5B9E\u4F53 ${data.target}`;
+    } else if (name2 === "block_dig" && [0, 1, 2].includes(data.status)) {
+      kind = "gather";
+      target = visualPoint(data.location);
+      detail = data.status === 0 ? "\u5F00\u59CB\u91C7\u96C6" : data.status === 1 ? "\u53D6\u6D88\u91C7\u96C6" : "\u63D0\u4EA4\u91C7\u96C6";
+    } else if (name2 === "block_place" || name2 === "use_item") {
+      kind = "interact";
+      target = visualPoint(data.location);
+      detail = "\u4F7F\u7528\u7269\u54C1 / \u65B9\u5757";
+    } else if (name2 === "window_click") {
+      kind = "inventory";
+      detail = `\u69FD\u4F4D ${Number.isSafeInteger(data.slot) ? data.slot : "?"} \xB7 ${data.mouseButton === 1 ? "\u53F3\u952E" : "\u5DE6\u952E"}`;
+    } else return;
+    r.operations.push({
+      id: ++operationId,
+      kind,
+      button: kind === "attack" || kind === "gather" ? "left" : kind === "inventory" && data.mouseButton !== 1 ? "left" : "right",
+      detail,
+      target,
+      from: visualPoint(bot.entity.position),
+      until: now() + 1800
+    });
+    r.operations = r.operations.slice(-6);
+  });
+  function sample() {
+    const r = refreshRecord();
+    if (!r) return;
+    const time = now(), position2 = visualPoint(bot.entity.position);
+    if (r.dimension !== (bot.game?.dimension ?? null)) {
+      r.dimension = bot.game?.dimension ?? null;
+      r.epoch = randomUUID();
+      r.trail = [];
+      r.intent = null;
+      r.route = null;
+      r.candidates = [];
+      r.markers = [];
+      r.operations = [];
+      r.pointer = null;
+      r.camera = null;
+      r.presentation = null;
+    }
+    const previous = r.trail.at(-1);
+    if (position2 && (!previous || Math.hypot(previous.x - position2.x, previous.y - position2.y, previous.z - position2.z) >= 0.3)) {
+      if (previous && Math.hypot(previous.x - position2.x, previous.y - position2.y, previous.z - position2.z) > 16) r.trail = [];
+      r.trail.push({ ...position2, at: time });
+      r.trail = r.trail.slice(-64);
+    }
+    if (r.route?.source === "pathfinder" && r.route.status === "moving" && bot.pathfinder?.isMoving?.() === true) r.route.until = time + 1e4;
+    r.input = {
+      controls: controls.filter((key) => bot.controlState?.[key] === true),
+      position: position2,
+      yaw: Number.isFinite(bot.entity.yaw) ? bot.entity.yaw : null,
+      pitch: Number.isFinite(bot.entity.pitch) ? bot.entity.pitch : null
+    };
+    expire(r, time);
+  }
+  const remaining = (value, time) => value ? { ...value, remainingMs: Math.max(0, value.until - time), until: void 0 } : null;
+  function flush(force = false) {
+    if (closed) return;
+    sample();
+    const subject = viewerSubject(), r = subject ? hub.get(subject) : null, time = now();
+    if (r) expire(r, time);
+    const presentation = r?.presentation, presentationKey = presentation ? `${r.epoch}:${r.presentationRevision}` : "";
+    const frame = {
+      schemaVersion: 1,
+      subject,
+      available: !!r,
+      reason: r ? null : subject ? "AGENT_VISUAL_SOURCE_UNAVAILABLE" : "AGENT_VISUAL_SUBJECT_UNATTACHED",
+      epoch: r?.epoch ?? null,
+      ttlMs: 3500
+    };
+    if (r) Object.assign(frame, {
+      intent: remaining(r.intent, time),
+      route: remaining(r.route, time),
+      camera: remaining(r.camera, time),
+      candidates: r.candidates.map((v) => remaining(v, time)),
+      markers: r.markers.map((v) => remaining(v, time)),
+      trail: r.trail.map(({ at, ...p }) => p),
+      input: { ...r.input, operations: r.operations.map((v) => remaining(v, time)), pointer: remaining(r.pointer, time) },
+      presentation: presentation ? {
+        id: presentation.id,
+        revision: r.presentationRevision,
+        kind: presentation.kind,
+        title: presentation.title,
+        caption: presentation.caption,
+        remainingMs: Math.max(0, presentation.until - time)
+      } : null
+    });
+    const signature = JSON.stringify(frame);
+    for (const [socket, sent] of sockets) {
+      if (socket.connected === false) continue;
+      if (force || sent.signature !== signature || time - sent.at >= 1e3) {
+        socket.emit("agentVisualization", { ...frame, sequence: ++sequence });
+        sent.signature = signature;
+        sent.at = time;
+      }
+      if (presentationKey && sent.presentation !== presentationKey) socket.emit("agentPresentation", {
+        schemaVersion: 1,
+        subject,
+        epoch: r.epoch,
+        revision: r.presentationRevision,
+        presentation: remaining(presentation, time)
+      });
+      sent.presentation = presentationKey;
+    }
+  }
+  const timer = timers ? setInterval(flush, Math.max(100, intervalMs)) : null;
+  timer?.unref?.();
+  refreshRecord();
+  return {
+    publish,
+    flush,
+    subscribeSocket(socket) {
+      if (closed) throw Error("AGENT_VISUAL_HOST_CLOSED");
+      let lastPublish = -Infinity;
+      const incoming = async (update, acknowledge) => {
+        if (typeof acknowledge !== "function") return;
+        const finish = (result) => {
+          if (sockets.has(socket) && !closed) acknowledge(result);
+        };
+        if (now() - lastPublish < 200) {
+          finish({ ok: false, code: "AGENT_VISUAL_RATE_LIMIT" });
+          return;
+        }
+        lastPublish = now();
+        let authorized = false;
+        try {
+          authorized = typeof authorizePublish === "function" && await authorizePublish({ socket, subject: ownSubject(bot) }) === true;
+        } catch {
+        }
+        if (!authorized) {
+          finish({ ok: false, code: "AGENT_VISUAL_PUBLISH_FORBIDDEN" });
+          return;
+        }
+        if (closed || !sockets.has(socket)) return;
+        finish(publish(update));
+      };
+      const off = () => {
+        sockets.delete(socket);
+        socket.off?.("disconnect", off);
+        socket.off?.("agentVisualUpdate", incoming);
+      };
+      sockets.set(socket, { signature: "", at: -Infinity, presentation: "", off });
+      socket.on("disconnect", off);
+      socket.on("agentVisualUpdate", incoming);
+      flush(true);
+      return off;
+    },
+    dispose() {
+      if (closed) return;
+      closed = true;
+      if (timer) clearInterval(timer);
+      stopPackets();
+      for (const [event, handler] of hooks) bot.off(event, handler);
+      publishers.delete(bot);
+      hub.remove(owner);
+      record3 = null;
+      for (const [socket, row] of sockets) {
+        socket.emit("agentVisualization", { schemaVersion: 1, subject: null, available: false, reason: "AGENT_VISUAL_HOST_CLOSED", sequence: ++sequence, ttlMs: 3500 });
+        row.off();
+      }
+      sockets.clear();
+    }
+  };
+}
+
+// ../mc-visual-console/packages/modern-viewer/renderer-src/host/viewer-observer.mjs
+var CHANNELS = /* @__PURE__ */ new Set(["mcviewer:state", "corti:viewer_state"]);
+var UUID2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function createViewerObserverBridge(bot, { now = Date.now, staleMs = 12e3, serializeWindow } = {}) {
+  const subscribers = /* @__PURE__ */ new Set();
+  let nativeWindow = null;
+  const windowChanged = () => {
+    if (nativeWindow && current?.viewerSession?.attached && current.viewerSession.windowOpen && serializeWindow)
+      emit("containerState", serializeWindow(nativeWindow));
+  };
+  function openWindow(window) {
+    nativeWindow?.off?.("updateSlot", windowChanged);
+    nativeWindow = window;
+    nativeWindow?.on?.("updateSlot", windowChanged);
+    windowChanged();
+  }
+  let current = null, pending = null, cameraId = null, at = 0, closed = false;
+  const key = (state) => state?.viewerSession?.attached ? [
+    state.viewerSession.playerUuid,
+    state.viewerSession.entityId,
+    state.viewerSession.worldUuid
+  ].join(":") : "";
+  const emit = (event, value) => {
+    for (const socket of subscribers) socket.emit(event, value);
+  };
+  function reset(reason) {
+    openWindow(null);
+    current = null;
+    pending = null;
+    at = 0;
+    emit("viewerSession", { mode: "observer", attached: false, reason });
+    emit("containerState", null);
+    emit("skillsState", { schemaVersion: 1, mana: null, skills: [], abilities: [] });
+    emit("observerState", { attached: false, reason });
+  }
+  function accept(state) {
+    const session = state.viewerSession;
+    if (session.mode === "observer" && session.attached && session.entityId !== cameraId) {
+      pending = state;
+      return;
+    }
+    if (key(current) !== key(state)) emit("containerState", null);
+    current = state;
+    pending = null;
+    at = now();
+    emit("viewerSession", session);
+    if (!session.attached || !session.windowOpen) emit("containerState", null);
+    emit("skillsState", state);
+    emit("observerState", { ...session, vitals: state.vitals ?? null });
+    windowChanged();
+  }
+  function payload(packet) {
+    if (!CHANNELS.has(packet.channel) || !Buffer.isBuffer(packet.data) || packet.data.length > 16384) return;
+    let state;
+    try {
+      state = JSON.parse(packet.data.toString("utf8"));
+    } catch {
+      return;
+    }
+    const session = state?.viewerSession;
+    if (state?.schemaVersion !== 1 || !session || !UUID2.test(session.recipientUuid ?? "") || session.recipientUuid.toLowerCase() !== String(bot.player?.uuid ?? bot.entity?.uuid ?? bot.uuid).toLowerCase() || !["self", "observer"].includes(session.mode) || typeof session.attached !== "boolean") return;
+    if (session.attached && (!UUID2.test(session.playerUuid ?? "") || !UUID2.test(session.worldUuid ?? "") || !Number.isSafeInteger(session.entityId) || !/^[A-Za-z0-9_.]{1,32}$/.test(session.playerName ?? "") || typeof session.windowOpen !== "boolean")) return;
+    accept(state);
+  }
+  function camera(packet) {
+    const previous = cameraId, candidate = pending;
+    cameraId = packet.cameraId;
+    if (current?.viewerSession?.mode === "observer" && current.viewerSession.entityId !== cameraId) reset("camera_changed");
+    if (previous !== cameraId && candidate?.viewerSession?.entityId === cameraId) accept(candidate);
+  }
+  const respawn = () => {
+    cameraId = null;
+    reset("respawn");
+  };
+  const closeWindow = () => {
+    openWindow(null);
+    emit("containerState", null);
+  };
+  const outgoing = (name2) => {
+    if (name2 === "close_window") closeWindow();
+  };
+  const register = () => {
+    if (bot._client?.state === "play") bot._client.write("custom_payload", {
+      channel: "minecraft:register",
+      data: Buffer.from("mcviewer:state")
+    });
+  };
+  bot._client.on("custom_payload", payload);
+  bot._client.on("camera", camera);
+  bot._client.on("respawn", respawn);
+  bot._client.on("close_window", closeWindow);
+  bot._client.on("writePacket", outgoing);
+  bot.on("windowClose", closeWindow);
+  bot.on("spawn", register);
+  if (serializeWindow) bot.on("windowOpen", openWindow);
+  const onEnd = () => reset("disconnected");
+  bot.on("end", onEnd);
+  register();
+  const timer = setInterval(() => {
+    if (current && now() - at > staleMs) reset("state_stale");
+  }, 1e3);
+  timer.unref?.();
+  return {
+    subscribeSocket(socket) {
+      if (closed) throw Error("observer_bridge_closed");
+      subscribers.add(socket);
+      if (current) {
+        socket.emit("viewerSession", current.viewerSession);
+        socket.emit("skillsState", current);
+        socket.emit("observerState", { ...current.viewerSession, vitals: current.vitals ?? null });
+        if (nativeWindow && current.viewerSession.attached && current.viewerSession.windowOpen && serializeWindow)
+          socket.emit("containerState", serializeWindow(nativeWindow));
+      }
+      const off = () => {
+        subscribers.delete(socket);
+        socket.off?.("disconnect", off);
+      };
+      socket.on("disconnect", off);
+      return off;
+    },
+    snapshot: () => current,
+    dispose() {
+      if (closed) return;
+      closed = true;
+      clearInterval(timer);
+      reset("disposed");
+      subscribers.clear();
+      bot._client.off("custom_payload", payload);
+      bot._client.off("camera", camera);
+      bot._client.off("respawn", respawn);
+      bot._client.off("close_window", closeWindow);
+      bot._client.off("writePacket", outgoing);
+      bot.off("windowClose", closeWindow);
+      bot.off("spawn", register);
+      bot.off("end", onEnd);
+      bot.off("windowOpen", openWindow);
+    }
+  };
+}
+
+// ../mc-visual-console/packages/modern-viewer/renderer-src/host/viewer-ysm-assets.mjs
+import { createHash as createHash2, randomBytes } from "node:crypto";
+import { gunzipSync } from "node:zlib";
+var YSM_ASSET_CHANNEL = "mcagent:ysm_asset";
+var MAX_BYTES = 2 * 1024 * 1024;
+var MAX_RAW = 8 * 1024 * 1024;
+var sha = (bytes) => createHash2("sha256").update(bytes).digest("hex");
+function decodeYsmBundle(compressed, hash) {
+  if (compressed.length > MAX_BYTES || sha(compressed) !== hash) throw Error("YSM_ASSET_HASH_MISMATCH");
+  const raw = gunzipSync(compressed, { maxOutputLength: MAX_RAW });
+  const bundle = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+  if (bundle.schemaVersion !== 1 || bundle.ysmVersion !== "2.4.1" || bundle.format !== "ysm-bedrock-original" || typeof bundle.modelId !== "string" || bundle.modelId.length > 96 || !bundle.files || Object.keys(bundle.files).length > 32) throw Error("YSM_ASSET_FORMAT_UNSUPPORTED");
+  let total = 0;
+  for (const [path5, file] of Object.entries(bundle.files)) {
+    if (path5.startsWith("/") || path5.includes("\\") || path5.includes(":") || path5.split("/").includes("..") || typeof file.base64 !== "string") throw Error("YSM_ASSET_PATH_INVALID");
+    const bytes = Buffer.from(file.base64, "base64");
+    total += bytes.length;
+    if (total > MAX_RAW || bytes.length !== file.bytes || sha(bytes) !== file.sha256) throw Error("YSM_SOURCE_HASH_MISMATCH");
+  }
+  if (!bundle.files[bundle.model] || !bundle.files[bundle.animation] || !bundle.files["ysm.json"] || Object.values(bundle.textures ?? {}).some((path5) => !bundle.files[path5]) || Object.values(bundle.animations ?? {}).some((path5) => typeof path5 !== "string" || !bundle.files[path5]) || !Array.isArray(bundle.controllers ?? []) || (bundle.controllers?.length ?? 0) > 8 || (bundle.controllers ?? []).some((path5) => typeof path5 !== "string" || !bundle.files[path5])) throw Error("YSM_SOURCE_MISSING");
+  return { ...bundle, assetSha256: hash };
+}
+function createYsmAssetReceiver(bot, { onAsset = () => {
+}, onError = () => {
+} } = {}) {
+  const cache = /* @__PURE__ */ new Map(), queue = /* @__PURE__ */ new Map(), attempts = /* @__PURE__ */ new Map();
+  let active = null, disposed = false, bytes = 0, lastStarted = 0;
+  const start = () => {
+    if (disposed || active || !queue.size || bot._client.state !== "play" || Date.now() - lastStarted < 600) return;
+    const [hash, row] = queue.entries().next().value;
+    queue.delete(hash);
+    const requestId = randomBytes(16).toString("hex");
+    active = { row, hash, requestId, parts: [], size: 0, count: null, started: Date.now() };
+    lastStarted = Date.now();
+    attempts.set(hash, (attempts.get(hash) ?? 0) + 1);
+    bot._client.write("custom_payload", { channel: YSM_ASSET_CHANNEL, data: Buffer.from(JSON.stringify({ type: "get", modelId: row.modelId, sha256: hash, requestId })) });
+  };
+  const fail = (reason) => {
+    const prior = active;
+    active = null;
+    if (prior) onError(prior.row, reason);
+    start();
+  };
+  const payload = (packet) => {
+    if (packet.channel !== YSM_ASSET_CHANNEL || !active || packet.data.length > 18e3) return;
+    try {
+      const p = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(packet.data));
+      if (p.schemaVersion !== 1 || p.type !== "chunk" || p.requestId !== active.requestId || p.sha256 !== active.hash) return;
+      if (!Number.isInteger(p.count) || p.count < 1 || p.count > 171 || !Number.isInteger(p.index) || p.index < 0 || p.index >= p.count || !Number.isInteger(p.bytes) || p.bytes < 1 || p.bytes > MAX_BYTES || typeof p.data !== "string" || p.data.length > 16384 || active.count !== null && (active.count !== p.count || active.bytes !== p.bytes)) throw Error("YSM_TRANSFER_INVALID");
+      active.count = p.count;
+      active.bytes = p.bytes;
+      if (active.parts[p.index]) return;
+      const part = Buffer.from(p.data, "base64");
+      if (part.length !== Math.min(12288, p.bytes - p.index * 12288)) throw Error("YSM_TRANSFER_SIZE_INVALID");
+      active.parts[p.index] = part;
+      active.size += part.length;
+      if (active.parts.filter(Boolean).length === p.count) {
+        if (active.size !== p.bytes) throw Error("YSM_TRANSFER_SIZE_INVALID");
+        const bundle = decodeYsmBundle(Buffer.concat(active.parts), active.hash);
+        if (bundle.modelId !== active.row.modelId) throw Error("YSM_MODEL_BINDING_MISMATCH");
+        const size = Buffer.byteLength(JSON.stringify(bundle));
+        while (cache.size >= 32 || bytes + size > 32 * 1024 * 1024) {
+          const key = cache.keys().next().value;
+          bytes -= cache.get(key).size;
+          cache.delete(key);
+        }
+        const hash = active.hash;
+        cache.set(hash, { bundle, size });
+        bytes += size;
+        active = null;
+        onAsset(bundle);
+        setTimeout(start, 600).unref?.();
+      }
+    } catch (error) {
+      fail(error.message?.startsWith("YSM_") ? error.message : "YSM_TRANSFER_INVALID");
+    }
+  };
+  const timer = setInterval(() => {
+    if (active && Date.now() - active.started > 2e4) fail("YSM_TRANSFER_TIMEOUT");
+    else start();
+  }, 1e3);
+  timer.unref?.();
+  bot._client.on("custom_payload", payload);
+  return { get: (hash) => cache.get(hash)?.bundle, request(row) {
+    if (disposed || row.webAvailable !== true || cache.has(row.assetSha256) || active?.hash === row.assetSha256 || (attempts.get(row.assetSha256) ?? 0) >= 3 || queue.size >= 40) return;
+    queue.set(row.assetSha256, row);
+    start();
+  }, reset() {
+    active = null;
+    queue.clear();
+    attempts.clear();
+  }, dispose() {
+    disposed = true;
+    clearInterval(timer);
+    bot._client.off("custom_payload", payload);
+    cache.clear();
+    queue.clear();
+    active = null;
+  } };
+}
+
+// ../mc-visual-console/packages/modern-viewer/renderer-src/host/viewer-ysm-motion.mjs
+var angle = (value) => Math.atan2(Math.sin(value), Math.cos(value));
+var compactItem = (item) => {
+  if (item === null) return null;
+  if (!item || !/^(?:[a-z0-9_.-]+:)?[a-z0-9_./-]{1,128}$/.test(item.name ?? "")) return null;
+  const result = { name: item.name, count: Math.min(99, Math.max(1, item.count ?? 1)) };
+  for (const key of ["type", "metadata", "enchants", "components", "nbt"]) {
+    if (item[key] === void 0) continue;
+    try {
+      const value = JSON.stringify(item[key], (_k, v) => typeof v === "bigint" ? v.toString() : v);
+      if (value.length <= 8192) result[key] = JSON.parse(value);
+      else result.visualDataUnavailable = true;
+    } catch {
+      result.visualDataUnavailable = true;
+    }
+  }
+  return result;
+};
+function createViewerYsmMotion(bot, { binding, emit, now = Date.now } = {}) {
+  const states = /* @__PURE__ */ new Map(), ground = /* @__PURE__ */ new Map();
+  let sequence = 0;
+  const listeners = [];
+  const on = (target, name2, fn) => {
+    target.on(name2, fn);
+    listeners.push(() => target.off(name2, fn));
+  };
+  function actual(row) {
+    const own = (bot._client.uuid ?? bot.player?.uuid)?.toLowerCase() === row.playerUuid;
+    const entity = own ? bot.entity : bot.entities?.[row.entityId];
+    return entity && entity.id === row.entityId && (own || entity.uuid?.toLowerCase() === row.playerUuid) ? entity : null;
+  }
+  function sample(row) {
+    if (!row?.available) return null;
+    const entity = actual(row);
+    if (!entity) return null;
+    const position2 = entity.position;
+    if (!position2 || ![position2.x, position2.y, position2.z].every(Number.isFinite)) return null;
+    let prior = states.get(row.playerUuid);
+    const time = now();
+    if (!prior || prior.entityId !== entity.id || prior.epoch !== row.epoch) {
+      prior = { entityId: entity.id, epoch: row.epoch, position: { ...position2 }, at: time, movedAt: time, speed: 0, sentAt: 0 };
+      states.set(row.playerUuid, prior);
+    }
+    const distance2 = Math.hypot(position2.x - prior.position.x, position2.z - prior.position.z), elapsed = (time - prior.at) / 1e3;
+    if (distance2 > 0 && elapsed > 0) {
+      prior.speed = distance2 < 4 && elapsed < 2 ? Math.min(30, distance2 / elapsed) : 0;
+      prior.movedAt = time;
+    } else if (time - prior.movedAt > 250) prior.speed = 0;
+    prior.position = { x: position2.x, y: position2.y, z: position2.z };
+    prior.at = time;
+    const metadata = entity.metadata ?? [], flags = Number(metadata[0]) || 0, living = Number(metadata[8]) || 0;
+    const yaw = entity.yaw ?? 0, headYaw = entity.headYaw ?? yaw, pitch = entity.pitch ?? 0;
+    const mainArm = metadata[18] === 0 ? "left" : "right";
+    const equipment = entity === bot.entity ? [bot.heldItem ?? entity.equipment?.[0] ?? null, bot.inventory?.slots?.[45] ?? entity.equipment?.[1] ?? null] : entity.equipment?.slice(0, 2);
+    const result = {
+      schemaVersion: 1,
+      source: "same_connection_java_protocol",
+      epoch: row.epoch,
+      playerUuid: row.playerUuid,
+      entityId: entity.id,
+      sequence: ++sequence,
+      horizontalSpeed: prior.speed,
+      bodyYaw: yaw,
+      headYawDegrees: angle(headYaw - yaw) * 180 / Math.PI,
+      headPitchDegrees: -pitch * 180 / Math.PI,
+      crouching: !!(flags & 2),
+      sprinting: !!(flags & 8),
+      usingItem: !!(living & 1),
+      activeHand: living & 2 ? "offhand" : "mainhand",
+      mainArm,
+      pose: typeof metadata[6] === "number" ? ["standing", "fall_flying", "sleeping", "swimming", "spin_attack", "crouching", "long_jumping", "dying"][metadata[6]] : metadata[6],
+      equipment: Array.isArray(equipment) ? equipment.map(compactItem) : null
+    };
+    const knownGround = entity === bot.entity ? entity.onGround : ground.get(entity.id);
+    if (typeof knownGround === "boolean") result.onGround = knownGround;
+    const flying = entity === bot.entity ? bot.game?.gameMode === "creative" && bot.entity?.isFlying : void 0;
+    if (typeof flying === "boolean") result.flying = flying;
+    if (prior.swing && time - prior.swing.at < 2500) result.swing = { hand: prior.swing.hand, sequence: prior.swing.sequence, ageSeconds: (time - prior.swing.at) / 1e3 };
+    if (prior.hurt && time - prior.hurt.at < 700) result.hurt = { sequence: prior.hurt.sequence, ageSeconds: (time - prior.hurt.at) / 1e3 };
+    return result;
+  }
+  function send(row, force = false) {
+    const prior = states.get(row?.playerUuid);
+    if (!force && prior && now() - prior.sentAt < 100) return;
+    const value = sample(row);
+    if (!value) return;
+    const current = states.get(row.playerUuid), signature = JSON.stringify({ ...value, sequence: 0, swing: value.swing ? { ...value.swing, ageSeconds: 0 } : null, hurt: value.hurt ? { ...value.hurt, ageSeconds: 0 } : null });
+    if (!force && current.signature === signature && now() - current.sentAt < 1e3) return;
+    current.signature = signature;
+    current.sentAt = now();
+    emit("appearanceMotion", value);
+  }
+  const update = (entity) => {
+    const row = binding(entity?.id);
+    if (row) send(row);
+  };
+  for (const event of ["entityMoved", "entityEquip", "entityUpdate", "entitySpawn"]) on(bot, event, update);
+  on(bot, "move", () => update(bot.entity));
+  on(bot, "heldItemChanged", () => update(bot.entity));
+  on(bot._client, "packet", (packet, meta) => {
+    if (["rel_entity_move", "entity_move_look", "entity_teleport", "entity_position_sync"].includes(meta?.name) && typeof packet.onGround === "boolean") {
+      if (ground.size < 128 || ground.has(packet.entityId)) ground.set(packet.entityId, packet.onGround);
+    }
+  });
+  on(bot._client, "animation", (packet) => {
+    if (![0, 3].includes(packet.animation)) return;
+    const row = binding(packet.entityId);
+    if (!row || !sample(row)) return;
+    states.get(row.playerUuid).swing = { at: now(), hand: packet.animation === 3 ? "offhand" : "mainhand", sequence: ++sequence };
+    send(row, true);
+  });
+  let serializer = null, outgoing = null;
+  const attachOutgoing = () => {
+    if (serializer && outgoing) serializer.off("data", outgoing);
+    serializer = bot._client.serializer;
+    outgoing = null;
+    if (bot.version !== "1.20.6" || !serializer?.createPacketBuffer || !serializer.proto?.parsePacketBuffer) return;
+    try {
+      const armBytes = serializer.createPacketBuffer({ name: "arm_animation", params: { hand: 0 } }), prefix = armBytes.subarray(0, armBytes.length - 1);
+      outgoing = (bytes) => {
+        if (bot._client.state !== "play" || bytes.length !== armBytes.length || !bytes.subarray(0, prefix.length).equals(prefix)) return;
+        try {
+          const decoded = serializer.proto.parsePacketBuffer(serializer.mainType, bytes).data;
+          if (decoded.name !== "arm_animation" || ![0, 1].includes(decoded.params.hand)) return;
+          const row = binding(bot.entity?.id);
+          if (!row || !sample(row)) return;
+          states.get(row.playerUuid).swing = { at: now(), hand: decoded.params.hand ? "offhand" : "mainhand", sequence: ++sequence };
+          send(row, true);
+        } catch {
+        }
+      };
+      serializer.on("data", outgoing);
+    } catch {
+    }
+  };
+  on(bot._client, "state", attachOutgoing);
+  attachOutgoing();
+  on(bot, "entityHurt", (entity) => {
+    const row = binding(entity?.id);
+    if (!row || !sample(row)) return;
+    states.get(row.playerUuid).hurt = { at: now(), sequence: ++sequence };
+    send(row, true);
+  });
+  on(bot, "entityGone", (entity) => {
+    ground.delete(entity?.id);
+    for (const [uuid, row] of states) if (row.entityId === entity?.id) states.delete(uuid);
+  });
+  const timer = setInterval(() => {
+    for (const [uuid, prior] of states) {
+      const row = binding(prior.entityId);
+      if (!row || row.playerUuid !== uuid || row.epoch !== prior.epoch) states.delete(uuid);
+      else send(row);
+    }
+  }, 100);
+  timer.unref?.();
+  return {
+    send: (row) => send(row, true),
+    snapshot: (rows) => rows.map(sample).filter(Boolean),
+    reset() {
+      states.clear();
+      ground.clear();
+    },
+    dispose() {
+      clearInterval(timer);
+      if (serializer && outgoing) serializer.off("data", outgoing);
+      for (const off of listeners) off();
+      states.clear();
+      ground.clear();
+    }
+  };
+}
+
+// ../mc-visual-console/packages/modern-viewer/renderer-src/host/viewer-appearance.mjs
+var UUID3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var APPEARANCE_CHANNEL = "mcagent:appearance";
+var PAPER_YSM_JAR_SHA256 = "ec51cfae84d219a45fac5098a31bfe980bcb7c2d8b413e8fffbd05a411a85680";
+function parseAppearancePacket(packet) {
+  if (packet?.channel !== APPEARANCE_CHANNEL || !(packet.data instanceof Uint8Array) || packet.data.length > 2048) return null;
+  let value;
+  try {
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(packet.data));
+  } catch {
+    return null;
+  }
+  if (!value || value.schemaVersion !== 1 || value.source !== "freesia_worker" || !UUID3.test(value.epoch ?? "") || !UUID3.test(value.playerUuid ?? "")) return null;
+  const base = { schemaVersion: 1, source: value.source, epoch: value.epoch, playerUuid: value.playerUuid.toLowerCase(), type: value.type };
+  if (value.type === "remove") return base;
+  if (value.type !== "state" || typeof value.available !== "boolean" || value.ysmVersion !== "2.4.1" || value.protocolVersion !== "2.4.0" || value.jarSha256 !== PAPER_YSM_JAR_SHA256) return null;
+  Object.assign(base, { available: value.available, ysmVersion: value.ysmVersion, protocolVersion: value.protocolVersion, jarSha256: value.jarSha256 });
+  if (typeof value.workerConnected === "boolean") base.workerConnected = value.workerConnected;
+  if (["confirmed", "unsupported", "awaiting_model_state", "worker_offline", "awaiting_initial_poll"].includes(value.stateStatus)) base.stateStatus = value.stateStatus;
+  if (typeof value.message === "string" && value.message.length <= 160 && !/[\u0000-\u001f\u007f]/.test(value.message)) base.message = value.message;
+  if (!value.available) return { ...base, reason: value.reason === "YSM_WORKER_STATE_UNSUPPORTED" ? "YSM_WORKER_STATE_UNSUPPORTED" : "YSM_WORKER_STATE_UNAVAILABLE" };
+  if (!Number.isSafeInteger(value.entityId) || value.entityId < 0 || value.entityId > 2147483647 || typeof value.mandatory !== "boolean" || !/^[\p{L}\p{N}_./-]{1,96}$/u.test(value.modelId ?? "") || value.modelId.includes("..") || value.modelId.startsWith("/") || !/^[\p{L}\p{N}_.-]{1,96}$/u.test(value.texture ?? "") || typeof value.animation !== "string" || value.animation.length > 96) return null;
+  const web = value.webAvailable === true && /^[a-f0-9]{64}$/.test(value.assetSha256 ?? "") && Number.isInteger(value.assetBytes) && value.assetBytes > 0 && value.assetBytes <= 2 * 1024 * 1024;
+  return {
+    ...base,
+    entityId: value.entityId,
+    modelId: value.modelId,
+    texture: value.texture,
+    mandatory: value.mandatory,
+    animation: value.animation,
+    webAvailable: web,
+    ...web ? { assetSha256: value.assetSha256, assetBytes: value.assetBytes } : { webReason: typeof value.webReason === "string" ? value.webReason.slice(0, 96) : "YSM_SOURCE_NOT_REGISTERED" }
+  };
+}
+function createViewerAppearanceBridge(bot, { now = Date.now } = {}) {
+  const records = /* @__PURE__ */ new Map(), listeners = /* @__PURE__ */ new Set();
+  let epoch = null, disposed = false;
+  const errors = /* @__PURE__ */ new Map();
+  const assets = createYsmAssetReceiver(bot, { onAsset: (bundle) => {
+    emit("appearanceAsset", bundle);
+    for (const row of records.values()) if (row.assetSha256 === bundle.assetSha256) {
+      const bound = binding(row);
+      if (bound) emit("appearanceState", bound);
+    }
+  }, onError: (row, reason) => {
+    errors.set(row.assetSha256, reason);
+    const bound = binding(row);
+    if (bound) emit("appearanceState", bound);
+  } });
+  const emit = (name2, row) => {
+    for (const fn of listeners) try {
+      fn(name2, row);
+    } catch {
+      listeners.delete(fn);
+    }
+  };
+  const motion = createViewerYsmMotion(bot, { now, emit, binding: (id) => {
+    for (const row of records.values()) if (row.entityId === id && now() - row.receivedAt <= 15e3) return binding(row);
+    return null;
+  } });
+  const reset = () => {
+    records.clear();
+    errors.clear();
+    assets.reset();
+    motion.reset();
+    epoch = null;
+    emit("appearanceReset", { schemaVersion: 1 });
+  };
+  function binding(row) {
+    const ownUuid = bot._client.uuid ?? bot.player?.uuid;
+    const own = ownUuid?.toLowerCase() === row.playerUuid;
+    const entity = own ? bot.entity : bot.entities?.[row.entityId];
+    const actualUuid = own ? ownUuid : entity?.uuid;
+    if (!entity || typeof actualUuid !== "string" || actualUuid.toLowerCase() !== row.playerUuid || row.available && entity.id !== row.entityId) return null;
+    const { receivedAt, ...publicRow } = row;
+    const asset = assets.get(row.assetSha256), renderAvailable = row.available === true && asset?.modelId === row.modelId && Object.hasOwn(asset.textures, row.texture);
+    return { ...publicRow, entityId: entity.id, renderAvailable, renderReason: renderAvailable ? null : errors.get(row.assetSha256) ?? row.webReason ?? row.reason ?? "YSM_ASSET_PENDING", completeEntityParityVerified: false };
+  }
+  function payload(packet) {
+    const row = parseAppearancePacket(packet);
+    if (!row) return;
+    if (epoch !== row.epoch) {
+      reset();
+      epoch = row.epoch;
+    }
+    if (row.type === "remove") {
+      records.delete(row.playerUuid);
+      emit("appearanceRemove", { schemaVersion: 1, playerUuid: row.playerUuid });
+      return;
+    }
+    if (records.size >= 40 && !records.has(row.playerUuid)) return;
+    if (!row.available) row.entityId = records.get(row.playerUuid)?.entityId;
+    records.set(row.playerUuid, { ...row, receivedAt: now() });
+    const bound = binding(row);
+    if (bound) {
+      const bundle = assets.get(row.assetSha256);
+      if (bundle) emit("appearanceAsset", bundle);
+      emit("appearanceState", bound);
+      motion.send(bound);
+      if (listeners.size) assets.request(row);
+    }
+  }
+  const tracked = (entity) => {
+    const uuid = entity?.uuid?.toLowerCase();
+    const row = uuid && records.get(uuid);
+    const bound = row && binding(row);
+    if (bound) emit("appearanceState", bound);
+  };
+  const gone = (entity) => {
+    if (entity?.uuid) emit("appearanceRemove", { schemaVersion: 1, playerUuid: entity.uuid.toLowerCase() });
+  };
+  bot._client.on("custom_payload", payload);
+  bot.on("entitySpawn", tracked);
+  bot.on("entityGone", gone);
+  bot.on("login", reset);
+  bot.on("respawn", reset);
+  bot.on("end", reset);
+  const expire = () => {
+    for (const [uuid, row] of records) if (now() - row.receivedAt > 15e3) {
+      records.delete(uuid);
+      emit("appearanceRemove", { schemaVersion: 1, playerUuid: uuid });
+    }
+  };
+  const timer = setInterval(expire, 1e3);
+  timer.unref?.();
+  const snapshot = () => {
+    expire();
+    return Array.from(records.values()).map(binding).filter(Boolean);
+  };
+  return { snapshot, subscribeSocket(socket) {
+    if (disposed) throw Error("viewer_appearance_disposed");
+    const fn = (name2, row) => socket.emit(name2, row);
+    listeners.add(fn);
+    socket.emit("appearanceReset", { schemaVersion: 1 });
+    for (const row of snapshot()) {
+      const bundle = assets.get(row.assetSha256);
+      if (bundle) socket.emit("appearanceAsset", bundle);
+      socket.emit("appearanceState", row);
+      motion.send(row);
+      assets.request(row);
+    }
+    return () => listeners.delete(fn);
+  }, dispose() {
+    if (disposed) return;
+    disposed = true;
+    assets.dispose();
+    motion.dispose();
+    clearInterval(timer);
+    bot._client.off("custom_payload", payload);
+    bot.off("entitySpawn", tracked);
+    bot.off("entityGone", gone);
+    bot.off("login", reset);
+    bot.off("respawn", reset);
+    bot.off("end", reset);
+    records.clear();
+    listeners.clear();
+  } };
+}
+
+// ../mc-visual-console/packages/modern-viewer/renderer-src/host/text-display.mjs
+var integer = (n, min, max) => Number.isInteger(n) && n >= min && n <= max;
+var vector = (v, fallback) => v === void 0 ? fallback : v && ["x", "y", "z"].every((k) => Number.isFinite(v[k]) && Math.abs(v[k]) <= 64) ? { x: v.x, y: v.y, z: v.z } : null;
+var colors = Object.freeze({ black: "#000000", dark_blue: "#0000aa", dark_green: "#00aa00", dark_aqua: "#00aaaa", dark_red: "#aa0000", dark_purple: "#aa00aa", gold: "#ffaa00", gray: "#aaaaaa", dark_gray: "#555555", blue: "#5555ff", green: "#55ff55", aqua: "#55ffff", red: "#ff5555", light_purple: "#ff55ff", yellow: "#ffff55", white: "#ffffff" });
+function textDisplayRuns(input) {
+  let nodes = 0, length = 0;
+  function nbt(value, depth = 0) {
+    if (++nodes > 512 || depth > 16) throw Error("component_budget");
+    if (!value || typeof value !== "object") return value;
+    if (value.type === "compound") return Object.fromEntries(Object.entries(value.value).map(([k, v]) => [k, nbt(v, depth + 1)]));
+    if (value.type === "list") return value.value.value.map((v) => nbt({ type: value.value.type, value: v }, depth + 1));
+    if (["string", "byte", "int", "float", "double"].includes(value.type)) return value.value;
+    if (Array.isArray(value)) return value.map((v) => nbt(v, depth + 1));
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, nbt(v, depth + 1)]));
+  }
+  const runs = [];
+  function visit(value, color2 = "#ffffff", depth = 0) {
+    if (++nodes > 512 || depth > 16) throw Error("component_budget");
+    if (typeof value === "string") {
+      length += [...value].length;
+      if (length > 512) throw Error("text_budget");
+      if (value) runs.push({ text: value, color: color2 });
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const v of value) visit(v, color2, depth + 1);
+      return;
+    }
+    if (!value || typeof value !== "object") throw Error("component_type");
+    if (["translate", "selector", "score", "nbt", "keybind"].some((k) => Object.hasOwn(value, k)) || value.obfuscated || value.bold || value.italic || value.underlined || value.strikethrough || value.font && value.font !== "minecraft:default") throw Error("component_unsupported");
+    if (value.color !== void 0) {
+      color2 = colors[value.color] ?? (/^#[0-9a-f]{6}$/i.test(value.color) ? value.color : null);
+      if (!color2) throw Error("component_color");
+    }
+    if (Object.hasOwn(value, "text")) visit(value.text, color2, depth + 1);
+    if (value.extra !== void 0) {
+      if (!Array.isArray(value.extra)) throw Error("component_extra");
+      for (const v of value.extra) visit(v, color2, depth + 1);
+    }
+  }
+  try {
+    let value = nbt(input);
+    if (typeof value === "string" && value.length > 16384) return null;
+    if (typeof value === "string" && /^[\[{]/.test(value.trim())) {
+      try {
+        value = JSON.parse(value);
+      } catch {
+      }
+    }
+    visit(value);
+    if (runs.some((r) => /[\u0000-\u0008\u000b-\u001f\u007f\u202a-\u202e\u2066-\u2069]/u.test(r.text))) return null;
+    return runs;
+  } catch {
+    return null;
+  }
+}
+function textDisplayMetadataKeys(registry) {
+  const keys = registry?.entitiesByName?.text_display?.metadataKeys;
+  return Array.isArray(keys) && keys[23] === "text" && keys[27] === "style_flags" ? keys : null;
+}
+function decodeTextDisplay(entity, registry) {
+  const keys = textDisplayMetadataKeys(registry);
+  if (!keys || entity?.name !== "text_display" || !integer(entity.id, 0, 2147483647)) return null;
+  const position2 = entity.position;
+  if (!position2 || !["x", "y", "z"].every((k) => Number.isFinite(position2[k]))) return null;
+  const values = entity.metadata ?? {};
+  const get = (key, fallback) => values[keys.indexOf(key)] ?? fallback;
+  const runs = textDisplayRuns(get("text", ""));
+  const translation = vector(get("translation"), { x: 0, y: 0, z: 0 }), scale = vector(get("scale"), { x: 1, y: 1, z: 1 });
+  const identity = (v) => !v || v.x === 0 && v.y === 0 && v.z === 0 && (v.w === 1 || v.w === -1);
+  const flags = get("style_flags", 0), billboard = get("billboard_render_constraints", 0);
+  const lineWidth = get("line_width", 200), opacity = get("text_opacity", -1), background = get("background_color", 1073741824);
+  const viewRange = get("view_range", 1), teleportTicks = get("pos_rot_interpolation_duration", 0);
+  const reason = !runs ? "text-component" : !identity(get("left_rotation")) || !identity(get("right_rotation")) ? "rotation" : get("transformation_interpolation_duration", 0) !== 0 ? "transform-interpolation" : flags & ~31 ? "style-flags" : null;
+  if (!integer(flags, -128, 255) || !integer(billboard, 0, 3) || !integer(lineWidth, 1, 2048) || !integer(opacity, -128, 255) || !integer(background, -2147483648, 4294967295) || !translation || !scale || !Number.isFinite(viewRange) || viewRange < 0 || viewRange > 4 || !integer(teleportTicks, 0, 59)) return null;
+  return {
+    schemaVersion: 1,
+    id: entity.id,
+    uuid: entity.uuid,
+    name: "text_display",
+    position: { ...position2 },
+    yaw: Number.isFinite(entity.yaw) ? entity.yaw : Math.PI,
+    pitch: Number.isFinite(entity.pitch) ? entity.pitch : 0,
+    runs: runs ?? [],
+    translation,
+    scale,
+    billboard,
+    flags: flags & 255,
+    lineWidth,
+    opacity: opacity & 255,
+    background: background >>> 0,
+    viewRange,
+    teleportTicks,
+    invisible: (get("shared_flags", 0) & 32) !== 0,
+    unavailable: reason
+  };
+}
+
+// ../mc-visual-console/packages/modern-viewer/renderer-src/host/viewer-content.mjs
+var finite2 = (n) => typeof n === "number" && Number.isFinite(n);
+var integer2 = (n, min, max) => Number.isInteger(n) && n >= min && n <= max;
+var pos = (p) => p && [p.x, p.y, p.z].every(finite2) ? { x: p.x, y: p.y, z: p.z } : null;
+var rgb = (p) => Array.isArray(p) && p.length === 3 && p.every((n) => finite2(n) && n >= 0 && n <= 1) ? p : null;
+var VIEWER_CONTENT_LIMITS = Object.freeze({ maps: 64, frames: 128, textDisplays: 64, particleBatch: 256, flushMs: 50, range: 80, longDistanceRange: 512 });
+function transitionFieldOrder(protocol) {
+  const fields = protocol?.types?.Particle?.[1]?.find((f) => f.name === "data")?.type?.[1]?.fields?.dust_color_transition?.[1];
+  return Array.isArray(fields) ? fields.map((f) => f.name).join(",") : null;
+}
+function viewerParticlePacket(packet, { version = "1.20.6", protocol } = {}) {
+  const position2 = pos(packet);
+  const name2 = packet?.particle?.type;
+  if (!position2 || typeof name2 !== "string" || !/^[a-z_]{1,64}$/.test(name2) || !integer2(packet.amount, 0, 4096) || ![packet.offsetX, packet.offsetY, packet.offsetZ, packet.velocityOffset].every(finite2)) return null;
+  const data = packet.particle.data;
+  const result = {
+    kind: "particle",
+    name: name2,
+    position: position2,
+    longDistance: packet.longDistance === true,
+    spread: {
+      x: Math.max(-8, Math.min(8, packet.offsetX)),
+      y: Math.max(-8, Math.min(8, packet.offsetY)),
+      z: Math.max(-8, Math.min(8, packet.offsetZ))
+    },
+    count: Math.min(48, packet.amount),
+    speed: Math.max(0, Math.min(4, packet.velocityOffset)),
+    exact: packet.amount === 1 && packet.offsetX === 0 && packet.offsetY === 0 && packet.offsetZ === 0 && packet.velocityOffset === 0
+  };
+  if (name2 === "dust" || name2 === "dust_color_transition") {
+    if (!data) return null;
+    let color2, colorEnd, scale;
+    if (name2 === "dust") {
+      color2 = [data.red, data.green, data.blue];
+      scale = data.scale;
+    } else {
+      color2 = [data.fromRed, data.fromGreen, data.fromBlue];
+      const order = transitionFieldOrder(protocol);
+      if (version === "1.20.6" && order === "fromRed,fromGreen,fromBlue,scale,toRed,toGreen,toBlue") {
+        colorEnd = [data.scale, data.toRed, data.toGreen];
+        scale = data.toBlue;
+      } else if (order === "fromRed,fromGreen,fromBlue,toRed,toGreen,toBlue,scale") {
+        colorEnd = [data.toRed, data.toGreen, data.toBlue];
+        scale = data.scale;
+      } else return null;
+    }
+    if (!rgb(color2) || colorEnd && !rgb(colorEnd) || !finite2(scale) || scale < 0.01 || scale > 4) return null;
+    result.color = color2;
+    result.size = scale;
+    if (colorEnd) result.colorEnd = colorEnd;
+  }
+  return result;
+}
+function viewerMapPacket(packet) {
+  if (!packet || !integer2(packet.itemDamage, 0, 2147483647) || !integer2(packet.scale, 0, 4) || !integer2(packet.columns, 0, 128)) return null;
+  const row = { schemaVersion: 1, mapId: packet.itemDamage, scale: packet.scale, locked: packet.locked === true };
+  if (Array.isArray(packet.icons)) row.icons = packet.icons.slice(0, 256).filter((i) => integer2(i.type, 0, 255) && integer2(i.x, -128, 127) && integer2(i.z, -128, 127) && integer2(i.direction, 0, 255)).map((i) => ({ type: i.type, x: i.x, z: i.z, direction: i.direction }));
+  if (packet.columns === 0) return { ...row, columns: 0 };
+  if (!integer2(packet.rows, 1, 128) || !integer2(packet.x, 0, 127) || !integer2(packet.y, 0, 127) || packet.x + packet.columns > 128 || packet.y + packet.rows > 128 || !(packet.data instanceof Uint8Array) || packet.data.length !== packet.columns * packet.rows) return null;
+  return { ...row, x: packet.x, y: packet.y, columns: packet.columns, rows: packet.rows, data: Uint8Array.from(packet.data) };
+}
+function frameMapId(slot, registry) {
+  if (!slot || registry?.items?.[slot.itemId ?? slot.type]?.name !== "filled_map") return null;
+  const component = slot.components?.find((c) => c.type === "map_id" || c.type === "minecraft:map_id");
+  return integer2(component?.data, 0, 2147483647) ? component.data : null;
+}
+var normals = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
+function frameTileCenter(tile, normal) {
+  if (!pos(tile) || ![tile.x, tile.y, tile.z].every(Number.isInteger)) return null;
+  return Object.fromEntries(["x", "y", "z"].map((axis, i) => [axis, tile[axis] + 0.5 - normal[i] * 0.46875]));
+}
+function nativeFrameCenter(position2, normal) {
+  const tileCenter = frameTileCenter(position2, normal);
+  if (tileCenter) return tileCenter;
+  return pos(position2) && ["x", "y", "z"].every((axis, i) => Number.isInteger(position2[axis] + normal[i] * 0.46875 - 0.5)) ? pos(position2) : null;
+}
+function cachedMapFrame(entity, registry) {
+  if (!["item_frame", "glow_item_frame"].includes(entity?.name) || !integer2(entity.id, 0, 2147483647) || !pos(entity.position) || !finite2(entity.yaw) || !finite2(entity.pitch)) return null;
+  let normal;
+  if (Math.abs(Math.abs(entity.pitch) - Math.PI / 2) < 1e-5) normal = [0, Math.sign(entity.pitch), 0];
+  else if (Math.abs(entity.pitch) < 1e-5) {
+    const notchYaw = Math.PI - entity.yaw, quarter = Math.round(notchYaw / (Math.PI / 2));
+    if (Math.abs(notchYaw - quarter * Math.PI / 2) > 1e-5) return null;
+    normal = [[0, 0, 1], [-1, 0, 0], [0, 0, -1], [1, 0, 0]][(quarter % 4 + 4) % 4];
+  } else return null;
+  const rotation = entity.metadata?.[9] ?? 0;
+  if (!integer2(rotation, 0, 7)) return null;
+  const position2 = nativeFrameCenter(entity.position, normal);
+  if (!position2) return null;
+  return {
+    id: entity.id,
+    uuid: entity.uuid,
+    name: entity.name,
+    position: position2,
+    normal,
+    rotation,
+    mapId: frameMapId(entity.metadata?.[8], registry),
+    invisible: ((entity.metadata?.[0] ?? 0) & 32) !== 0
+  };
+}
+function createViewerContentBridge(bot, { now = Date.now, schedule = setInterval, unschedule = clearInterval } = {}) {
+  if (bot.version !== "1.20.6") throw Error("viewer_content_requires_1.20.6");
+  const protocol = bot._client, maps = /* @__PURE__ */ new Map(), frames = /* @__PURE__ */ new Map(), textEntities = /* @__PURE__ */ new Map(), textDisplays = /* @__PURE__ */ new Map(), listeners = /* @__PURE__ */ new Set(), hooks = [], socketDrainers = /* @__PURE__ */ new Set(), socketDisposers = /* @__PURE__ */ new Set();
+  let epoch = 0, queue = [], disposed = false;
+  const diagnostics = { particles: 0, droppedParticles: 0, mapPatches: 0, rejected: 0, subscriberErrors: 0, cachedFrames: 0, cachedTextDisplays: 0, rejectedTextDisplays: 0 };
+  const nearby = (p, range = VIEWER_CONTENT_LIMITS.range) => !bot.entity?.position || Math.hypot(p.x - bot.entity.position.x, p.y - bot.entity.position.y, p.z - bot.entity.position.z) <= range;
+  const deliver = (publish, name2, value) => {
+    try {
+      publish(name2, value);
+    } catch {
+      diagnostics.subscriberErrors++;
+    }
+  };
+  const send = (name2, value) => {
+    for (const publish of listeners) deliver(publish, name2, { ...value, epoch });
+  };
+  const on = (emitter, name2, fn) => {
+    emitter.on(name2, fn);
+    hooks.push(() => emitter.off(name2, fn));
+  };
+  function textSnapshot(display) {
+    return { ...display, position: { ...display.position }, translation: { ...display.translation }, scale: { ...display.scale }, runs: display.runs.map((r) => ({ ...r })) };
+  }
+  function publishText(entity) {
+    const display = decodeTextDisplay(entity, bot.registry);
+    if (!display) {
+      diagnostics.rejectedTextDisplays++;
+      if (textDisplays.delete(entity.id)) send("textDisplay", { schemaVersion: 1, id: entity.id, delete: true });
+      return;
+    }
+    textDisplays.set(display.id, display);
+    send("textDisplay", textSnapshot(display));
+  }
+  function removeText(id) {
+    textEntities.delete(id);
+    if (textDisplays.delete(id)) send("textDisplay", { schemaVersion: 1, id, delete: true });
+  }
+  on(protocol, "spawn_entity", (packet) => {
+    removeText(packet.entityId);
+    if (bot.registry?.entities?.[packet.type]?.name !== "text_display" || !textDisplayMetadataKeys(bot.registry) || !integer2(packet.entityId, 0, 2147483647) || !pos(packet)) return;
+    if (textEntities.size >= VIEWER_CONTENT_LIMITS.textDisplays) {
+      diagnostics.rejectedTextDisplays++;
+      return;
+    }
+    const entity = {
+      id: packet.entityId,
+      uuid: packet.objectUUID,
+      name: "text_display",
+      position: pos(packet),
+      metadata: {},
+      yaw: Math.PI - (packet.yaw ?? 0) * Math.PI / 128,
+      pitch: -(packet.pitch ?? 0) * Math.PI / 128
+    };
+    textEntities.set(entity.id, entity);
+    publishText(entity);
+  });
+  on(protocol, "entity_metadata", (packet) => {
+    const entity = textEntities.get(packet.entityId);
+    if (!entity || !Array.isArray(packet.metadata)) return;
+    for (const field of packet.metadata.slice(0, 64)) if (integer2(field.key, 0, 27)) entity.metadata[field.key] = field.value;
+    publishText(entity);
+  });
+  on(protocol, "entity_teleport", (packet) => {
+    const entity = textEntities.get(packet.entityId), position2 = pos(packet);
+    if (!entity || !position2) return;
+    const yaw = integer2(packet.yaw, -128, 255) ? Math.PI - packet.yaw * Math.PI / 128 : entity.yaw;
+    const pitch = integer2(packet.pitch, -128, 255) ? -packet.pitch * Math.PI / 128 : entity.pitch;
+    if (["x", "y", "z"].every((k) => entity.position[k] === position2[k]) && entity.yaw === yaw && entity.pitch === pitch) return;
+    entity.position = position2;
+    entity.yaw = yaw;
+    entity.pitch = pitch;
+    publishText(entity);
+  });
+  on(bot, "entityMoved", (moved) => {
+    const entity = textEntities.get(moved.id);
+    if (!entity || !pos(moved.position)) return;
+    if (JSON.stringify(entity.position) === JSON.stringify(pos(moved.position)) && entity.yaw === moved.yaw && entity.pitch === moved.pitch) return;
+    entity.position = pos(moved.position);
+    entity.yaw = moved.yaw;
+    entity.pitch = moved.pitch;
+    publishText(entity);
+  });
+  on(protocol, "entity_destroy", (packet) => {
+    for (const id of packet.entityIds ?? []) removeText(id);
+  });
+  on(protocol, "world_particles", (packet) => {
+    const event = viewerParticlePacket(packet, { version: bot.version, protocol: bot.registry?.protocol });
+    if (!event) {
+      diagnostics.rejected++;
+      return;
+    }
+    if (!nearby(event.position, event.longDistance ? VIEWER_CONTENT_LIMITS.longDistanceRange : VIEWER_CONTENT_LIMITS.range) || !listeners.size) return;
+    if (queue.length >= VIEWER_CONTENT_LIMITS.particleBatch) {
+      diagnostics.droppedParticles++;
+      return;
+    }
+    queue.push(event);
+    diagnostics.particles++;
+  });
+  function flush() {
+    if (disposed) return;
+    for (const drain of socketDrainers) try {
+      drain();
+    } catch {
+      diagnostics.subscriberErrors++;
+    }
+    if (!queue.length) return;
+    const events = queue;
+    queue = [];
+    send("particleBatch", { schemaVersion: 1, atMs: now(), events });
+  }
+  const timer = schedule(flush, VIEWER_CONTENT_LIMITS.flushMs);
+  timer?.unref?.();
+  on(protocol, "map", (packet) => {
+    const patch = viewerMapPacket(packet);
+    if (!patch) {
+      diagnostics.rejected++;
+      return;
+    }
+    let map = maps.get(patch.mapId);
+    if (!map) {
+      if (maps.size >= VIEWER_CONTENT_LIMITS.maps) maps.delete(maps.keys().next().value);
+      map = { mapId: patch.mapId, scale: patch.scale, locked: patch.locked, data: new Uint8Array(16384), coverage: new Uint8Array(2048), icons: [] };
+      maps.set(patch.mapId, map);
+    }
+    map.scale = patch.scale;
+    map.locked = patch.locked;
+    if (patch.icons) map.icons = patch.icons;
+    for (let y = 0; y < (patch.rows ?? 0); y++) for (let x = 0; x < patch.columns; x++) {
+      const index = (patch.y + y) * 128 + patch.x + x;
+      map.data[index] = patch.data[y * patch.columns + x];
+      map.coverage[index >> 3] |= 1 << (index & 7);
+    }
+    diagnostics.mapPatches++;
+    send("mapPixels", patch);
+  });
+  on(protocol, "spawn_entity", (packet) => {
+    const name2 = bot.registry?.entities?.[packet.type]?.name;
+    if (!["item_frame", "glow_item_frame"].includes(name2) || !integer2(packet.entityId, 0, 2147483647) || !pos(packet) || !integer2(packet.objectData, 0, 5)) return;
+    if (frames.size >= VIEWER_CONTENT_LIMITS.frames) return;
+    const normal = normals[packet.objectData], position2 = frameTileCenter(packet, normal);
+    if (!position2) return;
+    frames.set(packet.entityId, { id: packet.entityId, uuid: packet.objectUUID, name: name2, position: position2, normal, rotation: 0, mapId: null, invisible: false });
+  });
+  on(protocol, "entity_metadata", (packet) => {
+    const frame = frames.get(packet.entityId);
+    if (!frame || !Array.isArray(packet.metadata)) return;
+    for (const field of packet.metadata) {
+      if (field.key === 0 && integer2(field.value, -128, 255)) frame.invisible = (field.value & 32) !== 0;
+      if (field.key === 8) frame.mapId = frameMapId(field.value, bot.registry);
+      if (field.key === 9 && integer2(field.value, 0, 7)) frame.rotation = field.value;
+    }
+    if (nearby(frame.position)) send("mapFrame", { schemaVersion: 1, ...frame });
+  });
+  on(protocol, "entity_teleport", (packet) => {
+    const frame = frames.get(packet.entityId);
+    if (!frame) return;
+    const position2 = nativeFrameCenter(packet, frame.normal);
+    if (!position2) {
+      diagnostics.rejected++;
+      return;
+    }
+    frame.position = position2;
+    if (nearby(position2)) send("mapFrame", { schemaVersion: 1, ...frame });
+  });
+  on(protocol, "entity_destroy", (packet) => {
+    for (const id of packet.entityIds ?? []) if (frames.delete(id)) send("mapFrame", { schemaVersion: 1, id, delete: true });
+  });
+  for (const entity of Object.values(bot.entities ?? {})) {
+    if (frames.size >= VIEWER_CONTENT_LIMITS.frames) break;
+    const frame = cachedMapFrame(entity, bot.registry);
+    if (frame) {
+      frames.set(frame.id, frame);
+      diagnostics.cachedFrames++;
+    }
+  }
+  for (const entity of Object.values(bot.entities ?? {})) {
+    if (textEntities.size >= VIEWER_CONTENT_LIMITS.textDisplays) break;
+    if (entity.name !== "text_display") continue;
+    const display = decodeTextDisplay(entity, bot.registry);
+    if (!display) continue;
+    textEntities.set(entity.id, { ...entity, position: pos(entity.position), metadata: { ...entity.metadata } });
+    textDisplays.set(entity.id, display);
+    diagnostics.cachedTextDisplays++;
+  }
+  function reset() {
+    epoch++;
+    maps.clear();
+    frames.clear();
+    textEntities.clear();
+    textDisplays.clear();
+    queue = [];
+    send("contentReset", { schemaVersion: 1 });
+  }
+  on(bot, "respawn", reset);
+  on(bot, "end", reset);
+  function snapshot(map) {
+    return { schemaVersion: 1, epoch, ...map, data: Uint8Array.from(map.data), coverage: Uint8Array.from(map.coverage), snapshot: true, x: 0, y: 0, columns: 128, rows: 128 };
+  }
+  function subscribe(publish) {
+    if (disposed) throw Error("viewer_content_disposed");
+    if (typeof publish !== "function") throw TypeError("viewer_content_publish_required");
+    listeners.add(publish);
+    deliver(publish, "contentReset", { schemaVersion: 1, epoch });
+    for (const map of maps.values()) deliver(publish, "mapPixels", snapshot(map));
+    for (const frame of frames.values()) if (nearby(frame.position)) deliver(publish, "mapFrame", { schemaVersion: 1, epoch, ...frame });
+    for (const display of textDisplays.values()) deliver(publish, "textDisplay", { ...textSnapshot(display), epoch });
+    return () => listeners.delete(publish);
+  }
+  function subscribeSocket(socket, { writable = () => socket.connected && socket.conn?.transport?.writable !== false && (socket.conn?.writeBuffer?.length ?? 0) <= 4 } = {}) {
+    let closed = false, resetPending = false;
+    const mapIds = /* @__PURE__ */ new Set(), frameIds = /* @__PURE__ */ new Set(), textIds = /* @__PURE__ */ new Set();
+    const fullReplay = () => {
+      resetPending = true;
+      mapIds.clear();
+      frameIds.clear();
+      textIds.clear();
+      for (const id of maps.keys()) mapIds.add(id);
+      for (const id of frames.keys()) frameIds.add(id);
+      for (const id of textDisplays.keys()) textIds.add(id);
+    };
+    function drain() {
+      if (closed || !writable()) return;
+      if (resetPending) {
+        socket.emit("contentReset", { schemaVersion: 1, epoch });
+        resetPending = false;
+      }
+      let sent = 0;
+      for (const id of textIds) {
+        if (!writable() || sent >= 4) break;
+        textIds.delete(id);
+        const display = textDisplays.get(id);
+        socket.emit("textDisplay", display ? { ...textSnapshot(display), epoch } : { schemaVersion: 1, epoch, id, delete: true });
+        sent++;
+      }
+      for (const id of mapIds) {
+        if (!writable() || sent >= 4) break;
+        mapIds.delete(id);
+        const map = maps.get(id);
+        if (map) {
+          socket.emit("mapPixels", snapshot(map));
+          sent++;
+        }
+      }
+      for (const id of frameIds) {
+        if (!writable() || sent >= 4) break;
+        frameIds.delete(id);
+        const frame = frames.get(id);
+        socket.emit("mapFrame", frame ? { schemaVersion: 1, epoch, ...frame } : { schemaVersion: 1, epoch, id, delete: true });
+        sent++;
+      }
+    }
+    const off = subscribe((name2, value) => {
+      if (name2 === "contentReset") {
+        resetPending = true;
+        mapIds.clear();
+        frameIds.clear();
+        textIds.clear();
+      }
+      if (writable() && !resetPending && !mapIds.size && !frameIds.size && !textIds.size) {
+        socket.emit(name2, value);
+        return;
+      }
+      if (name2 === "mapPixels") mapIds.add(value.mapId);
+      if (name2 === "mapFrame") frameIds.add(value.id);
+      if (name2 === "textDisplay") textIds.add(value.id);
+      if (mapIds.size > VIEWER_CONTENT_LIMITS.maps || frameIds.size > VIEWER_CONTENT_LIMITS.frames || textIds.size > VIEWER_CONTENT_LIMITS.textDisplays) fullReplay();
+      drain();
+    });
+    function close() {
+      if (closed) return;
+      closed = true;
+      off();
+      mapIds.clear();
+      frameIds.clear();
+      textIds.clear();
+      socketDrainers.delete(drain);
+      socketDisposers.delete(close);
+      socket.off("disconnect", close);
+    }
+    socketDrainers.add(drain);
+    socketDisposers.add(close);
+    socket.on("disconnect", close);
+    return close;
+  }
+  return {
+    subscribe,
+    subscribeSocket,
+    flush,
+    stats: () => ({ ...diagnostics, epoch, maps: maps.size, frames: frames.size, textDisplays: textDisplays.size, viewers: listeners.size, pendingParticles: queue.length }),
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      unschedule(timer);
+      for (const close of [...socketDisposers]) close();
+      for (const off of hooks) off();
+      maps.clear();
+      frames.clear();
+      textEntities.clear();
+      textDisplays.clear();
+      listeners.clear();
+      queue = [];
+    }
+  };
+}
+
 // src/worlds/minecraft/modern-viewer.ts
 import { createRequire } from "node:module";
-import { createHash } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { createServer } from "node:http";
-import { readFile as readFile3, stat as stat3 } from "node:fs/promises";
+import { readFile as readFile4, stat as stat4 } from "node:fs/promises";
 import path4 from "node:path";
 import { Server as SocketServer } from "socket.io";
 import { Vec3 as Vec33 } from "vec3";
+import { gameOnline } from "../game_health.js";
 
 // src/worlds/minecraft/viewer-biome.ts
 function nearestVanillaBiome(name2) {
@@ -366,8 +1982,8 @@ function minecraftTextComponent(value) {
 }
 
 // src/worlds/minecraft/viewer-state.ts
-var finite = (value) => typeof value === "number" && Number.isFinite(value);
-var bounded = (value, min, max) => finite(value) && value >= min && value <= max ? value : null;
+var finite3 = (value) => typeof value === "number" && Number.isFinite(value);
+var bounded = (value, min, max) => finite3(value) && value >= min && value <= max ? value : null;
 function viewerItemData(value, depth = 0) {
   if (value === null || typeof value === "boolean") return value;
   if (typeof value === "number") return Number.isFinite(value) ? value : void 0;
@@ -384,7 +2000,7 @@ function viewerItemData(value, depth = 0) {
 function viewerItem(value) {
   if (!value || typeof value !== "object") return null;
   const item = value;
-  if (typeof item.name !== "string" || !finite(item.type)) return null;
+  if (typeof item.name !== "string" || !finite3(item.type)) return null;
   const customName = itemCustomName(item);
   const headTextureHash = item.name.replace(/^minecraft:/, "") === "player_head" ? itemProfileSkinHash(item) : null;
   const componentMap = item.componentMap instanceof Map ? item.componentMap : null;
@@ -392,7 +2008,7 @@ function viewerItem(value) {
   const enchanted = Array.isArray(enchantComponent?.enchantments) && enchantComponent.enchantments.length > 0 || readEnchants(item).length > 0;
   const vanillaDurability = readDurability(item);
   const customMax = componentMap?.get("max_damage")?.data;
-  const max = finite(customMax) && customMax > 0 && customMax <= 1e6 ? customMax : vanillaDurability?.max;
+  const max = finite3(customMax) && customMax > 0 && customMax <= 1e6 ? customMax : vanillaDurability?.max;
   const damage = readDamage(item) ?? 0;
   const durability = max && !componentMap?.has("unbreakable") ? { left: Math.max(0, max - damage), max } : null;
   return {
@@ -424,9 +2040,9 @@ function viewerTradeList(packet, decodeItem) {
     const secondInput = decodeItem(trade.inputItem2);
     const uses = bounded(trade.nbTradeUses, 0, 65535) ?? 0;
     const maxUses = bounded(trade.maximumNbTradeUses, 0, 65535) ?? 0;
-    const demand = finite(trade.demand) ? trade.demand : 0;
-    const multiplier = finite(trade.priceMultiplier) ? trade.priceMultiplier : 0;
-    const special = finite(trade.specialPrice) ? trade.specialPrice : 0;
+    const demand = finite3(trade.demand) ? trade.demand : 0;
+    const multiplier = finite3(trade.priceMultiplier) ? trade.priceMultiplier : 0;
+    const special = finite3(trade.specialPrice) ? trade.specialPrice : 0;
     const calculatedPrice = Math.max(1, Math.min(
       64,
       input.count + special + Math.max(0, Math.floor(input.count * demand * multiplier))
@@ -466,7 +2082,7 @@ function windowSnapshot(window, properties = /* @__PURE__ */ new Map(), serializ
   const totalBurn = properties.get(1);
   const currentCook = properties.get(2);
   const totalCook = properties.get(3);
-  const ratio = (current, total) => finite(current) && finite(total) && total > 0 ? Math.max(0, Math.min(1, current / total)) : null;
+  const ratio = (current, total) => finite3(current) && finite3(total) && total > 0 ? Math.max(0, Math.min(1, current / total)) : null;
   return {
     id: window.id,
     type,
@@ -476,7 +2092,7 @@ function windowSnapshot(window, properties = /* @__PURE__ */ new Map(), serializ
     hotbarStart,
     containerCount: inventoryStart,
     furnace: furnace ? { burn: ratio(currentBurn, totalBurn), cook: ratio(currentCook, totalCook) } : null,
-    properties: Object.fromEntries([...properties].filter(([key, value]) => Number.isInteger(key) && key >= 0 && key < 16 && finite(value))),
+    properties: Object.fromEntries([...properties].filter(([key, value]) => Number.isInteger(key) && key >= 0 && key < 16 && finite3(value))),
     trades: /(?:^|:)(?:merchant|villager)$/.test(type) && trades?.windowId === window.id ? trades : null
   };
 }
@@ -511,22 +2127,22 @@ function spellCatalogueFromText(text) {
 }
 function viewerBossBars(value) {
   if (!Array.isArray(value)) return [];
-  const colors = /* @__PURE__ */ new Set(["pink", "blue", "red", "green", "yellow", "purple", "white"]);
+  const colors2 = /* @__PURE__ */ new Set(["pink", "blue", "red", "green", "yellow", "purple", "white"]);
   return value.slice(0, 8).flatMap((entry) => {
     if (!entry || typeof entry !== "object") return [];
     const bar = entry;
     const title = minecraftTextComponent(bar.title).slice(0, 100);
     if (!title) return [];
-    const health = finite(bar.health) ? Math.max(0, Math.min(1, bar.health)) : 0;
-    const color = typeof bar.color === "string" && colors.has(bar.color) ? bar.color : "purple";
-    return [{ title, progress: health, color }];
+    const health = finite3(bar.health) ? Math.max(0, Math.min(1, bar.health)) : 0;
+    const color2 = typeof bar.color === "string" && colors2.has(bar.color) ? bar.color : "purple";
+    return [{ title, progress: health, color: color2 }];
   });
 }
 function viewerPlayerAbsorption(metadata, metadataKeys) {
   if (!metadata || typeof metadata !== "object") return 0;
   const index = metadataKeys?.indexOf("player_absorption") ?? 15;
   const value = metadata[index >= 0 ? index : 15];
-  return finite(value) ? Math.max(0, Math.min(80, value)) : 0;
+  return finite3(value) ? Math.max(0, Math.min(80, value)) : 0;
 }
 function parseSkillsPayload(channel, data) {
   if (channel !== VIEWER_STATE_CHANNEL && channel !== "mcviewer:state" && channel !== "corti:viewer_state" || !Buffer.isBuffer(data) || data.length > 65536) return null;
@@ -641,7 +2257,7 @@ function mergeViewerSpellCatalogue(previous, catalogue, agentStateSeen) {
   return {
     ...previous ?? { schemaVersion: 1, mana: null, skills: [] },
     abilities,
-    observedAt: Date.now()
+    observedAt: previous?.observedAt ?? Date.now()
   };
 }
 
@@ -883,8 +2499,8 @@ function viewerBiomeClimate(value) {
     ...precipitation === "rain" || precipitation === "snow" || precipitation === "none" ? { precipitation } : {}
   };
 }
-var finite2 = (value) => typeof value === "number" && Number.isFinite(value);
-var point2 = (x, y, z) => finite2(x) && finite2(y) && finite2(z) && [x, y, z].every((value) => Math.abs(value) <= 3e7) ? { x, y, z } : null;
+var finite4 = (value) => typeof value === "number" && Number.isFinite(value);
+var point2 = (x, y, z) => finite4(x) && finite4(y) && finite4(z) && [x, y, z].every((value) => Math.abs(value) <= 3e7) ? { x, y, z } : null;
 function viewerParticle(packet) {
   if (!packet || typeof packet !== "object") return null;
   const row = packet;
@@ -892,9 +2508,9 @@ function viewerParticle(packet) {
   const spread = point2(row.offsetX, row.offsetY, row.offsetZ);
   const particle = row.particle;
   const name2 = typeof particle?.type === "string" ? particle.type.replace(/^minecraft:/, "") : "";
-  if (!position2 || !spread || !/^[a-z0-9_]{1,64}$/.test(name2) || !finite2(row.amount) || !finite2(row.velocityOffset)) return null;
+  if (!position2 || !spread || !/^[a-z0-9_]{1,64}$/.test(name2) || !finite4(row.amount) || !finite4(row.velocityOffset)) return null;
   const data = particle?.data;
-  const color = data && [data.red, data.green, data.blue].every(finite2) ? [data.red, data.green, data.blue].map((value) => Math.max(0, Math.min(1, value))) : void 0;
+  const color2 = data && [data.red, data.green, data.blue].every(finite4) ? [data.red, data.green, data.blue].map((value) => Math.max(0, Math.min(1, value))) : void 0;
   return {
     kind: "particle",
     name: name2,
@@ -902,14 +2518,14 @@ function viewerParticle(packet) {
     spread: { x: Math.min(Math.abs(spread.x), 8), y: Math.min(Math.abs(spread.y), 8), z: Math.min(Math.abs(spread.z), 8) },
     speed: Math.min(Math.abs(row.velocityOffset), 3),
     count: Math.min(48, Math.max(1, Math.trunc(row.amount))),
-    ...color ? { color } : {}
+    ...color2 ? { color: color2 } : {}
   };
 }
 function viewerExplosion(packet) {
   if (!packet || typeof packet !== "object") return null;
   const row = packet;
   const position2 = point2(row.x, row.y, row.z);
-  return position2 && finite2(row.radius) ? { kind: "explosion", position: position2, radius: Math.min(12, Math.max(0.5, Math.abs(row.radius))) } : null;
+  return position2 && finite4(row.radius) ? { kind: "explosion", position: position2, radius: Math.min(12, Math.max(0.5, Math.abs(row.radius))) } : null;
 }
 function viewerWorldEvent(packet, registry) {
   if (!packet || typeof packet !== "object") return null;
@@ -1186,10 +2802,10 @@ var name = (value) => {
   return value.replace(/^minecraft:/, "");
 };
 var record = (value) => value && typeof value === "object" ? value : null;
-var finite3 = (value) => typeof value === "number" && Number.isFinite(value);
+var finite5 = (value) => typeof value === "number" && Number.isFinite(value);
 var position = (value, scale = 1) => {
   const p = record(value);
-  return p && [p.x, p.y, p.z].every(finite3) ? { x: Number(p.x) / scale, y: Number(p.y) / scale, z: Number(p.z) / scale } : null;
+  return p && [p.x, p.y, p.z].every(finite5) ? { x: Number(p.x) / scale, y: Number(p.y) / scale, z: Number(p.z) / scale } : null;
 };
 var seed = (value) => {
   if (typeof value === "bigint") return value.toString();
@@ -1201,34 +2817,34 @@ var seed = (value) => {
 };
 function viewerSoundPacket(kind, value, registry, entityPosition) {
   const packet = record(value);
-  if (!packet || !finite3(packet.volume) || !finite3(packet.pitch)) return null;
+  if (!packet || !finite5(packet.volume) || !finite5(packet.pitch)) return null;
   const holder = record(packet.sound);
   const inline = record(holder?.data);
   const id = holder?.soundId ?? packet.soundId;
   const soundName = name(packet.soundName ?? inline?.soundName ?? (Number.isSafeInteger(id) ? registry.sounds?.[Number(id)]?.name : void 0));
   if (!soundName) return null;
-  let pos2;
+  let pos3;
   let entityId;
   if (kind === "entity_sound_effect") {
     if (!Number.isSafeInteger(packet.entityId) || Number(packet.entityId) < 0) return null;
     entityId = Number(packet.entityId);
-    pos2 = position(entityPosition(entityId));
-    if (!pos2) return null;
+    pos3 = position(entityPosition(entityId));
+    if (!pos3) return null;
   } else if (kind === "sound_effect" || kind === "named_sound_effect") {
-    pos2 = position(packet, 8);
-    if (!pos2) return null;
+    pos3 = position(packet, 8);
+    if (!pos3) return null;
   } else return null;
   const source = category(packet.soundCategory);
   const randomSeed = seed(packet.seed);
   return {
     name: soundName,
-    position: pos2,
+    position: pos3,
     volume: Math.max(0, Math.min(16, packet.volume)),
     pitch: Math.max(0.01, Math.min(4, packet.pitch)),
     ...source ? { category: source } : {},
     ...entityId !== void 0 ? { entityId } : {},
     ...randomSeed !== void 0 ? { seed: randomSeed } : {},
-    ...finite3(inline?.fixedRange) && inline.fixedRange > 0 && inline.fixedRange <= 1024 ? { fixedRange: inline.fixedRange } : {}
+    ...finite5(inline?.fixedRange) && inline.fixedRange > 0 && inline.fixedRange <= 1024 ? { fixedRange: inline.fixedRange } : {}
   };
 }
 function viewerSoundStopPacket(value) {
@@ -1269,7 +2885,7 @@ function observeViewerSounds(protocol, registry, entityPosition, publish, stop, 
 }
 
 // src/worlds/minecraft/viewer-sound-registry.ts
-import { readFile } from "node:fs/promises";
+import { readFile as readFile2 } from "node:fs/promises";
 import path from "node:path";
 var CLIENT_1206_SHA256 = "02dfd345ac1ad55692d5dbc8486ac7e4fea72cd54ac494a79cd48963048e56b2";
 var SOUND_1206_COUNT = 1607;
@@ -1294,7 +2910,7 @@ function validateViewerSoundRegistry(value, expectedVersion) {
 async function loadViewerSoundRegistry(assetsDir, minecraftVersion, fallbackRegistry) {
   if (minecraftVersion !== "1.20.6") return { registry: fallbackRegistry, source: "minecraft-data", diagnostic: null };
   try {
-    const source = await readFile(path.join(assetsDir, "public", "sounds", "registry.json"), "utf8");
+    const source = await readFile2(path.join(assetsDir, "public", "sounds", "registry.json"), "utf8");
     if (source.length > 1024 * 1024) throw new Error("Sound registry metadata too large");
     const value = JSON.parse(source);
     const registry = validateViewerSoundRegistry(value, minecraftVersion);
@@ -1335,7 +2951,7 @@ function observeWrite(protocol, onWrite) {
     writeDispatchers.delete(protocol);
   };
 }
-var pos = (value) => {
+var pos2 = (value) => {
   const p = value;
   return p && [p.x, p.y, p.z].every((part) => typeof part === "number" && Number.isFinite(part)) ? { x: p.x, y: p.y, z: p.z } : null;
 };
@@ -1410,7 +3026,7 @@ function observeViewerFishingCatch(bot, publish, serializeItem, now = Date.now) 
     loot.delete(id);
     hooks.delete(id);
     const entities = bot.registry.entitiesByName;
-    const position2 = pos(packet);
+    const position2 = pos2(packet);
     if (!position2) return;
     if (packet.type === entities.fishing_bobber?.internalId && packet.objectData === bot.entity?.id) {
       hooks.set(id, { id, position: position2, biteAt: 0, reelAt: 0, before: /* @__PURE__ */ new Map() });
@@ -1421,13 +3037,13 @@ function observeViewerFishingCatch(bot, publish, serializeItem, now = Date.now) 
     const hook = [...hooks.values()].reverse().find((entry) => entry.reelAt && entry.biteAt && at - entry.reelAt <= 1500 && at - entry.reelAt >= 0 && Math.abs(entry.reelAt - entry.biteAt) <= 2e3 && distance(position2, entry.position) <= 2);
     if (!hook) return;
     const entity = bot.entities[id];
-    const caster = pos(bot.entity?.position);
-    const rawVelocity = pos(packet.velocity);
+    const caster = pos2(bot.entity?.position);
+    const rawVelocity = pos2(packet.velocity);
     const velocity = rawVelocity ? {
       x: rawVelocity.x / 8e3,
       y: rawVelocity.y / 8e3,
       z: rawVelocity.z / 8e3
-    } : pos(entity?.velocity);
+    } : pos2(entity?.velocity);
     if (!caster || !velocity) return;
     const dx = caster.x - position2.x, dz = caster.z - position2.z;
     if (Math.hypot(dx, dz) > 1 && (velocity.x * dx + velocity.z * dz <= 0.01 || velocity.y <= 0.02)) return;
@@ -1436,7 +3052,7 @@ function observeViewerFishingCatch(bot, publish, serializeItem, now = Date.now) 
   const onEntity = (entity) => {
     const hook = hooks.get(entity.id);
     if (hook) {
-      const position2 = pos(entity.position);
+      const position2 = pos2(entity.position);
       if (position2) hook.position = position2;
       const keys = bot.registry.entitiesByName.fishing_bobber?.metadataKeys;
       const biting = keys?.indexOf("biting") ?? -1;
@@ -1452,7 +3068,7 @@ function observeViewerFishingCatch(bot, publish, serializeItem, now = Date.now) 
     const particle = packet.particle?.type;
     const ids = bot.registry.particlesByName;
     if ((packet.amount ?? packet.particles) !== 6 || !(["fishing", "bubble"].includes(particle ?? "") || Number.isSafeInteger(packet.particleId) && (packet.particleId === ids.fishing?.id || packet.particleId === ids.bubble?.id))) return;
-    const position2 = pos(packet);
+    const position2 = pos2(packet);
     if (!position2) return;
     for (const hook of hooks.values()) if (Math.hypot(
       position2.x - hook.position.x,
@@ -1524,17 +3140,17 @@ function observeViewerFishingCatch(bot, publish, serializeItem, now = Date.now) 
 }
 
 // src/worlds/minecraft/viewer-page-assets.ts
-import { readFile as readFile2, stat } from "node:fs/promises";
+import { readFile as readFile3, stat as stat2 } from "node:fs/promises";
 import path2 from "node:path";
 var MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
 async function document(root, relative) {
   const filename = path2.join(root, "public", relative);
-  const info = await stat(filename).catch((error) => {
+  const info = await stat2(filename).catch((error) => {
     if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
     throw error;
   });
   if (!info?.isFile() || info.size > MAX_DOCUMENT_BYTES) return null;
-  const bytes = await readFile2(filename);
+  const bytes = await readFile3(filename);
   if (bytes.length > MAX_DOCUMENT_BYTES) return null;
   return bytes.toString("utf8");
 }
@@ -1555,9 +3171,9 @@ async function viewerPageCss(root, fallback, speechCss = "") {
   return generated === null ? fallback : generated + speechCss;
 }
 
-// src/worlds/minecraft/viewer-asset-server.ts
+// ../mc-visual-console/packages/modern-viewer/renderer-src/host/viewer-asset-server.mjs
 import { createReadStream } from "node:fs";
-import { stat as stat2 } from "node:fs/promises";
+import { stat as stat3 } from "node:fs/promises";
 import path3 from "node:path";
 var MAX_ASSET_BYTES = 32 * 1024 * 1024;
 var MIME = {
@@ -1569,27 +3185,33 @@ var MIME = {
   ".glb": "model/gltf-binary",
   ".vrm": "model/gltf-binary",
   ".webp": "image/webp",
-  ".jpg": "image/jpeg"
+  ".jpg": "image/jpeg",
+  ".zip": "application/zip"
 };
 function viewerByteRange(range, size) {
   const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
-  if (!match || !match[1] && !match[2] || size <= 0) return null;
+  if (!match || !match[1] && !match[2] || size <= 0)
+    return null;
   if (!match[1]) {
     const suffix = Number(match[2]);
-    if (!Number.isSafeInteger(suffix) || suffix <= 0) return null;
+    if (!Number.isSafeInteger(suffix) || suffix <= 0)
+      return null;
     return { start: Math.max(0, size - suffix), end: size - 1 };
   }
   const start = Number(match[1]);
   const requestedEnd = match[2] ? Number(match[2]) : size - 1;
-  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd) || start >= size || requestedEnd < start) return null;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd) || start >= size || requestedEnd < start)
+    return null;
   return { start, end: Math.min(requestedEnd, size - 1) };
 }
 async function serveViewerAsset(res, root, relative, cacheControl = "public, max-age=3600", range) {
   const file = path3.resolve(root, relative);
   const extension = path3.extname(file).toLowerCase();
-  if (!file.startsWith(path3.resolve(root) + path3.sep) || !MIME[extension]) return false;
-  const info = await stat2(file).catch(() => null);
-  if (!info?.isFile() || info.size > MAX_ASSET_BYTES) return false;
+  if (!file.startsWith(path3.resolve(root) + path3.sep) || !MIME[extension])
+    return false;
+  const info = await stat3(file).catch(() => null);
+  if (!info?.isFile() || info.size > MAX_ASSET_BYTES)
+    return false;
   const ranged = extension === ".ogg";
   const headers = {
     "content-type": MIME[extension],
@@ -2092,8 +3714,8 @@ var VIEWER_LAYOUT_CSS = `
 `;
 var SPEECH_BUBBLE_CSS = `.corti-speech-bubble{position:fixed;z-index:7;left:50%;bottom:150px;width:min(720px,72vw);height:178px;transform:translateX(-50%);border:0;background:transparent;pointer-events:none}@media(max-width:720px){.corti-speech-bubble{bottom:140px;width:calc(100vw - 20px);height:152px}}`;
 async function requiredAssetsPresent(root, version) {
-  const source = JSON.parse(await readFile3(path4.join(root, "public", "asset-source.json"), "utf8"));
-  const client = JSON.parse(await readFile3(path4.join(root, "viewer-client.json"), "utf8"));
+  const source = JSON.parse(await readFile4(path4.join(root, "public", "asset-source.json"), "utf8"));
+  const client = JSON.parse(await readFile4(path4.join(root, "viewer-client.json"), "utf8"));
   if (source.minecraftVersion !== version || client.minecraftVersion !== version || !source.clientJarSha256 || client.clientJarSha256 !== source.clientJarSha256) return false;
   for (const relative of [
     "dist/modern-viewer.js",
@@ -2107,11 +3729,11 @@ async function requiredAssetsPresent(root, version) {
     "render-assets/itemsAtlases.json",
     "render-assets/painting-records.json"
   ]) {
-    if (!(await stat3(path4.join(root, relative)).catch(() => null))?.isFile()) return false;
+    if (!(await stat4(path4.join(root, relative)).catch(() => null))?.isFile()) return false;
   }
-  const browserHash = createHash("sha256").update(await readFile3(path4.join(root, "dist", "modern-viewer.js"))).digest("hex");
+  const browserHash = createHash3("sha256").update(await readFile4(path4.join(root, "dist", "modern-viewer.js"))).digest("hex");
   if (browserHash !== client.browserBundleSha256) return false;
-  if (client.mesherSha256 && createHash("sha256").update(await readFile3(path4.join(root, "public", "mesher.js"))).digest("hex") !== client.mesherSha256) return false;
+  if (client.mesherSha256 && createHash3("sha256").update(await readFile4(path4.join(root, "public", "mesher.js"))).digest("hex") !== client.mesherSha256) return false;
   return true;
 }
 function ownEntity(bot) {
@@ -2317,7 +3939,8 @@ function avatarState(bot, sequence, shieldRaised = false) {
     inWater: entity.isInWater === true,
     shieldRaised,
     burning: entity.isOnFire === true || (Number(entity.metadata?.[0]) & 1) !== 0,
-    usingHeldItem: bot.usingHeldItem === true,
+    usingHeldItem: bot.usingHeldItem === true || (Number(entity.metadata?.[8]) & 1) !== 0,
+    usingOffhand: (Number(entity.metadata?.[8]) & 2) !== 0,
     heldItemEdible: !!(held?.name && foodRegistry?.[held.name.replace(/^minecraft:/, "")]) || (held?.components?.some((component) => component.type?.replace(/^minecraft:/, "") === "food") ?? false),
     surfaceBlock: surface ? { name: surface.name, stateId: surface.stateId } : null,
     inLava: entity.isInLava === true,
@@ -2387,6 +4010,20 @@ async function startModernViewer(bot, options) {
   const origin = `http://127.0.0.1:${options.port}`;
   const sessions = /* @__PURE__ */ new Set();
   const sessionSlots = new ViewerSessionSlots(MAX_SESSIONS, MAX_CAPTURE_SESSIONS);
+  const selfSkin = await loadViewerSelfSkin(options.selfSkinPath, options.selfSkinModel ?? "slim");
+  const presentOwnEntity = () => ({ ...ownEntity(bot), ...selfSkin?.entity ?? {} });
+  const content = createViewerContentBridge(bot);
+  const appearance = createViewerAppearanceBridge(bot);
+  const observer = options.observerState === true ? createViewerObserverBridge(bot) : null;
+  const agentVisuals = createViewerAgentBridge(bot, {
+    getViewerSession: () => observer?.snapshot()?.viewerSession ?? null
+  });
+  const disposeContent = () => {
+    agentVisuals.dispose();
+    observer?.dispose();
+    appearance.dispose();
+    content.dispose();
+  };
   const viewerSockets = /* @__PURE__ */ new Set();
   let latestRoute = { points: [], goal: viewerGoal(bot.pathfinder?.goal), status: "pending" };
   const publishRoute = (route) => {
@@ -2399,6 +4036,21 @@ async function startModernViewer(bot, options) {
   let latestSkills = null;
   let agentManaSeen = false;
   let agentStateSeen = false;
+  const initialSkills = options.getInitialSkillsPacket?.() ?? options.initialSkillsPacket;
+  if (initialSkills?.channel === VIEWER_STATE_CHANNEL && Number.isFinite(initialSkills.observedAt) && initialSkills.observedAt > 0 && initialSkills.observedAt <= Date.now() + 3e4) {
+    const parsed = parseSkillsPayload(initialSkills.channel, initialSkills.data);
+    if (parsed) {
+      latestSkills = {
+        ...mergeViewerSkillState(null, parsed, initialSkills.channel, false),
+        observedAt: initialSkills.observedAt,
+        stale: true,
+        // A login snapshot cannot prove present cooldown readiness.
+        abilities: parsed.abilities.map((ability) => ({ ...ability, cooldownRemainingMs: null }))
+      };
+      agentManaSeen = true;
+      agentStateSeen = true;
+    }
+  }
   let castSequence = 0;
   let pendingCasts = [];
   let recentChatSuccess = null;
@@ -2698,9 +4350,14 @@ async function startModernViewer(bot, options) {
         return;
       }
       if (await speechRelay.handle(req, res, pathname)) return;
+      if (selfSkin && pathname === selfSkin.entity.skinUrl) {
+        res.writeHead(200, { "content-type": "image/png", "cache-control": "no-cache" });
+        res.end(selfSkin.bytes);
+        return;
+      }
       if (pathname === "/healthz") {
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-        res.end(JSON.stringify({ ok: !closed, version: bot.version, ...sessionSlots.status() }));
+        res.end(JSON.stringify({ ok: !closed, gameOnline: gameOnline(bot), version: bot.version, ...sessionSlots.status() }));
         return;
       }
       if (pathname === "/capture-lease") {
@@ -3009,8 +4666,8 @@ async function startModernViewer(bot, options) {
     const entityTimer = setInterval(flushEntities, 100);
     const publishDigging = () => {
       const block = bot.targetDigBlock;
-      const pos2 = block?.position;
-      const next = pos2 && [pos2.x, pos2.y, pos2.z].every(Number.isInteger) ? `${pos2.x},${pos2.y},${pos2.z}` : "";
+      const pos3 = block?.position;
+      const next = pos3 && [pos3.x, pos3.y, pos3.z].every(Number.isInteger) ? `${pos3.x},${pos3.y},${pos3.z}` : "";
       if (!next) {
         if (digKey) socket.emit("digProgress", { stage: null });
         digKey = "";
@@ -3031,9 +4688,9 @@ async function startModernViewer(bot, options) {
       if (stage !== digStage) {
         digStage = stage;
         socket.emit("digProgress", {
-          x: pos2.x,
-          y: pos2.y,
-          z: pos2.z,
+          x: pos3.x,
+          y: pos3.y,
+          z: pos3.z,
           stage,
           blockName: block.name,
           mergedShape: diggingShape(block)
@@ -3042,7 +4699,7 @@ async function startModernViewer(bot, options) {
     };
     const publishAvatar = () => {
       if (active && bot.entity && socket.connected) {
-        socket.emit("avatarState", avatarState(bot, ++sequence, shieldRaised));
+        socket.emit("avatarState", { ...avatarState(bot, ++sequence, shieldRaised), entity: presentOwnEntity() });
         publishDigging();
       }
     };
@@ -3111,7 +4768,7 @@ async function startModernViewer(bot, options) {
         addMesh: view === "third",
         teleport: teleport === true
       });
-      socket.emit(view === "third" ? "entityMoved" : "playerEntity", ownEntity(bot));
+      socket.emit(view === "third" ? "entityMoved" : "playerEntity", presentOwnEntity());
       updateChunkPosition();
     };
     const forcedPosition = () => position2(void 0, true);
@@ -3236,6 +4893,10 @@ async function startModernViewer(bot, options) {
     viewerSockets.add(socket);
     socket.once("disconnect", stop);
     socket.emit("version", bot.version);
+    content.subscribeSocket(socket);
+    socket.once("disconnect", appearance.subscribeSocket(socket));
+    observer?.subscribeSocket(socket);
+    agentVisuals.subscribeSocket(socket);
     socket.emit("tacticalRoute", latestRoute);
     if (latestSkills) socket.emit("skillsState", latestSkills);
     if (recentCastCue && Date.now() - recentCastCue.atMs < 4e3)
@@ -3252,7 +4913,7 @@ async function startModernViewer(bot, options) {
       });
     }
     socket.emit("biome", { name: "unknown", dimension: String(bot.game.dimension || "minecraft:overworld"), id: null });
-    socket.emit(view === "third" ? "entity" : "playerEntity", ownEntity(bot));
+    socket.emit(view === "third" ? "entity" : "playerEntity", presentOwnEntity());
     bot.on("move", position2);
     bot.on("forcedMove", forcedPosition);
     bot.on("time", time);
@@ -3299,6 +4960,7 @@ async function startModernViewer(bot, options) {
       });
     });
   } catch (error) {
+    disposeContent();
     first.close();
     third.close();
     throw error;
@@ -3322,7 +4984,6 @@ async function startModernViewer(bot, options) {
   protocol.on("packet", onPacketObserved);
   protocol.on("spawn_entity", onSpawnEntity);
   bot.on("entityGone", forgetFishingBobberOwner);
-  protocol.on("world_particles", onParticle);
   protocol.on("explosion", onExplosion);
   protocol.on("world_event", onWorldEvent);
   protocol.on("collect", onCollect);
@@ -3409,7 +5070,6 @@ async function startModernViewer(bot, options) {
       protocol.off("packet", onPacketObserved);
       protocol.off("spawn_entity", onSpawnEntity);
       bot.off("entityGone", forgetFishingBobberOwner);
-      protocol.off("world_particles", onParticle);
       protocol.off("explosion", onExplosion);
       protocol.off("world_event", onWorldEvent);
       protocol.off("collect", onCollect);
@@ -3434,6 +5094,7 @@ async function startModernViewer(bot, options) {
       stopRangedUse();
       stopAttack();
       stopArmAnimation();
+      disposeContent();
       for (const stop of [...sessions]) stop();
       await Promise.all([
         new Promise((resolve) => first.close(() => resolve())),

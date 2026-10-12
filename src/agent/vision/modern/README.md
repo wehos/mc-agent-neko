@@ -1,7 +1,8 @@
 # Modern viewer host
 
-`host.mjs` is bundled from Cortico's MIT-licensed Mineflayer viewer. `source.json`
-records its source revision, inputs and SHA-256. It receives the existing bot;
+`host.mjs` is bundled from Cortico's MIT-licensed Mineflayer viewer and the
+shared renderer's original content bridge and asset server. `source.json`
+records both source revisions, separate inputs and the combined SHA-256. It receives the existing bot;
 it does not start Cortico, another game login or an LLM. The host speech and
 livestream overlay is removed by the importer; Minecraft audio remains available.
 
@@ -12,6 +13,16 @@ The browser frontend and offline build tools come from the separate
 `renderer-source.json` pins its compatible source revision and tree;
 `RENDERER_LICENSE` preserves that project's MIT notice. The host's `source.json`
 and `LICENSE` retain Cortico's own provenance and copyright notice.
+
+The content bridge observes original particles, map pixels and native
+TextDisplay entities from that connection, including Chinese font resources.
+Both Socket.IO paths share its state and cleanup. No second bot, model request
+or server command is added. Cortico's separate speech overlay remains removed.
+
+The shared Agent bridge observes that player's routes, controls and sent
+operations, and accepts explicit public markers via `bot.emit('viewer:agent',
+update, acknowledgement)`. Viewer publishing stays denied. It is disposed after
+the legacy packet observers so the existing connection's writer is restored.
 
 The separately generated Minecraft 1.20.6 browser assets are runtime data.
 Set `viewer_type` to `modern` and `modern_viewer_assets_dir` to their root, which

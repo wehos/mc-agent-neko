@@ -9,6 +9,7 @@ import { plugin as autoEat } from 'mineflayer-auto-eat';
 import plugin from 'mineflayer-armor-manager';
 import { installInvSync } from './inv_sync.js';
 import { attachForgeHandshake } from './forge.js';
+import { watchViewerSkills } from '../agent/vision/viewer_skills_cache.js';
 const armorManager = plugin;
 let mc_version = settings.minecraft_version;
 let mcdata = null;
@@ -84,6 +85,7 @@ export function initBot(username) {
     // 必须紧跟 createBot 同步调用：tagHost 是写 set_protocol 那一刻才读的。
     // 探测结果不是 Forge 就是空操作，原版/Fabric 一个字节都不受影响。
     try { attachForgeHandshake(bot); } catch (e) { console.warn('FML 握手安装失败:', e.message); }
+    if (settings.render_bot_view && settings.viewer_type === 'modern') watchViewerSkills(bot);
     
     // Increase max listeners to prevent EventEmitter warnings
     // Multiple systems listen to bot events: plugins, agent, proxy, viewer, etc.

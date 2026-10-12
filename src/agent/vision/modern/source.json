@@ -2,7 +2,7 @@
   "repository": "https://github.com/jcs130/Cortico",
   "revision": "f0db612ce5075287330ab3e095ffa449c6e8e71c",
   "entry": "src/worlds/minecraft/modern-viewer.ts",
-  "bundleSha256": "3b92aa08b86a0432f36ef62fd657d71c372dc35fad8c8967c316445465881d82",
+  "bundleSha256": "5755769a57b28aa65d8626f63cec030dde7263f42bef4189c14d12eaf27b893f",
   "inputs": [
     "src/worlds/minecraft/viewer-biome.ts",
     "src/worlds/minecraft/viewer-light.ts",
@@ -26,7 +26,6 @@
     "src/worlds/minecraft/viewer-sound-registry.ts",
     "src/worlds/minecraft/viewer-fishing.ts",
     "src/worlds/minecraft/viewer-page-assets.ts",
-    "src/worlds/minecraft/viewer-asset-server.ts",
     "src/core/types.ts",
     "src/core/log-context.ts",
     "src/protocol/open-responses/context.ts",
@@ -44,8 +43,42 @@
     "src/worlds/minecraft/viewer-player-skin.ts",
     "src/worlds/minecraft/modern-viewer.ts"
   ],
+  "localInputs": [
+    "src/agent/vision/viewer_self_skin.js",
+    "src/agent/vision/game_health.js"
+  ],
+  "renderer": {
+    "repository": "https://github.com/jcs130/mc-visual-console",
+    "revision": "f579863e64428d270dec0d3ddf89dbeab5d93481",
+    "directory": "packages/modern-viewer/renderer-src",
+    "gitTree": "b8a79f5d52858d0b76259341ce917698405ed79e",
+    "minecraftVersion": "1.20.6",
+    "socketProtocol": "packages/modern-viewer/renderer-src/SOCKET_PROTOCOL.md",
+    "license": "MIT",
+    "licenseFile": "RENDERER_LICENSE",
+    "inputs": [
+      "packages/modern-viewer/renderer-src/src/modern-viewer/agent-visual-protocol.js",
+      "packages/modern-viewer/renderer-src/host/viewer-agent.mjs",
+      "packages/modern-viewer/renderer-src/host/viewer-observer.mjs",
+      "packages/modern-viewer/renderer-src/host/viewer-ysm-assets.mjs",
+      "packages/modern-viewer/renderer-src/host/viewer-ysm-motion.mjs",
+      "packages/modern-viewer/renderer-src/host/viewer-appearance.mjs",
+      "packages/modern-viewer/renderer-src/host/text-display.mjs",
+      "packages/modern-viewer/renderer-src/host/viewer-content.mjs",
+      "packages/modern-viewer/renderer-src/host/viewer-asset-server.mjs"
+    ]
+  },
   "changes": [
     "Remove the host speech and livestream overlay; retain game rendering and sound.",
-    "Make concurrent viewing configurable (default 8, range 1-16); keep the separate capture limit."
+    "Make concurrent viewing configurable (default 8, range 1-16); keep the separate capture limit.",
+    "Report Minecraft connection health separately from the renderer HTTP listener.",
+    "Observe original particle, map and TextDisplay packets through the shared renderer bridge; remove the duplicate legacy particle path.",
+    "Serve original font ZIP resources through the shared bounded asset server.",
+    "Use the shared appearance/asset bridge; observer registration remains opt-in for spectator consumers.",
+    "Optionally serve a validated local 64x64 PNG for the own bot; preserve server skins for other players.",
+    "Replay same-connection login mana and abilities through the strict parser, retaining the original timestamp and marking cached cooldowns unknown.",
+    "Preserve prior mana observation time when enriching abilities from a server spell catalogue.",
+    "Forward native main-hand and offhand item-use flags to the OBS hand renderer.",
+    "Relay same-player routes, inputs and explicit public markers through the shared Agent bridge; viewer publishing is denied by default."
   ]
 }

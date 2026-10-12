@@ -1,6 +1,7 @@
 import settings from '../settings.js';
 import { createRequire } from 'node:module';
 import { startViewerLanProxy } from './viewer_lan_proxy.js';
+import { cachedViewerSkills, watchViewerSkills } from './viewer_skills_cache.js';
 const require = createRequire(import.meta.url);
 
 export async function addBrowserViewer(bot, count_id = 0) {
@@ -18,9 +19,16 @@ export async function addBrowserViewer(bot, count_id = 0) {
         bot.viewer.info = { available: true, type: 'prismarine', url: `http://127.0.0.1:${port}/`, views: ['first'] };
         return;
     }
+    watchViewerSkills(bot);
     const { startModernViewer } = await import('./modern/host.mjs');
     const handle = await startModernViewer(bot, { port,
         assetsDir: settings.modern_viewer_assets_dir, speakerName: bot.username,
+        selfSkinPath: settings.modern_viewer_self_skin,
+        selfSkinModel: settings.modern_viewer_self_skin_model ?? 'slim',
+        observerState: settings.modern_viewer_observer_state === true,
+        // Asset validation is asynchronous. Read the connection cache only
+        // when the host is ready to attach its packet listeners.
+        getInitialSkillsPacket: () => cachedViewerSkills(bot),
         maxSessions: settings.modern_viewer_max_sessions ?? 8 });
     let lan;
     try {
