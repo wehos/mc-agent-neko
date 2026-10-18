@@ -237,8 +237,12 @@ export class Agent {
             if (isCmd) {
                 if (!body) return;
                 console.log(`[chat] 指令 (${username}): ${body.slice(0, 80)}`);
-                if (this._missionEnabled && this.adminMission) this.adminMission.submit({ text: body, taskId: null, origin: 'chat' });
-                else if (this.respondFunc) this.respondFunc('admin', body);
+                // ★本地补丁 (用户要求): 把说话人带进任务文本 —— 否则 LLM 不知道谁在请求，
+                //   而 actions.js 的 resolveHumanPlayerName() 会兜底成 player_username(master)，
+                //   于是"别人要石头/要打人"全落到 master 头上。
+                const missionText = `[玩家 ${username} 说] ${body}`;
+                if (this._missionEnabled && this.adminMission) this.adminMission.submit({ text: missionText, taskId: null, origin: 'chat' });
+                else if (this.respondFunc) this.respondFunc('admin', missionText);
             } else {
                 console.log(`[chat] 聊天转发→admin llm (${username}, tr=${tr || '-'}): ${body.slice(0, 80)}`);
                 this._bufferChatForward(username, body);
@@ -485,6 +489,34 @@ export class Agent {
             if (!isCurrentBot()) return;
             console.log(this.name, 'logged in!');
             serverProxy.login();
+
+            // ★捕获当前 bot 实例: 重连后 this.bot 会被换成新实例,
+            //   旧定时器必须凭它判断"自己已经过期", 否则会在新连接上重发命令。
+            const botRef = this.bot;
+
+            // ★自动登录 (登录插件) —— 与下方皮肤逻辑完全解耦, 且必须"延后"发送:
+            //   1) 服务器装 /login 密码插件时, 未登录玩家会被冻结/每 tick 拉回原位
+            //      (表现就是"卡住动不了")。密码来自 settings.json 的 login_password。
+            //   2) 进服后立刻用命令会被防刷守卫踢:
+            //      "[LoginGuard] you used a command too fast! ...wait more before using any command"
+            //      → 延后 login_delay_ms(默认 4000ms) 再发 /login。
+            //   3) 皮肤命令排在登录之后 (再等 2.5s), 两条命令绝不连发。
+            //   4) 绝不放进皮肤判断的 else 分支 —— 历史坑: 那样一配皮肤就永远不登录。
+            const loginPwd = settings.login_password;
+            const _ldRaw = Number(settings.login_delay_ms);
+            const loginDelay = Number.isFinite(_ldRaw) && _ldRaw >= 0 ? _ldRaw : 4000;
+
+            setTimeout(() => {
+                if (botRef !== this.bot) return; // 已重连, 旧定时器作废
+                try {
+                    if (botRef && botRef.entity) {
+                        console.log(`🔑 自动登录: 延迟 ${loginDelay}ms 后发送 /login`);
+                        botRef.chat(`/login ${loginPwd}`);
+                    }
+                } catch (err) {
+                    console.warn('自动登录发送失败:', err && err.message);
+                }
+            }, loginDelay);
             
             // Set skin for profile, requires Fabric Tailor. (https://modrinth.com/mod/fabrictailor)
             // ★本地皮肤支持 (session#14 用户令: 固定皮肤每次登录都套上):
@@ -503,6 +535,10 @@ export class Agent {
             //      万一 FabricTailor 用的是 greedyString 参数, 无条件加引号反而会把引号当路径的一部分)。
             //   4. 重连风暴反复上传: 这个 handler 挂在 login 上, 断线重连每次都会重发, 每发一次
             //      服务端就走一遍 MineSkin 上传 (~4s) → 同一进程内同一 (variant, 路径) 只发一次。
+            // ★本地补丁: 皮肤发送包成函数 —— 有登录插件时排到 /login 之后(再 2.5s),
+            //   避免 /login 与 /skin 连发触发 "[LoginGuard] you used a command too fast!" 被踢。
+            const sendSkin = () => {
+                if (botRef !== this.bot) return; // 已重连, 旧定时器作废
             const skin = this.prompter.profile.skin;
             if (skin && skin.path) {
                 const variant = skin.model || 'classic';
@@ -516,13 +552,21 @@ export class Agent {
                     console.warn(`⚠️ 皮肤文件找不到: ${target}（配置里写的是 "${skin.path}"）。皮肤这次跳过，其他一切照常运行。把 PNG 放到这个位置再重启就会生效。`);
                 } else {
                     const arg = isUrl || !/\s/.test(target) ? target : `"${target}"`;
-                    this.bot.chat(`/skin set ${isUrl ? 'URL' : 'upload'} ${variant} ${arg}`);
+                    botRef.chat(`/skin set ${isUrl ? 'URL' : 'upload'} ${variant} ${arg}`);
                     this._skinSent.add(once);
                     console.log(`🎨 已请求设置皮肤（${target}）…`);
                     this._probeSkinResult(target);
                 }
             } else {
-                this.bot.chat(`/skin clear`);
+                botRef.chat(`/skin clear`);
+            }
+            };
+
+            if (loginPwd) {
+                // 有登录插件: 皮肤排到登录之后, 避免两条命令连发触发防刷守卫
+                setTimeout(sendSkin, loginDelay + 2500);
+            } else {
+                sendSkin();
             }
         });
 
@@ -1484,6 +1528,43 @@ export class Agent {
             }, 5 * 60 * 1000);
         }
 
+        // ★2026-10-06 用户令: 记录【真实】伤害来源, 不再按距离猜。
+        //   病根: _inferDamageCause() 原来只能取"最近的敌对生物(≤6格)"，玩家(≤5格)还会覆盖怪物，
+        //   于是"被僵尸打"会被说成"被玩家打"。但 Java 版的 damage_event 包里就带着攻击者 entity id，不用猜。
+        //   sourceCauseId 是 +1 偏移的 id (0 = 无攻击者)，反查 bot.entities 即得真名。
+        //   字段名随协议版本可能不同，所以几个候选都读；读不到就静默退回旧的距离猜测。
+        if (firstStart) {
+            try {
+                this.bot._client.on('damage_event', (packet) => {
+                    try {
+                        const raw = packet && (
+                            packet.sourceCauseId ?? packet.source_cause_id ??
+                            packet.sourceCauseID ?? packet.sourceEntityId ?? 0
+                        );
+                        const id = Number(raw) - 1;
+                        if (!Number.isFinite(id) || id < 0) return;   // 0 = 没有攻击者(环境伤害等)
+                        const ent = (this.bot.entities || {})[id];
+                        const name = ent
+                            ? String(ent.name || ent.username || ent.displayName || '').toLowerCase()
+                            : '';
+                        this._lastDamageSource = {
+                            isPlayer: !!(ent && ent.type === 'player'),
+                            name: name || 'unknown',
+                            entityId: id,
+                            at: Date.now(),
+                        };
+                        // 验证用: 该行只在真的解出实体名时打, 环境伤害不刷屏。
+                        // 如果打了但名字是 unknown, 说明字段名/映射要再对。
+                        if (name) {
+                            console.log(`★damage_event 真实攻击源: entityId=${id} name=${name} isPlayer=${!!(ent && ent.type === 'player')}`);
+                        }
+                    } catch (e) { /* 记录失败绝不影响受击处理 */ }
+                });
+            } catch (e) {
+                console.warn('damage_event listener not attached:', e && e.message);
+            }
+        }
+
         // Custom events
         this.bot.on('time', () => {
             if (this.bot.time.timeOfDay == 0)
@@ -1882,6 +1963,22 @@ export class Agent {
         if (!this.bot || !this.bot.entity) return null;
         const hints = {};
 
+        // ★2026-10-06: 优先用 damage_event 记下的【真实】攻击者(3 秒内有效)。
+        //   有它就不再按距离猜, 也不会把僵尸的伤害算到站在旁边的玩家头上。
+        //   下面的距离启发式只在拿不到真实来源时才生效(verifiedAttacker 为真则跳过)。
+        try {
+            const src = this._lastDamageSource;
+            if (src && Date.now() - src.at <= 3000) {
+                hints.attacker = {
+                    kind: src.isPlayer ? 'player' : (src.name || 'mob'),
+                    distance: null,
+                    verified: true,
+                };
+                if (src.isPlayer) hints.attacker.name = src.name;
+            }
+        } catch (_) { /* ignore */ }
+        const verifiedAttacker = !!(hints.attacker && hints.attacker.verified);
+
         // Environmental: block at / over the bot's feet
         try {
             const pos = this.bot.entity.position;
@@ -1936,7 +2033,7 @@ export class Agent {
                 }
             }
         } catch (_) { /* ignore */ }
-        if (closest && closestDist <= 6) {
+        if (closest && closestDist <= 6 && !verifiedAttacker) {
             hints.attacker = {
                 kind: (closest.name || closest.displayName || 'mob').toLowerCase(),
                 distance: Number(closestDist.toFixed(1)),
@@ -1971,7 +2068,7 @@ export class Agent {
                 // Prefer player over hostile mob if both present and the
                 // player is closer: a human swinging at point-blank is a
                 // stronger signal than a distant zombie.
-                if (!hints.attacker || closestPlayerDist < (hints.attacker.distance ?? Infinity)) {
+                if (!verifiedAttacker && (!hints.attacker || closestPlayerDist < (hints.attacker.distance ?? Infinity))) {
                     hints.attacker = {
                         kind: 'player',
                         name: closestPlayer,
